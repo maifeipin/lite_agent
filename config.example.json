@@ -1,0 +1,36 @@
+{
+    "bot_name": "VPS 助手",
+
+    "llm": {
+        "base_url": "https://api.deepseek.com/v1",
+        "api_key": "sk-YOUR_API_KEY_HERE",
+        "model": "deepseek-v4-flash",
+        "max_tokens": 2048,
+        "temperature": 0.3
+    },
+
+    "session": {
+        "ttl_minutes": 30,
+        "max_history": 20,
+        "max_steps_per_goal": 10,
+        "daily_token_limit": 500000
+    },
+
+    "security": {
+        "allowed_users": [],
+        "sandbox_paths": ["/var/log", "/root/down", "/root/script"],
+        "blocked_commands": ["rm -rf /", "mkfs", "dd if=", "> /dev/sd", "shutdown", "reboot", "passwd"]
+    },
+
+    "channels": {
+        "feishu": {
+            "enabled": true,
+            "app_id": "YOUR_APP_ID",
+            "app_secret": "YOUR_APP_SECRET"
+        },
+        "telegram": {
+            "enabled": false,
+            "bot_token": "YOUR_TELEGRAM_BOT_TOKEN"
+        }
+    }
+}

@@ -1,0 +1,17 @@
+[Unit]
+Description=Lite Agent Bot (Feishu WebSocket)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/lite_agent
+ExecStart=/usr/bin/python3 /root/lite_agent/main.py
+Restart=always
+RestartSec=5
+Environment=PYTHONIOENCODING=utf-8
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

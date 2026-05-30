@@ -1,0 +1,174 @@
+"""
+动态技能引擎 - 自动扫描 skills/ 目录，注册技能并生成 OpenAI Tool Schema
+"""
+
+import os
+import sys
+import json
+import importlib
+import traceback
+from typing import Any, Dict, List, Optional
+
+
+# ============================================================
+#  全局技能注册表
+# ============================================================
+_skill_registry: Dict[str, Dict] = {}  # {name: {"func": callable, "schema": dict}}
+
+
+def skill(name: str, description: str, params: dict = None):
+    """
+    技能装饰器 - 标记一个函数为可被 AI 调用的技能
+
+    用法:
+        @skill(
+            name="ops_sys_status",
+            description="获取 VPS 系统状态",
+            params={
+                "detail": {
+                    "type": "boolean",
+                    "description": "是否返回详细信息",
+                    "default": False
+                }
+            }
+        )
+        def ops_sys_status(detail: bool = False) -> str:
+            ...
+    """
+    def decorator(func):
+        # 构建 OpenAI Function Calling 的参数 Schema
+        properties = {}
+        required = []
+
+        if params:
+            for param_name, param_info in params.items():
+                prop = {
+                    "type": param_info.get("type", "string"),
+                    "description": param_info.get("description", ""),
+                }
+                if "enum" in param_info:
+                    prop["enum"] = param_info["enum"]
+                properties[param_name] = prop
+                # 没有 default 的参数视为必填
+                if "default" not in param_info:
+                    required.append(param_name)
+
+        schema = {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": description,
+                "parameters": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required,
+                },
+            },
+        }
+
+        _skill_registry[name] = {"func": func, "schema": schema}
+        func._skill_name = name
+        return func
+
+    return decorator
+
+
+# ============================================================
+#  技能引擎
+# ============================================================
+class SkillEngine:
+    """
+    技能引擎
+    - 启动时自动扫描 skills/ 目录
+    - 将 Python 函数自动转换为 OpenAI Tool Schema
+    - 提供统一的执行调度接口
+    """
+
+    def __init__(self, skills_dir: str = None):
+        if skills_dir is None:
+            base = os.path.dirname(os.path.abspath(__file__))
+            skills_dir = os.path.join(base, "skills")
+        self.skills_dir = skills_dir
+        self._load_skills()
+
+    def _load_skills(self):
+        """扫描 skills/ 目录，自动导入所有技能模块"""
+        if not os.path.isdir(self.skills_dir):
+            print(f"⚠️ 技能目录不存在: {self.skills_dir}")
+            return
+
+        # 确保 skills 目录及其父目录在 sys.path 中
+        parent_dir = os.path.dirname(self.skills_dir)
+        if parent_dir not in sys.path:
+            sys.path.insert(0, parent_dir)
+        if self.skills_dir not in sys.path:
+            sys.path.insert(0, self.skills_dir)
+
+        for filename in sorted(os.listdir(self.skills_dir)):
+            if not filename.endswith(".py") or filename.startswith("_"):
+                continue
+            module_name = filename[:-3]
+            try:
+                # 使用 skills.xxx 的方式导入
+                full_module = f"skills.{module_name}"
+                if full_module in sys.modules:
+                    importlib.reload(sys.modules[full_module])
+                else:
+                    importlib.import_module(full_module)
+                print(f"  ✅ 已加载技能模块: {filename}")
+            except Exception as e:
+                print(f"  ❌ 加载技能模块失败 [{filename}]: {e}")
+                traceback.print_exc()
+
+        print(f"📦 技能引擎就绪: 共注册 {len(_skill_registry)} 个技能")
+
+    def get_all_schemas(self) -> List[Dict]:
+        """返回所有已注册技能的 OpenAI Tool Schema 列表"""
+        return [info["schema"] for info in _skill_registry.values()]
+
+    def execute(self, skill_name: str, arguments: str) -> str:
+        """
+        执行指定技能
+        :param skill_name: 技能名称
+        :param arguments: JSON 格式的参数字符串
+        :return: 执行结果字符串
+        """
+        if skill_name not in _skill_registry:
+            return f"❌ 未知技能: {skill_name}"
+
+        func = _skill_registry[skill_name]["func"]
+
+        # 解析参数
+        try:
+            kwargs = json.loads(arguments) if arguments else {}
+        except json.JSONDecodeError as e:
+            return f"❌ 参数解析失败: {e}"
+
+        # 执行
+        try:
+            print(f"  🔧 执行技能: {skill_name}({kwargs})")
+            result = func(**kwargs)
+            if not isinstance(result, str):
+                result = json.dumps(result, ensure_ascii=False, indent=2)
+            return result
+        except Exception as e:
+            error_msg = f"❌ 技能执行异常 [{skill_name}]: {e}"
+            print(error_msg)
+            traceback.print_exc()
+            return error_msg
+
+    def list_skills(self) -> str:
+        """列出所有已注册技能 (供 System Prompt 和 /help 展示)"""
+        if not _skill_registry:
+            return "(暂无技能)"
+        lines = []
+        for name, info in _skill_registry.items():
+            desc = info["schema"]["function"]["description"]
+            params = info["schema"]["function"]["parameters"]["properties"]
+            param_str = ", ".join(params.keys()) if params else "无参数"
+            lines.append(f"- **{name}**({param_str}): {desc}")
+        return "\n".join(lines)
+
+    def get_skill_count(self) -> int:
+        """返回已注册技能数量"""
+        return len(_skill_registry)
