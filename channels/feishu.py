@@ -51,7 +51,7 @@ class FeishuChannel(BaseChannel):
             )
         )
         print("🚀 飞书 WebSocket 通道已启动")
-        self.ws_client.start()
+        threading.Thread(target=self.ws_client.start, daemon=True, name="Feishu_WS_Client").start()
     
     def stop(self):
         # 当前 SDK 的 WebSocket 客户端没有显式的停止方法
