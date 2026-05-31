@@ -98,6 +98,13 @@ def _get_health_report() -> str:
 
     # 5a. 检查 chromadb 是否可导入
     try:
+        try:
+            __import__('pysqlite3')
+            import sys
+            sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+        except ImportError:
+            pass
+            
         import chromadb
         chromadb_available = True
     except ImportError:

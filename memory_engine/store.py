@@ -91,6 +91,14 @@ class MemoryStore:
         if self._chroma is not None:
             return self._chroma_ready
         try:
+            # 解决 CentOS/Debian 旧版 sqlite3 导致 chromadb 报错的问题
+            try:
+                __import__('pysqlite3')
+                import sys
+                sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+            except ImportError:
+                pass
+                
             import chromadb
             chroma_dir = os.path.join(DB_DIR, 'chroma')
             self._chroma = chromadb.PersistentClient(path=chroma_dir)
