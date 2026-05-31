@@ -203,3 +203,44 @@ class FeishuChannel(BaseChannel):
             'elements': elements
         }
         return json.dumps(card, ensure_ascii=False)
+
+    def broadcast(self, response: AgentResponse) -> bool:
+        """从会话库中查询所有活跃飞书用户并主动广播"""
+        user_ids = []
+        try:
+            with self.agent.session_mgr._connect() as conn:
+                rows = conn.execute("SELECT DISTINCT session_key FROM sessions WHERE session_key LIKE 'feishu:%'").fetchall()
+                for r in rows:
+                    uid = r[0].split(':', 1)[1]
+                    if uid: user_ids.append(uid)
+        except Exception as e:
+            print(f"❌ 广播查询用户失败: {e}")
+            return False
+
+        if not user_ids:
+            return False
+            
+        card_json = self._build_card(response.title, response.text, response.color)
+        success_count = 0
+        for uid in user_ids:
+            try:
+                request = (
+                    lark.api.im.v1.CreateMessageRequest.builder()
+                    .receive_id_type("open_id")
+                    .request_body(
+                        lark.api.im.v1.CreateMessageRequestBody.builder()
+                        .receive_id(uid)
+                        .msg_type("interactive")
+                        .content(card_json)
+                        .build()
+                    )
+                    .build()
+                )
+                res = self.lark_client.im.v1.message.create(request)
+                if res.success():
+                    success_count += 1
+            except Exception as e:
+                print(f"  ❌ 飞书广播给 {uid} 失败: {e}")
+                
+        print(f"📣 [Feishu] 广播完成，成功发送 {success_count}/{len(user_ids)} 人")
+        return success_count > 0

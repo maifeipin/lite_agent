@@ -75,6 +75,7 @@ class Agent:
             ttl_minutes=session_cfg.get("ttl_minutes", 30),
             max_history=session_cfg.get("max_history", 20),
         )
+        self.channels = []  # 由 main.py 在初始化通道后注入
 
         # 技能引擎
         self.skill_engine = SkillEngine()
@@ -93,6 +94,14 @@ class Agent:
 
         # 系统提示词
         self.system_prompt = self._build_system_prompt()
+
+    def broadcast(self, response: AgentResponse):
+        """将消息广播到所有挂载的通道"""
+        for ch in self.channels:
+            try:
+                ch.broadcast(response)
+            except Exception as e:
+                print(f"❌ 通道 {ch.name} 广播异常: {e}")
 
     def _build_system_prompt(self) -> str:
         """构建系统提示词 (包含技能列表)"""
@@ -274,6 +283,15 @@ class Agent:
                 )
             return AgentResponse(self.cron.run_job_manually(job_id), title="🚀 手动执行", color="green")
 
+        if cmd == "/check":
+            try:
+                import sys, os
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                from skills.ops_self_check import _get_health_report
+                return AgentResponse(_get_health_report(), title="🏥 健康检查", color="green")
+            except Exception as e:
+                return AgentResponse(f"自检失败: {e}", title="⚠️", color="red")
+
         if cmd == "/help":
             skills_list = self.skill_engine.list_skills()
             help_text = f"""**内置指令:**
@@ -285,6 +303,7 @@ class Agent:
 `/balance` - 查询大模型账户余额
 `/memory` - 查看记忆池状态
 `/cron` - 查看定时任务列表，`/cron <序号>` 手动执行，`/cron toggle <序号>` 开关
+`/check` - 执行全方位健康自检，检查系统各模块状态
 `/ai` - 强行调用 AI（适用于飞书只能接收命令的场景，如 `/ai 查一下账单`）
 `/cmd` - 精确执行账单旧版指令（不经过 AI，如 `/cmd report 3` 或 `/cmd fetch`）
 

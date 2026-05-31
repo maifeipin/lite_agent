@@ -121,3 +121,54 @@ class DingTalkChannel(BaseChannel):
             print(f"❌ [DingTalk] 回复失败: {e}")
             return False
         return False
+
+    def broadcast(self, response: AgentResponse) -> bool:
+        """从会话库中查询所有活跃钉钉用户并主动广播 (oToMessages/batchSend)"""
+        user_ids = []
+        try:
+            with self.agent.session_mgr._connect() as conn:
+                rows = conn.execute("SELECT DISTINCT session_key FROM sessions WHERE session_key LIKE 'dingtalk:%'").fetchall()
+                for r in rows:
+                    uid = r[0].split(':', 1)[1]
+                    if uid: user_ids.append(uid)
+        except Exception as e:
+            print(f"❌ 广播查询用户失败: {e}")
+            return False
+
+        if not user_ids:
+            return False
+            
+        import urllib.request
+        try:
+            # 获取 Access Token
+            req = urllib.request.Request(
+                "https://api.dingtalk.com/v1.0/oauth2/accessToken",
+                data=json.dumps({"appKey": self.client_id, "appSecret": self.client_secret}).encode('utf-8'),
+                headers={'Content-Type': 'application/json'}
+            )
+            with urllib.request.urlopen(req, timeout=10) as r:
+                access_token = json.loads(r.read().decode()).get("accessToken")
+            
+            if not access_token: return False
+            
+            text = f"**{response.title}**\n\n{response.text}" if response.title else response.text
+            msg_param = json.dumps({"title": response.title or "系统广播", "text": text})
+            
+            req = urllib.request.Request(
+                "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend",
+                data=json.dumps({
+                    "robotCode": self.client_id,
+                    "userIds": user_ids,
+                    "msgKey": "sampleMarkdown",
+                    "msgParam": msg_param
+                }).encode('utf-8'),
+                headers={'Content-Type': 'application/json', 'x-acs-dingtalk-access-token': access_token}
+            )
+            with urllib.request.urlopen(req, timeout=10) as r:
+                res_data = json.loads(r.read().decode())
+                process_query_key = res_data.get("processQueryKey")
+                print(f"📣 [DingTalk] 广播已投递，批次任务: {process_query_key}, 目标人数: {len(user_ids)}")
+                return True
+        except Exception as e:
+            print(f"❌ [DingTalk] 广播失败: {e}")
+            return False

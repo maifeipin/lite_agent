@@ -26,3 +26,7 @@ class BaseChannel(ABC):
     def format_card(self, title: str, content: str, color: str = 'blue') -> str:
         """将回复格式化为平台特定的卡片格式（子类可覆盖）"""
         return content
+
+    def broadcast(self, response) -> bool:
+        """主动广播消息给当前通道所有历史活跃用户（或指定群组）"""
+        return False

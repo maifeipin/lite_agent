@@ -69,6 +69,21 @@ def _register_cron_jobs(agent: Agent):
 
     cron.add_job("系统状态巡检", "08:00", sys_status)
 
+    # 4. 系统自动巡检与推送 — 每天 23:50
+    def daily_health_check():
+        import sys, os
+        from agent import AgentResponse
+        try:
+            sys.path.insert(0, '/root/lite_agent')
+            from skills.ops_self_check import _get_health_report
+            report_text = _get_health_report()
+            agent.broadcast(AgentResponse(report_text, title="🌙 每日系统体检报告", color="wathet"))
+            return "巡检广播已推送"
+        except Exception as e:
+            return f"巡检广播失败: {e}"
+
+    cron.add_job("每日健康巡检广播", "23:50", daily_health_check)
+
     # 启动 Cron 引擎后台线程
     cron.start()
     print(f"📅 定时任务引擎就绪: 共注册 {len(cron.jobs)} 个任务")
@@ -106,13 +121,16 @@ def main():
         tg_channel.start()
         channels.append(tg_channel)
         
-    # -- DingTalk 通道 --
-    dt_cfg = config.get('channels', {}).get('dingtalk', {})
-    if dt_cfg.get('enabled'):
+    # -- 钉钉通道 --
+    ding_cfg = config.get('channels', {}).get('dingtalk', {})
+    if ding_cfg.get('enabled'):
         from channels.dingtalk import DingTalkChannel
-        dt_channel = DingTalkChannel(dt_cfg, agent)
-        dt_channel.start()
-        channels.append(dt_channel)
+        ding_channel = DingTalkChannel(ding_cfg, agent)
+        ding_channel.start()
+        channels.append(ding_channel)
+
+    # 将所有激活的通道实例绑定到 Agent，以便后续广播
+    agent.channels = channels
 
     if not channels:
         print("⚠️ 没有启用任何通信通道，程序将退出。")
