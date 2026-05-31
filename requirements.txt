@@ -2,3 +2,5 @@ openai>=1.30.0
 lark-oapi>=1.4.0
 dingtalk-stream>=0.24.0
 websockets<14.0
+chromadb>=0.4.0
+sentence-transformers>=2.2.0

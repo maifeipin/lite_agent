@@ -9,6 +9,13 @@ from openai import OpenAI
 from session import SessionManager
 from skill_engine import SkillEngine
 
+# 记忆引擎 (可选 — 缺失时优雅降级)
+try:
+    from memory_engine.lite_integration import AgentMemory
+    MEMORY_AVAILABLE = True
+except ImportError:
+    MEMORY_AVAILABLE = False
+
 
 # ============================================================
 #  内部消息格式
@@ -73,6 +80,12 @@ class Agent:
 
         # 安全限制
         self.max_steps = session_cfg.get("max_steps_per_goal", 10)
+
+        # 记忆引擎 (跨会话长期记忆)
+        self.memory = AgentMemory() if MEMORY_AVAILABLE else None
+        if self.memory:
+            self.memory.start_distill_scheduler(interval_hours=24)
+            print("  ✅ 记忆引擎已启用")
 
         # 系统提示词
         self.system_prompt = self._build_system_prompt()
@@ -192,6 +205,50 @@ class Agent:
             except Exception as e:
                 return AgentResponse(f"查询余额失败: {e}", title="错误", color="red")
 
+        if cmd == "/memory":
+            if not self.memory:
+                return AgentResponse("记忆引擎未安装，请将 memory_engine/ 目录放入项目根目录", title="⚠️ 未启用", color="grey")
+            stats = self.memory.stats()
+            type_stats = stats.get('by_type', {})
+            type_lines = "\n".join(
+                f"  {t}: {c} 条" for t, c in type_stats.items()
+            )
+            return AgentResponse(
+                f"**记忆池状态**\n"
+                f"总消息: {stats['total_messages']}\n"
+                f"蒸馏产物: {stats['distilled']}\n"
+                f"平均质量分: {stats['avg_importance']}\n"
+                f"用户数: {stats['users']}\n"
+                f"四维分布:\n{type_lines}" if type_lines else '',
+                title="🧠 记忆池", color="blue"
+            )
+
+        if cmd == "/remember":
+            # /remember <type> <内容>
+            if not self.memory:
+                return AgentResponse("记忆引擎未安装", title="⚠️", color="grey")
+            if len(args) < 2:
+                return AgentResponse(
+                    "用法: `/remember <type> <内容>`\n"
+                    "type: concept | event | preference | troubleshooting\n"
+                    "示例: `/remember troubleshooting 钉钉Stream必须勾选后台开关并发布才能生效`",
+                    title="📝 强制记忆", color="grey"
+                )
+            mem_type = args[0]
+            if mem_type not in ('concept', 'event', 'preference', 'troubleshooting'):
+                return AgentResponse(
+                    f"未知类型 {mem_type}。可选: concept, event, preference, troubleshooting",
+                    title="⚠️", color="red"
+                )
+            content = msg.text[len('/remember ')+len(mem_type)+1:]
+            mid = self.memory.force_remember(
+                msg.session_key, '', content, memory_type=mem_type
+            )
+            return AgentResponse(
+                f"已存入 [{mem_type}] 记忆池 (id:{mid})",
+                title="🧠 已记忆", color="green"
+            )
+
         if cmd == "/help":
             skills_list = self.skill_engine.list_skills()
             help_text = f"""**内置指令:**
@@ -201,6 +258,7 @@ class Agent:
 `/stop` - 终止当前任务
 `/help` - 显示帮助
 `/balance` - 查询大模型账户余额
+`/memory` - 查看记忆池状态
 `/ai` - 强行调用 AI（适用于飞书只能接收命令的场景，如 `/ai 查一下账单`）
 `/cmd` - 精确执行账单旧版指令（不经过 AI，如 `/cmd report 3` 或 `/cmd fetch`）
 
@@ -234,6 +292,15 @@ class Agent:
         for step in range(self.max_steps):
             # 构建完整的消息列表
             messages = [{"role": "system", "content": self.system_prompt}]
+
+            # 注入长期记忆
+            if self.memory:
+                memory_ctx = self.memory.before_reply(
+                    msg.session_key, msg.text
+                )
+                if memory_ctx:
+                    messages[0]["content"] += memory_ctx
+
             messages.extend(self.session_mgr.get_history(msg.session_key))
 
             # 调用 LLM
@@ -320,10 +387,22 @@ class Agent:
             if session.status == "working":
                 self.session_mgr.mark_done(msg.session_key, reply_text[:200])
 
+            # 存入长期记忆 (异步)
+            if self.memory:
+                self.memory.after_reply(
+                    msg.session_key, '', msg.text, reply_text, msg.channel
+                )
+
             return AgentResponse(reply_text, title=f"🤖 {self.bot_name}", color="blue")
 
         # 超出最大步骤数
         warning = "⚠️ 任务执行步骤过多，已自动终止。请尝试拆分为更小的任务。"
         self.session_mgr.add_message(msg.session_key, "assistant", warning)
         self.session_mgr.mark_done(msg.session_key, "超出最大步骤数")
+
+        if self.memory:
+            self.memory.after_reply(
+                msg.session_key, '', msg.text, warning, msg.channel
+            )
+
         return AgentResponse(warning, title="⚠️ 任务终止", color="orange")
