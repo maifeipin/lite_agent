@@ -223,13 +223,35 @@ class SessionManager:
         if len(messages) <= self.max_history:
             return list(messages)
 
-        # 滑动窗口：保留最新的 max_history 条
-        # 在前面插入一条摘要提示
-        truncated = messages[-self.max_history:]
-        truncated.insert(0, {
-            "role": "system",
-            "content": f"[系统提示: 之前有 {len(messages) - self.max_history} 条早期对话已被压缩省略，以下是最近的对话]"
-        })
+        # 确保滑动窗口截断边界不会破坏 tool_calls 链条
+        start_idx = max(0, len(messages) - self.max_history)
+        
+        while start_idx < len(messages):
+            msg = messages[start_idx]
+            # 最安全的切割点是 user 消息，或者是没有 tool_calls 的 assistant 消息
+            if msg["role"] == "user":
+                break
+            if msg["role"] == "assistant" and "tool_calls" not in msg:
+                break
+            # 如果是 tool 响应，或者带 tool_calls 的 assistant，向后顺延寻找安全断点
+            start_idx += 1
+            
+        if start_idx >= len(messages):
+            # 极端情况：全是连续的 tool_calls 链，退回到最后一个 user 消息
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i]["role"] == "user":
+                    start_idx = i
+                    break
+                    
+        truncated = messages[start_idx:]
+        
+        if start_idx > 0:
+            # 在前面插入一条摘要提示
+            truncated.insert(0, {
+                "role": "system",
+                "content": f"[系统提示: 之前有 {start_idx} 条早期对话已被压缩省略，以下是最近的对话]"
+            })
+            
         return truncated
 
     # ------------------------------------------------------------------
