@@ -145,6 +145,7 @@ def rss_brief() -> str:
         pass
 
     scored = []
+    seen_titles = set()
     for item in articles:
         sid = str(item['_id'])
         if sid in pushed_ids:
@@ -155,6 +156,11 @@ def rss_brief() -> str:
         title = item.get('title', '')
         if not exc or exc == 'None' or len(exc) < 10:
             continue
+
+        title_key = title[:80]
+        if title_key in seen_titles:
+            continue
+        seen_titles.add(title_key)
 
         score = SITE_QUALITY.get(site, 5)
         score += sum(1 for kw in HOT_KEYWORDS if kw.lower() in (title + exc).lower())
