@@ -84,6 +84,21 @@ def _register_cron_jobs(agent: Agent):
 
     cron.add_job("每日健康巡检广播", "23:50", daily_health_check)
 
+    # 5. RSS 精选推送 — 每天 9:00-22:00 每小时过 3 分钟
+    def rss_push():
+        import sys
+        sys.path.insert(0, '/root/lite_agent')
+        from agent import AgentResponse
+        from skills.ops_rss import rss_brief
+        text = rss_brief()
+        if text:
+            agent.broadcast(AgentResponse(text, title='📰 RSS 精选', color='blue'))
+            return 'RSS 精选已推送'
+        return '(无新文章)'
+
+    for h in range(9, 23):
+        cron.add_job(f'RSS 精选推送', f'{h:02d}:03', rss_push)
+
     # 启动 Cron 引擎后台线程
     cron.start()
     print(f"📅 定时任务引擎就绪: 共注册 {len(cron.jobs)} 个任务")

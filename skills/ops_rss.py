@@ -106,6 +106,85 @@ def _list_view(items, g, total, nodes, db, msg, session_mgr):
     return AgentResponse('\n'.join(lines), title=f'📰 {g["name"]}', color='blue')
 
 
+SITE_QUALITY = {
+    '量子位': 9, '机器之心': 9, '虎嗅': 7, '36氪': 7,
+    'IT之家': 5, '百度热搜': 4, '快问快答': 3, '虫部落': 3,
+}
+
+HOT_KEYWORDS = [
+    '大模型', 'Agent', 'Agent', '英伟达', 'OpenAI', 'DeepSeek',
+    '架构', '开源', '离职', '模型', '训练', '推理', '多模态',
+    '机器人', '具身', 'GPU', '蒸馏', 'RAG', '向量',
+]
+
+PUSHED_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           'workspace', 'pushed_rss.json')
+
+
+def rss_brief() -> str:
+    import pymongo, json
+    from datetime import date
+
+    c = pymongo.MongoClient('mongodb://root:M1jiqiS1.v@localhost:27017', serverSelectionTimeoutMS=5000)
+    db = c['rsslite']
+    today = date.today().strftime('%Y-%m-%d')
+    month = date.today().strftime('%Y%m')
+    col_name = f'FeedItem_{month}'
+
+    nodes = {int(n['id']): n.get('sitename', '?') for n in db['RssNode'].find()}
+
+    articles = list(db[col_name].find(
+        {'groupid': 5, 'pubdate': {'$regex': '^' + today}}
+    ).sort('pubdate', -1))
+
+    pushed_ids = set()
+    try:
+        with open(PUSHED_FILE, 'r') as f:
+            pushed_ids = set(json.load(f).get('ids', []))
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+    scored = []
+    for item in articles:
+        sid = str(item['_id'])
+        if sid in pushed_ids:
+            continue
+
+        site = nodes.get(int(item.get('rssNodeId', 0)), '?')
+        exc = (item.get('excerpt') or '')
+        title = item.get('title', '')
+        if not exc or exc == 'None' or len(exc) < 10:
+            continue
+
+        score = SITE_QUALITY.get(site, 5)
+        score += sum(1 for kw in HOT_KEYWORDS if kw.lower() in (title + exc).lower())
+        scored.append((score, item, site, exc[:120], sid))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = scored[:5]
+
+    if not top:
+        c.close()
+        return ''
+
+    new_pushed = pushed_ids.copy()
+    lines = [f'**RSS 精选** · {today}\n']
+    for score, item, site, exc, sid in top:
+        title = item.get('title', '(无标题)')[:80]
+        lines.append(f'⭐{score} **[{site}]** {title}')
+        if exc:
+            lines.append(f'_{exc}_')
+        lines.append('')
+        new_pushed.add(sid)
+
+    os.makedirs(os.path.dirname(PUSHED_FILE), exist_ok=True)
+    with open(PUSHED_FILE, 'w') as f:
+        json.dump({'ids': list(new_pushed), 'updated': today}, f)
+
+    c.close()
+    return '\n'.join(lines)
+
+
 def _overview_view(groups, col_name, today, db):
     lines = [f'**RSS 今日采集概览** · {today}\n']
     for g in sorted(groups.values(), key=lambda x: int(x.get('sortid', '99'))):
