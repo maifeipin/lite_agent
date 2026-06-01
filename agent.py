@@ -393,8 +393,7 @@ class Agent:
             from skills.ops_rss import rss_brief
             text = rss_brief()
             if text:
-                self.broadcast(AgentResponse(text, title='📰 RSS 精选', color='blue'))
-                return AgentResponse('RSS 精选已推送到所有通道', title='✅ 已推送', color='green')
+                return AgentResponse(text, title='📰 RSS 精选', color='blue')
             return AgentResponse('当前无新文章可推送', title='RSS', color='grey')
         except Exception as e:
             return AgentResponse(f'推送失败: {e}', title='❌', color='red')

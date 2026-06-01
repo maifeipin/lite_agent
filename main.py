@@ -92,8 +92,11 @@ def _register_cron_jobs(agent: Agent):
         from skills.ops_rss import rss_brief
         text = rss_brief()
         if text:
-            agent.broadcast(AgentResponse(text, title='📰 RSS 精选', color='blue'))
-            return 'RSS 精选已推送'
+            feishu_ch = next((ch for ch in agent.channels if ch.name == 'feishu'), None)
+            if feishu_ch:
+                feishu_ch.broadcast(AgentResponse(text, title='📰 RSS 精选', color='blue'))
+                return 'RSS 精选已推送'
+            return '(飞书通道未启用)'
         return '(无新文章)'
 
     for h in range(9, 23):
