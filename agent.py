@@ -82,6 +82,8 @@ class Agent:
 
         # 安全限制
         self.max_steps = session_cfg.get("max_steps_per_goal", 10)
+        self.daily_token_limit = session_cfg.get("daily_token_limit", 500000)
+        self._dead_loop_counter: dict = {}  # session_key -> {tool_fingerprint -> count}
 
         # 记忆引擎 (跨会话长期记忆)
         self.memory = AgentMemory() if MEMORY_AVAILABLE else None
@@ -422,6 +424,13 @@ class Agent:
             messages.extend(self.session_mgr.get_history(msg.session_key))
             messages = self._validate_messages(messages)
 
+            # 日额度检查
+            if session.token_usage >= self.daily_token_limit:
+                print(f"  💸 日 Token 上限: {session.token_usage}/{self.daily_token_limit}")
+                warning = f"⚠️ 今日 Token 已达上限 ({self.daily_token_limit})，请明天再试\n当前累计: {session.token_usage}"
+                self.session_mgr.add_message(msg.session_key, "assistant", warning)
+                return AgentResponse(warning, title="💸 额度耗尽", color="red")
+
             # 调用 LLM
             try:
                 kwargs = {
@@ -482,6 +491,22 @@ class Agent:
                 # 逐个执行工具
                 for tc in choice.message.tool_calls:
                     self.session_mgr.increment_tool_calls(msg.session_key)
+
+                    fingerprint = f"{tc.function.name}:{tc.function.arguments}"
+                    counter = self._dead_loop_counter.setdefault(msg.session_key, {})
+                    if fingerprint == counter.get("_last"):
+                        counter["_streak"] = counter.get("_streak", 1) + 1
+                    else:
+                        counter["_streak"] = 1
+                    counter["_last"] = fingerprint
+
+                    if counter["_streak"] >= 3:
+                        print(f"  🔄 死循环检测: {tc.function.name} 连续 {counter['_streak']} 次, 强制终止")
+                        warning = f"🔄 检测到工具 `{tc.function.name}` 连续重复调用 {counter['_streak']} 次，已自动终止以防止死循环"
+                        self.session_mgr.add_message(msg.session_key, "assistant", warning)
+                        self.session_mgr.mark_done(msg.session_key, "死循环自动终止")
+                        return AgentResponse(warning, title="🔄 死循环终止", color="orange")
+
                     print(f"  🔧 [{step+1}/{self.max_steps}] "
                           f"调用: {tc.function.name}({tc.function.arguments})")
 
