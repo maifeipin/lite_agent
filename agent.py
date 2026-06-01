@@ -2,6 +2,7 @@
 AI Agent 核心 - LLM 调度与 Tool Call Loop
 """
 
+import os
 import json
 import time
 import traceback
