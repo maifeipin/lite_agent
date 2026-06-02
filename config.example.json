@@ -37,6 +37,24 @@
                 "temperature": 0.3,
                 "max_steps": 10,
                 "tags": ["multimodal", "vision", "code"]
+            },
+            "gemini-flash": {
+                "api_key": "YOUR_GEMINI_API_KEY",
+                "model": "gemini-3.5-flash",
+                "max_tokens": 8192,
+                "temperature": 0.3,
+                "max_steps": 8,
+                "proxy": "",
+                "tags": ["gemini", "text", "fast"]
+            },
+            "gemini-pro": {
+                "api_key": "YOUR_GEMINI_API_KEY",
+                "model": "gemini-2.0-flash",
+                "max_tokens": 8192,
+                "temperature": 0.1,
+                "max_steps": 12,
+                "proxy": "",
+                "tags": ["gemini", "code", "complex_reasoning"]
             }
         }
     },
@@ -52,11 +70,11 @@
         "planner_model": "pro",
         "classifier_model": "flash",
         "route_rules": [
-            {"type": "text",            "model": "flash",  "fallback": "pro"},
-            {"type": "code",            "model": "pro",    "fallback": "flash",   "tools": ["ops_workspace"]},
-            {"type": "multimodal",      "model": "vision", "fallback": "pro"},
-            {"type": "complex_reasoning","model": "pro",   "fallback": "flash"},
-            {"type": "data_analysis",   "model": "pro",    "fallback": "flash",   "tools": ["ops_billing", "ops_logs", "ops_sys"]}
+            {"type": "text",            "model": "flash",       "fallback": "gemini-flash"},
+            {"type": "code",            "model": "pro",         "fallback": "flash",       "tools": ["ops_workspace"]},
+            {"type": "multimodal",      "model": "vision",      "fallback": "pro"},
+            {"type": "complex_reasoning","model": "pro",        "fallback": "gemini-pro"},
+            {"type": "data_analysis",   "model": "pro",         "fallback": "flash",       "tools": ["ops_billing", "ops_logs", "ops_sys"]}
         ],
         "max_parallel_subtasks": 3,
         "subtask_timeout_minutes": 15,

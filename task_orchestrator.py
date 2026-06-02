@@ -253,6 +253,7 @@ class TaskOrchestrator:
                 model_cfg=model_cfg,
                 skill_engine=self.skill_engine,
                 tools_allowlist=subtask.tools if subtask.tools else None,
+                provider=self.router.get_provider(subtask.assigned_model),
             )
             result_text = worker.run(subtask, upstream)
             subtask.finished_at = time.time()
@@ -282,6 +283,7 @@ class TaskOrchestrator:
                         model_cfg=fb_cfg,
                         skill_engine=self.skill_engine,
                         tools_allowlist=subtask.tools if subtask.tools else None,
+                        provider=self.router.get_provider(fb_name),
                     )
                     result_text = worker_fb.run(subtask, upstream)
                     subtask.finished_at = time.time()

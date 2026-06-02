@@ -146,6 +146,36 @@ class SkillEngine:
         return [info["schema"] for info in _skill_registry.values()
                 if tag in (info.get("tags") or [])]
 
+    def get_gemini_tool_declarations(self, names: list = None) -> list:
+        """将 OpenAI tool schema 转为 Gemini function_declarations 格式"""
+        decls = []
+        items = (
+            [(n, _skill_registry[n]) for n in names if n in _skill_registry]
+            if names
+            else _skill_registry.items()
+        )
+        for name, info in items:
+            fn = info["schema"]["function"]
+            params = fn["parameters"]
+            gemini_params = {
+                "type": params.get("type", "OBJECT").upper(),
+                "properties": {},
+                "required": params.get("required", []),
+            }
+            for pname, pdef in params.get("properties", {}).items():
+                gemini_params["properties"][pname] = {
+                    "type": pdef.get("type", "STRING").upper(),
+                    "description": pdef.get("description", ""),
+                }
+                if "enum" in pdef:
+                    gemini_params["properties"][pname]["enum"] = pdef["enum"]
+            decls.append({
+                "name": fn["name"],
+                "description": fn["description"],
+                "parameters": gemini_params,
+            })
+        return decls
+
     def execute(self, skill_name: str, arguments: str) -> str:
         """
         执行指定技能
