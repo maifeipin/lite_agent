@@ -181,7 +181,7 @@ def rss_brief() -> str:
     for score, item, site, exc, sid, link in top:
         title = item.get('title', '(无标题)')[:80]
         lines.append(f'⭐{score} **[{site}]** {title}')
-        if link:
+        if link and 'http' not in (exc or ''):
             lines.append(link)
         if exc:
             lines.append(f'_{exc}_')
