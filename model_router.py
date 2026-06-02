@@ -47,15 +47,11 @@ class ModelRouter:
             )
 
         proxy = cfg.get("proxy", os.environ.get("HTTPS_PROXY", ""))
-        http_options = {}
 
-        if proxy and ("socks" in proxy):
+        if proxy and "socks" in proxy:
             self._setup_socks_proxy(proxy, name)
 
-        client = genai.Client(
-            api_key=cfg["api_key"],
-            **http_options,
-        )
+        client = genai.Client(api_key=cfg["api_key"])
         print(f"  🤖 Gemini[{name}] 客户端就绪 model={cfg.get('model', name)}")
         return client
 
