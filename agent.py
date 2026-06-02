@@ -376,6 +376,17 @@ class Agent:
                 return self._handle_rss_log()
             return self._handle_rss(msg, args)
 
+        if cmd == "cron" and args == "log":
+            import subprocess
+            r = subprocess.run(
+                "journalctl -u feishu-bot --since '24 hours ago' --no-pager | grep '定时任务' | tail -30",
+                shell=True, capture_output=True, text=True, timeout=10
+            )
+            text = r.stdout.strip() or r.stderr.strip() or '(无日志)'
+            if len(text) > 2500:
+                text = text[-2500:]
+            return AgentResponse(text, title='📋 定时任务日志', color='turquoise')
+
         return AgentResponse(
             f"未知指令 `::{cmd}`。可用: `::goal <描述>` / `::goal` / `::goal done` / `::rss [分组]`",
             title="⚠️", color="red"
