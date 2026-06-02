@@ -196,6 +196,9 @@ class TaskOrchestrator:
                 subtask.started_at = time.time()
                 print(f"  ▶ {subtask.id} [{subtask.type.value}] 开始执行")
 
+            self._persist_dag(session_key, task_id, dag)
+
+            for subtask in batch:
                 upstream = {}
                 for dep in subtask.depends_on:
                     dep_node = dag.subtasks.get(dep)
