@@ -17,14 +17,18 @@ class WeComChannel(BaseChannel):
         pass
 
     def send_response(self, message_id: str, response) -> bool:
-        return self._do_send(f"**{response.title}**\n\n{response.text}" if response.title else response.text)
+        text = f"**{response.title}**\n\n{response.text}" if response.title else response.text
+        return self._do_send(text, use_md=bool(response.title))
 
     def send_to(self, open_id: str, response) -> bool:
         return self.send_response('', response)
 
-    def _do_send(self, text: str) -> bool:
+    def _do_send(self, text: str, use_md: bool = False) -> bool:
         try:
-            data = json.dumps({'message': text}).encode('utf-8')
+            payload = {'message': text}
+            if use_md:
+                payload['msgtype'] = 'markdown'
+            data = json.dumps(payload).encode('utf-8')
             headers = {'Content-Type': 'application/json'}
             if self.push_token:
                 headers['Authorization'] = f'Bearer {self.push_token}'
