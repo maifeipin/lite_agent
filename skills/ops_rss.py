@@ -122,8 +122,30 @@ HOT_KEYWORDS = [
 
 PUSHED_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                            'workspace', 'pushed_rss.json')
+CACHE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          'workspace', 'rss_cache.json')
 
 V2EX_TOKEN = 'eece9286-960c-4084-918a-c53714056ca6'
+
+
+def rss_precompute() -> str:
+    import json, time
+    text = _rss_brief_compute()
+    with open(CACHE_FILE, 'w') as f:
+        json.dump({'text': text, 'ts': time.time()}, f)
+    return 'RSS 预计算完成' if text else '(无新文章)'
+
+
+def rss_brief() -> str:
+    import json, time
+    try:
+        with open(CACHE_FILE, 'r') as f:
+            cache = json.load(f)
+            if time.time() - cache.get('ts', 0) < 900:
+                return cache.get('text', '')
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return _rss_brief_compute()
 
 
 def _v2ex_reply_count(link: str) -> int:
@@ -150,7 +172,7 @@ def _v2ex_reply_count(link: str) -> int:
         return 0
 
 
-def rss_brief() -> str:
+def _rss_brief_compute() -> str:
     import pymongo, json
     from datetime import date
 

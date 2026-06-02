@@ -99,7 +99,14 @@ def _register_cron_jobs(agent: Agent):
             return '(飞书通道未启用)'
         return '(无新文章)'
 
+    def rss_precompute():
+        import sys
+        sys.path.insert(0, '/root/lite_agent')
+        from skills.ops_rss import rss_precompute
+        return rss_precompute()
+
     for h in range(9, 23):
+        cron.add_job(f'RSS 预计算', f'{h:02d}:50', rss_precompute)
         cron.add_job(f'RSS 精选推送', f'{h:02d}:03', rss_push)
 
     # 启动 Cron 引擎后台线程
