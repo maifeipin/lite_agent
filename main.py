@@ -77,7 +77,10 @@ def _register_cron_jobs(agent: Agent):
             sys.path.insert(0, '/root/lite_agent')
             from skills.ops_self_check import _get_health_report
             report_text = _get_health_report()
-            agent.broadcast(AgentResponse(report_text, title="🌙 每日系统体检报告", color="wathet"))
+            feishu_ch = next((ch for ch in agent.channels if ch.name == 'feishu'), None)
+            if feishu_ch and hasattr(feishu_ch, 'send_to'):
+                feishu_ch.send_to('ou_7135c531f7a77b6cb3ae8b27e5dc056b',
+                                  AgentResponse(report_text, title="🌙 每日系统体检报告", color="wathet"))
             return "巡检广播已推送"
         except Exception as e:
             return f"巡检广播失败: {e}"
