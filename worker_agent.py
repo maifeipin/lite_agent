@@ -250,7 +250,6 @@ class WorkerAgent:
                     fn_response_part = types.Part.from_function_response(
                         name=name,
                         response={"result": tool_result},
-                        id=fn_call.id if hasattr(fn_call, 'id') and fn_call.id else None,
                     )
                     fn_response_parts.append(fn_response_part)
 

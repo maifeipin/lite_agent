@@ -67,6 +67,11 @@ class TaskOrchestrator:
     # ==================================================================
     #  Phase 1: 拆解
     # ==================================================================
+    def _resolve_model(self, model_key: str) -> str:
+        """Resolve config key name to actual API model name"""
+        cfg = self.router.models_cfg.get(model_key, {})
+        return cfg.get("model", model_key)
+
     def _plan(self, goal: str) -> list[Subtask]:
         print(f"  [ORCH:PLAN] 规划中... model={self.planner_model}")
         planner_client = self.router.get_client(self.planner_model)
@@ -75,6 +80,8 @@ class TaskOrchestrator:
                 self.config.get("llm", {}).get("default", "")
             )
             self.planner_model = self.config.get("llm", {}).get("default", "")
+
+        actual_model = self._resolve_model(self.planner_model)
 
         all_tools = self.skill_engine.get_all_schemas()
         tools_desc_lines = []
@@ -87,7 +94,7 @@ class TaskOrchestrator:
 
         try:
             response = planner_client.chat.completions.create(
-                model=self.planner_model,
+                model=actual_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,
                 max_tokens=4096,
@@ -341,8 +348,9 @@ class TaskOrchestrator:
 3. 发现的问题和建议（如有）"""
 
         try:
+            actual_model = self._resolve_model(self.planner_model)
             response = aggregator_client.chat.completions.create(
-                model=self.planner_model,
+                model=actual_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
                 max_tokens=4096,
