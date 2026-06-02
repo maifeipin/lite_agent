@@ -74,7 +74,7 @@
             {"type": "code",            "model": "pro",         "fallback": "flash",       "tools": ["ops_workspace"]},
             {"type": "multimodal",      "model": "vision",      "fallback": "pro"},
             {"type": "complex_reasoning","model": "pro",        "fallback": "gemini-pro"},
-            {"type": "data_analysis",   "model": "pro",         "fallback": "flash",       "tools": ["ops_billing", "ops_logs", "ops_sys"]}
+            {"type": "data_analysis",   "model": "pro",         "fallback": "flash",       "tools": ["ops_billing", "ops_logs", "ops_sys", "ops_workspace"]}
         ],
         "max_parallel_subtasks": 3,
         "subtask_timeout_minutes": 15,

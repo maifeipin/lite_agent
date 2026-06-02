@@ -160,7 +160,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                     self.wfile.write(f"data: {json.dumps(data_obj, ensure_ascii=False)}\n\n".encode('utf-8'))
                     self.wfile.flush()
                     
-                    if status in ('completed', 'failed', 'error'):
+                    if status in ('done', 'completed', 'failed', 'error'):
                         break
                 else:
                     data_obj = {"status": "planning", "message": "正在规划任务..."}
