@@ -157,7 +157,8 @@
             "enabled": false,
             "host": "0.0.0.0",
             "port": 8887,
-            "auth_token": "your_secret_token_here"
+            "auth_token": "your_secret_token_here",
+            "guest_token": "your_guest_token_here"
         }
     }
 }

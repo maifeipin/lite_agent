@@ -22,17 +22,28 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def _auth(self) -> bool:
         auth_token = self.server.api_server.auth_token
-        if not auth_token:
+        guest_token = self.server.api_server.config.get("guest_token", "")
+        self.is_guest = False
+        
+        if not auth_token and not guest_token:
             return True
+            
         auth_header = self.headers.get('Authorization')
         if not auth_header or not auth_header.startswith('Bearer '):
             self.send_error(401, "Unauthorized")
             return False
+            
         token = auth_header.split(' ')[1]
-        if token != auth_token:
-            self.send_error(403, "Forbidden")
-            return False
-        return True
+        
+        if auth_token and token == auth_token:
+            self.is_guest = False
+            return True
+        elif guest_token and token == guest_token:
+            self.is_guest = True
+            return True
+            
+        self.send_error(403, "Forbidden")
+        return False
 
     def do_GET(self):
         if not self._auth():
@@ -41,6 +52,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         parsed_url = urlparse(self.path)
         if parsed_url.path == '/api/v1/task/stream':
             self._handle_task_stream(parsed_url.query)
+        elif parsed_url.path == '/v1/models':
+            self._handle_openai_models()
         else:
             self.send_error(404, "Not Found")
 
@@ -51,6 +64,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         parsed_url = urlparse(self.path)
         if parsed_url.path in ('/api/v1/chat', '/api/v1/task'):
             self._handle_chat_or_task()
+        elif parsed_url.path == '/v1/chat/completions':
+            self._handle_openai_chat_completions()
         else:
             self.send_error(404, "Not Found")
 
@@ -171,6 +186,130 @@ class ApiHandler(BaseHTTPRequestHandler):
                 break
                 
             time.sleep(1)
+
+    def _handle_openai_models(self):
+        models_obj = {
+            "object": "list",
+            "data": [
+                {
+                    "id": "lite-agent",
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": "lite-agent"
+                }
+            ]
+        }
+        self.send_response(200)
+        self._send_cors_headers()
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(models_obj).encode('utf-8'))
+
+    def _handle_openai_chat_completions(self):
+        import uuid
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length == 0:
+            self.send_error(400, "Bad Request: Empty body")
+            return
+            
+        body = self.rfile.read(content_length)
+        try:
+            req_data = json.loads(body.decode('utf-8'))
+        except json.JSONDecodeError:
+            self.send_error(400, "Bad Request: Invalid JSON")
+            return
+
+        messages = req_data.get('messages', [])
+        if not messages:
+            self.send_error(400, "Bad Request: Missing messages")
+            return
+            
+        text = ""
+        for m in reversed(messages):
+            if m.get('role') == 'user':
+                text = m.get('content', '')
+                break
+                
+        if not text:
+            self.send_error(400, "Bad Request: No user message found")
+            return
+            
+        client_user = req_data.get('user', '')
+        is_guest_mode = getattr(self, "is_guest", False)
+        
+        if client_user:
+            session_id = f"oai_u_{client_user}"
+        else:
+            role_name = "guest" if is_guest_mode else "admin"
+            session_id = f"oai_{role_name}"
+            
+        msg = IncomingMessage(
+            channel='api',
+            user_id=session_id,
+            chat_id=session_id,
+            message_id=str(time.time()),
+            text=text,
+            notify_channels=[],
+            is_guest=is_guest_mode,
+            sync_mode=True
+        )
+        
+        agent = self.server.api_server.agent
+        resp = agent.handle(msg)
+        
+        final_text = ""
+        if not resp:
+            final_text = ""
+        else:
+            final_text = resp.text
+
+        is_stream = req_data.get('stream', False)
+        
+        if is_stream:
+            self.send_response(200)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'text/event-stream')
+            self.send_header('Cache-Control', 'no-cache')
+            self.send_header('Connection', 'keep-alive')
+            self.end_headers()
+            
+            chunk_obj = {
+                "id": f"chatcmpl-{uuid.uuid4().hex}",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": req_data.get("model", "lite-agent"),
+                "choices": [{"index": 0, "delta": {"content": final_text}}]
+            }
+            self.wfile.write(f"data: {json.dumps(chunk_obj, ensure_ascii=False)}\n\n".encode('utf-8'))
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+        else:
+            resp_obj = {
+                "id": f"chatcmpl-{uuid.uuid4().hex}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": req_data.get("model", "lite-agent"),
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": final_text
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0
+                }
+            }
+            self.send_response(200)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(resp_obj, ensure_ascii=False).encode('utf-8'))
 
 
 class ApiServer:

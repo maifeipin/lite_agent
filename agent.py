@@ -27,13 +27,16 @@ class IncomingMessage:
     """从通道层传入的标准化消息"""
 
     def __init__(self, channel: str, user_id: str, chat_id: str,
-                 message_id: str, text: str, notify_channels: list = None):
+                 message_id: str, text: str, notify_channels: list = None, is_guest: bool = False, sync_mode: bool = False):
         self.channel = channel
         self.user_id = user_id
         self.chat_id = chat_id
         self.message_id = message_id
         self.text = text
         self.notify_channels = notify_channels
+        self.is_guest = is_guest
+        self.sync_mode = sync_mode
+        self.sync_mode = sync_mode
 
     @property
     def session_key(self) -> str:
@@ -155,8 +158,11 @@ class Agent:
         if text.startswith("::"):
             return self._handle_double_colon(msg)
 
-        if text.startswith("/"):
+        if msg.text.startswith("/"):
             return self._handle_builtin(msg)
+
+        if msg.is_guest:
+            return self._run_simple_chat(msg)
 
         if self._is_complex_task(text):
             print(f"  [ROUTE] 复杂任务检测命中 → 走多Agent编排: {text[:60]}")
@@ -457,6 +463,31 @@ class Agent:
             "巡视", "巡检", "汇总", "统计并", "扫描",
         ]
         return any(kw in text for kw in keywords)
+
+    def _run_simple_chat(self, msg: IncomingMessage) -> AgentResponse:
+        """访客模式：强制纯文本对话，无工具，保证安全"""
+        self.session_mgr.get_or_create(msg.session_key)
+        self.session_mgr.add_message(msg.session_key, "user", msg.text)
+        
+        hist = self._build_history(msg.session_key)
+        messages = [{"role": "system", "content": "You are a helpful AI assistant. You are in guest mode and have no access to system tools. Answer the user's questions safely."}] + hist
+        
+        try:
+            model_key = self.config["llm"].get("default", "flash")
+            model_cfg = self.config.get("llm", {}).get("models", {}).get(model_key, {})
+            actual_model = model_cfg.get("model", model_key)
+            response = self.client.chat.completions.create(
+                model=actual_model,
+                messages=messages,
+                temperature=0.5
+            )
+            content = response.choices[0].message.content or "无返回内容"
+        except Exception as e:
+            content = f"API Request Failed: {e}"
+            
+        self.session_mgr.add_message(msg.session_key, "assistant", content)
+        self._push_result(msg, content)
+        return AgentResponse(text=content)
 
     def _run_orchestrated(self, msg: IncomingMessage) -> AgentResponse:
         from task_orchestrator import TaskOrchestrator
