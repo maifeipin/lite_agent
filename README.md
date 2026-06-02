@@ -1,64 +1,63 @@
 # Lite Agent
 
-🚀 **Lite Agent** 是一个轻量级、零外部依赖（仅依赖官方 SDK）、支持深度思考大模型（如 DeepSeek-V4-Pro / R1）的私有化 AI 智能助手引擎。它能够通过 WebSocket 无缝接入飞书机器人，并通过自然语言全自动调度本地服务器的各类运维和账单处理脚本。
+🚀 **Lite Agent** 是一个轻量级、零外部依赖（仅依赖官方 SDK）、支持深度思考大模型的私有化 AI 智能助手引擎。通过 WebSocket / HTTP 回调接入**飞书、钉钉、企业微信**三大国内 IM，并通过自然语言全自动调度本地服务器的运维、账单、RSS 精选等技能。
 
 ## 🌟 核心特性
 
-- **极致轻量 (0 外部依赖)**: 核心框架完全使用 Python 内置库（`urllib`, `sqlite3`, `threading` 等）实现，无需安装庞大的三方框架。
-- **动态技能引擎 (Skill Engine)**: 只需要编写普通的 Python 函数并加上 `@skill` 装饰器，即可一秒钟将本地脚本转化为 AI 的可用工具 (Tool Calling)。
-- **完美适配 DeepSeek 深度思考模型**: 底层严格遵守 DeepSeek 官方 Tool Calling 规范，支持 `reasoning_content` (思维链) 在多轮工具调用中的无损透传，彻底解决 400 报错，同时自动适配 `reasoning_effort` 注入。
-- **跨会话长期记忆 (Memory Engine)**: 本地搭载 Chroma 向量数据库与 SentenceTransformers (bge-small-zh-v1.5) 进行语义向量化，结合 LLM 每天定时执行“记忆蒸馏复盘”，让助手越养越懂你。
-- **定时任务引擎 (Cron Engine)**: 内置系统级的定时任务调度器，支持通过对话动态管理（查看、执行、启停）各项自动化任务（如自动备份、证书巡检、每日复盘）。
-- **多通道无缝接入**: 突破内网限制，无需繁琐的公网 Webhook 回调，支持通过 WebSocket 直连 **飞书** 和 **钉钉 (Stream 模式)**。
-- **完美适配 DeepSeek 深度思考模型**: 底层严格遵守 DeepSeek 官方 Tool Calling 规范，支持 `reasoning_content` (思维链) 在多轮工具调用中的无损透传，彻底解决 400 报错，同时自动适配 `reasoning_effort` 注入。
+- **极致轻量**: 核心框架使用 Python 内置库（`urllib`, `sqlite3`, `threading`, `http.server` 等），无需庞大三方框架。
+- **动态技能引擎 (Skill Engine)**: 编写普通 Python 函数加 `@skill` 装饰器，一秒将本地脚本转化为 AI 可用工具。
+- **完美适配 DeepSeek**: 严格遵循 DeepSeek Tool Calling 规范，支持 `reasoning_content` 多轮透传，自动适配 `reasoning_effort`。
+- **跨会话长期记忆 (Memory Engine)**: ChromaDB 向量库 + SentenceTransformers，结合 LLM 每天定时执行记忆蒸馏复盘。
+- **配置驱动的定时任务引擎**: 所有 cron 任务定义在 `config.json`，支持 command/skill 两种类型与 `time_range` 多时段。
+- **三通道全覆盖**: 飞书 (WebSocket)、钉钉 (Stream)、企业微信 (HTTP 回调 + pushmsg)，推送 fallback 自动切换。
+- **RSS 精选引擎**: 多源资讯聚合评分，V2EX 回复数权重加成，低质量标签降权，预计算缓存秒级推送。
+- **外部独立监控**: crontab 定时检查 bot 存活，故障时通过企业微信告警，不依赖进程内 `/check`。
 
-## 🛠️ 内置技能库 (Skills)
+## 🛠️ 内置技能库
 
-系统已内置多款实用插件，涵盖服务器运维与账单管理：
+### 📰 RSS 资讯精选 (`ops_rss.py`)
+- **多源聚合**: 量子位、机器之心、虎嗅、36氪、IT之家、V2EX 等，站点权重 + 关键词 + 回复数加权评分。
+- **V2EX API 对接**: 调 V2EX API 获取回复数，热门帖自动加分，推广/交易帖自动降权。
+- **预计算缓存**: 推送前 13 分钟预计算，HH:03 秒级读缓存发送。
 
 ### 💰 财务与账单管理 (`ops_billing.py`)
 - **账单解析入库**: 自动从邮箱抓取信用卡账单并落库入账。
 - **财务汇总报表**: 一键生成多维度月度/年度账单报表。
-- **对账与提醒**: 支持临期还款自动检查、差异对账、以及大额异常交易筛查。
+- **对账与提醒**: 支持临期还款检查、差异对账、大额交易筛查。
 
-### 🖥️ 系统与安全运维 (`ops_sys.py`, `ops_security.py`, `ops_logs.py`, `ops_crontab.py`)
-- **系统状态看板**: 实时查询系统负载、内存、磁盘以及资源占用 Top 的进程。
-- **安全审查**: 自动拦截并扫描近期的 SSH 爆破尝试及异常登录。
-- **日志分析**: 支持跨文件、多关键字的高级日志检索。
-- **证书监控与脚本执行**: 一键运行 SSL 证书有效期巡检及其他后台脚本。
+### 🖥️ 系统运维 (`ops_sys.py`, `ops_security.py`, `ops_logs.py`, `ops_self_check.py`)
+- **健康自检**: `/check` 一键检查进程、网络、配置、DB、记忆、备份等 9 项指标。
+- **安全审查**: 自动扫描 SSH 爆破尝试及异常登录。
+- **日志分析**: 跨文件、多关键字高级日志检索。
+- **数据备份**: 每天凌晨自动打包备份，`/check` 可查看备份状态。
+- **证书监控**: SSL 证书有效期巡检，过期前推送告警。
 
-## 📦 部署指南
+## 📦 部署
 
-### 1. 准备配置文件
-在根目录下创建 `config.json`，填入您的配置：
+### 1. 配置
+复制 `config.example.json` 为 `config.json`，填入各通道和 LLM 的密钥：
+
 ```json
 {
-    "channels": {
-        "feishu": {
-            "enabled": true,
-            "app_id": "cli_xxxx",
-            "app_secret": "xxxx"
-        },
-        "dingtalk": {
-            "enabled": true,
-            "client_id": "dingxxxx",
-            "client_secret": "xxxx"
-        }
-    },
+    "bot_name": "VPS 助手",
+    "project_root": "/root/lite_agent",
     "llm": {
-        "api_key": "sk-xxxx",
         "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-reasoner"
+        "api_key": "sk-YOUR_KEY",
+        "model": "deepseek-v4-flash"
     },
-    "session": {
-        "ttl_minutes": 30,
-        "max_history": 20,
-        "max_steps_per_goal": 10
-    }
+    "channels": {
+        "feishu": { "enabled": true, "app_id": "cli_xxx", "app_secret": "xxx", "admin_open_id": "ou_xxx" },
+        "dingtalk": { "enabled": false, "client_id": "xxx", "client_secret": "xxx" },
+        "wecom": { "enabled": true, "listen_port": 8899, "push_url": "http://127.0.0.1:6969/send_message", "push_token": "xxx" }
+    },
+    "rssdb": { "uri": "mongodb://user:pass@localhost:27017", "database": "rsslite" },
+    "v2ex": { "token": "YOUR_V2EX_TOKEN" },
+    "cron_jobs": []
 }
 ```
 
-### 2. 环境安装与启动
+### 2. 启动
 ```bash
 pip install -r requirements.txt
 python3 main.py
@@ -66,18 +65,23 @@ python3 main.py
 
 ## 💬 交互指令
 
-- `/remember <type> <内容>` : 强制记录一条关键信息（可选类型: concept, event, preference, troubleshooting）。
-- `/memory` : 查看当前长期记忆池的状态与分布。
-- `/cron` : 查看当前系统注册的定时任务列表。
-- `/cron <序号>` : 手动执行某一项定时任务。
-- `/cron toggle <序号>` : 开启或暂停某一项定时任务。
-- `/ai <自然语言>` : 强制使用大模型处理（适用于飞书特定场景拦截）。
-- `/cmd <脚本指令>` : 绕过大模型，精确触发底层脚本（如 `/cmd report 3`）。
-- `/balance` : 查询当前大模型 API 余额。
-- `/status` : 查看当前对话目标的进展与 Token 消耗。
-- `/history` : 回顾最近对话历史。
-- `/new` : 重置当前会话。
+| 指令 | 说明 |
+|------|------|
+| `::rss [ai\|v2ex]` | 查看 RSS 资讯列表 |
+| `::rss push` | 手动推送精选简报 |
+| `::rss log` | 查看推送/预计算日志 |
+| `/check` | 全方位健康自检（进程/网络/备份/DB 等 9 项） |
+| `/cron` | 查看定时任务列表 |
+| `/cron <序号>` | 手动执行某个定时任务 |
+| `/cron log` | 查看定时任务执行日志 |
+| `/remember <type> <内容>` | 强制记录长期记忆 |
+| `/memory` | 查看记忆池状态 |
+| `/balance` | 查询 API 余额 |
+| `/status` | 查看会话状态与 Token 消耗 |
+| `/history` | 最近对话历史 |
+| `/new` | 重置会话 |
+| `/help` | 完整帮助 |
 
 ## 📄 开源协议
 
-本项目采用 [MIT License](LICENSE) 协议开源。
+[MIT License](LICENSE)
