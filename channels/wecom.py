@@ -66,7 +66,8 @@ class WeComChannel(BaseChannel):
         print(f"📩 [wecom] {user_id}: {text.strip()[:80]}")
 
         text_stripped = text.strip()
-        self._do_send(f"🤔 已收到: _{text_stripped[:60]}{'...' if len(text_stripped) > 60 else ''}_", use_md=True)
+        from channels import smart_truncate
+        self._do_send(f"🤔 已收到: _{smart_truncate(text_stripped, 60)}_", use_md=True)
 
         msg = IncomingMessage(
             channel='wecom',

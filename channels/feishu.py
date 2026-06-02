@@ -111,7 +111,8 @@ class FeishuChannel(BaseChannel):
     def _process_and_reply(self, msg: IncomingMessage):
         """在独立线程中执行 Agent 逻辑并回复"""
         try:
-            self.send_progress(msg.message_id, f"已收到 \"{msg.text[:50]}{'...' if len(msg.text) > 50 else ''}\"")
+            from channels import smart_truncate
+            self.send_progress(msg.message_id, f"已收到 \"{smart_truncate(msg.text, 50)}\"")
             response = self.agent.handle(msg)
             self._reply_card(msg.message_id, response.title, response.text, response.color)
         except Exception as e:

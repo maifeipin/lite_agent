@@ -38,7 +38,8 @@ class DingTalkChannel(BaseChannel):
                 text=text
             )
 
-            self.send_progress(msg_data, f"已收到 \"{text[:40]}\"")
+            from channels import smart_truncate
+            self.send_progress(msg_data, f"已收到 \"{smart_truncate(text, 50)}\"")
             resp = self.agent.handle(incoming)
             if resp:
                 # 钉钉回复可以直接调 Webhook URL 或者利用 OpenAPI

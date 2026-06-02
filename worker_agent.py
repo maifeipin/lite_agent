@@ -87,7 +87,8 @@ class WorkerAgent:
 
         for step in range(self.max_steps):
             try:
-                kwargs = {"model": self.model_name, "messages": messages}
+                actual_model = self.model_cfg.get("model", self.model_name)
+                kwargs = {"model": actual_model, "messages": messages}
 
                 if (
                     "pro" in self.model_name.lower()
