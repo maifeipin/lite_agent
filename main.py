@@ -40,6 +40,12 @@ def _register_cron_jobs(agent: Agent, config: dict):
     """从 config.json 的 cron_jobs 列表注册定时任务"""
     import subprocess, sys
 
+    # 确保 ops_backup 的模块级 CronManager().add_job 生效
+    try:
+        import skills.ops_backup
+    except ImportError:
+        pass
+
     cron = agent.cron
     root = config['project_root']
     feishu_cfg = config.get('channels', {}).get('feishu', {})
