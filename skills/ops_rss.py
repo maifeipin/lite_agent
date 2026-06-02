@@ -144,6 +144,8 @@ HOT_KEYWORDS = [
     '机器人', '具身', 'GPU', '蒸馏', 'RAG', '向量',
 ]
 
+V2EX_LOW_TAGS = ['推广', '交易', '外包', '酷工作', '招聘', '广告']
+
 PUSHED_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                            'workspace', 'pushed_rss.json')
 CACHE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -247,6 +249,10 @@ def _rss_brief_compute() -> str:
 
         score = SITE_QUALITY.get(site, 5)
         score += sum(1 for kw in HOT_KEYWORDS if kw.lower() in (title + exc).lower())
+        for tag in V2EX_LOW_TAGS:
+            if f'[{tag}]' in title:
+                score -= 10
+                break
         link = item.get('link', '')
         scored.append((score, item, site, exc[:120], sid, link))
 
