@@ -167,7 +167,7 @@ def rss_brief() -> str:
 
         score = SITE_QUALITY.get(site, 5)
         score += sum(1 for kw in HOT_KEYWORDS if kw.lower() in (title + exc).lower())
-        scored.append((score, item, site, exc[:120], sid))
+        scored.append((score, item, site, exc[:120], sid, item.get('link', '')))
 
     scored.sort(key=lambda x: x[0], reverse=True)
     top = scored[:5]
@@ -178,9 +178,11 @@ def rss_brief() -> str:
 
     new_pushed = pushed_ids.copy()
     lines = [f'**RSS 精选** · {today}\n']
-    for score, item, site, exc, sid in top:
+    for score, item, site, exc, sid, link in top:
         title = item.get('title', '(无标题)')[:80]
         lines.append(f'⭐{score} **[{site}]** {title}')
+        if link:
+            lines.append(link)
         if exc:
             lines.append(f'_{exc}_')
         lines.append('')
