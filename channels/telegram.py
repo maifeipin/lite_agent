@@ -1,139 +1,86 @@
-import json
-import time
-import urllib.request
-import urllib.error
-import urllib.parse
-import threading
+import json, time, subprocess, threading
 from channels.base import BaseChannel
 from agent import IncomingMessage, AgentResponse
 
+
 class TelegramChannel(BaseChannel):
-    """
-    Telegram 通道实现 (原生 urllib，支持代理)
-    使用 Long Polling (getUpdates) 模式，无需 Webhook
-    """
+    """Telegram 通道 — Long Polling via subprocess+curl (socks5h)"""
 
     def __init__(self, config: dict, agent):
         super().__init__('telegram', config, agent)
         self.bot_token = config.get('bot_token', '')
-        self.proxy = config.get('proxy', '')  # 例如 http://127.0.0.1:7890
-        self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
+        self.proxy = config.get('proxy', 'socks5h://127.0.0.1:18988')
+        self.base_url = f'https://api.telegram.org/bot{self.bot_token}'
         self.running = False
-        self._thread = None
         self.offset = 0
 
-        # 配置代理
-        if self.proxy:
-            proxy_handler = urllib.request.ProxyHandler({
-                'http': self.proxy,
-                'https': self.proxy
-            })
-            self.opener = urllib.request.build_opener(proxy_handler)
-        else:
-            self.opener = urllib.request.build_opener()
-
-    def _api_call(self, method: str, data: dict = None) -> dict:
-        url = f"{self.base_url}/{method}"
+    def _curl(self, method: str, data: dict = None) -> dict:
+        url = f'{self.base_url}/{method}'
+        cmd = ['curl', '-x', self.proxy, '-k', '-s', '-m', '40', url]
+        if data:
+            cmd += ['-H', 'Content-Type: application/json', '-d', json.dumps(data)]
         try:
-            if data:
-                req_data = json.dumps(data).encode('utf-8')
-                req = urllib.request.Request(url, data=req_data, headers={'Content-Type': 'application/json'})
-            else:
-                req = urllib.request.Request(url)
-                
-            with self.opener.open(req, timeout=40) as resp:
-                return json.loads(resp.read().decode('utf-8'))
-        except urllib.error.URLError as e:
-            if hasattr(e, 'reason') and 'timed out' in str(e.reason).lower():
-                pass # Long polling timeout is expected
-            else:
-                print(f"❌ [Telegram] API Error: {e}")
-            return {}
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+            if r.stdout.strip():
+                return json.loads(r.stdout)
         except Exception as e:
-            print(f"❌ [Telegram] Unexpected Error: {e}")
-            return {}
+            print(f'  ❌ [Telegram] {method} error: {e}')
+        return {}
 
     def _poll_loop(self):
-        print(f"🚀 Telegram WebSocket(Long Polling) 通道已启动 (代理: {self.proxy or '无'})")
+        print(f'  📡 Telegram 通道就绪 (Long Polling @ {self.proxy})')
         while self.running:
-            try:
-                updates = self._api_call('getUpdates', {
-                    'offset': self.offset,
-                    'timeout': 30,
-                    'allowed_updates': ['message']
-                })
-                
-                if not updates or not updates.get('ok'):
-                    time.sleep(2)
+            updates = self._curl('getUpdates', {
+                'offset': self.offset, 'timeout': 30,
+                'allowed_updates': ['message']
+            })
+            if not updates.get('ok'):
+                time.sleep(2)
+                continue
+
+            for upd in updates.get('result', []):
+                self.offset = upd['update_id'] + 1
+                msg = upd.get('message')
+                if not msg or 'text' not in msg:
                     continue
 
-                for update in updates.get('result', []):
-                    self.offset = update['update_id'] + 1
-                    msg_obj = update.get('message')
-                    if not msg_obj or 'text' not in msg_obj:
-                        continue
-                        
-                    chat_id = str(msg_obj['chat']['id'])
-                    text = msg_obj['text']
-                    msg_id = str(msg_obj['message_id'])
-                    
-                    # 组装 IncomingMessage
-                    incoming = IncomingMessage(
-                        channel='telegram',
-                        user_id=chat_id,
-                        chat_id=chat_id,
-                        message_id=f'{chat_id}_{msg_id}',
-                        text=text
-                    )
-                    
-                    # 传给 Agent
-                    resp = self.agent.handle(incoming)
-                    if resp:
-                        self.send_response(chat_id, resp)
-                        
-            except Exception as e:
-                print(f"❌ [Telegram] Loop Error: {e}")
-                time.sleep(5)
+                chat_id = str(msg['chat']['id'])
+                text = msg['text']
+                msg_id = str(msg['message_id'])
+
+                incoming = IncomingMessage(
+                    channel='telegram', user_id=chat_id, chat_id=chat_id,
+                    message_id=f'{chat_id}_{msg_id}', text=text,
+                )
+                resp = self.agent.handle(incoming)
+                if resp:
+                    self.send_response(chat_id, resp)
 
     def start(self):
         if not self.bot_token:
-            print("⚠️ Telegram token 未配置，通道无法启动。")
-            return
-        if self.running:
+            print('  ⚠️ Telegram token 未配置')
             return
         self.running = True
-        self._thread = threading.Thread(target=self._poll_loop, daemon=True, name="TG_Poller")
-        self._thread.start()
+        threading.Thread(target=self._poll_loop, daemon=True, name='TG').start()
 
     def stop(self):
         self.running = False
-        if self._thread:
-            self._thread.join(timeout=2)
 
     def send_response(self, chat_id: str, resp: AgentResponse) -> bool:
         text = resp.text
         if resp.title:
-            text = f"**{resp.title}**\n\n{text}"
+            text = f'**{resp.title}**\n\n{text}'
         return self._send_msg(chat_id, text)
 
     def send_to(self, chat_id: str, resp: AgentResponse) -> bool:
         return self.send_response(chat_id, resp)
 
-    def send_progress(self, chat_id: str, text: str) -> bool:
-        return self._send_msg(chat_id, f"🤔 _{text}_")
-
     def _send_msg(self, chat_id: str, text: str) -> bool:
-            
-        data = {
-            'chat_id': chat_id,
-            'text': text,
-            'parse_mode': 'Markdown'
-        }
-        res = self._api_call('sendMessage', data)
-        if res.get('ok'):
-            return True
-        else:
-            # Markdown 解析失败时，回退到纯文本
-            data.pop('parse_mode')
-            res = self._api_call('sendMessage', data)
-            return bool(res.get('ok'))
+        r = self._curl('sendMessage', {
+            'chat_id': chat_id, 'text': text, 'parse_mode': 'Markdown'
+        })
+        if not r.get('ok'):
+            r = self._curl('sendMessage', {
+                'chat_id': chat_id, 'text': text
+            })
+        return bool(r.get('ok'))
