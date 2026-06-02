@@ -123,6 +123,32 @@ HOT_KEYWORDS = [
 PUSHED_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                            'workspace', 'pushed_rss.json')
 
+V2EX_TOKEN = 'eece9286-960c-4084-918a-c53714056ca6'
+
+
+def _v2ex_reply_count(link: str) -> int:
+    import re, subprocess, json
+    m = re.search(r'/t/(\d+)', link)
+    if not m:
+        return 0
+    tid = m.group(1)
+    url = f'https://www.v2ex.com/api/v2/topics/{tid}/replies?p=1'
+    try:
+        r = subprocess.run(
+            ['curl', '-x', 'socks5://127.0.0.1:18988', '-s', '-m', '10',
+             '-H', f'Authorization: Bearer {V2EX_TOKEN}', url],
+            capture_output=True, text=True, timeout=15
+        )
+        data = json.loads(r.stdout)
+        if isinstance(data, dict):
+            result = data.get('result', data)
+            return len(result) if isinstance(result, list) else 0
+        if isinstance(data, list):
+            return len(data)
+        return 0
+    except Exception:
+        return 0
+
 
 def rss_brief() -> str:
     import pymongo, json
@@ -167,7 +193,22 @@ def rss_brief() -> str:
 
         score = SITE_QUALITY.get(site, 5)
         score += sum(1 for kw in HOT_KEYWORDS if kw.lower() in (title + exc).lower())
-        scored.append((score, item, site, exc[:120], sid, item.get('link', '')))
+        link = item.get('link', '')
+        scored.append((score, item, site, exc[:120], sid, link))
+
+    v2ex_calls = 0
+    for i, (score, item, site, exc, sid, link) in enumerate(scored):
+        if 'V2EX' in site or '话题' in site:
+            if v2ex_calls >= 20:
+                break
+            v2ex_calls += 1
+            replies = _v2ex_reply_count(link)
+            if replies >= 100:
+                scored[i] = (score + 5, item, site, exc, sid, link)
+            elif replies >= 50:
+                scored[i] = (score + 3, item, site, exc, sid, link)
+            elif replies >= 20:
+                scored[i] = (score + 1, item, site, exc, sid, link)
 
     scored.sort(key=lambda x: x[0], reverse=True)
     top = scored[:5]
