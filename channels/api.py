@@ -163,8 +163,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                     if status in ('completed', 'failed', 'error'):
                         break
                 else:
-                    # Still initializing or not found
-                    data_obj = {"status": "pending", "message": "Task not found or initializing..."}
+                    data_obj = {"status": "planning", "message": "正在规划任务..."}
                     self.wfile.write(f"data: {json.dumps(data_obj, ensure_ascii=False)}\n\n".encode('utf-8'))
                     self.wfile.flush()
             except Exception as e:

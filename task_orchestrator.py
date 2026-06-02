@@ -156,6 +156,9 @@ class TaskOrchestrator:
         print(f"🎯 编排任务 [{task_id}]: {goal[:60]}")
         print(f"{'='*60}")
 
+        self.session_mgr.save_subtask_dag(session_key, task_id,
+            json.dumps([], ensure_ascii=False), "planning")
+
         subtasks = self._plan(goal)
         if not subtasks:
             return "❌ 任务规划失败，无法拆解目标"
