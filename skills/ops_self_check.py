@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import time
 import json
+from datetime import datetime
 from skill_engine import skill
 
 def _get_health_report() -> str:
@@ -165,6 +166,24 @@ def _get_health_report() -> str:
         report.append("⚙️ **Systemd 守护进程**: ✅ Active (作为系统级后台服务稳定运行中)")
     else:
         report.append("⚙️ **Systemd 守护进程**: ⚠️ 未激活 (当前可能为手动前台运行模式)")
+
+    # 6.5 备份任务检查
+    try:
+        import glob
+        backup_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'backup')
+        backups = sorted(glob.glob(os.path.join(backup_dir, 'backup_*.zip')), reverse=True)
+        if backups:
+            latest = backups[0]
+            mtime = datetime.fromtimestamp(os.path.getmtime(latest))
+            ago = (datetime.now() - mtime).total_seconds() / 3600
+            if ago < 25:
+                report.append(f"💾 **数据备份**: ✅ 已完成 (最新: {os.path.basename(latest)}, {ago:.1f}h 前)")
+            else:
+                report.append(f"💾 **数据备份**: ⚠️ 超过24h未备份 (最新: {os.path.basename(latest)}, {ago:.0f}h 前)")
+        else:
+            report.append("💾 **数据备份**: ⚠️ 暂无备份文件")
+    except Exception as e:
+        report.append(f"💾 **数据备份**: ⚠️ 检查失败 ({str(e)})")
 
     # 7. 技能模块加载状态
     skill_dir = os.path.dirname(__file__)
