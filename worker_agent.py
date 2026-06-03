@@ -104,7 +104,12 @@ class WorkerAgent:
                     kwargs["tool_choice"] = "auto"
 
                 kwargs["timeout"] = 60.0
+                
+                start_t = time.time()
+                print(f"  🧠 [LLM Request] 角色: {self.name}, 模型: {actual_model}")
                 response = self.client.chat.completions.create(**kwargs)
+                print(f"  ✅ [LLM Response] 耗时: {time.time()-start_t:.2f}s, Tokens: {response.usage.total_tokens if response.usage else 0}")
+                
                 choice = response.choices[0]
 
                 if response.usage:

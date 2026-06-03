@@ -93,6 +93,8 @@ class TaskOrchestrator:
         prompt = PLANNER_PROMPT.format(goal=goal, tools_desc=tools_desc)
 
         try:
+            start_t = time.time()
+            print(f"  🧠 [LLM Request] 角色: Planner, 模型: {actual_model}")
             response = planner_client.chat.completions.create(
                 model=actual_model,
                 messages=[{"role": "user", "content": prompt}],
@@ -100,6 +102,7 @@ class TaskOrchestrator:
                 max_tokens=4096,
                 timeout=60.0,
             )
+            print(f"  ✅ [LLM Response] 耗时: {time.time()-start_t:.2f}s, Tokens: {response.usage.total_tokens if response.usage else 0}")
             raw = response.choices[0].message.content
             parsed = self._parse_json(raw)
             subtasks = []
@@ -356,6 +359,8 @@ class TaskOrchestrator:
 
         try:
             actual_model = self._resolve_model(self.planner_model)
+            start_t = time.time()
+            print(f"  🧠 [LLM Request] 角色: Aggregator, 模型: {actual_model}")
             response = aggregator_client.chat.completions.create(
                 model=actual_model,
                 messages=[{"role": "user", "content": prompt}],
@@ -363,6 +368,7 @@ class TaskOrchestrator:
                 max_tokens=4096,
                 timeout=60.0,
             )
+            print(f"  ✅ [LLM Response] 耗时: {time.time()-start_t:.2f}s, Tokens: {response.usage.total_tokens if response.usage else 0}")
             return response.choices[0].message.content
         except Exception as e:
             traceback.print_exc()
