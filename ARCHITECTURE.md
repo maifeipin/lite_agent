@@ -31,7 +31,8 @@ lite_agent/
 │   ├── feishu.py         # 飞书 WebSocket (lark SDK)
 │   ├── dingtalk.py       # 钉钉 Stream (dingtalk-stream SDK)
 │   ├── wecom.py          # 企业微信 HTTP 回调 + pushmsg
-│   └── telegram.py       # Telegram Long Polling (subprocess+curl)
+│   ├── telegram.py       # Telegram Long Polling (subprocess+curl)
+│   └── api.py            # 对外提供的 REST/SSE API (兼容 OpenAI)
 │
 ├── memory_engine/       # 长期记忆引擎
 │   ├── engine.py         # MemoryEngine: ChromaDB 向量库 + LLM 蒸馏
@@ -109,6 +110,7 @@ class BaseChannel(ABC):
 | 钉钉 | dingtalk-stream SDK | SDK 文本 | 直连 |
 | 企微 | Flask w.py 回调 → POST :8899 | pushmsg :6969 HTTP API | 内网直连 |
 | TG | subprocess+curl Long Polling | curl HTTP API | socks5h 代理 |
+| API | 内置 ThreadingHTTPServer | 标准 JSON / SSE 兼容 OpenAI | 直连 |
 
 **企微架构**（最复杂，独立于 Lite Agent 进程）：
 ```
@@ -457,9 +459,9 @@ scp file.py vps1:/root/lite_agent/   # 部署单文件
 | 配置驱动 Cron | ✅ |
 | 多模型路由 | ❌ 均用 DeepSeek |
 | Web 管理面板 | ❌ |
-| Web 控制台通道 | ❌ |
+| Web 控制台通道 / API | ✅ (完美兼容 OpenAI 接口与 Guest 模式) |
 | OCR / TTS / STT | ❌ |
-| 多 Agent 长任务 | ❌ |
+| 多 Agent 长任务 | ✅ (TaskOrchestrator 编排子任务) |
 | 文件识别 | ❌ |
 | 支付集成 | ❌ (计划中) |
 
@@ -469,10 +471,8 @@ scp file.py vps1:/root/lite_agent/   # 部署单文件
 
 1. **多模型路由**：`config.json llm` 扩展为数组，按任务复杂度选模型
 2. **Web 管理面板**：Flask/FastAPI 独立进程，读 sessions.db，展示状态
-3. **Web 控制台通道**：新增 `channels/web.py` 实现 BaseChannel
-4. **多 Agent 长任务**：将 `Agent._run_ai_loop` 拆分为可暂停/恢复的任务队列
-5. **OCR/TTS/STT**：新增 `skills/ops_ocr.py` 等，调外部 API
-6. **支付集成**：支付宝 SDK，`skills/ops_pay.py`
+3. **OCR/TTS/STT**：新增 `skills/ops_ocr.py` 等，调外部 API
+4. **支付集成**：支付宝 SDK，`skills/ops_pay.py`
 
 ---
 

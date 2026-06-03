@@ -9,7 +9,9 @@
 - **完美适配 DeepSeek**: 严格遵循 DeepSeek Tool Calling 规范，支持 `reasoning_content` 多轮透传，自动适配 `reasoning_effort`。
 - **跨会话长期记忆 (Memory Engine)**: ChromaDB 向量库 + SentenceTransformers，结合 LLM 每天定时执行记忆蒸馏复盘。
 - **配置驱动的定时任务引擎**: 所有 cron 任务定义在 `config.json`，支持 command/skill 两种类型与 `time_range` 多时段。
-- **三通道全覆盖**: 飞书 (WebSocket)、钉钉 (Stream)、企业微信 (HTTP 回调 + pushmsg)，推送 fallback 自动切换。
+- **四通道全覆盖**: 飞书 (WebSocket)、钉钉 (Stream)、企业微信 (HTTP 回调 + pushmsg)，推送 fallback 自动切换。新增 **API 接口 (OpenAI 兼容)**。
+- **完美兼容 OpenAI 接口与 Guest 模式**: 原生暴露 `/v1/chat/completions` 等 OpenAI 标准接口，支持 ChatBox、NextChat 等主流第三方客户端无缝对接。带有独立 Guest Token 机制，保障暴露在外网时的安全性。
+- **多 Agent 编排复杂任务**: 遇到耗时复杂任务时，后台会自动将请求下发给 TaskOrchestrator，并多线程调度 Planner -> Worker -> Aggregator 的子任务流。
 - **RSS 精选引擎**: 多源资讯聚合评分，V2EX 回复数权重加成，低质量标签降权，预计算缓存秒级推送。
 - **外部独立监控**: crontab 定时检查 bot 存活，故障时通过企业微信告警，不依赖进程内 `/check`。
 
@@ -49,7 +51,14 @@
     "channels": {
         "feishu": { "enabled": true, "app_id": "cli_xxx", "app_secret": "xxx", "admin_open_id": "ou_xxx" },
         "dingtalk": { "enabled": false, "client_id": "xxx", "client_secret": "xxx" },
-        "wecom": { "enabled": true, "listen_port": 8899, "push_url": "http://127.0.0.1:6969/send_message", "push_token": "xxx" }
+        "wecom": { "enabled": true, "listen_port": 8899, "push_url": "http://127.0.0.1:6969/send_message", "push_token": "xxx" },
+        "api": {
+            "enabled": true,
+            "host": "0.0.0.0",
+            "port": 8887,
+            "auth_token": "your_secret_token_here",
+            "guest_token": "your_guest_token_here"
+        }
     },
     "rssdb": { "uri": "mongodb://user:pass@localhost:27017", "database": "rsslite" },
     "v2ex": { "token": "YOUR_V2EX_TOKEN" },
