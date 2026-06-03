@@ -83,7 +83,7 @@ class AgentMemory:
                     self.engine.remember(user_id, user_nick, user_text, role='user')
                     self.engine.remember(user_id, user_nick, bot_reply, role='bot')
                     # 隐式反馈
-                    self.engine.feedback(user_id, user_text)
+                    self.engine.feedback.detect_implicit_feedback(user_id, user_text)
             except Exception as e:
                 print(f'[记忆存储] 降级: {e}')
 
