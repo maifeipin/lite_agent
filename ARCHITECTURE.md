@@ -54,7 +54,8 @@ lite_agent/
     ├── ops_llm.py         # API 余额查询
     ├── ops_memory_distiller.py  # 记忆蒸馏 CLI
     ├── ops_blog.py        # Halo 博客管理与发布
-    └── ops_bypy.py        # 百度网盘直连同步与备份
+    ├── ops_bypy.py        # 百度网盘直连同步与备份
+    └── ops_media.py       # 媒体库与NAS管理 (PostgreSQL)
 ```
 
 ---

@@ -225,5 +225,12 @@
         "url": "http://127.0.0.1:8090",
         "username": "admin",
         "password": "YOUR_PASSWORD"
+    },
+    "media": {
+        "postgres_host": "127.0.0.1",
+        "postgres_port": 5432,
+        "postgres_user": "postgres",
+        "postgres_password": "YOUR_PASSWORD",
+        "postgres_db": "webmusic"
     }
 }
