@@ -50,33 +50,17 @@
 ## 📦 部署
 
 ### 1. 配置
-复制 `config.example.json` 为 `config.json`，填入各通道和 LLM 的密钥：
+项目采用 **环境变量分离** 的安全配置方案。
 
-```json
-{
-    "bot_name": "VPS 助手",
-    "project_root": "/root/lite_agent",
-    "llm": {
-        "base_url": "https://api.deepseek.com/v1",
-        "api_key": "sk-YOUR_KEY",
-        "model": "deepseek-v4-flash"
-    },
-    "channels": {
-        "feishu": { "enabled": true, "app_id": "cli_xxx", "app_secret": "xxx", "admin_open_id": "ou_xxx" },
-        "dingtalk": { "enabled": false, "client_id": "xxx", "client_secret": "xxx" },
-        "wecom": { "enabled": true, "listen_port": 8899, "push_url": "http://127.0.0.1:6969/send_message", "push_token": "xxx" },
-        "api": {
-            "enabled": true,
-            "host": "0.0.0.0",
-            "port": 8887,
-            "auth_token": "your_secret_token_here",
-            "guest_token": "your_guest_token_here"
-        }
-    },
-    "rssdb": { "uri": "mongodb://user:pass@localhost:27017", "database": "rsslite" },
-    "v2ex": { "token": "YOUR_V2EX_TOKEN" },
-    "cron_jobs": []
-}
+1. 复制 `.env.example` 为 `.env`，并在其中填入所有的敏感密钥（如 API Keys、数据库密码、各通道 Secret）：
+```bash
+cp .env.example .env
+vim .env
+```
+
+2. 复制 `config.example.json` 为 `config.json`。该文件定义了非敏感的系统结构和定时任务，其中的 `${VAR}` 占位符会在运行时自动从 `.env` 中读取替换：
+```bash
+cp config.example.json config.json
 ```
 
 ### 2. 启动
