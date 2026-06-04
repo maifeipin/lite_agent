@@ -8,10 +8,8 @@ _config = None
 def _rss_config():
     global _config
     if _config is None:
-        import json
-        cfg_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config.json')
-        with open(cfg_path) as f:
-            _config = json.load(f)
+        import config_loader
+        _config = config_loader.load_config()
     return _config
 
 

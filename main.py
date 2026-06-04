@@ -22,8 +22,8 @@ def load_config() -> dict:
         print("💡 请复制 config.example.json 为 config.json 并修改相关配置")
         exit(1)
         
-    with open(config_path, 'r', encoding='utf-8') as f:
-        return json.load(f)
+    import config_loader
+    return config_loader.load_config()
 
 
 def session_cleanup_task(agent: Agent, interval: int = 300):

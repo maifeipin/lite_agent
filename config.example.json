@@ -1,60 +1,30 @@
 {
     "bot_name": "VPS 助手",
-    "project_root": "/root/lite_agent",
-    "service_name": "lite-agent",
     "llm": {
         "base_url": "https://api.deepseek.com/v1",
-        "api_key": "sk-YOUR_API_KEY_HERE",
+        "api_key": "${DEEPSEEK_API_KEY}",
         "model": "deepseek-v4-flash",
         "max_tokens": 2048,
         "temperature": 0.3,
-        "default": "flash",
         "models": {
             "flash": {
                 "base_url": "https://api.deepseek.com/v1",
-                "api_key": "sk-YOUR_API_KEY_HERE",
+                "api_key": "${DEEPSEEK_API_KEY}",
                 "model": "deepseek-v4-flash",
                 "max_tokens": 2048,
-                "temperature": 0.3,
-                "max_steps": 8,
+                "max_steps": 30,
                 "tags": [
                     "text",
                     "fast"
                 ]
             },
-            "pro": {
-                "base_url": "https://api.deepseek.com/v1",
-                "api_key": "sk-YOUR_API_KEY_HERE",
-                "model": "deepseek-v4-pro",
-                "max_tokens": 8192,
-                "temperature": 0.1,
-                "max_steps": 12,
-                "tags": [
-                    "code",
-                    "complex_reasoning",
-                    "data_analysis"
-                ]
-            },
-            "vision": {
-                "base_url": "https://api.openai.com/v1",
-                "api_key": "sk-YOUR_OPENAI_KEY",
-                "model": "gpt-4o",
-                "max_tokens": 4096,
-                "temperature": 0.3,
-                "max_steps": 10,
-                "tags": [
-                    "multimodal",
-                    "vision",
-                    "code"
-                ]
-            },
             "gemini-flash": {
-                "api_key": "YOUR_GEMINI_API_KEY",
-                "model": "gemini-3.5-flash",
+                "api_key": "${GEMINI_API_KEY}",
+                "model": "gemini-2.5-flash",
                 "max_tokens": 8192,
                 "temperature": 0.3,
-                "max_steps": 8,
-                "proxy": "",
+                "max_steps": 30,
+                "proxy": "socks5://127.0.0.1:18988",
                 "tags": [
                     "gemini",
                     "text",
@@ -62,75 +32,36 @@
                 ]
             },
             "gemini-pro": {
-                "api_key": "YOUR_GEMINI_API_KEY",
-                "model": "gemini-2.0-flash",
+                "api_key": "${GEMINI_API_KEY}",
+                "model": "gemini-2.5-flash",
                 "max_tokens": 8192,
                 "temperature": 0.1,
-                "max_steps": 12,
-                "proxy": "",
+                "max_steps": 30,
+                "proxy": "socks5://127.0.0.1:18988",
                 "tags": [
                     "gemini",
                     "code",
                     "complex_reasoning"
                 ]
             }
-        }
+        },
+        "default": "flash"
     },
     "session": {
         "ttl_minutes": 30,
         "max_history": 20,
-        "max_steps_per_goal": 10,
+        "max_steps_per_goal": 30,
         "daily_token_limit": 500000
-    },
-    "task_routing": {
-        "planner_model": "pro",
-        "classifier_model": "flash",
-        "route_rules": [
-            {
-                "type": "text",
-                "model": "flash",
-                "fallback": "gemini-flash"
-            },
-            {
-                "type": "code",
-                "model": "pro",
-                "fallback": "flash",
-                "tools": [
-                    "ops_workspace"
-                ]
-            },
-            {
-                "type": "multimodal",
-                "model": "vision",
-                "fallback": "pro"
-            },
-            {
-                "type": "complex_reasoning",
-                "model": "pro",
-                "fallback": "gemini-pro"
-            },
-            {
-                "type": "data_analysis",
-                "model": "pro",
-                "fallback": "flash",
-                "tools": [
-                    "ops_billing",
-                    "ops_logs",
-                    "ops_sys",
-                    "ops_workspace"
-                ]
-            }
-        ],
-        "max_parallel_subtasks": 3,
-        "subtask_timeout_minutes": 15,
-        "dag_max_depth": 5
     },
     "security": {
         "allowed_users": [],
         "sandbox_paths": [
             "/var/log",
             "/root/down",
-            "/root/script"
+            "/root/script",
+            "/root/cert",
+            "/root/alert",
+            "/root/mail-statement-parser"
         ],
         "blocked_commands": [
             "rm -rf /",
@@ -142,13 +73,46 @@
             "passwd"
         ]
     },
+    "channels": {
+        "feishu": {
+            "enabled": true,
+            "app_id": "cli_a9439c9bcaf8dcd4",
+            "app_secret": "${FEISHU_APP_SECRET}",
+            "admin_open_id": "ou_7135c531f7a77b6cb3ae8b27e5dc056b"
+        },
+        "telegram": {
+            "enabled": true,
+            "bot_token": "${TG_BOT_TOKEN}",
+            "proxy": "socks5h://127.0.0.1:18988",
+            "admin_chat_id": "7797851184"
+        },
+        "dingtalk": {
+            "enabled": true,
+            "client_id": "dingb2eadjfacycy1kuk",
+            "client_secret": "${DINGTALK_CLIENT_SECRET}"
+        },
+        "wecom": {
+            "enabled": true,
+            "push_url": "http://127.0.0.1:6969/send_message",
+            "push_token": "${WECOM_PUSH_TOKEN}",
+            "listen_port": 8899
+        },
+        "api": {
+            "enabled": true,
+            "host": "0.0.0.0",
+            "port": 8887,
+            "auth_token": "${API_AUTH_TOKEN}",
+            "guest_token": "guest_123456"
+        }
+    },
     "rssdb": {
-        "uri": "mongodb://user:pass@localhost:27017",
+        "uri": "${RSSDB_URI}",
         "database": "rsslite"
     },
     "v2ex": {
-        "token": "YOUR_V2EX_TOKEN"
+        "token": "${V2EX_TOKEN}"
     },
+    "project_root": "/root/lite_agent",
     "cron_jobs": [
         {
             "name": "证书过期检查",
@@ -189,48 +153,56 @@
             "skill": "ops_self_check::daily_health"
         }
     ],
-    "channels": {
-        "feishu": {
-            "enabled": true,
-            "app_id": "cli_xxxxxxxx",
-            "app_secret": "xxxxxxxx",
-            "admin_open_id": "ou_xxxxxxxx"
-        },
-        "telegram": {
-            "enabled": false,
-            "bot_token": "YOUR_TG_BOT_TOKEN",
-            "proxy": "http://127.0.0.1:7890",
-            "admin_chat_id": "YOUR_CHAT_ID"
-        },
-        "dingtalk": {
-            "enabled": false,
-            "client_id": "YOUR_DINGTALK_CLIENT_ID",
-            "client_secret": "YOUR_DINGTALK_CLIENT_SECRET"
-        },
-        "wecom": {
-            "enabled": false,
-            "listen_port": 8899,
-            "push_url": "http://127.0.0.1:6969/send_message",
-            "push_token": "YOUR_PUSHMSG_TOKEN"
-        },
-        "api": {
-            "enabled": false,
-            "host": "0.0.0.0",
-            "port": 8887,
-            "auth_token": "your_secret_token_here",
-            "guest_token": "your_guest_token_here"
-        }
+    "service_name": "lite-agent",
+    "task_routing": {
+        "planner_model": "flash",
+        "classifier_model": "flash",
+        "route_rules": [
+            {
+                "type": "text",
+                "model": "gemini-flash",
+                "fallback": "flash"
+            },
+            {
+                "type": "code",
+                "model": "pro",
+                "fallback": "flash",
+                "tools": [
+                    "ops_workspace_run"
+                ]
+            },
+            {
+                "type": "complex_reasoning",
+                "model": "gemini-pro",
+                "fallback": "pro"
+            },
+            {
+                "type": "data_analysis",
+                "model": "pro",
+                "fallback": "flash",
+                "tools": [
+                    "ops_billing_cost",
+                    "ops_logs_query",
+                    "ops_sys_status",
+                    "ops_workspace_run",
+                    "ops_web_fetch"
+                ]
+            }
+        ],
+        "max_parallel_subtasks": 3,
+        "subtask_timeout_minutes": 15,
+        "dag_max_depth": 5
     },
     "halo": {
         "url": "http://127.0.0.1:8090",
         "username": "admin",
-        "password": "YOUR_PASSWORD"
+        "password": "${HALO_PASSWORD}"
     },
     "media": {
-        "postgres_host": "127.0.0.1",
+        "postgres_host": "100.115.42.126",
         "postgres_port": 5432,
         "postgres_user": "postgres",
-        "postgres_password": "YOUR_PASSWORD",
+        "postgres_password": "${POSTGRES_PASSWORD}",
         "postgres_db": "webmusic"
     }
 }

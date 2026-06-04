@@ -9,9 +9,8 @@ _config = None
 def _media_config():
     global _config
     if _config is None:
-        cfg_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config.json')
-        with open(cfg_path) as f:
-            _config = json.load(f)
+        import config_loader
+        _config = config_loader.load_config()
     return _config.get('media', {})
 
 def _get_pg_conn():

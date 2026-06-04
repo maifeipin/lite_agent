@@ -8,8 +8,8 @@ _cached_token = None
 
 def _get_halo_config():
     try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f).get("halo", {})
+        import config_loader
+        return config_loader.load_config().get("halo", {})
     except Exception:
         return {}
 

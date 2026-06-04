@@ -16,8 +16,8 @@ from skill_engine import skill
 def _svc_name():
     try:
         base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(base, 'config.json')) as f:
-            return json.load(f).get('service_name', 'feishu-bot')
+        import config_loader
+        return config_loader.load_config().get('service_name', 'feishu-bot')
     except Exception:
         return 'feishu-bot'
 
@@ -62,7 +62,8 @@ def _get_health_report() -> str:
     config_path = os.path.join(base_dir, 'config.json')
     if os.path.exists(config_path):
         try:
-            cfg = json.load(open(config_path, encoding='utf-8'))
+            import config_loader
+            cfg = config_loader.load_config()
             llm_key = cfg.get('llm', {}).get('api_key', '')
             if llm_key.startswith('sk-') and len(llm_key) > 10:
                 report.append("🔑 **大模型 API 密钥**: ✅ 已配置 (格式正确)")
