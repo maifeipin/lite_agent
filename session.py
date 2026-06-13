@@ -311,7 +311,27 @@ class SessionManager:
                 "content": f"[系统提示: 之前有 {start_idx} 条早期对话已被压缩省略，以下是最近的对话]"
             })
 
-        return truncated
+        # Phase 3: 断电/重启造成的孤儿 tool_calls 清洗
+        # 如果 assistant 发出了 tool_calls，但进程死掉导致下一条不是 tool，就会报 400 错误
+        sanitized = []
+        for i, msg in enumerate(truncated):
+            if msg["role"] == "assistant" and "tool_calls" in msg:
+                # 检查紧跟的下一条消息是不是 tool
+                is_broken = False
+                if i == len(truncated) - 1:
+                    is_broken = True
+                elif truncated[i+1]["role"] != "tool":
+                    is_broken = True
+                
+                if is_broken:
+                    # 剥离 tool_calls 字段，降级为普通文本回复
+                    clean_msg = dict(msg)
+                    del clean_msg["tool_calls"]
+                    sanitized.append(clean_msg)
+                    continue
+            sanitized.append(msg)
+
+        return sanitized
 
     # ------------------------------------------------------------------
     #  目标管理
