@@ -109,7 +109,9 @@ class SessionManager:
             """)
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.db_path, check_same_thread=False)
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
 
     # ------------------------------------------------------------------
     #  会话生命周期
@@ -197,17 +199,33 @@ class SessionManager:
     #  消息与计费管理
     # ------------------------------------------------------------------
     def log_api_usage(self, session_key: str, model: str, prompt_tokens: int, completion_tokens: int, total_tokens: int):
-        """记录每一次大模型请求的计费详情"""
-        try:
-            with self._connect() as conn:
-                conn.execute(
-                    "INSERT INTO api_usage_log "
-                    "(session_key, model, prompt_tokens, completion_tokens, total_tokens, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (session_key, model, prompt_tokens, completion_tokens, total_tokens, time.time())
-                )
-        except Exception as e:
-            print(f"⚠️ 写入 api_usage_log 失败: {e}")
+        """记录每一次大模型请求的计费详情 (线程安全)"""
+        with self._lock:
+            # 1. 更新内存状态并持久化主表
+            session = self.get_or_create(session_key)
+            session.token_usage += total_tokens
+            self._persist_session(session)
+            
+            # 2. 写入独立的流水表 (带重试防止 WAL 高并发下偶发的 locked)
+            for attempt in range(3):
+                try:
+                    with self._connect() as conn:
+                        conn.execute(
+                            "INSERT INTO api_usage_log "
+                            "(session_key, model, prompt_tokens, completion_tokens, total_tokens, created_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?)",
+                            (session_key, model, prompt_tokens, completion_tokens, total_tokens, time.time())
+                        )
+                    return
+                except sqlite3.OperationalError as e:
+                    if "locked" in str(e).lower() and attempt < 2:
+                        time.sleep(0.1)
+                        continue
+                    print(f"⚠️ 写入 api_usage_log 失败(数据库被锁): {e}")
+                    break
+                except Exception as e:
+                    print(f"⚠️ 写入 api_usage_log 失败: {e}")
+                    break
 
     def add_message(self, session_key: str, role: str, content: str,
                     tool_call_id: str = None, name: str = None,
@@ -352,16 +370,26 @@ class SessionManager:
 
     def save_subtask_dag(self, session_key: str, task_id: str,
                           dag_json: str, status: str = "running"):
-        """持久化子任务 DAG 进度"""
+        """持久化子任务 DAG 进度 (线程安全)"""
         now = time.time()
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO subtask_progress "
-                "(session_key, task_id, subtask_dag_json, status, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, COALESCE((SELECT created_at FROM subtask_progress "
-                "WHERE session_key=? AND task_id=?), ?), ?)",
-                (session_key, task_id, dag_json, status, session_key, task_id, now, now)
-            )
+        with self._lock:
+            for attempt in range(3):
+                try:
+                    with self._connect() as conn:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO subtask_progress "
+                            "(session_key, task_id, subtask_dag_json, status, created_at, updated_at) "
+                            "VALUES (?, ?, ?, ?, COALESCE((SELECT created_at FROM subtask_progress "
+                            "WHERE session_key=? AND task_id=?), ?), ?)",
+                            (session_key, task_id, dag_json, status, session_key, task_id, now, now)
+                        )
+                    return
+                except sqlite3.OperationalError as e:
+                    if "locked" in str(e).lower() and attempt < 2:
+                        time.sleep(0.1)
+                        continue
+                    print(f"⚠️ 写入 subtask_progress 失败: {e}")
+                    break
 
     def load_subtask_dag(self, session_key: str, task_id: str) -> Optional[tuple]:
         """加载持久化的子任务 DAG, 返回 (dag_json, status) 或 None"""
