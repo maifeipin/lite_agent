@@ -5,13 +5,13 @@
 ![效果演示](assets/screenshot.png)
 ## 🌟 核心特性
 
-- **极致轻量**: 核心框架使用 Python 内置库（`urllib`, `sqlite3`, `threading`, `http.server` 等），无需庞大三方框架。
-- **动态技能引擎 (Skill Engine)**: 编写普通 Python 函数加 `@skill` 装饰器，一秒将本地脚本转化为 AI 可用工具。
-- **完美适配 DeepSeek**: 严格遵循 DeepSeek Tool Calling 规范，支持 `reasoning_content` 多轮透传，自动适配 `reasoning_effort`。
-- **跨会话长期记忆 (Memory Engine)**: ChromaDB 向量库 + SentenceTransformers，结合 LLM 每天定时执行记忆蒸馏复盘。
-- **配置驱动的定时任务引擎**: 所有 cron 任务定义在 `config.json`，支持 command/skill 两种类型与 `time_range` 多时段。
-- **四通道全覆盖**: 飞书 (WebSocket)、钉钉 (Stream)、企业微信 (HTTP 回调 + pushmsg)，推送 fallback 自动切换。新增 **API 接口 (OpenAI 兼容)**。
-- **完美兼容 OpenAI 接口与 Guest 模式**: 原生暴露 `/v1/chat/completions` 等 OpenAI 标准接口，支持 ChatBox、NextChat 等主流第三方客户端无缝对接。带有独立 Guest Token 机制，保障暴露在外网时的安全性。
+- **多通道无缝接入**: 一套代码同时支持飞书 (WebSocket)、Telegram (Long Polling/Webhook)、钉钉、企业微信。
+- **全自动多模态视觉 (OCR)**: 零额外指令！向机器人直接发送图片，自动调用外置大语言视觉模型（通过 `OCR_ENDPOINT` 代理），秒级解析并返回包含公式渲染的极致排版 Markdown。
+- **动态技能引擎 (Skills)**: 通过简单的 Python 脚本即可为 Agent 扩展新能力（如发送邮件、查询数据）。
+- **自带任务编排**: 支持将复杂任务拆解成多步 DAG 图执行。
+- **自带定时任务 (Cron)**: 像配置 Crontab 一样轻松配置 Agent 主动推送。
+- **自带长短期记忆 (Memory)**: 上下文不断片，随聊随记。
+- **绝对轻量级**: 0 臃肿框架，纯原生 Python 实现，核心代码甚至可以写进一两个文件里。`/v1/chat/completions` 等 OpenAI 标准接口，支持 ChatBox、NextChat 等主流第三方客户端无缝对接。带有独立 Guest Token 机制，保障暴露在外网时的安全性。
 - **多 Agent 编排复杂任务**: 遇到耗时复杂任务时，后台会自动将请求下发给 TaskOrchestrator，并多线程调度 Planner -> Worker -> Aggregator 的子任务流。
 - **RSS 精选引擎**: 多源资讯聚合评分，V2EX 回复数权重加成，低质量标签降权，预计算缓存秒级推送。
 - **外部独立监控**: crontab 定时检查 bot 存活，故障时通过企业微信告警，不依赖进程内 `/check`。

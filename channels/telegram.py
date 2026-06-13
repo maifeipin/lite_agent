@@ -41,12 +41,22 @@ class TelegramChannel(BaseChannel):
             for upd in updates.get('result', []):
                 self.offset = upd['update_id'] + 1
                 msg = upd.get('message')
-                if not msg or 'text' not in msg:
+                if not msg:
+                    continue
+                
+                chat_id = str(msg['chat']['id'])
+                msg_id = str(msg['message_id'])
+
+                if 'photo' in msg:
+                    threading.Thread(target=self._process_photo, args=(chat_id, msg_id, msg['photo']), daemon=True).start()
                     continue
 
-                chat_id = str(msg['chat']['id'])
+                if 'text' not in msg:
+                    continue
+
                 text = msg['text']
-                msg_id = str(msg['message_id'])
+
+
 
                 incoming = IncomingMessage(
                     channel='telegram', user_id=chat_id, chat_id=chat_id,
@@ -55,6 +65,44 @@ class TelegramChannel(BaseChannel):
                 resp = self.agent.handle(incoming)
                 if resp:
                     self.send_response(chat_id, resp)
+
+    def _process_photo(self, chat_id, msg_id, photo_array):
+        self._send_msg(chat_id, "🤔 收到图片，正在调用视觉大模型进行全版面结构化解析...")
+        try:
+            file_id = photo_array[-1]['file_id']
+            file_info = self._curl('getFile', {'file_id': file_id})
+            if not file_info.get('ok'):
+                self._send_msg(chat_id, "❌ 获取图片信息失败")
+                return
+            
+            file_path = file_info['result']['file_path']
+            url = f'https://api.telegram.org/file/bot{self.bot_token}/{file_path}'
+            
+            import subprocess, requests, os
+            cmd = ['curl', '-x', self.proxy, '-k', '-s', url]
+            r = subprocess.run(cmd, capture_output=True)
+            image_bytes = r.stdout
+            if not image_bytes:
+                self._send_msg(chat_id, "❌ 下载图片失败")
+                return
+            
+            ocr_url = os.environ.get('OCR_ENDPOINT', 'http://127.0.0.1:8000/api/ocr')
+            files = {'file': ('image.jpg', image_bytes, 'image/jpeg')}
+            res = requests.post(ocr_url, files=files)
+            
+            if res.status_code == 200:
+                data = res.json()
+                markdown = data.get('markdown', '')
+                if not markdown:
+                    self._send_msg(chat_id, "解析完毕，图片中未识别到文本或公式")
+                    return
+                self._send_msg(chat_id, f"📄 **视觉模型提取结果**:\n\n{markdown[:4000]}")
+            else:
+                self._send_msg(chat_id, f"❌ OCR 服务异常: {res.text}")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self._send_msg(chat_id, f"❌ 处理图片异常: {e}")
 
     def start(self):
         if not self.bot_token:

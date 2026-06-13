@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import threading
 import traceback
@@ -71,9 +72,27 @@ class FeishuChannel(BaseChannel):
             if sender.sender_type and sender.sender_type != 'user':
                 return
             
-            # 仅支持文本消息
+            sender_id = ''
+            if sender.sender_id:
+                sender_id = sender.sender_id.open_id or 'unknown'
+            
+            chat_type = message.chat_type or 'p2p'
+
+            # 兼容图片消息并执行 OCR 提取
+            if message.message_type == 'image':
+                content = json.loads(message.content)
+                image_key = content.get('image_key')
+                if image_key:
+                    threading.Thread(
+                        target=self._process_image_and_reply,
+                        args=(msg_id, sender, message, image_key),
+                        daemon=True
+                    ).start()
+                return
+
+            # 其他类型
             if message.message_type != 'text':
-                self._reply_card(msg_id, '⚠️ 不支持的消息类型', '当前仅支持文本消息', 'grey')
+                self._reply_card(msg_id, '⚠️ 不支持的消息类型', '当前仅支持文本消息或图片', 'grey')
                 return
             
             # 提取清洗后的文本
@@ -81,11 +100,6 @@ class FeishuChannel(BaseChannel):
             if not text:
                 return
             
-            sender_id = ''
-            if sender.sender_id:
-                sender_id = sender.sender_id.open_id or 'unknown'
-            
-            chat_type = message.chat_type or 'p2p'
             print(f"📩 [feishu:{chat_type}] {sender_id}: {text}")
             
             # 构建标准化的消息对象
@@ -108,6 +122,42 @@ class FeishuChannel(BaseChannel):
             print(f"❌ 飞书消息处理异常: {e}")
             traceback.print_exc()
     
+    def _process_image_and_reply(self, msg_id, sender, message, image_key):
+        """处理图片：通过 OCR API 提取文本并返回"""
+        import requests
+        self.send_progress(msg_id, "收到图片，正在调用视觉大模型进行全版面结构化解析...")
+        try:
+            request = (
+                lark.api.im.v1.GetMessageResourceRequest.builder()
+                .message_id(msg_id)
+                .file_key(image_key)
+                .type('image')
+                .build()
+            )
+            response = self.lark_client.im.v1.message_resource.get(request)
+            
+            if not response.success():
+                self._reply_card(msg_id, "解析失败", f"无法下载图片: {response.msg}", "red")
+                return
+                
+            image_bytes = response.file.read()
+            ocr_url = os.environ.get('OCR_ENDPOINT', 'http://127.0.0.1:8000/api/ocr')
+            files = {'file': ('image.jpg', image_bytes, 'image/jpeg')}
+            res = requests.post(ocr_url, files=files)
+            
+            if res.status_code == 200:
+                data = res.json()
+                markdown = data.get('markdown', '')
+                if not markdown:
+                    self._reply_card(msg_id, "解析完毕", "图片中未识别到文本或公式", "grey")
+                    return
+                self._reply_card(msg_id, "📄 视觉模型提取结果", markdown[:MAX_CARD_LEN], "blue")
+            else:
+                self._reply_card(msg_id, "解析异常", f"OCR 服务返回错误: {res.text}", "red")
+        except Exception as e:
+            traceback.print_exc()
+            self._reply_card(msg_id, "❌ 图片处理异常", str(e), "red")
+
     def _process_and_reply(self, msg: IncomingMessage):
         """在独立线程中执行 Agent 逻辑并回复"""
         try:
