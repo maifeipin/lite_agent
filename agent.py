@@ -518,8 +518,8 @@ class Agent:
         messages = [{"role": "system", "content": "You are a helpful AI assistant. You are in guest mode and have no access to system tools. Answer the user's questions safely."}] + hist
         
         try:
-            model_key = self.config["llm"].get("default", "flash")
-            model_cfg = self.config.get("llm", {}).get("models", {}).get(model_key, {})
+            model_key = self._config["llm"].get("default", "flash")
+            model_cfg = self._config.get("llm", {}).get("models", {}).get(model_key, {})
             actual_model = model_cfg.get("model", model_key)
             response = self.client.chat.completions.create(
                 model=actual_model,
