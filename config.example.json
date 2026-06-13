@@ -204,5 +204,12 @@
         "postgres_user": "postgres",
         "postgres_password": "${POSTGRES_PASSWORD}",
         "postgres_db": "webmusic"
+    },
+    "hedgedoc": {
+        "enabled": true,
+        "internal_url": "http://127.0.0.1:3030",
+        "public_url": "https://md.maifeipin.com",
+        "email": "liteagent@bot.com",
+        "password": "${HEDGEDOC_PASSWORD}"
     }
 }

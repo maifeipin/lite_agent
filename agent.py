@@ -162,20 +162,59 @@ class Agent:
         text = msg.text.strip()
 
         if text.startswith("::"):
-            return self._handle_double_colon(msg)
-
-        if msg.text.startswith("/"):
-            return self._handle_builtin(msg)
-
-        if msg.is_guest:
-            return self._run_simple_chat(msg)
-
-        if self._is_complex_task(text):
+            response = self._handle_double_colon(msg)
+        elif msg.text.startswith("/"):
+            response = self._handle_builtin(msg)
+        elif msg.is_guest:
+            response = self._run_simple_chat(msg)
+        elif self._is_complex_task(text):
             print(f"  [ROUTE] 复杂任务检测命中 → 走多Agent编排: {text[:60]}")
-            return self._run_orchestrated(msg)
+            response = self._run_orchestrated(msg)
+        else:
+            print(f"  [ROUTE] 简单任务 → 走同步AI Loop: {text[:60]}")
+            response = self._run_ai_loop(msg)
+            
+        # 超长消息拦截：如果不是 Web 端（api），且配置了 HedgeDoc，则尝试上传并截断
+        hc = self._config.get("hedgedoc", {})
+        if msg.channel != 'api' and hc.get("enabled") and len(response.text) > 2500:
+            try:
+                url = self._upload_to_hedgedoc(response.text, hc)
+                if url:
+                    response.text = response.text[:2000] + f"\n\n... (由于字数超出平台限制，剩余内容已截断)\n\n[🔗 点击此处在 Web 网页中查看完整报告]({url})"
+            except Exception as e:
+                print(f"❌ 上传至 HedgeDoc 失败: {e}")
+                
+        return response
 
-        print(f"  [ROUTE] 简单任务 → 走同步AI Loop: {text[:60]}")
-        return self._run_ai_loop(msg)
+    def _upload_to_hedgedoc(self, markdown_text: str, hc: dict) -> str:
+        import requests
+        s = requests.Session()
+        headers = {'X-Forwarded-Proto': 'https'}
+        # 1. 登录换取 Cookie
+        login_url = hc.get("internal_url", "http://127.0.0.1:3030").rstrip('/') + "/login"
+        r_login = s.post(login_url, data={'email': hc.get("email"), 'password': hc.get("password")}, headers=headers, allow_redirects=False)
+        
+        # Express.js 会返回 set-cookie，我们需要手动提取由于 HTTP 被忽略的 Secure Cookie
+        cookie_str = '; '.join([f'{k}={v}' for k, v in s.cookies.items()])
+        
+        # 2. 发文
+        headers['Cookie'] = cookie_str
+        headers['Content-Type'] = 'text/markdown'
+        new_url = hc.get("internal_url", "http://127.0.0.1:3030").rstrip('/') + "/new"
+        r_new = requests.post(new_url, data=markdown_text.encode('utf-8'), headers=headers, allow_redirects=False)
+        
+        location = r_new.headers.get('Location')
+        if location:
+            # location 可能是内部地址或完整的 public URL
+            public_url = hc.get("public_url", "https://md.maifeipin.com").rstrip('/')
+            if location.startswith("http"):
+                # 如果返回了完整的内部 URL，替换为公网 URL
+                import urllib.parse
+                parsed = urllib.parse.urlparse(location)
+                return public_url + parsed.path
+            else:
+                return public_url + location
+        return ""
 
     # ------------------------------------------------------------------
     #  内置指令
