@@ -4,10 +4,17 @@ from skill_engine import skill
 
 @skill(
     name='ops_rss_node_status',
-    description='检查 RSS 节点的更新状态，找出最后一次更新超过3天的异常节点。'
+    description='检查 RSS 节点的更新状态，找出最后一次更新超过指定小时数未更新的异常节点。',
+    params={
+        'hours_threshold': {
+            'type': 'integer',
+            'description': '检查断更的时间阈值（小时），默认为 72 小时',
+            'default': 72
+        }
+    }
 )
-def ops_rss_node_status() -> str:
-    """返回超过3天未更新的 RSS 节点列表"""
+def ops_rss_node_status(hours_threshold: int = 72) -> str:
+    """返回超过指定时间未更新的 RSS 节点列表"""
     try:
         from skills.ops_rss import _get_db
     except ImportError:
@@ -18,8 +25,8 @@ def ops_rss_node_status() -> str:
     
     from datetime import datetime, timedelta
     
-    # 获取3天前的时间
-    threshold_date = datetime.now() - timedelta(days=3)
+    # 获取指定小时前的时间
+    threshold_date = datetime.now() - timedelta(hours=hours_threshold)
     nodes = list(db['RssNode'].find({'isEnable': 1}))
     
     outdated_nodes = []
@@ -46,7 +53,7 @@ def ops_rss_node_status() -> str:
     c.close()
     
     if outdated_nodes:
-        return "\n⚠️ **注意：以下 RSS 节点超过3天未更新：**\n" + "\n".join(outdated_nodes)
+        return f"\n⚠️ **注意：以下 RSS 节点超过 {hours_threshold} 小时未更新：**\n" + "\n".join(outdated_nodes)
     else:
-        return "\n✅ **所有启用的 RSS 节点都在3天内正常更新。**"
+        return f"\n✅ **所有启用的 RSS 节点都在 {hours_threshold} 小时内正常更新。**"
 
