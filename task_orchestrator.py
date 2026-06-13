@@ -3,6 +3,7 @@ import time
 import uuid
 import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Callable, Optional
 
 from openai import OpenAI
@@ -62,6 +63,7 @@ class TaskOrchestrator:
         self.max_parallel = routing.get("max_parallel_subtasks", 3)
         self.subtask_timeout = routing.get("subtask_timeout_minutes", 15) * 60
         self.max_depth = routing.get("dag_max_depth", 5)
+        self.executor = ThreadPoolExecutor(max_workers=self.max_parallel, thread_name_prefix="OrchWorker")
         print(f"  [ORCH] 初始化完成 planner={self.planner_model} classifier={self.classifier_model} parallel={self.max_parallel}")
 
     # ==================================================================
@@ -190,7 +192,7 @@ class TaskOrchestrator:
                 break
 
             batch = ready[:self.max_parallel]
-            threads = []
+            futures = []
             results_lock = threading.Lock()
             results = {}
 
@@ -208,16 +210,13 @@ class TaskOrchestrator:
                     if dep_node and dep_node.result:
                         upstream[dep] = dep_node.result
 
-                t = threading.Thread(
-                    target=self._run_single_subtask,
-                    args=(subtask, upstream, results, results_lock),
-                    daemon=True,
+                future = self.executor.submit(
+                    self._run_single_subtask,
+                    subtask, upstream, results, results_lock
                 )
-                threads.append(t)
-                t.start()
+                futures.append(future)
 
-            for t in threads:
-                t.join(timeout=self.subtask_timeout)
+            wait(futures, timeout=self.subtask_timeout)
 
             for sid, result in results.items():
                 node = dag.subtasks.get(sid)

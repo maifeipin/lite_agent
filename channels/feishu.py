@@ -4,7 +4,7 @@ import re
 import threading
 import traceback
 from datetime import datetime
-from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import *
@@ -21,8 +21,10 @@ class FeishuChannel(BaseChannel):
         super().__init__('feishu', config, agent)
         self.app_id = config.get('app_id', '')
         self.app_secret = config.get('app_secret', '')
-        # 消息防重放缓存
-        self._processed_ids = deque(maxlen=1000)
+        # 消息防重放机制交由 session_mgr 持久化处理
+        
+        # 构建线程池执行器
+        self.executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="FeishuWorker")
         
         # 构建飞书客户端
         self.lark_client = lark.Client.builder() \
@@ -52,7 +54,7 @@ class FeishuChannel(BaseChannel):
             )
         )
         print("🚀 飞书 WebSocket 通道已启动")
-        threading.Thread(target=self.ws_client.start, daemon=True, name="Feishu_WS_Client").start()
+        self.executor.submit(self.ws_client.start)
     
     def stop(self):
         # 当前 SDK 的 WebSocket 客户端没有显式的停止方法
@@ -64,9 +66,8 @@ class FeishuChannel(BaseChannel):
             msg_id = message.message_id
             
             # 防重放机制：如果收到了重复的消息 ID，直接丢弃
-            if msg_id in self._processed_ids:
+            if self.agent.session_mgr.is_message_processed(msg_id):
                 return
-            self._processed_ids.append(msg_id)
             
             # 忽略非用户消息，防止机器人互聊死循环
             if sender.sender_type and sender.sender_type != 'user':
@@ -83,11 +84,7 @@ class FeishuChannel(BaseChannel):
                 content = json.loads(message.content)
                 image_key = content.get('image_key')
                 if image_key:
-                    threading.Thread(
-                        target=self._process_image_and_reply,
-                        args=(msg_id, sender, message, image_key),
-                        daemon=True
-                    ).start()
+                    self.executor.submit(self._process_image_and_reply, msg_id, sender, message, image_key)
                 return
 
             # 其他类型
@@ -112,11 +109,7 @@ class FeishuChannel(BaseChannel):
             )
             
             # 异步处理消息，避免阻塞导致飞书重传
-            threading.Thread(
-                target=self._process_and_reply,
-                args=(incoming,),
-                daemon=True
-            ).start()
+            self.executor.submit(self._process_and_reply, incoming)
         
         except Exception as e:
             print(f"❌ 飞书消息处理异常: {e}")

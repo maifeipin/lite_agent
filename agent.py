@@ -7,10 +7,26 @@ import json
 import time
 import threading
 import traceback
+import collections
+from concurrent.futures import ThreadPoolExecutor
 from openai import OpenAI
 from session import SessionManager
 from cron_engine import CronManager
 from skill_engine import SkillEngine
+
+class LRUCache:
+    def __init__(self, maxsize=200):
+        self.cache = collections.OrderedDict()
+        self.maxsize = maxsize
+
+    def setdefault(self, key, default):
+        if key in self.cache:
+            self.cache.move_to_end(key)
+            return self.cache[key]
+        self.cache[key] = default
+        if len(self.cache) > self.maxsize:
+            self.cache.popitem(last=False)
+        return self.cache[key]
 
 # 记忆引擎 (可选 — 缺失时优雅降级)
 try:
@@ -104,7 +120,8 @@ class Agent:
         # 安全限制
         self.max_steps = session_cfg.get("max_steps_per_goal", 10)
         self.daily_token_limit = session_cfg.get("daily_token_limit", 500000)
-        self._dead_loop_counter: dict = {}  # session_key -> {tool_fingerprint -> count}
+        self._dead_loop_counter = LRUCache(maxsize=200)  # session_key -> {tool_fingerprint -> count}
+        self.orch_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="AgentOrch")
 
         # 记忆引擎 (跨会话长期记忆)
         self.memory = AgentMemory() if MEMORY_AVAILABLE else None

@@ -1,9 +1,24 @@
 import json
 import time
 import traceback
+import collections
 from openai import OpenAI
 from skill_engine import SkillEngine
 from subtask_dag import Subtask
+
+class LRUCache:
+    def __init__(self, maxsize=200):
+        self.cache = collections.OrderedDict()
+        self.maxsize = maxsize
+
+    def setdefault(self, key, default):
+        if key in self.cache:
+            self.cache.move_to_end(key)
+            return self.cache[key]
+        self.cache[key] = default
+        if len(self.cache) > self.maxsize:
+            self.cache.popitem(last=False)
+        return self.cache[key]
 
 
 class WorkerAgent:
@@ -21,7 +36,7 @@ class WorkerAgent:
         self.max_steps = model_cfg.get("max_steps", 8)
         self.max_tokens = model_cfg.get("max_tokens", 2048)
         self.temperature = model_cfg.get("temperature", 0.3)
-        self._dead_loop_counter: dict = {}
+        self._dead_loop_counter = LRUCache(maxsize=200)
 
     def _get_tools(self):
         all_tools = self.skill_engine.get_all_schemas()

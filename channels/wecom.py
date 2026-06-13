@@ -1,7 +1,8 @@
 import urllib.request, json
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-import threading
+from urllib.parse import urlparse, parse_qs
+from concurrent.futures import ThreadPoolExecutor
 from channels.base import BaseChannel
 
 
@@ -14,12 +15,11 @@ class WeComChannel(BaseChannel):
         self.push_token = config.get('push_token', '')
         self.listen_port = config.get('listen_port', 8899)
         self._httpd = None
-        self._processed = set()
+        self.executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="WeComWorker")
 
     def start(self):
         self._httpd = HTTPServer(('127.0.0.1', self.listen_port), _make_handler(self))
-        t = threading.Thread(target=self._httpd.serve_forever, daemon=True, name='WeComListener')
-        t.start()
+        self.executor.submit(self._httpd.serve_forever)
         print(f"  📡 企业微信通道就绪 (收: :{self.listen_port}, 发: {self.push_url})")
 
     def stop(self):
@@ -57,11 +57,9 @@ class WeComChannel(BaseChannel):
             return
 
         msg_id = text.strip()[:80]
-        if msg_id in self._processed:
+        # 防重放机制
+        if self.agent.session_mgr.is_message_processed(f"wecom_{msg_id}"):
             return
-        self._processed.add(msg_id)
-        if len(self._processed) > 500:
-            self._processed.clear()
 
         print(f"📩 [wecom] {user_id}: {text.strip()[:80]}")
 
@@ -94,7 +92,8 @@ def _make_handler(channel):
                 text = data.get('text', '').strip()
                 user_id = data.get('user', 'unknown')
                 if text:
-                    channel._feed_message(text, user_id)
+                    # 将实际处理丢入线程池，避免阻塞 HTTP 响应
+                    channel.executor.submit(channel._feed_message, text, user_id)
             except Exception as e:
                 print(f"  ⚠️ 企业微信消息解析失败: {e}")
             self.send_response(200)

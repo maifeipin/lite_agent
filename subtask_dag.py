@@ -84,10 +84,15 @@ class SubtaskDAG:
         return any(s.status == SubtaskStatus.FAILED for s in self.subtasks.values())
 
     def mark_downstream_skipped(self, failed_id: str):
-        for s in self.subtasks.values():
-            if failed_id in s.depends_on and s.status == SubtaskStatus.PENDING:
-                s.status = SubtaskStatus.SKIPPED
-                s.error = f"上游子任务 {failed_id} 失败，跳过"
+        import collections
+        queue = collections.deque([failed_id])
+        while queue:
+            current_id = queue.popleft()
+            for s in self.subtasks.values():
+                if current_id in s.depends_on and s.status == SubtaskStatus.PENDING:
+                    s.status = SubtaskStatus.SKIPPED
+                    s.error = f"上游关联任务失败，跳过"
+                    queue.append(s.id)
 
     def progress(self) -> dict:
         done = sum(1 for s in self.subtasks.values() if s.status == SubtaskStatus.DONE)

@@ -44,6 +44,7 @@ class SessionManager:
         self.max_history = max_history
         self._cache: Dict[str, Session] = {}
         self._lock = threading.RLock()
+        self._db_write_lock = threading.Lock()
         self._init_db()
 
     # ------------------------------------------------------------------
@@ -106,10 +107,14 @@ class SessionManager:
                     total_tokens       INTEGER,
                     created_at         REAL
                 );
+                CREATE TABLE IF NOT EXISTS processed_msgs (
+                    msg_id             TEXT PRIMARY KEY,
+                    created_at         REAL
+                );
             """)
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn = sqlite3.connect(self.db_path, timeout=10.0, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
         return conn
 
@@ -185,15 +190,25 @@ class SessionManager:
 
     def _persist_session(self, session: Session):
         """将会话元数据写入 SQLite"""
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO sessions "
-                "(session_key, goal, status, created_at, updated_at, tool_calls, token_usage) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (session.key, session.goal, session.status,
-                 session.created_at, session.updated_at,
-                 session.tool_calls, session.token_usage)
-            )
+        with self._db_write_lock:
+            for attempt in range(3):
+                try:
+                    with self._connect() as conn:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO sessions "
+                            "(session_key, goal, status, created_at, updated_at, tool_calls, token_usage) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (session.key, session.goal, session.status,
+                             session.created_at, session.updated_at,
+                             session.tool_calls, session.token_usage)
+                        )
+                    return
+                except sqlite3.OperationalError as e:
+                    if "locked" in str(e).lower() and attempt < 2:
+                        time.sleep(0.1)
+                        continue
+                    print(f"⚠️ 写入 sessions 失败(数据库被锁): {e}")
+                    break
 
     # ------------------------------------------------------------------
     #  消息与计费管理
@@ -248,17 +263,27 @@ class SessionManager:
             session.updated_at = time.time()
 
             # 持久化消息
-            with self._connect() as conn:
-                conn.execute(
-                    "INSERT INTO messages "
-                    "(session_key, role, content, tool_call_id, name, tool_calls_json, reasoning_content, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (session_key, role, content,
-                     tool_call_id or "", name or "",
-                     json.dumps(tool_calls_data, ensure_ascii=False) if tool_calls_data else "",
-                     reasoning_content or "",
-                     time.time())
-                )
+            with self._db_write_lock:
+                for attempt in range(3):
+                    try:
+                        with self._connect() as conn:
+                            conn.execute(
+                                "INSERT INTO messages "
+                                "(session_key, role, content, tool_call_id, name, tool_calls_json, reasoning_content, created_at) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                (session_key, role, content,
+                                 tool_call_id or "", name or "",
+                                 json.dumps(tool_calls_data, ensure_ascii=False) if tool_calls_data else "",
+                                 reasoning_content or "",
+                                 time.time())
+                            )
+                        break
+                    except sqlite3.OperationalError as e:
+                        if "locked" in str(e).lower() and attempt < 2:
+                            time.sleep(0.1)
+                            continue
+                        print(f"⚠️ 写入 messages 失败(数据库被锁): {e}")
+                        break
             self._persist_session(session)
 
     def get_history(self, session_key: str) -> list:
@@ -347,13 +372,22 @@ class SessionManager:
         with self._lock:
             session = self.get_or_create(session_key)
             if session.goal:
-                with self._connect() as conn:
-                    conn.execute(
-                        "INSERT INTO goal_archive (session_key, goal, result, steps, finished_at) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (session_key, session.goal, result_summary[:500],
-                         session.tool_calls, time.time())
-                    )
+                with self._db_write_lock:
+                    for attempt in range(3):
+                        try:
+                            with self._connect() as conn:
+                                conn.execute(
+                                    "INSERT INTO goal_archive (session_key, goal, result, steps, finished_at) "
+                                    "VALUES (?, ?, ?, ?, ?)",
+                                    (session_key, session.goal, result_summary[:500],
+                                     session.tool_calls, time.time())
+                                )
+                            break
+                        except sqlite3.OperationalError as e:
+                            if "locked" in str(e).lower() and attempt < 2:
+                                time.sleep(0.1)
+                                continue
+                            break
             session.goal = ""
             session.status = "chatting"
             session.tool_calls = 0
@@ -380,15 +414,24 @@ class SessionManager:
                 updated_at=time.time(),
             )
             self._cache[session_key] = session
-            with self._connect() as conn:
-                conn.execute("DELETE FROM messages WHERE session_key = ?", (session_key,))
+            with self._db_write_lock:
+                for attempt in range(3):
+                    try:
+                        with self._connect() as conn:
+                            conn.execute("DELETE FROM messages WHERE session_key = ?", (session_key,))
+                        break
+                    except sqlite3.OperationalError as e:
+                        if "locked" in str(e).lower() and attempt < 2:
+                            time.sleep(0.1)
+                            continue
+                        break
             self._persist_session(session)
 
     def save_subtask_dag(self, session_key: str, task_id: str,
                           dag_json: str, status: str = "running"):
         """持久化子任务 DAG 进度 (线程安全)"""
         now = time.time()
-        with self._lock:
+        with self._db_write_lock:
             for attempt in range(3):
                 try:
                     with self._connect() as conn:
@@ -434,9 +477,18 @@ class SessionManager:
                 session = self._cache.pop(key, None)
                 if session and session.goal:
                     self.mark_done(key, "会话超时自动归档")
-                with self._connect() as conn:
-                    conn.execute("DELETE FROM messages WHERE session_key = ?", (key,))
-                    conn.execute("DELETE FROM sessions WHERE session_key = ?", (key,))
+                with self._db_write_lock:
+                    for attempt in range(3):
+                        try:
+                            with self._connect() as conn:
+                                conn.execute("DELETE FROM messages WHERE session_key = ?", (key,))
+                                conn.execute("DELETE FROM sessions WHERE session_key = ?", (key,))
+                            break
+                        except sqlite3.OperationalError as e:
+                            if "locked" in str(e).lower() and attempt < 2:
+                                time.sleep(0.1)
+                                continue
+                            break
 
         if expired_keys:
             print(f"🧹 已清理 {len(expired_keys)} 个过期会话")
@@ -453,3 +505,25 @@ class SessionManager:
             "created_at": session.created_at,
             "updated_at": session.updated_at,
         }
+
+    # ------------------------------------------------------------------
+    #  防重放管理
+    # ------------------------------------------------------------------
+    def is_message_processed(self, msg_id: str) -> bool:
+        """检查并记录消息ID（基于 SQLite 的防重放机制）"""
+        with self._db_write_lock:
+            for attempt in range(3):
+                try:
+                    with self._connect() as conn:
+                        # 尝试插入，如果主键冲突则说明已处理
+                        try:
+                            conn.execute("INSERT INTO processed_msgs (msg_id, created_at) VALUES (?, ?)", (msg_id, time.time()))
+                            return False  # 插入成功，说明是新消息
+                        except sqlite3.IntegrityError:
+                            return True   # 主键冲突，说明已经处理过
+                except sqlite3.OperationalError as e:
+                    if "locked" in str(e).lower() and attempt < 2:
+                        time.sleep(0.1)
+                        continue
+                    return False # 出错时宁可漏过也不要全阻挡
+        return False

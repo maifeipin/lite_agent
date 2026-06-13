@@ -1,4 +1,5 @@
 import json, time, subprocess, threading
+from concurrent.futures import ThreadPoolExecutor
 from channels.base import BaseChannel
 from agent import IncomingMessage, AgentResponse
 
@@ -13,6 +14,7 @@ class TelegramChannel(BaseChannel):
         self.base_url = f'https://api.telegram.org/bot{self.bot_token}'
         self.running = False
         self.offset = 0
+        self.executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="TelegramWorker")
 
     def _curl(self, method: str, data: dict = None) -> dict:
         url = f'{self.base_url}/{method}'
@@ -47,8 +49,13 @@ class TelegramChannel(BaseChannel):
                 chat_id = str(msg['chat']['id'])
                 msg_id = str(msg['message_id'])
 
+                # 防重放机制
+                telegram_msg_id = f'{chat_id}_{msg_id}'
+                if self.agent.session_mgr.is_message_processed(telegram_msg_id):
+                    continue
+
                 if 'photo' in msg:
-                    threading.Thread(target=self._process_photo, args=(chat_id, msg_id, msg['photo']), daemon=True).start()
+                    self.executor.submit(self._process_photo, chat_id, msg_id, msg['photo'])
                     continue
 
                 if 'text' not in msg:
@@ -56,15 +63,18 @@ class TelegramChannel(BaseChannel):
 
                 text = msg['text']
 
-
-
                 incoming = IncomingMessage(
                     channel='telegram', user_id=chat_id, chat_id=chat_id,
-                    message_id=f'{chat_id}_{msg_id}', text=text,
+                    message_id=telegram_msg_id, text=text,
                 )
-                resp = self.agent.handle(incoming)
-                if resp:
-                    self.send_response(chat_id, resp)
+                
+                # 异步处理文本消息，避免阻塞 polling
+                def _handle_and_reply(inc: IncomingMessage, c_id: str):
+                    resp = self.agent.handle(inc)
+                    if resp:
+                        self.send_response(c_id, resp)
+                
+                self.executor.submit(_handle_and_reply, incoming, chat_id)
 
     def _process_photo(self, chat_id, msg_id, photo_array):
         self._send_msg(chat_id, "🤔 收到图片，正在调用视觉大模型进行全版面结构化解析...")
@@ -109,7 +119,7 @@ class TelegramChannel(BaseChannel):
             print('  ⚠️ Telegram token 未配置')
             return
         self.running = True
-        threading.Thread(target=self._poll_loop, daemon=True, name='TG').start()
+        self.executor.submit(self._poll_loop)
 
     def stop(self):
         self.running = False
