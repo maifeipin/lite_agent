@@ -269,50 +269,45 @@ class SessionManager:
         session = self.get_or_create(session_key)
         messages = session.messages
 
-        if len(messages) <= self.max_history:
-            return list(messages)
+        if len(messages) <= self.max_history or session.status == "working":
+            truncated = list(messages)
+        else:
+            start_idx = max(0, len(messages) - self.max_history)
 
-        if session.status == "working":
-            return list(messages)
-
-        start_idx = max(0, len(messages) - self.max_history)
-
-        # Phase 1: 寻找安全切割点 (user 或纯文本 assistant)
-        while start_idx < len(messages):
-            msg = messages[start_idx]
-            if msg["role"] == "user":
-                break
-            if msg["role"] == "assistant" and "tool_calls" not in msg:
-                break
-            start_idx += 1
-
-        if start_idx >= len(messages):
-            for i in range(len(messages) - 1, -1, -1):
-                if messages[i]["role"] == "user":
-                    start_idx = i
+            # Phase 1: 寻找安全切割点 (user 或纯文本 assistant)
+            while start_idx < len(messages):
+                msg = messages[start_idx]
+                if msg["role"] == "user":
                     break
-
-        truncated = messages[start_idx:]
-
-        # Phase 2: 孤儿 tool 消息检测 — 如果截断结果第一条是 tool，
-        # 说明其配对 assistant(tool_calls) 被截掉了，向前回溯找回
-        if truncated and truncated[0]["role"] == "tool":
-            for i in range(start_idx - 1, -1, -1):
-                if messages[i]["role"] == "assistant" and "tool_calls" in messages[i]:
-                    start_idx = i
-                    truncated = messages[start_idx:]
+                if msg["role"] == "assistant" and "tool_calls" not in msg:
                     break
-                elif messages[i]["role"] == "user":
-                    break
+                start_idx += 1
 
-        if start_idx > 0:
-            truncated.insert(0, {
-                "role": "system",
-                "content": f"[系统提示: 之前有 {start_idx} 条早期对话已被压缩省略，以下是最近的对话]"
-            })
+            if start_idx >= len(messages):
+                for i in range(len(messages) - 1, -1, -1):
+                    if messages[i]["role"] == "user":
+                        start_idx = i
+                        break
+
+            truncated = messages[start_idx:]
+
+            # Phase 2: 孤儿 tool 消息检测
+            if truncated and truncated[0]["role"] == "tool":
+                for i in range(start_idx - 1, -1, -1):
+                    if messages[i]["role"] == "assistant" and "tool_calls" in messages[i]:
+                        start_idx = i
+                        truncated = messages[start_idx:]
+                        break
+                    elif messages[i]["role"] == "user":
+                        break
+
+            if start_idx > 0:
+                truncated.insert(0, {
+                    "role": "system",
+                    "content": f"[系统提示: 之前有 {start_idx} 条早期对话已被压缩省略，以下是最近的对话]"
+                })
 
         # Phase 3: 断电/重启造成的孤儿 tool_calls 清洗
-        # 如果 assistant 发出了 tool_calls，但进程死掉导致下一条不是 tool，就会报 400 错误
         sanitized = []
         for i, msg in enumerate(truncated):
             if msg["role"] == "assistant" and "tool_calls" in msg:
@@ -324,7 +319,6 @@ class SessionManager:
                     is_broken = True
                 
                 if is_broken:
-                    # 剥离 tool_calls 字段，降级为普通文本回复
                     clean_msg = dict(msg)
                     del clean_msg["tool_calls"]
                     sanitized.append(clean_msg)
@@ -332,6 +326,8 @@ class SessionManager:
             sanitized.append(msg)
 
         return sanitized
+
+
 
     # ------------------------------------------------------------------
     #  目标管理
