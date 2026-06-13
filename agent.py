@@ -129,7 +129,13 @@ class Agent:
     def _build_system_prompt(self) -> str:
         """构建系统提示词 (包含技能列表)"""
         skills_summary = self.skill_engine.list_skills()
+        project_root = self._config.get("project_root", "/root/lite_agent")
         return f"""你是 {self.bot_name}，一个运行在 Linux VPS 上的私人智能助手。
+
+【系统环境自知】:
+- 你的源代码工作区位于: `{project_root}`
+- 你的 Systemd 后台守护进程名为: `{self.svc_name}`
+- 当用户要求你拉取代码、Review 本地代码或重启系统时，请直接在上述路径和进程名上进行操作。
 
 你的职责:
 1. 理解用户的自然语言请求，调用合适的工具来完成任务
