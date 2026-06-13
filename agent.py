@@ -192,7 +192,7 @@ class Agent:
         headers = {'X-Forwarded-Proto': 'https'}
         # 1. 登录换取 Cookie
         login_url = hc.get("internal_url", "http://127.0.0.1:3030").rstrip('/') + "/login"
-        r_login = s.post(login_url, data={'email': hc.get("email"), 'password': hc.get("password")}, headers=headers, allow_redirects=False)
+        r_login = s.post(login_url, data={'email': hc.get("email"), 'password': hc.get("password")}, headers=headers, allow_redirects=False, timeout=10)
         
         # Express.js 会返回 set-cookie，我们需要手动提取由于 HTTP 被忽略的 Secure Cookie
         cookie_str = '; '.join([f'{k}={v}' for k, v in s.cookies.items()])
@@ -201,7 +201,7 @@ class Agent:
         headers['Cookie'] = cookie_str
         headers['Content-Type'] = 'text/markdown'
         new_url = hc.get("internal_url", "http://127.0.0.1:3030").rstrip('/') + "/new"
-        r_new = requests.post(new_url, data=markdown_text.encode('utf-8'), headers=headers, allow_redirects=False)
+        r_new = requests.post(new_url, data=markdown_text.encode('utf-8'), headers=headers, allow_redirects=False, timeout=10)
         
         location = r_new.headers.get('Location')
         if location:
