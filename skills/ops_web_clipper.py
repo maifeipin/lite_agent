@@ -324,8 +324,8 @@ def web_clip(urls: str, screenshot: bool = False) -> str:
     if not url_list:
         return "❌ 请提供至少一个有效的 URL"
 
-    if len(url_list) > 10:
-        return "❌ 单次最多支持 10 个 URL"
+    if len(url_list) > 3:
+        return "❌ 单次最多支持 3 个 URL"
 
     # 单个 URL
     if len(url_list) == 1:
