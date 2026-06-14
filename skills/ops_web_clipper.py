@@ -247,7 +247,12 @@ def _call_url2md_batch(urls: list) -> list:
 #  智能分发：判断是直接回复还是上传 HedgeDoc
 # ============================================================
 def _smart_deliver(result: dict) -> str:
-    """根据内容长度和图片数量，决定是直接返回 MD 还是上传 HedgeDoc 返回链接"""
+    """根据内容长度和图片数量，决定是直接返回 MD 还是上传 HedgeDoc 返回链接。
+
+    返回的字符串是**最终答复**——LLM 应原样转发给用户，不要二次包装、概括或虚构事实。
+    每种返回格式都包含明确的元信息行（字数 / 图片数 / 是否有 HedgeDoc 链接），
+    避免 LLM 看到纯文本时编造"已上传"等不存在的事实。
+    """
     if not result.get("success", result.get("Success")):
         return f"❌ 抓取失败: {result.get('Error', '未知错误')}"
 
@@ -283,10 +288,21 @@ def _smart_deliver(result: dict) -> str:
             # HedgeDoc 上传失败，降级为纯文本截断
             pass
 
-    # 短文本直接回复
+    # 短文本（< 2500 字 且 无图）：直接返回 markdown，但显式标注"未上传 HedgeDoc"
+    # 否则 LLM 看到纯 markdown 会自作主张说"已上传到 HedgeDoc"产生幻觉。
+    meta_line = f"📊 全文 {len(markdown)} 字（未达上传阈值，仅返回纯文本）"
+    if source_url:
+        meta_line += f" | 📎 [原文链接]({source_url})"
+
     if len(markdown) > 2500:
-        return f"📄 **{title}**\n\n{markdown[:2400]}\n\n... (全文 {len(markdown)} 字，因平台限制已截断)"
-    return f"📄 **{title}**\n\n{markdown}"
+        # 此分支：HedgeDoc 上传失败的兜底
+        return (
+            f"📄 **{title}**\n\n"
+            f"{markdown[:2400]}\n\n"
+            f"... (全文 {len(markdown)} 字，HedgeDoc 上传失败已截断)\n\n"
+            f"{meta_line}"
+        )
+    return f"📄 **{title}**\n\n{markdown}\n\n---\n{meta_line}"
 
 # ============================================================
 #  对外暴露的 LLM Tool
@@ -318,7 +334,12 @@ def _smart_deliver(result: dict) -> str:
 注意：
 - 如果用户提到"我关注的列表"、"我的订阅"等，请先调用 rss_today 获取文章列表和链接，再用本工具批量抓取
 - 同一 URL 不要重复调用，结果会被缓存，再次调用浪费时间
-- 抓取失败请直接告诉用户失败原因，不要尝试 pip install playwright 或换工具重试""",
+- 抓取失败请直接告诉用户失败原因，不要尝试 pip install playwright 或换工具重试
+- ⚠️ **本工具返回的字符串是最终答复——请原样转发给用户**。不要：
+    × 添加"已上传到 HedgeDoc"等本工具未声明的事实（实际是否上传由本工具自行决定，看返回内容里有无 🔗 链接）
+    × 重新概括/总结正文（用户已点击要求看全文，再总结是冗余）
+    × 修改链接为其他 URL
+  正确做法：把返回的 📄 标题块 + 内容 + 📊 元信息行 完整发给用户即可。""",
     params={
         'urls': {
             'type': 'string',
