@@ -154,11 +154,30 @@ class Agent:
             except Exception as e:
                 print(f"❌ 通道 {ch.name} 广播异常: {e}")
 
-    def _build_system_prompt(self) -> str:
+    def _build_system_prompt(self, is_guest: bool = False) -> str:
         """构建系统提示词 (包含技能列表)"""
-        skills_summary = self.skill_engine.list_skills()
+        skills_summary = self.skill_engine.list_skills(is_guest=is_guest)
         project_root = self._config.get("project_root", "/root/lite_agent")
-        return f"""你是 {self.bot_name}，一个运行在 Linux VPS 上的私人智能助手。
+
+        if is_guest:
+            return f"""你是 {self.bot_name}，一个运行在 Linux VPS 上的私人智能助手。
+目前你正在与普通访客（非管理员）对话。
+
+你的职责:
+1. 理解用户的自然语言请求，调用合适的工具来完成任务。
+2. 你只被授予了访问基础公开查询工具（如高考数据、网页剪藏）的权限。任何涉及 VPS 系统管理、本地文件操作、命令执行、配置编辑或管理员专属功能的敏感请求，你都必须礼貌地予以拒绝（声明无权限）。
+3. 如果用户只是闲聊或提问，正常回复即可，不必强行调用工具。
+
+可用工具:
+{skills_summary}
+
+注意事项:
+- 回复使用 Markdown 格式
+- 涉及数据时用表格或列表展示
+- 不要编造数据，一切以工具返回的真实结果为准
+- 如果工具返回错误，向用户解释原因"""
+        else:
+            return f"""你是 {self.bot_name}，一个运行在 Linux VPS 上的私人智能助手。
 
 【系统环境自知】:
 - 你的源代码工作区位于: `{project_root}`
@@ -194,7 +213,8 @@ class Agent:
         elif msg.text.startswith("/"):
             response = self._handle_builtin(msg)
         elif msg.is_guest:
-            response = self._run_simple_chat(msg)
+            print(f"  [ROUTE] 访客消息 → 走同步AI Loop (已限制工具权限): {text[:60]}")
+            response = self._run_ai_loop(msg)
         elif self._is_complex_task(text):
             print(f"  [ROUTE] 复杂任务检测命中 → 走多Agent编排: {text[:60]}")
             response = self._run_orchestrated(msg)
@@ -252,6 +272,10 @@ class Agent:
         parts = msg.text.strip().split()
         cmd = parts[0].lower()
         args = parts[1:]
+
+        if cmd in ("/cmd", "/balance", "/memory", "/remember", "/persona", "/cron", "/check"):
+            if msg.is_guest:
+                return AgentResponse("❌ 权限不足：只有管理员可使用该指令", title="⚠️ 权限不足", color="red")
 
         if cmd == "/new":
             self.session_mgr.reset_session(msg.session_key)
@@ -454,8 +478,30 @@ class Agent:
                 return AgentResponse(f"自检失败: {e}", title="⚠️", color="red")
 
         if cmd == "/help":
-            skills_list = self.skill_engine.list_skills()
-            help_text = f"""**内置指令:**
+            if msg.is_guest:
+                skills_list = self.skill_engine.list_skills(is_guest=True)
+                help_text = f"""**内置指令:**
+`/new` - 重置会话
+`/status` - 查看会话状态
+`/history` - 查看最近对话
+`/stop` - 终止当前任务
+`/help` - 显示帮助
+`/ai` - 强行调用 AI（例如：`/ai 查高考数据`）
+
+**任务模式 (双冒号指令):**
+`::goal <目标描述>` - 设定查询目标，AI 逐步执行，上下文不截断
+`::goal` - 查看当前目标状态与进度
+`::goal done` - 手动标记目标完成并归档
+
+**可用工具:**
+{skills_list}
+
+💡 **提示:** 直接用自然语言告诉我你想做什么
+例如: "帮我查一下物理类 600 分在广东省的排位" / "查一下中山大学历年录取分数线"
+如果查询步骤较多，可以先用 `::goal` 锁定目标"""
+            else:
+                skills_list = self.skill_engine.list_skills(is_guest=False)
+                help_text = f"""**内置指令:**
 `/new` - 重置会话
 `/status` - 查看会话状态
 `/history` - 查看最近对话
@@ -493,6 +539,10 @@ class Agent:
         parts = text.split()
         cmd = parts[0].lower() if parts else ""
         args = " ".join(parts[1:]) if len(parts) > 1 else ""
+
+        if cmd in ("rss", "cron"):
+            if msg.is_guest:
+                return AgentResponse("❌ 权限不足：只有管理员可使用该指令", title="⚠️ 权限不足", color="red")
 
         if cmd == "goal":
             if not args:
@@ -593,30 +643,7 @@ class Agent:
         ]
         return any(kw in text for kw in keywords)
 
-    def _run_simple_chat(self, msg: IncomingMessage) -> AgentResponse:
-        """访客模式：强制纯文本对话，无工具，保证安全"""
-        self.session_mgr.get_or_create(msg.session_key)
-        self.session_mgr.add_message(msg.session_key, "user", msg.text)
-        
-        hist = self._build_history(msg.session_key)
-        messages = [{"role": "system", "content": "You are a helpful AI assistant. You are in guest mode and have no access to system tools. Answer the user's questions safely."}] + hist
-        
-        try:
-            model_key = self._config["llm"].get("default", "flash")
-            model_cfg = self._config.get("llm", {}).get("models", {}).get(model_key, {})
-            actual_model = model_cfg.get("model", model_key)
-            response = self.client.chat.completions.create(
-                model=actual_model,
-                messages=messages,
-                temperature=0.5
-            )
-            content = response.choices[0].message.content or "无返回内容"
-        except Exception as e:
-            content = f"API Request Failed: {e}"
-            
-        self.session_mgr.add_message(msg.session_key, "assistant", content)
-        self._push_result(msg, content)
-        return AgentResponse(text=content)
+
 
     def _run_orchestrated(self, msg: IncomingMessage) -> AgentResponse:
         from task_orchestrator import TaskOrchestrator
@@ -718,11 +745,14 @@ class Agent:
         self.session_mgr.add_message(msg.session_key, "user", msg.text)
 
         # 获取所有可用工具 Schema
-        tools = self.skill_engine.get_all_schemas()
+        if msg.is_guest:
+            tools = self.skill_engine.get_guest_schemas()
+        else:
+            tools = self.skill_engine.get_all_schemas()
 
         for step in range(self.max_steps):
             # 构建完整的消息列表
-            messages = [{"role": "system", "content": self.system_prompt}]
+            messages = [{"role": "system", "content": self._build_system_prompt(is_guest=msg.is_guest)}]
 
             # 注入长期记忆
             if self.memory:
@@ -828,9 +858,13 @@ class Agent:
                     print(f"  🔧 [{step+1}/{self.max_steps}] "
                           f"调用: {tc.function.name}({tc.function.arguments})")
 
-                    result = self.skill_engine.execute(
-                        tc.function.name, tc.function.arguments
-                    )
+                    if msg.is_guest and not self.skill_engine.is_guest_ok(tc.function.name):
+                        print(f"  🚫 访客试图越权调用工具: {tc.function.name}")
+                        result = f"❌ 权限不足：当前账户为访客，无权调用工具 {tc.function.name}"
+                    else:
+                        result = self.skill_engine.execute(
+                            tc.function.name, tc.function.arguments
+                        )
 
                     # 将工具结果添加到会话 (带 tool_call_id 关联)
                     self.session_mgr.add_message(
