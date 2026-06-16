@@ -309,6 +309,7 @@ def _smart_deliver(result: dict, force_hedgedoc: bool = False) -> str:
 # ============================================================
 @skill(
     name='web_clip',
+    guest_ok=True,
     description="""网页剪藏工具（Playwright 真浏览器抓取）—— 处理 URL 转 Markdown 的首选工具。
 
 ✅ 必须使用本工具的场景：

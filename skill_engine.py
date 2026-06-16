@@ -19,7 +19,7 @@ AUDIT_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'workspace'
 _skill_registry: Dict[str, Dict] = {}  # {name: {"func": callable, "schema": dict}}
 
 
-def skill(name: str, description: str, params: dict = None, tags: list = None):
+def skill(name: str, description: str, params: dict = None, tags: list = None, guest_ok: bool = False):
     """
     技能装饰器 - 标记一个函数为可被 AI 调用的技能
 
@@ -35,6 +35,7 @@ def skill(name: str, description: str, params: dict = None, tags: list = None):
                 }
             },
             tags=["sys", "text"],
+            guest_ok=False,
         )
         def ops_sys_status(detail: bool = False) -> str:
             ...
@@ -74,6 +75,7 @@ def skill(name: str, description: str, params: dict = None, tags: list = None):
             "func": func,
             "schema": schema,
             "tags": tags or [],
+            "guest_ok": guest_ok,
         }
         func._skill_name = name
         return func
@@ -133,6 +135,10 @@ class SkillEngine:
     def get_all_schemas(self) -> List[Dict]:
         """返回所有已注册技能的 OpenAI Tool Schema 列表"""
         return [info["schema"] for info in _skill_registry.values()]
+
+    def get_guest_schemas(self) -> List[Dict]:
+        """返回所有已注册且 guest_ok=True 的技能 OpenAI Tool Schema 列表"""
+        return [info["schema"] for info in _skill_registry.values() if info.get("guest_ok")]
 
     def get_schemas_by_names(self, names: list) -> List[Dict]:
         """返回指定名称的技能 Schema"""
@@ -208,17 +214,19 @@ class SkillEngine:
             traceback.print_exc()
             return error_msg
 
-    def list_skills(self) -> str:
+    def list_skills(self, is_guest: bool = False) -> str:
         """列出所有已注册技能 (供 System Prompt 和 /help 展示)"""
         if not _skill_registry:
             return "(暂无技能)"
         lines = []
         for name, info in _skill_registry.items():
+            if is_guest and not info.get("guest_ok"):
+                continue
             desc = info["schema"]["function"]["description"]
             params = info["schema"]["function"]["parameters"]["properties"]
             param_str = ", ".join(params.keys()) if params else "无参数"
             lines.append(f"- **{name}**({param_str}): {desc}")
-        return "\n".join(lines)
+        return "\n".join(lines) if lines else "(无可用工具)"
 
     def list_skills_filtered(self, names: list) -> str:
         """列出指定名称的技能"""
@@ -238,6 +246,13 @@ class SkillEngine:
     def get_skill_count(self) -> int:
         """返回已注册技能数量"""
         return len(_skill_registry)
+
+    def is_guest_ok(self, skill_name: str) -> bool:
+        """检查指定技能是否允许访客调用"""
+        info = _skill_registry.get(skill_name)
+        if not info:
+            return False
+        return bool(info.get("guest_ok"))
 
 
 def _write_audit(name: str, args: str):
