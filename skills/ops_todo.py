@@ -3,6 +3,7 @@ import os
 import sys
 import hashlib
 import time
+import re
 from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -92,15 +93,16 @@ def _now_iso():
 
 def _parse_until(until: str) -> str:
     if until.startswith('+'):
-        if until.endswith('h'):
-            return (datetime.now(timezone.utc) + timedelta(hours=int(until[1:-1]))).isoformat()
-        elif until.endswith('d'):
-            return (datetime.now(timezone.utc) + timedelta(days=int(until[1:-1]))).isoformat()
+        m = re.match(r'^\+(\d+)([mhd])$', until)
+        if m:
+            n, unit = int(m.group(1)), m.group(2)
+            delta = {'m': timedelta(minutes=n), 'h': timedelta(hours=n), 'd': timedelta(days=n)}[unit]
+            return (datetime.now(timezone.utc) + delta).isoformat()
     try:
         dt = datetime.fromisoformat(until.replace('Z', '+00:00'))
         return dt.isoformat()
     except ValueError:
-        raise ValueError(until)
+        raise ValueError(f"无法解析时间: {until!r}（支持 ISO8601 或 +Nm/+Nh/+Nd）")
 
 def _render_markdown():
     conn = _conn()
@@ -322,13 +324,13 @@ def todo_drop(id: str, reason: str = None) -> str:
 @skill(
     name="todo_snooze", 
     description="将任务延期挂起", 
-    params={"id": {"type": "string"}, "until": {"type": "string", "description": "唤醒时间 ISO8601 或 +3d/+2h 格式"}}
+    params={"id": {"type": "string"}, "until": {"type": "string", "description": "唤醒时间 ISO8601 格式或 +Nm/+Nh/+Nd 相对时间（如 +2m, +3d）"}}
 )
 def todo_snooze(id: str, until: str) -> str:
     try:
         dt = _parse_until(until)
     except ValueError as e:
-        return f"❌ 时间格式无效: {e}（请用 ISO8601 或 '+3d'/'+2h'）"
+        return f"❌ {e}"
     return _update_todo_status(id, "snoozed", {"snoozed_until": dt})
 
 @skill(
