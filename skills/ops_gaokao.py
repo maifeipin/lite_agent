@@ -89,6 +89,7 @@ def _fmt_rows(rows, max_rows=30):
 @skill(
     name="gaokao_score_rank",
     description="高考分数→全省位次 查询。输入省份、年份、科类和分数，返回该分数对应的全省排名位次。",
+    guest_ok=True,
     params={
         "province": {
             "type": "string",
@@ -159,6 +160,7 @@ def gaokao_score_rank(score: int, province: str = "安徽",
 @skill(
     name="gaokao_school_admission",
     description="查询某院校的历年录取分数线（最低分、最低位次）。支持模糊搜索校名。",
+    guest_ok=True,
     params={
         "school_name": {
             "type": "string",
@@ -225,6 +227,7 @@ def gaokao_school_admission(school_name: str, from_province: str = "安徽",
 @skill(
     name="gaokao_major_admission",
     description="查询某院校某专业的历年录取分数和位次。支持模糊搜索院校名和专业名。",
+    guest_ok=True,
     params={
         "school_name": {
             "type": "string",
@@ -293,6 +296,7 @@ def gaokao_major_admission(school_name: str, major_name: str = "",
 @skill(
     name="gaokao_recommend",
     description="根据分数和位次推荐志愿方案（冲/稳/保三档院校）。自动换算位次并匹配历年录取数据。",
+    guest_ok=True,
     params={
         "score": {
             "type": "integer",
@@ -429,6 +433,7 @@ def gaokao_recommend(score: int, province: str = "安徽",
 @skill(
     name="gaokao_school_info",
     description="查询院校基本信息（985/211/双一流、所在省份、办学性质等）。支持模糊搜索。",
+    guest_ok=True,
     params={
         "keyword": {
             "type": "string",
@@ -474,6 +479,7 @@ def gaokao_school_info(keyword: str) -> str:
 @skill(
     name="gaokao_sql",
     description="直接执行 SQL 查询高考数据库（只读）。表: admission_lines, score_rank, score_control_lines, major_admission, major_plans, schools。用于复杂的自定义查询。",
+    guest_ok=True,
     params={
         "sql": {
             "type": "string",
@@ -511,6 +517,7 @@ def gaokao_sql(sql: str) -> str:
 @skill(
     name="gaokao_stats",
     description="查看高考数据库的数据概况：各表记录数、覆盖省份和年份。",
+    guest_ok=True,
     params={},
     tags=["gaokao", "data_analysis"]
 )
