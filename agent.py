@@ -495,7 +495,7 @@ class Agent:
 `/history` - 查看最近对话
 `/stop` - 终止当前任务
 `/help` - 显示帮助
-`/ai` - 强行调用 AI（例如：`/ai 查高考数据`）
+`/ai` - 强行调用 AI（例如：`/ai 网页剪藏 https://example.com`）
 
 **任务模式 (双冒号指令):**
 `::goal <目标描述>` - 设定查询目标，AI 逐步执行，上下文不截断
@@ -506,7 +506,7 @@ class Agent:
 {skills_list}
 
 💡 **提示:** 直接用自然语言告诉我你想做什么
-例如: "帮我查一下物理类 600 分在广东省的排位" / "查一下中山大学历年录取分数线"
+例如: "帮我剪藏这个网页" / "帮我查询相关的公开数据"
 如果查询步骤较多，可以先用 `::goal` 锁定目标"""
             else:
                 skills_list = self.skill_engine.list_skills(is_guest=False)
