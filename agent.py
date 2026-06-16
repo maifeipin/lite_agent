@@ -150,7 +150,13 @@ class Agent:
         """将消息广播到所有挂载的通道"""
         for ch in self.channels:
             try:
-                ch.broadcast(response)
+                ch_response = AgentResponse(
+                    text=self._truncate_long_message_if_needed(response.text, ch.name),
+                    title=response.title,
+                    color=response.color,
+                    task_id=response.task_id
+                )
+                ch.broadcast(ch_response)
             except Exception as e:
                 print(f"❌ 通道 {ch.name} 广播异常: {e}")
 
@@ -223,16 +229,19 @@ class Agent:
             response = self._run_ai_loop(msg)
             
         # 超长消息拦截：如果不是 Web 端（api），且配置了 HedgeDoc，则尝试上传并截断
+        response.text = self._truncate_long_message_if_needed(response.text, msg.channel)
+        return response
+
+    def _truncate_long_message_if_needed(self, text: str, channel: str) -> str:
         hc = self._config.get("hedgedoc", {})
-        if msg.channel != 'api' and hc.get("enabled") and len(response.text) > 2500:
+        if channel != 'api' and hc.get("enabled") and len(text) > 2500:
             try:
-                url = self._upload_to_hedgedoc(response.text, hc)
+                url = self._upload_to_hedgedoc(text, hc)
                 if url:
-                    response.text = response.text[:2000] + f"\n\n... (由于字数超出平台限制，剩余内容已截断)\n\n[🔗 点击此处在 Web 网页中查看完整报告]({url})"
+                    return text[:2000] + f"\n\n... (由于字数超出平台限制，剩余内容已截断)\n\n[🔗 点击此处在 Web 网页中查看完整报告]({url})"
             except Exception as e:
                 print(f"❌ 上传至 HedgeDoc 失败: {e}")
-                
-        return response
+        return text
 
     def _upload_to_hedgedoc(self, markdown_text: str, hc: dict) -> str:
         import requests
@@ -703,7 +712,8 @@ class Agent:
         return callback
 
     def _push_result(self, msg, result: str):
-        response = AgentResponse(result, title="🤖 多Agent执行报告", color="blue")
+        truncated_result = self._truncate_long_message_if_needed(result, msg.channel)
+        response = AgentResponse(truncated_result, title="🤖 多Agent执行报告", color="blue")
         for ch in self.channels:
             if msg.notify_channels is not None and ch.name not in msg.notify_channels:
                 continue
