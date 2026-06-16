@@ -171,7 +171,7 @@ class Agent:
 
 你的职责:
 1. 理解用户的自然语言请求，调用合适的工具来完成任务。
-2. 你只被授予了访问基础公开查询工具（如高考数据、网页剪藏）的权限。任何涉及 VPS 系统管理、本地文件操作、命令执行、配置编辑或管理员专属功能的敏感请求，你都必须礼貌地予以拒绝（声明无权限）。
+2. 你只被授予了访问基础公开查询和网页剪藏工具的权限。任何涉及 VPS 系统管理、本地文件操作、命令执行、配置编辑或管理员专属功能的敏感请求，你都必须礼貌地予以拒绝（声明无权限）。
 3. 如果用户只是闲聊或提问，正常回复即可，不必强行调用工具。
 
 可用工具:
@@ -204,7 +204,7 @@ class Agent:
 - 回复使用 Markdown 格式
 - 涉及数据时用表格或列表展示
 - 发现异常时主动提醒并给出建议
-- 不要编造数据，一切以工具返回的真实结果为准
+- 不要编造数据，一切以工具返回的真实结果为准。在生成最终答复时，必须完全忠实于工具返回的内容，严禁添加任何未查询到的虚假数据。
 - 如果工具返回错误，向用户解释原因并建议解决方案"""
 
     # ------------------------------------------------------------------
@@ -495,7 +495,7 @@ class Agent:
 `/history` - 查看最近对话
 `/stop` - 终止当前任务
 `/help` - 显示帮助
-`/ai` - 强行调用 AI（例如：`/ai 查高考数据`）
+`/ai` - 强行调用 AI（例如：`/ai 网页剪藏 https://example.com`）
 
 **任务模式 (双冒号指令):**
 `::goal <目标描述>` - 设定查询目标，AI 逐步执行，上下文不截断
@@ -506,7 +506,7 @@ class Agent:
 {skills_list}
 
 💡 **提示:** 直接用自然语言告诉我你想做什么
-例如: "帮我查一下物理类 600 分在广东省的排位" / "查一下中山大学历年录取分数线"
+例如: "帮我剪藏这个网页" / "帮我查询相关的公开数据"
 如果查询步骤较多，可以先用 `::goal` 锁定目标"""
             else:
                 skills_list = self.skill_engine.list_skills(is_guest=False)
@@ -760,9 +760,18 @@ class Agent:
         else:
             tools = self.skill_engine.get_all_schemas()
 
+        # 动态匹配并获取当前消息命中的所有技能防护提示词（循环外只运行一次）
+        guard_prompts = self.skill_engine.get_guard_prompts(msg.text, is_guest=msg.is_guest)
+
         for step in range(self.max_steps):
             # 构建完整的消息列表
-            messages = [{"role": "system", "content": self._build_system_prompt(is_guest=msg.is_guest)}]
+            system_content = self._build_system_prompt(is_guest=msg.is_guest)
+
+            # 动态注入安全防幻觉提示词
+            if guard_prompts:
+                system_content += "\n\n⚠️【数据忠实执行指令】:\n" + "\n".join(f"- {p}" for p in guard_prompts)
+
+            messages = [{"role": "system", "content": system_content}]
 
             # 注入长期记忆
             if self.memory:

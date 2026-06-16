@@ -19,7 +19,7 @@ AUDIT_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'workspace'
 _skill_registry: Dict[str, Dict] = {}  # {name: {"func": callable, "schema": dict}}
 
 
-def skill(name: str, description: str, params: dict = None, tags: list = None, guest_ok: bool = False):
+def skill(name: str, description: str, params: dict = None, tags: list = None, guest_ok: bool = False, guard_keywords: list = None, guard_prompt: str = "", guard_threshold: int = 1):
     """
     技能装饰器 - 标记一个函数为可被 AI 调用的技能
 
@@ -36,6 +36,9 @@ def skill(name: str, description: str, params: dict = None, tags: list = None, g
             },
             tags=["sys", "text"],
             guest_ok=False,
+            guard_keywords=["系统", "status"],
+            guard_prompt="请勿捏造系统状态...",
+            guard_threshold=1
         )
         def ops_sys_status(detail: bool = False) -> str:
             ...
@@ -76,6 +79,9 @@ def skill(name: str, description: str, params: dict = None, tags: list = None, g
             "schema": schema,
             "tags": tags or [],
             "guest_ok": guest_ok,
+            "guard_keywords": guard_keywords or [],
+            "guard_prompt": guard_prompt,
+            "guard_threshold": guard_threshold,
         }
         func._skill_name = name
         return func
@@ -253,6 +259,22 @@ class SkillEngine:
         if not info:
             return False
         return bool(info.get("guest_ok"))
+
+    def get_guard_prompts(self, text: str, is_guest: bool = False) -> List[str]:
+        """检查消息是否命中技能的 guard_keywords，返回对应 guard_prompt"""
+        prompts = []
+        for name, info in _skill_registry.items():
+            if is_guest and not info.get("guest_ok"):
+                continue
+            kws = info.get("guard_keywords", [])
+            prompt = info.get("guard_prompt")
+            threshold = info.get("guard_threshold", 1)
+            if kws and prompt:
+                matched_count = sum(1 for kw in kws if kw in text)
+                if matched_count >= threshold:
+                    if prompt not in prompts:
+                        prompts.append(prompt)
+        return prompts
 
 
 def _write_audit(name: str, args: str):
