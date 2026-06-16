@@ -171,7 +171,7 @@ class Agent:
 
 你的职责:
 1. 理解用户的自然语言请求，调用合适的工具来完成任务。
-2. 你只被授予了访问基础公开查询工具（如高考数据、网页剪藏）的权限。任何涉及 VPS 系统管理、本地文件操作、命令执行、配置编辑或管理员专属功能的敏感请求，你都必须礼貌地予以拒绝（声明无权限）。
+2. 你只被授予了访问基础公开查询和网页剪藏工具的权限。任何涉及 VPS 系统管理、本地文件操作、命令执行、配置编辑或管理员专属功能的敏感请求，你都必须礼貌地予以拒绝（声明无权限）。
 3. 如果用户只是闲聊或提问，正常回复即可，不必强行调用工具。
 
 可用工具:
@@ -204,7 +204,7 @@ class Agent:
 - 回复使用 Markdown 格式
 - 涉及数据时用表格或列表展示
 - 发现异常时主动提醒并给出建议
-- 不要编造数据，一切以工具返回的真实结果为准
+- 不要编造数据，一切以工具返回的真实结果为准。在生成最终答复时，必须完全忠实于工具返回的内容，严禁添加任何未查询到的虚假数据。
 - 如果工具返回错误，向用户解释原因并建议解决方案"""
 
     # ------------------------------------------------------------------
@@ -760,9 +760,18 @@ class Agent:
         else:
             tools = self.skill_engine.get_all_schemas()
 
+        # 动态匹配并获取当前消息命中的所有技能防护提示词（循环外只运行一次）
+        guard_prompts = self.skill_engine.get_guard_prompts(msg.text, is_guest=msg.is_guest)
+
         for step in range(self.max_steps):
             # 构建完整的消息列表
-            messages = [{"role": "system", "content": self._build_system_prompt(is_guest=msg.is_guest)}]
+            system_content = self._build_system_prompt(is_guest=msg.is_guest)
+
+            # 动态注入安全防幻觉提示词
+            if guard_prompts:
+                system_content += "\n\n⚠️【数据忠实执行指令】:\n" + "\n".join(f"- {p}" for p in guard_prompts)
+
+            messages = [{"role": "system", "content": system_content}]
 
             # 注入长期记忆
             if self.memory:
