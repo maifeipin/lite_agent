@@ -22,6 +22,7 @@ class DingTalkChannel(BaseChannel):
             msg_data = message.data if isinstance(message.data, dict) else json.loads(message.data)
             sender_id = msg_data.get('senderStaffId') or msg_data.get('senderId')
             text = msg_data.get('text', {}).get('content', '').strip()
+            print(f"📩 [dingtalk] {sender_id}: {text}")
             msg_id = msg_data.get('msgId')
             
             # 如果是群聊，前缀可能包含 @机器人
