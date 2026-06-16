@@ -129,3 +129,74 @@ def billing_txns_over(amount: float, months: int = 3) -> str:
     if months > 0:
         args.append(str(months))
     return _run_billing_cmd(args)
+
+import sqlite3
+from datetime import datetime, timedelta
+from cron_engine import CronManager
+
+@skill(
+    name="billing_parse_health",
+    description="检查近 30 天各银行账单解析健康度（NULL 比率异常即可能正则失效）",
+    params={
+        'threshold': {'type': 'number', 'description': '报警阈值，比如 0.5', 'default': 0.5},
+        'days': {'type': 'integer', 'description': '检查近多少天', 'default': 30}
+    }
+)
+def billing_parse_health(threshold: float = 0.5, days: int = 30) -> str:
+    db_path = os.path.join(BILLING_SCRIPT_DIR, "statements.db")
+    if not os.path.exists(db_path):
+        return f"❌ 找不到数据库文件: {db_path}"
+    
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    cutoff_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    
+    cursor.execute("""
+        SELECT bank_code, COUNT(*) as total, SUM(CASE WHEN total_due IS NULL THEN 1 ELSE 0 END) as null_count
+        FROM statements 
+        WHERE created_at > ?
+        GROUP BY bank_code
+    """, (cutoff_date,))
+    
+    rows = cursor.fetchall()
+    conn.close()
+    
+    if not rows:
+        return f"✅ 近 {days} 天无新账单入库，暂无解析异常。"
+        
+    lines = [f"📊 **账单解析健康度检查 (近 {days} 天)**\n"]
+    has_warning = False
+    
+    for row in rows:
+        bank, total, null_count = row
+        null_count = null_count or 0
+        ratio = null_count / total if total > 0 else 0
+        
+        status = "✅"
+        if ratio > threshold:
+            status = "⚠️"
+            has_warning = True
+            
+        lines.append(f"{status} **{bank}**: 总计 {total} 笔，NULL {null_count} 笔 (占比 {ratio*100:.1f}%)")
+        
+    if has_warning:
+        lines.append("\n⚠️ 发现解析异常！某些银行的 NULL 比例过高，可能是邮件模板格式发生变更导致正则失效，建议尽快排查。")
+    else:
+        lines.append("\n✅ 所有银行解析健康，未超出报警阈值。")
+        
+    return "\n".join(lines)
+
+def _billing_health_cron():
+    # 每周日跑 (0=周一, 6=周日)
+    if datetime.now().weekday() != 6:
+        return None
+    res = billing_parse_health(threshold=0.5, days=30)
+    # 只有存在告警才推送
+    if "⚠️" in res:
+        return res
+    return None
+
+_mgr = CronManager()
+if not any(j.name == 'billing_parse_health_tick' for j in _mgr.jobs.values()):
+    _mgr.add_job('billing_parse_health_tick', '09:00', _billing_health_cron)
