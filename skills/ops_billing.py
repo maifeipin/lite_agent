@@ -58,6 +58,35 @@ def billing_due_soon(months: int = 3, days: int = 7) -> str:
     return _run_billing_cmd(["due_soon_bills", str(months), str(days)])
 
 @skill(
+    name='billing_unpaid',
+    description='查询所有尚未还款的账单',
+    params={}
+)
+def billing_unpaid() -> str:
+    return _run_billing_cmd(["unpaid"])
+
+@skill(
+    name='billing_mark_paid',
+    description='标记某银行账单为已还款',
+    params={
+        'bank_code': {
+            'type': 'string',
+            'description': '银行代码 (如 CMB, ICBC 等)'
+        },
+        'statement_month': {
+            'type': 'string',
+            'description': '账单月份，如 2026年5月。若不填则默认最新一期',
+            'default': ''
+        }
+    }
+)
+def billing_mark_paid(bank_code: str, statement_month: str = '') -> str:
+    args = ["mark_paid", bank_code]
+    if statement_month:
+        args.append(statement_month)
+    return _run_billing_cmd(args)
+
+@skill(
     name='billing_reconcile',
     description='查看账单对账差异报表 (检查应还款和实际交易明细总和是否对得上)',
     params={
@@ -197,6 +226,15 @@ def _billing_health_cron():
         return res
     return None
 
+def _billing_fetch_cron():
+    # 每日执行自动抓取，确保数据库账单状态最新
+    res = billing_fetch(months=1)
+    # 只打印到日志，不推送到通道
+    print(f"[billing_fetch_cron] 自动同步账单结果: {res}")
+    return None
+
 _mgr = CronManager()
 if not any(j.name == 'billing_parse_health_tick' for j in _mgr.jobs.values()):
     _mgr.add_job('billing_parse_health_tick', '09:00', _billing_health_cron)
+if not any(j.name == 'billing_fetch_tick' for j in _mgr.jobs.values()):
+    _mgr.add_job('billing_fetch_tick', '03:00', _billing_fetch_cron)
