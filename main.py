@@ -102,9 +102,18 @@ def _register_cron_jobs(agent: Agent, config: dict):
                     except Exception as e:
                         return f"巡检广播失败: {e}"
                 fn = _health
+            elif fn_name == 'sentinel_scan':
+                kwargs = job.get('kwargs', {})
+                def _sentinel(module=module, fn_name=fn_name, kwargs=kwargs):
+                    text = _import_skill(module, fn_name)(**kwargs)
+                    if '⚠️' in text or '[HIGH]' in text or 'High:' in text:
+                        _send_card(text, '🛡️ Sentinel 安全告警', 'red')
+                    return text
+                fn = _sentinel
             else:
-                def _generic():
-                    return _import_skill(module, fn_name)()
+                kwargs = job.get('kwargs', {})
+                def _generic(module=module, fn_name=fn_name, kwargs=kwargs):
+                    return _import_skill(module, fn_name)(**kwargs)
                 fn = _generic
 
             if 'time_range' in job:
