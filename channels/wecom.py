@@ -28,16 +28,74 @@ class WeComChannel(BaseChannel):
 
     def send_response(self, message_id: str, response) -> bool:
         text = f"**{response.title}**\n\n{response.text}" if response.title else response.text
-        return self._do_send(text, use_md=bool(response.title))
+        user_id = self._parse_user_id(message_id)
+        return self._do_send(text, use_md=bool(response.title), user_id=user_id)
 
     def send_to(self, open_id: str, response) -> bool:
-        return self.send_response('', response)
+        text = f"**{response.title}**\n\n{response.text}" if response.title else response.text
+        return self._do_send(text, use_md=bool(response.title), user_id=open_id or None)
 
-    def _do_send(self, text: str, use_md: bool = False) -> bool:
+    def send_progress(self, message_id: str, text: str = "") -> bool:
+        """收到消息后/编排进度回调，发一条 markdown 状态卡片。
+        失败仅打日志，不抛异常给 agent。"""
+        try:
+            from channels import smart_truncate
+            body = smart_truncate(text or "已收到，AI 正在分析中...", 3500)
+            user_id = self._parse_user_id(message_id)
+            return self._do_send(f"🤔 **处理中**\n\n{body}", use_md=True, user_id=user_id)
+        except Exception as e:
+            print(f"  ⚠️ [WeCom] send_progress 异常: {e}")
+            return False
+
+    def broadcast(self, response) -> bool:
+        """从会话库中查询所有活跃 wecom 用户并主动广播。
+        依赖 pushmsg 服务支持 'touser' 字段（详见 deploy/pushmsg.py）。"""
+        user_ids = []
+        try:
+            with self.agent.session_mgr._connect() as conn:
+                rows = conn.execute(
+                    "SELECT DISTINCT session_key FROM sessions WHERE session_key LIKE 'wecom:%'"
+                ).fetchall()
+                for r in rows:
+                    uid = r[0].split(':', 1)[1]
+                    if uid:
+                        user_ids.append(uid)
+        except Exception as e:
+            print(f"❌ [WeCom] 广播查询用户失败: {e}")
+            return False
+
+        if not user_ids:
+            print("📣 [WeCom] 广播无活跃用户，跳过")
+            return False
+
+        text = f"**{response.title}**\n\n{response.text}" if response.title else response.text
+        success_count = 0
+        for uid in user_ids:
+            if self._do_send(text, use_md=bool(response.title), user_id=uid):
+                success_count += 1
+
+        print(f"📣 [WeCom] 广播完成，成功发送 {success_count}/{len(user_ids)} 人")
+        return success_count > 0
+
+    def _parse_user_id(self, message_id: str):
+        """从 _feed_message 生成的 message_id 中解析 user_id。
+        格式: wecom_<user_id>_<ts_ms>。无法解析时返回 None（pushmsg 自动 @all 兜底）。"""
+        if not message_id or not message_id.startswith('wecom_'):
+            return None
+        # rsplit 一次，把最后一段时间戳剔除；user_id 可含下划线，从右侧切更安全
+        body = message_id[len('wecom_'):]
+        parts = body.rsplit('_', 1)
+        if len(parts) != 2 or not parts[1].isdigit():
+            return None
+        return parts[0] or None
+
+    def _do_send(self, text: str, use_md: bool = False, user_id: str = None) -> bool:
         try:
             payload = {'message': text}
             if use_md:
                 payload['msgtype'] = 'markdown'
+            if user_id:
+                payload['touser'] = user_id
             data = json.dumps(payload).encode('utf-8')
             headers = {'Content-Type': 'application/json'}
             if self.push_token:
@@ -46,7 +104,8 @@ class WeComChannel(BaseChannel):
             with urllib.request.urlopen(req, timeout=10) as r:
                 return r.status == 200
         except Exception as e:
-            print(f"  ❌ 企业微信推送失败: {e}")
+            target = user_id or '@all'
+            print(f"  ❌ 企业微信推送失败 (touser={target}): {e}")
             return False
 
     def _feed_message(self, text: str, user_id: str):
@@ -65,7 +124,7 @@ class WeComChannel(BaseChannel):
 
         text_stripped = text.strip()
         from channels import smart_truncate
-        self._do_send(f"🤔 已收到: _{smart_truncate(text_stripped, 60)}_", use_md=True)
+        self._do_send(f"🤔 已收到: _{smart_truncate(text_stripped, 60)}_", use_md=True, user_id=user_id)
 
         admin_id = self.config.get('admin_userid')
         is_guest = False
@@ -79,7 +138,8 @@ class WeComChannel(BaseChannel):
             channel='wecom',
             user_id=user_id,
             chat_id=user_id,
-            message_id=f'wecom_{int(time.time()*1000)}',
+            # 把 user_id 编进 message_id，便于 send_progress / send_response 反向路由 touser
+            message_id=f'wecom_{user_id}_{int(time.time()*1000)}',
             text=text_stripped,
             is_guest=is_guest
         )

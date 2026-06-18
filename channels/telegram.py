@@ -142,6 +142,64 @@ class TelegramChannel(BaseChannel):
     def send_to(self, chat_id: str, resp: AgentResponse) -> bool:
         return self.send_response(chat_id, resp)
 
+    def send_progress(self, message_id: str, text: str = "") -> bool:
+        """收到消息后/编排进度回调，发一条状态消息。
+        message_id 形如 '<chat_id>_<msg_id>'（见 _poll_loop），切出 chat_id 即可路由。
+        失败仅打日志，不抛异常给 agent。"""
+        try:
+            chat_id = self._parse_chat_id(message_id)
+            if not chat_id:
+                print(f"  ⚠️ [Telegram] send_progress 无法从 message_id={message_id!r} 解析 chat_id")
+                return False
+            from channels import smart_truncate
+            body = smart_truncate(text or "已收到，AI 正在分析中...", 3500)
+            return self._send_msg(chat_id, f"🤔 *处理中*\n\n{body}")
+        except Exception as e:
+            print(f"  ⚠️ [Telegram] send_progress 异常: {e}")
+            return False
+
+    def broadcast(self, response: AgentResponse) -> bool:
+        """从会话库中查询所有活跃 telegram 用户并主动广播"""
+        chat_ids = []
+        try:
+            with self.agent.session_mgr._connect() as conn:
+                rows = conn.execute(
+                    "SELECT DISTINCT session_key FROM sessions WHERE session_key LIKE 'telegram:%'"
+                ).fetchall()
+                for r in rows:
+                    cid = r[0].split(':', 1)[1]
+                    if cid:
+                        chat_ids.append(cid)
+        except Exception as e:
+            print(f"❌ [Telegram] 广播查询用户失败: {e}")
+            return False
+
+        if not chat_ids:
+            print("📣 [Telegram] 广播无活跃用户，跳过")
+            return False
+
+        text = response.text
+        if response.title:
+            text = f'**{response.title}**\n\n{text}'
+        success_count = 0
+        for cid in chat_ids:
+            try:
+                if self._send_msg(cid, text):
+                    success_count += 1
+            except Exception as e:
+                print(f"  ❌ [Telegram] 广播给 {cid} 失败: {e}")
+
+        print(f"📣 [Telegram] 广播完成，成功发送 {success_count}/{len(chat_ids)} 人")
+        return success_count > 0
+
+    def _parse_chat_id(self, message_id: str):
+        """从 _poll_loop 生成的 telegram_msg_id ('<chat_id>_<msg_id>') 中解析 chat_id。
+        chat_id 可能为负数 (group chat) 形如 '-100123456789'，rsplit 一次保证 chat_id 完整。"""
+        if not message_id or '_' not in message_id:
+            return None
+        chat_id, _, _msg = message_id.rpartition('_')
+        return chat_id or None
+
     def _send_msg(self, chat_id: str, text: str) -> bool:
         r = self._curl('sendMessage', {
             'chat_id': chat_id, 'text': text, 'parse_mode': 'Markdown'
