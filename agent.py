@@ -130,6 +130,11 @@ class Agent:
         )
         self.channels = []  # 由 main.py 在初始化通道后注入
 
+        # 会话级互斥锁: 同一 session_key 的消息串行处理, 防止并发写 messages 表
+        # 导致 OpenAI 协议违规 (assistant tool_calls 后必须紧跟 tool 消息)
+        self._session_locks = {}  # session_key -> threading.Lock
+        self._session_locks_guard = threading.Lock()
+
         # 技能引擎
         self.skill_engine = SkillEngine()
 
@@ -226,8 +231,34 @@ class Agent:
     # ------------------------------------------------------------------
     #  消息入口
     # ------------------------------------------------------------------
+    def _get_session_lock(self, session_key: str) -> threading.Lock:
+        """获取/创建一个 session_key 专属的锁; 双重检查锁定避免每次都加 guard"""
+        lock = self._session_locks.get(session_key)
+        if lock is None:
+            with self._session_locks_guard:
+                lock = self._session_locks.get(session_key)
+                if lock is None:
+                    lock = threading.Lock()
+                    self._session_locks[session_key] = lock
+        return lock
+
     def handle(self, msg: IncomingMessage) -> AgentResponse:
-        """处理一条用户消息，返回 AgentResponse"""
+        """处理一条用户消息，返回 AgentResponse
+
+        同一 session_key 的消息串行处理: 防止并发线程同时写 messages 表
+        造成 assistant tool_calls 与 tool 消息错位 (导致 LLM API 400 错误)。
+        不同 session_key (不同用户/会话) 之间不互斥, 仍可并行。
+        """
+        lock = self._get_session_lock(msg.session_key)
+        wait_start = time.time()
+        with lock:
+            wait_ms = (time.time() - wait_start) * 1000
+            if wait_ms > 100:
+                print(f"  ⏳ 会话锁等待 {wait_ms:.0f}ms session={msg.session_key}")
+            return self._handle_locked(msg)
+
+    def _handle_locked(self, msg: IncomingMessage) -> AgentResponse:
+        """实际处理逻辑, 调用方必须已持有 session 锁"""
         text = msg.text.strip()
 
         if text.startswith("::"):
@@ -243,7 +274,7 @@ class Agent:
         else:
             print(f"  [ROUTE] 简单任务 → 走同步AI Loop: {text[:60]}")
             response = self._run_ai_loop(msg)
-            
+
         # 超长消息拦截：如果不是 Web 端（api），且配置了 HedgeDoc，则尝试上传并截断
         response.text = self._truncate_long_message_if_needed(response.text, msg.channel)
         return response
