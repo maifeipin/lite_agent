@@ -79,6 +79,8 @@ class TelegramChannel(BaseChannel):
                 
                 # 异步处理文本消息，避免阻塞 polling
                 def _handle_and_reply(inc: IncomingMessage, c_id: str):
+                    from channels import smart_truncate
+                    self.send_progress(inc.message_id, f'已收到 "{smart_truncate(inc.text, 50)}"')
                     resp = self.agent.handle(inc)
                     if resp:
                         self.send_response(c_id, resp)
