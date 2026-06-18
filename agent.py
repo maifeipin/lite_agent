@@ -911,7 +911,19 @@ class Agent:
                 continue  # 回到循环顶部，让 AI 处理工具结果
 
             # ----- 情况 2: AI 直接给出文本回复 (任务完成或闲聊) -----
-            reply_text = choice.message.content or "(空回复)"
+            raw_content = choice.message.content
+            finish_reason = getattr(choice, "finish_reason", None) or "unknown"
+            if not raw_content:
+                # 空 content 通常是上下文过长 / max_tokens 用尽 / 安全过滤导致
+                # 给用户友好提示，而不是字面 "(空回复)"
+                print(f"  ⚠️ LLM 返回空 content (finish_reason={finish_reason}), 提示用户重置会话")
+                reply_text = (
+                    f"⚠️ 模型未生成有效回复 (finish_reason={finish_reason})。"
+                    f"\n\n这通常因为对话上下文累积过长或工具返回结果太大。"
+                    f"\n\n建议：发送 `/new` 开启新会话后重试，或用更精确的关键词缩小工具调用范围。"
+                )
+            else:
+                reply_text = raw_content
             self.session_mgr.add_message(msg.session_key, "assistant", reply_text)
 
             # 如果之前在执行目标，标记完成

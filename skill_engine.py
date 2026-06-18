@@ -12,6 +12,25 @@ from typing import Any, Dict, List, Optional
 
 AUDIT_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'workspace', 'audit.log')
 
+# 工具结果最大长度（字符）。超过则保留头尾、丢弃中段，避免单个工具返回撑爆 LLM 上下文
+# 12000 字符 ≈ 中文 ~4000 token / 英文 ~3000 token，留足后续轮次空间
+MAX_TOOL_RESULT_LEN = 12000
+
+
+def _cap_tool_result(skill_name: str, result: str) -> str:
+    """超长工具结果做头尾截断，并在中段插入提示，引导模型用更精确的参数重新调用"""
+    if len(result) <= MAX_TOOL_RESULT_LEN:
+        return result
+    keep_head = MAX_TOOL_RESULT_LEN // 3
+    keep_tail = MAX_TOOL_RESULT_LEN - keep_head - 200  # 留 200 字符给提示
+    omitted = len(result) - keep_head - keep_tail
+    notice = (
+        f"\n\n... ⚠️ [已截断] 原始结果共 {len(result)} 字符，超过单次工具返回上限 "
+        f"{MAX_TOOL_RESULT_LEN}，中间省略 {omitted} 字符。"
+        f"请用更精确的参数（如缩小时间范围、增加关键词、减少 lines/limit）重新调用 {skill_name}。\n\n..."
+    )
+    return result[:keep_head] + notice + result[-keep_tail:]
+
 
 # ============================================================
 #  全局技能注册表
@@ -213,6 +232,12 @@ class SkillEngine:
             result = func(**kwargs)
             if not isinstance(result, str):
                 result = json.dumps(result, ensure_ascii=False, indent=2)
+            raw_len = len(result)
+            result = _cap_tool_result(skill_name, result)
+            if len(result) != raw_len:
+                print(f"  ✂️ 工具结果截断: {skill_name} {raw_len} → {len(result)} 字符")
+            else:
+                print(f"  ✓ {skill_name} result_len={raw_len}")
             return result
         except Exception as e:
             error_msg = f"❌ 技能执行异常 [{skill_name}]: {e}"
