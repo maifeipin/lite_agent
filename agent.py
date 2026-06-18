@@ -28,6 +28,22 @@ class LRUCache:
             self.cache.popitem(last=False)
         return self.cache[key]
 
+    def get(self, key, default=None):
+        if key in self.cache:
+            self.cache.move_to_end(key)
+            return self.cache[key]
+        return default
+
+    def __getitem__(self, key):
+        self.cache.move_to_end(key)
+        return self.cache[key]
+
+    def __setitem__(self, key, value):
+        self.cache[key] = value
+        self.cache.move_to_end(key)
+        if len(self.cache) > self.maxsize:
+            self.cache.popitem(last=False)
+
 # 记忆引擎 (可选 — 缺失时优雅降级)
 try:
     from memory_engine.lite_integration import AgentMemory
