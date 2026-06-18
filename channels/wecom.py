@@ -27,21 +27,31 @@ class WeComChannel(BaseChannel):
             self._httpd.shutdown()
 
     def send_response(self, message_id: str, response) -> bool:
-        text = f"**{response.title}**\n\n{response.text}" if response.title else response.text
         user_id = self._parse_user_id(message_id)
+        if not user_id:
+            print(f"  ❌ [WeCom] send_response 无法解析 user_id from {message_id!r}, 拒绝 fallback @all")
+            return False
+        text = f"**{response.title}**\n\n{response.text}" if response.title else response.text
         return self._do_send(text, use_md=bool(response.title), user_id=user_id)
 
     def send_to(self, open_id: str, response) -> bool:
+        if not open_id:
+            print("  ❌ [WeCom] send_to 收到空 open_id, 拒绝 fallback @all")
+            return False
         text = f"**{response.title}**\n\n{response.text}" if response.title else response.text
-        return self._do_send(text, use_md=bool(response.title), user_id=open_id or None)
+        return self._do_send(text, use_md=bool(response.title), user_id=open_id)
 
     def send_progress(self, message_id: str, text: str = "") -> bool:
         """收到消息后/编排进度回调，发一条 markdown 状态卡片。
-        失败仅打日志，不抛异常给 agent。"""
+        失败仅打日志，不抛异常给 agent。
+        无法解析 user_id 时 fail-closed: 返回 False, 不退化为 @all 群发。"""
         try:
+            user_id = self._parse_user_id(message_id)
+            if not user_id:
+                print(f"  ❌ [WeCom] send_progress 无法解析 user_id from {message_id!r}, 拒绝 fallback @all")
+                return False
             from channels import smart_truncate
             body = smart_truncate(text or "已收到，AI 正在分析中...", 3500)
-            user_id = self._parse_user_id(message_id)
             return self._do_send(f"🤔 **处理中**\n\n{body}", use_md=True, user_id=user_id)
         except Exception as e:
             print(f"  ⚠️ [WeCom] send_progress 异常: {e}")
@@ -49,7 +59,7 @@ class WeComChannel(BaseChannel):
 
     def broadcast(self, response) -> bool:
         """从会话库中查询所有活跃 wecom 用户并主动广播。
-        依赖 pushmsg 服务支持 'touser' 字段（详见 deploy/pushmsg.py）。"""
+        依赖 vps1 上的 pushmsg 服务支持 'touser' 字段。"""
         user_ids = []
         try:
             with self.agent.session_mgr._connect() as conn:
@@ -147,7 +157,7 @@ class WeComChannel(BaseChannel):
             response = self.agent.handle(msg)
             self.send_response(msg.message_id, response)
         except Exception as e:
-            self._do_send(f"❌ 处理失败: {e}", use_md=True)
+            self._do_send(f"❌ 处理失败: {e}", use_md=True, user_id=user_id)
             print(f"  ❌ 企业微信消息处理异常: {e}")
 
 

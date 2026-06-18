@@ -10,3 +10,8 @@ data/
 *.whl
 deploy*.sh
 
+# vps1-only deploy artifacts (含凭证) — 永不入仓库
+deploy/
+secrets/
+*.secret
+*.secret.*
