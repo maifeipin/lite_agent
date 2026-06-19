@@ -210,5 +210,45 @@
         "public_url": "https://md.maifeipin.com",
         "email": "liteagent@bot.com",
         "password": "${HEDGEDOC_PASSWORD}"
+    },
+    "committee": {
+        "models": [
+            "gemini-pro",
+            "flash"
+        ],
+        "task_profiles": {
+            "price_comparison": {
+                "base_weights": {
+                    "profitability": 0.35,
+                    "execution": 0.2,
+                    "timeliness": 0.15,
+                    "confidence": 0.1
+                },
+                "extra_criteria": [
+                    {
+                        "name": "supply_demand_balance",
+                        "weight": 0.2,
+                        "description": "判断市场供需关系、出手速度和库存风险"
+                    }
+                ],
+                "description": "用于评估闲鱼二手比价和套利空间的决策"
+            },
+            "trend_analysis": {
+                "base_weights": {
+                    "profitability": 0.1,
+                    "execution": 0.4,
+                    "timeliness": 0.4,
+                    "confidence": 0.1
+                },
+                "extra_criteria": [
+                    {
+                        "name": "virality_potential",
+                        "weight": 0.2,
+                        "description": "评估该趋势在小红书、抖音、YouTube上的传播势能"
+                    }
+                ],
+                "description": "用于评估短视频趋势、社交媒体热点是否值得跟进"
+            }
+        }
     }
 }
