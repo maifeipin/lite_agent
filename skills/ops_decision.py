@@ -26,7 +26,7 @@ class DecisionResult(BaseModel):
     decision_type: Literal["值得执行", "高风险放弃", "暂缓观察"] = Field(description="结论类型方向")
     base_scores: BaseScores = Field(description="固定维度得分")
     extra_scores: List[CriteriaScore] = Field(description="额外维度的得分", default_factory=list)
-    model_reported_overall_score: int = Field(ge=0, le=100, description="你(模型)主观认为的综合得分")
+    model_reported_overall_score: int = Field(ge=0, le=100, description="你主观认为的综合得分（仅用于审计对比，最终总分由系统引擎独立加权核算）")
     confidence_score: int = Field(ge=0, le=100, description="你对本次打分的整体置信度")
     reasoning: str = Field(description="核心论证逻辑")
     evidence_gaps: List[str] = Field(description="缺失的证据或前提假设", default_factory=list)
@@ -97,7 +97,8 @@ def _call_model(router: ModelRouter, model_name: str, prompt: str, schema_cls) -
         if provider == "gemini":
             res = client.models.generate_content(
                 model=model_id,
-                contents=sys_prompt + "\n\n" + prompt
+                contents=sys_prompt + "\n\n" + prompt,
+                config={"timeout": 45000} # Provide Gemini SDK timeout to avoid hanging
             )
             return res.text
         else:
@@ -195,7 +196,7 @@ def ops_decision(task_type: str, topic: str) -> str:
         "brief": brief,
         "results": {k: (v["res"].model_dump() if "res" in v else v) for k, v in results.items()}
     }
-    project_root = load_config().get("project_root", "/tmp")
+    project_root = load_config().get("project_root", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     data_dir = os.path.join(project_root, "data", "committee")
     os.makedirs(data_dir, exist_ok=True)
     audit_path = os.path.join(data_dir, f"audit_{run_id}.json")
@@ -217,7 +218,7 @@ def ops_decision(task_type: str, topic: str) -> str:
         if "res" in data:
             res = data["res"]
             score = data["computed_score"]
-            output.append(f"### 🤖 评委 [{m}]: `引擎核算分: {score:.1f}` (置信度: {res.confidence_score}) | 结论: `{res.decision_type}`")
+            output.append(f"### 🤖 评委 [{m}]: `引擎核算分: {score:.1f}` vs `自报分: {res.model_reported_overall_score}` (置信度: {res.confidence_score}) | 结论: `{res.decision_type}`")
             output.append(f"- **核心理由**: {res.reasoning}")
             if res.evidence_gaps:
                 output.append(f"- **证据缺失**: {', '.join(res.evidence_gaps)}")
