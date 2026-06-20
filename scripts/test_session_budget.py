@@ -57,7 +57,7 @@ def test_count_limit():
 
 def test_byte_limit():
     print("\n[2] Test: size limit in bytes/chars (max_history_bytes)")
-    mgr, path = fresh_mgr(max_history=10, max_bytes=50)
+    mgr, path = fresh_mgr(max_history=10, max_bytes=70)  # slightly larger to account for "role" length
     key = "test:bytes"
     
     mgr.add_message(key, "user", "A" * 80) # msg 0
@@ -103,22 +103,17 @@ def test_atomic_blocks():
             )
     mgr._cache.pop(key, None)
     
-    # 0. user "hello" (5)
-    # 1. assistant tool_calls (28)
-    # 2. tool response (26)
-    # 3. assistant text (18)
-    # Budget = 50:
-    # msg 3 (18) <= 50. Block tool+assistant (54). Cumulative total 72 > 50. Must truncate.
-    mgr.max_history_bytes = 50
+    # Cumulative sizes (including role length):
+    # msg 3: assistant (9) + content (18) = 27
+    # Block tool+assistant: assistant (9) + tool_calls (28) + tool (4) + content (18) + tcid (8) = 67
+    # Total = 27 + 67 = 94.
+    # Budget = 60: truncates block, leaves msg 3.
+    mgr.max_history_bytes = 60
     history = mgr.get_history(key)
     
-    # Budget = 80:
-    # Cumulative total 72 <= 80. All kept.
-    mgr.max_history_bytes = 80
+    # Budget = 100: keeps all.
+    mgr.max_history_bytes = 100
     history2 = mgr.get_history(key)
-    
-    print("DEBUG history:", history)
-    print("DEBUG history2:", history2)
     
     check("Atomic block exceeded budget is truncated safely without orphan tool", len(history) == 2)
     check("Latest message content matches", history[1]["content"] == "Here is your stock")
@@ -130,7 +125,7 @@ def test_atomic_blocks():
 
 def test_working_session_multiplier():
     print("\n[4] Test: working session receives 3x budget space")
-    mgr, path = fresh_mgr(max_history=10, max_bytes=50)
+    mgr, path = fresh_mgr(max_history=10, max_bytes=60)
     key = "test:working"
     
     mgr.add_message(key, "user", "A" * 20)
@@ -138,15 +133,80 @@ def test_working_session_multiplier():
     mgr.add_message(key, "user", "C" * 20)
     mgr.add_message(key, "assistant", "D" * 20)
     
-    # chatting status -> truncated (80 > 50)
+    # chatting status -> truncated (approx 110 total chars > 60 budget)
     history_chatting = mgr.get_history(key)
     check("Chatting status triggers truncation", len(history_chatting) < 5)
     
-    # working status -> not truncated (80 <= 150)
+    # working status -> not truncated (110 <= 180 budget)
     mgr.set_goal(key, "test goal")
     history_working = mgr.get_history(key)
     check("Working status gets 3x budget, no truncation", len(history_working) == 4)
     check("Last message matches", history_working[-1]["content"] == "D" * 20)
+    _cleanup_db(path)
+
+
+def test_parallel_tool_calls():
+    print("\n[5] Test: parallel tool calls grouping")
+    mgr, path = fresh_mgr(max_history=10, max_bytes=150)
+    key = "test:parallel"
+    
+    mgr.get_or_create(key)
+    
+    with mgr._db_write_lock:
+        with mgr._connect() as conn:
+            conn.execute(
+                "INSERT INTO messages (session_key, role, content, created_at) VALUES (?, ?, ?, ?)",
+                (key, "user", "hello", 1.0)
+            )
+            conn.execute(
+                "INSERT INTO messages (session_key, role, content, tool_calls_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                (key, "assistant", "", '[{"id": "call_1", "function": {"name": "get_stock", "arguments": "{\\"symbol\\": \\"AAPL\\"}"}}, {"id": "call_2", "function": {"name": "get_stock", "arguments": "{\\"symbol\\": \\"GOOG\\"}"}}]', 2.0)
+            )
+            conn.execute(
+                "INSERT INTO messages (session_key, role, content, tool_call_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                (key, "tool", "AAPL is 180", "call_1", 3.0)
+            )
+            conn.execute(
+                "INSERT INTO messages (session_key, role, content, tool_call_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                (key, "tool", "GOOG is 170", "call_2", 4.0)
+            )
+            conn.execute(
+                "INSERT INTO messages (session_key, role, content, created_at) VALUES (?, ?, ?, ?)",
+                (key, "assistant", "Here are the prices", 5.0)
+            )
+    mgr._cache.pop(key, None)
+    
+    mgr.max_history_bytes = 60
+    history = mgr.get_history(key)
+    
+    mgr.max_history_bytes = 200
+    history2 = mgr.get_history(key)
+    
+    check("Parallel tool calls atomic block truncated together", len(history) == 2)
+    check("Parallel tool calls atomic block kept together", len(history2) == 5)
+    check("Contains first tool response", history2[2]["tool_call_id"] == "call_1")
+    check("Contains second tool response", history2[3]["tool_call_id"] == "call_2")
+    _cleanup_db(path)
+
+
+def test_phase3_orphan_cleansing():
+    print("\n[6] Test: Phase 3 orphan tool_calls cleansing")
+    mgr, path = fresh_mgr(max_history=10, max_bytes=1000)
+    key = "test:phase3"
+    
+    mgr.get_or_create(key)
+    
+    with mgr._db_write_lock:
+        with mgr._connect() as conn:
+            conn.execute(
+                "INSERT INTO messages (session_key, role, content, tool_calls_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                (key, "assistant", "", '[{"id": "call_999", "function": {"name": "get_weather", "arguments": "{}"}}]', 1.0)
+            )
+    mgr._cache.pop(key, None)
+    
+    history = mgr.get_history(key)
+    check("History loaded the message", len(history) == 1)
+    check("Orphan tool_calls was stripped", "tool_calls" not in history[0])
     _cleanup_db(path)
 
 
@@ -159,6 +219,8 @@ def main():
         test_byte_limit()
         test_atomic_blocks()
         test_working_session_multiplier()
+        test_parallel_tool_calls()
+        test_phase3_orphan_cleansing()
     except Exception as e:
         print(f"Test crashed: {e}")
         import traceback

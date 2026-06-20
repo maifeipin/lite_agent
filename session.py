@@ -306,6 +306,8 @@ class SessionManager:
 
     def _get_message_size(self, msg: dict) -> int:
         size = 0
+        if msg.get("role"):
+            size += len(msg["role"])
         if msg.get("content"):
             size += len(msg["content"])
         if msg.get("reasoning_content"):
@@ -321,12 +323,17 @@ class SessionManager:
                     size += len(func.get("name", ""))
                     size += len(func.get("arguments", ""))
                 else:
-                    size += len(str(tc))
+                    size += len(str(tc)[:500])
         return size
 
     def _group_messages_to_blocks(self, messages: list) -> list:
+        # 预先构建 ID 到原始索引的映射，避免在循环中重复构造导致 O(N^2)
+        msg_to_index = {id(m): idx for idx, m in enumerate(messages)}
+        
         id_to_block = {}
         blocks = []
+        
+        # 逆序扫描消息以归并同一轮的 tool call 交互
         for msg in reversed(messages):
             role = msg.get("role")
             if role == "tool":
@@ -336,6 +343,7 @@ class SessionManager:
                 if tcid:
                     id_to_block[tcid] = block
             elif role == "assistant" and "tool_calls" in msg:
+                # 寻找该 assistant 关联的所有已存在的 tool 消息块
                 associated_blocks = []
                 for tc in msg.get("tool_calls", []):
                     tcid = tc.get("id") if isinstance(tc, dict) else None
@@ -343,17 +351,21 @@ class SessionManager:
                         associated_block = id_to_block[tcid]
                         if associated_block not in associated_blocks:
                             associated_blocks.append(associated_block)
+                
+                # 合并助理消息与所有相关的工具响应，并从待定块中移除工具块
                 new_block = [msg]
                 for ab in associated_blocks:
                     new_block.extend(ab)
                     blocks.remove(ab)
-                msg_to_index = {id(m): idx for idx, m in enumerate(messages)}
+                
+                # 保持块内消息的原始时序
                 new_block.sort(key=lambda m: msg_to_index.get(id(m), 0))
                 blocks.append(new_block)
             else:
+                # 系统消息、普通对话或无工具调用的助理消息独立成块
                 blocks.append([msg])
         
-        msg_to_index = {id(m): idx for idx, m in enumerate(messages)}
+        # 按块内首条消息的原始时序对所有块进行排序
         blocks.sort(key=lambda b: msg_to_index.get(id(b[0]), 0))
         return blocks
 
