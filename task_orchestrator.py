@@ -43,7 +43,11 @@ PLANNER_PROMPT = """你是一个任务编排专家。请将以下用户目标拆
 编排规则:
 1. 尽可能让无依赖的子任务并行，depends_on 写依赖的 id
 2. 深度不超过 5 层
-3. tools_hint 写可能需要的工具名，不知道就写空数组
+3. tools_hint 写该子任务需要的工具名 (从上方"可用的全部工具"里按 name 选)。
+   务必积极填写: 若子任务是"上传到hedgedoc/网页剪藏"就写 web_clip, 是"读写待办"
+   就写 todo_add/todo_list/todo_get, 是"搜网页"就写 web_search。不要图省事写空数组——
+   写对专用工具可让执行者直接复用, 避免自己写代码逆向摸索浪费大量 token。
+   不确定的才写空数组。
 4. 每个子任务 prompt 要具体、可执行"""
 
 
@@ -143,10 +147,16 @@ class TaskOrchestrator:
         for s in subtasks:
             model_name, client, tool_filter = self.router.route(s.type.value)
             s.assigned_model = model_name
-            if tool_filter:
-                s.tools = tool_filter
-            elif not s.tools:
-                pass
+            # 工具分配: route_rule 的类型级工具集 与 planner 的 tools_hint 取并集,
+            # 而非用 route_rule 覆盖 tools_hint。否则 "上传hedgedoc" 被 classify 成 code
+            # 后只剩 ops_workspace_run, planner 给的 web_clip 等专用工具丢失,
+            # worker 只能写代码自己逆向摸索 (曾烧百万 token)。并集让两者都满足。
+            if tool_filter or s.tools:
+                merged = list(tool_filter or [])
+                for t in (s.tools or []):
+                    if t not in merged:
+                        merged.append(t)
+                s.tools = merged
             tools_str = f" tools={s.tools}" if s.tools else ""
             print(f"  [ORCH:ROUTE]   {s.id} type={s.type.value} → model={model_name}{tools_str}")
 
