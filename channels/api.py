@@ -58,12 +58,14 @@ class ApiHandler(BaseHTTPRequestHandler):
             
         parsed_url = urlparse(self.path)
         
-        # 边缘节点权限隔离：仅允许访问 /api/report
-        if getattr(self, 'is_edge', False) and parsed_url.path != '/api/report':
-            self.send_error(403, "Forbidden: Edge token is limited to /api/report")
+        # 边缘节点权限隔离：仅允许 /api/report, /api/pull_task
+        if getattr(self, 'is_edge', False) and parsed_url.path not in ('/api/report', '/api/pull_task'):
+            self.send_error(403, "Forbidden: Edge token is limited to /api/report, /api/pull_task")
             return
 
-        if parsed_url.path == '/api/v1/task/stream':
+        if parsed_url.path == '/api/pull_task':
+            self._handle_pull_task(parsed_url.query)
+        elif parsed_url.path == '/api/v1/task/stream':
             self._handle_task_stream(parsed_url.query)
         elif parsed_url.path == '/v1/models':
             self._handle_openai_models()
@@ -76,9 +78,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             
         parsed_url = urlparse(self.path)
         
-        # 边缘节点权限隔离
-        if getattr(self, 'is_edge', False) and parsed_url.path != '/api/report':
-            self.send_error(403, "Forbidden: Edge token is limited to /api/report")
+        # 边缘节点权限隔离：仅允许 /api/report, /api/task_result
+        if getattr(self, 'is_edge', False) and parsed_url.path not in ('/api/report', '/api/task_result'):
+            self.send_error(403, "Forbidden: Edge token is limited to /api/report, /api/task_result")
             return
 
         if parsed_url.path in ('/api/v1/chat', '/api/v1/task'):
@@ -87,6 +89,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_openai_chat_completions()
         elif parsed_url.path == '/api/report':
             self._handle_edge_report()
+        elif parsed_url.path == '/api/task_result':
+            self._handle_task_result()
+        elif parsed_url.path == '/api/edge_task':
+            self._handle_edge_task()
         else:
             self.send_error(404, "Not Found")
 
@@ -197,6 +203,96 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"status": "success", "message": "Report saved"}).encode('utf-8'))
         except Exception as e:
             self.send_error(500, f"Internal Server Error: {str(e)}")
+
+    def _read_json(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length == 0:
+            self.send_error(400, "Bad Request: Empty body")
+            return None
+        body = self.rfile.read(content_length)
+        try:
+            return json.loads(body.decode('utf-8'))
+        except json.JSONDecodeError:
+            self.send_error(400, "Bad Request: Invalid JSON")
+            return None
+
+    def _json(self, code, obj):
+        self.send_response(code)
+        self._send_cors_headers()
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(obj, ensure_ascii=False).encode('utf-8'))
+
+    def _handle_pull_task(self, query: str):
+        """边缘节点拉取下发任务: GET /api/pull_task?node=<node_id>。
+
+        拉取即 dispatched (原子 claim), 返回验签执行所需 payload 或 {task: null}。"""
+        import edge_db
+        qs = parse_qs(query)
+        node = (qs.get('node', [None])[0] or '').strip()
+        if not node:
+            self.send_error(400, "Bad Request: Missing node")
+            return
+        task = edge_db.claim_task(node)
+        if not task:
+            self._json(200, {"task": None})
+            return
+        payload = {
+            "task_id": task["id"],
+            "node": task["node"],
+            "cmd": task["cmd"],
+            "ts": task["ts"],
+            "nonce": task["nonce"],
+            "sig": task["sig"],
+            "key_tier": task["key_tier"],
+        }
+        self._json(200, {"task": payload})
+
+    def _handle_task_result(self):
+        """边缘回传执行结果: POST /api/task_result {task_id, exit_code, stdout, stderr}。"""
+        import edge_db
+        body = self._read_json()
+        if body is None:
+            return
+        task_id = body.get('task_id')
+        if not task_id:
+            self.send_error(400, "Bad Request: Missing task_id")
+            return
+        try:
+            exit_code = int(body.get('exit_code', -1))
+        except (TypeError, ValueError):
+            exit_code = -1
+        updated = edge_db.submit_result(
+            task_id, exit_code, body.get('stdout', ''), body.get('stderr', '')
+        )
+        self._json(200, {"status": "ok" if updated else "noop"})
+
+    def _handle_edge_task(self):
+        """管理员上传根私钥签名的高危任务: POST /api/edge_task (admin auth only)。
+
+        cmd 写入后不可变 (id 冲突报 409)。仅接受 key_tier=root。"""
+        import uuid
+        import edge_db
+        if getattr(self, 'is_edge', False) or getattr(self, 'is_guest', False):
+            self.send_error(403, "Forbidden: admin only")
+            return
+        body = self._read_json()
+        if body is None:
+            return
+        node, cmd, ts, nonce, sig = (body.get(k) for k in ('node', 'cmd', 'ts', 'nonce', 'sig'))
+        if not all([node, cmd, ts, nonce, sig]):
+            self.send_error(400, "Bad Request: Missing required fields (node,cmd,ts,nonce,sig)")
+            return
+        if body.get('key_tier', 'root') != 'root':
+            self.send_error(400, "Bad Request: /api/edge_task only accepts key_tier=root")
+            return
+        task_id = body.get('task_id') or uuid.uuid4().hex
+        try:
+            edge_db.create_task(task_id, node, cmd, ts, nonce, sig, 'root')
+        except Exception as e:
+            self.send_error(409, f"Conflict: {e}")
+            return
+        self._json(200, {"status": "ok", "task_id": task_id})
 
     def _handle_task_stream(self, query: str):
         qs = parse_qs(query)

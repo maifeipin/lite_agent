@@ -1,0 +1,11 @@
+[
+    {"cmd": "df", "allow_args": ["-h", "-i"]},
+    {"cmd": "free", "allow_args": ["-m", "-h", "-g"]},
+    {"cmd": "w", "allow_args": []},
+    {"cmd": "uptime", "allow_args": []},
+    {"cmd": "vnstat", "allow_args": ["-d", "-h", "-m", "-5", "--oneline"], "allow_if": ["eth0", "eth1", "ens3", "enp3s0"], "value_flags": ["-i", "--interface"]},
+    {"cmd": "cat", "allow_args": [], "allow_files": ["/var/log/auth.log", "/var/log/secure", "/etc/ssh/sshd_config"]},
+    {"cmd": "journalctl", "allow_args": ["--no-pager", "-n", "today", "yesterday", "1 hour ago", "2 hours ago"], "allow_if": ["ssh", "sshd"], "value_flags": ["-u", "--since", "--unit", "-n"]},
+    {"cmd": "ss", "allow_args": ["-tlnp", "-tunlp"]},
+    {"cmd": "systemctl", "allow_args": ["status"], "allow_if": ["ssh", "sshd", "fail2ban"], "value_flags": []}
+]
