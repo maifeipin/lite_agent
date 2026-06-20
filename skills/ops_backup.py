@@ -5,23 +5,29 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from skill_engine import skill
 from cron_engine import CronManager
+from config_loader import load_config
+
+# 账单解析程序目录：与 ops_billing 共用 config.json 的 billing.script_dir，
+# 未配置时回退默认路径（vps1: /home/liteagent/mail-statement-parser）。
+_cfg = load_config() or {}
+_BILLING_DIR = _cfg.get("billing", {}).get("script_dir", "/home/liteagent/mail-statement-parser")
 
 def do_backup() -> str:
     """内部函数：执行备份逻辑"""
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     backup_dir = os.path.join(base_dir, "backup")
     os.makedirs(backup_dir, exist_ok=True)
-    
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     zip_name = f"backup_{timestamp}.zip"
     zip_path = os.path.join(backup_dir, zip_name)
-    
+
     # 待备份的目录或文件
     targets = [
         os.path.join(base_dir, "data"), # lite_agent/data/sessions.db
-        "/root/mail-statement-parser/statements.db",
-        "/root/mail-statement-parser/email-downloads",
-        "/root/mail-statement-parser/validation-reports"
+        os.path.join(_BILLING_DIR, "statements.db"),
+        os.path.join(_BILLING_DIR, "email-downloads"),
+        os.path.join(_BILLING_DIR, "validation-reports")
     ]
     
     # 过滤掉不存在的路径
