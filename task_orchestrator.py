@@ -43,7 +43,10 @@ PLANNER_PROMPT = """你是一个任务编排专家。请将以下用户目标拆
 
 编排规则:
 1. 尽可能让无依赖的子任务并行，depends_on 写依赖的 id
-2. 深度不超过 5 层
+2. 依赖深度不超过 5 层。全局预算: 所有子任务的 LLM 交互步数总和上限为 {max_steps} 步
+   (每个子任务通常消耗 2-5 步, 复杂任务可能更多)。
+   请根据预算精简拆解——宁可 4 个子任务全跑完，不要拆 8 个跑到一半被系统截断。
+   简单目标 1-2 个子任务即可，中等目标 3-5 个，复杂目标才拆到 6-8 个。
 3. global_strategy 必须写: 先分析目标的本质和关键路径, 再给出执行战略。战略要具体可操作,
    例如"先搜索再整理再发布"、"如果搜索失败 2 次则跳过该数据源改用已有知识"。
    不要写空洞的"要认真执行"、"要高质量完成"。
@@ -103,7 +106,8 @@ class TaskOrchestrator:
             tools_desc_lines.append(f"- {fn['name']}: {fn['description']}")
         tools_desc = "\n".join(tools_desc_lines)
 
-        prompt = PLANNER_PROMPT.format(goal=goal, tools_desc=tools_desc)
+        prompt = PLANNER_PROMPT.format(goal=goal, tools_desc=tools_desc,
+                                       max_steps=self.dag_max_steps)
 
         try:
             start_t = time.time()
