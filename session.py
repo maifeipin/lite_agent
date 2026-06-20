@@ -493,6 +493,20 @@ class SessionManager:
         if expired_keys:
             print(f"🧹 已清理 {len(expired_keys)} 个过期会话")
 
+        # 顺带清理 24h 前的防重放记录, 防 processed_msgs 表无限膨胀
+        # (feishu/telegram/wecom 每条消息都往里写, wecom 用 5min 时间窗 key 更易累积)
+        with self._db_write_lock:
+            try:
+                with self._connect() as conn:
+                    cur = conn.execute(
+                        "DELETE FROM processed_msgs WHERE created_at < ?",
+                        (now - 86400,)
+                    )
+                    if cur.rowcount > 0:
+                        print(f"🧹 清理 {cur.rowcount} 条过期防重放记录 (>24h)")
+            except sqlite3.OperationalError:
+                pass  # 锁冲突时跳过, 下次清理
+
     def get_session_info(self, session_key: str) -> dict:
         """获取会话状态摘要 (供 /status 指令使用)"""
         session = self.get_or_create(session_key)

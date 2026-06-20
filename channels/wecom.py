@@ -125,7 +125,11 @@ class WeComChannel(BaseChannel):
         if not text or not text.strip():
             return
 
-        msg_id = text.strip()[:80]
+        # 防重放 key: user_id + 5min时间窗 + 文本前80字。
+        # 原来只用 text[:80] 导致同内容永久去重 (processed_msgs 无 TTL)。
+        # 加 user_id 区分用户, 加 5min 时间窗 (int(time.time()/300)) 让同内容
+        # 在不同时段不再误去重, 同时仍覆盖企微回调 10-25s 重试间隔。
+        msg_id = f"{user_id}:{int(time.time()//300)}:{text.strip()[:80]}"
         # 防重放机制
         if self.agent.session_mgr.is_message_processed(f"wecom_{msg_id}"):
             return
