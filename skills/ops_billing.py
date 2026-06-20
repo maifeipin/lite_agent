@@ -1,10 +1,13 @@
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from skill_engine import skill
+from config_loader import load_config
 import subprocess
 
-# 设定账单解析程序的绝对路径
-BILLING_SCRIPT_DIR = "/root/mail-statement-parser"
+# 账单解析程序目录：从 config.json 的 billing.script_dir 读取，未配置时回退默认路径。
+# 路径由部署环境决定（如 vps1 用 /home/liteagent/mail-statement-parser），故放配置而非硬编码。
+_cfg = load_config() or {}
+BILLING_SCRIPT_DIR = _cfg.get("billing", {}).get("script_dir", "/home/liteagent/mail-statement-parser")
 MAIL_CLIENT_PY = os.path.join(BILLING_SCRIPT_DIR, "mail_client.py")
 
 def _run_billing_cmd(cmd_args: list, timeout=60) -> str:
