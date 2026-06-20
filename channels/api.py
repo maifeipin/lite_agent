@@ -21,9 +21,11 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _auth(self) -> bool:
+        import os
         auth_token = self.server.api_server.auth_token
         guest_token = self.server.api_server.config.get("guest_token", "")
-        edge_token = self.server.api_server.config.get("edge_token", "")
+        # The edge_token is at the root config, so we can check os.environ directly since it's mapped from .env
+        edge_token = os.environ.get("EDGE_TOKEN", "")
         self.is_guest = False
         self.is_edge = False
         
