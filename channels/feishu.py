@@ -202,15 +202,24 @@ class FeishuChannel(BaseChannel):
         self._reply_card(message_id, response.title, response.text, response.color)
         return True
 
-    def send_to(self, open_id: str, response: AgentResponse) -> bool:
+    def send_to(self, receive_id: str, response: AgentResponse) -> bool:
+        """主动发送消息到指定 receive_id。
+
+        receive_id 可能是 群会话id (oc_...) 或 用户open_id (ou_...), 根据前缀选 receive_id_type。
+        (修复: 原硬编码 open_id, 导致 _push_result 传群 chat_id(oc_) 时飞书 API 报 invalid receive_id)
+        """
+        if receive_id and receive_id.startswith('oc_'):
+            receive_id_type = "chat_id"
+        else:
+            receive_id_type = "open_id"
         card_json = self._build_card(response.title, response.text, response.color)
         try:
             request = (
                 lark.api.im.v1.CreateMessageRequest.builder()
-                .receive_id_type("open_id")
+                .receive_id_type(receive_id_type)
                 .request_body(
                     lark.api.im.v1.CreateMessageRequestBody.builder()
-                    .receive_id(open_id)
+                    .receive_id(receive_id)
                     .msg_type("interactive")
                     .content(card_json)
                     .build()
@@ -220,7 +229,7 @@ class FeishuChannel(BaseChannel):
             res = self.lark_client.im.v1.message.create(request)
             return res.success()
         except Exception as e:
-            print(f"  ❌ 飞书发送给 {open_id} 失败: {e}")
+            print(f"  ❌ 飞书发送给 {receive_id} 失败: {e}")
             return False
     
     def _reply_card(self, message_id: str, title: str, content: str, color: str = 'blue'):

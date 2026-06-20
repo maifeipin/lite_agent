@@ -28,6 +28,15 @@ class BaseChannel(ABC):
         参数: (message_id_or_data, status_text)
         子类可覆盖实现"""
         return False
+
+    def push_result(self, msg, response) -> bool:
+        """异步推送编排任务最终结果 (DAG _push_result 调用)。
+
+        与 send_to/send_response 不同, 此方法收到完整 IncomingMessage,
+        可使用 msg.channel_payload 里保存的原始通道上下文 (如钉钉 sessionWebhook)
+        完成异步推送。子类按需覆盖; 默认返回 False 由调用方回退到 send_to/send_response。
+        """
+        return False
     
     def format_card(self, title: str, content: str, color: str = 'blue') -> str:
         """将回复格式化为平台特定的卡片格式（子类可覆盖）"""

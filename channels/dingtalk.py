@@ -45,7 +45,8 @@ class DingTalkChannel(BaseChannel):
                 chat_id='',
                 message_id=msg_id,
                 text=text,
-                is_guest=is_guest
+                is_guest=is_guest,
+                channel_payload={'msg_data': msg_data}  # 供异步 push_result 取 sessionWebhook
             )
 
             from channels import smart_truncate
@@ -166,6 +167,15 @@ class DingTalkChannel(BaseChannel):
             print(f"❌ [DingTalk] 回复失败: {e}")
             return False
         return False
+
+    def push_result(self, msg, response: AgentResponse) -> bool:
+        """异步推送 DAG 编排结果 (修复: 用 channel_payload 里的 msg_data 取 sessionWebhook,
+        而非把 message_id(str) 当 dict 传给 send_response)。"""
+        msg_data = (msg.channel_payload or {}).get('msg_data')
+        if not msg_data:
+            print("  ⚠️ [DingTalk] push_result 缺少 msg_data (channel_payload 未携带), 无法异步推送")
+            return False
+        return self.send_response(msg_data, response)
 
     def broadcast(self, response: AgentResponse) -> bool:
         """从会话库中查询所有活跃钉钉用户并主动广播 (oToMessages/batchSend)"""

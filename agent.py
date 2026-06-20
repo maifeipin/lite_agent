@@ -59,7 +59,8 @@ class IncomingMessage:
     """从通道层传入的标准化消息"""
 
     def __init__(self, channel: str, user_id: str, chat_id: str,
-                 message_id: str, text: str, notify_channels: list = None, is_guest: bool = False, sync_mode: bool = False):
+                 message_id: str, text: str, notify_channels: list = None, is_guest: bool = False, sync_mode: bool = False,
+                 channel_payload: dict = None):
         self.channel = channel
         self.user_id = user_id
         self.chat_id = chat_id
@@ -69,6 +70,9 @@ class IncomingMessage:
         self.is_guest = is_guest
         self.sync_mode = sync_mode
         self.sync_mode = sync_mode
+        # channel_payload: 通道层原始上下文, 供异步推送 (_push_result/send_progress) 使用
+        # 如 钉钉的 msg_data(含sessionWebhook)、飞书的 sender open_id 等。默认 None 向后兼容。
+        self.channel_payload = channel_payload or {}
 
     @property
     def session_key(self) -> str:
@@ -765,6 +769,10 @@ class Agent:
             if msg.notify_channels is not None and ch.name not in msg.notify_channels:
                 continue
             try:
+                # 优先用 push_result (携带 channel_payload, 解决异步推送上下文丢失)
+                if hasattr(ch, 'push_result'):
+                    if ch.push_result(msg, response):
+                        continue
                 if hasattr(ch, 'send_to'):
                     ch.send_to(msg.chat_id, response)
                 elif hasattr(ch, 'send_response'):
