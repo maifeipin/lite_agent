@@ -57,6 +57,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
             
         parsed_url = urlparse(self.path)
+        
+        # 边缘节点权限隔离：仅允许访问 /api/report
+        if getattr(self, 'is_edge', False) and parsed_url.path != '/api/report':
+            self.send_error(403, "Forbidden: Edge token is limited to /api/report")
+            return
+
         if parsed_url.path == '/api/v1/task/stream':
             self._handle_task_stream(parsed_url.query)
         elif parsed_url.path == '/v1/models':
@@ -168,8 +174,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
             
         import os
-        from config_loader import load_config
-        project_root = load_config().get('project_root', os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         report_dir = os.path.join(project_root, 'data', 'sentinel', 'edge_reports')
         os.makedirs(report_dir, exist_ok=True)
         
