@@ -2,6 +2,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import json
 import uuid
+import time
 import concurrent.futures
 from pydantic import BaseModel, Field
 from typing import List, Dict, Literal, Optional
@@ -150,10 +151,12 @@ def _calculate_std_dev(scores: List[float]) -> float:
     description='多模型评判委员会引擎。用于对复杂报告、需求或商业行动进行多专家并行评分与盲审。',
     params={
         'task_type': {'type': 'string', 'description': '评估的任务类型，如果没有指定请传 default', 'default': 'default'},
-        'topic': {'type': 'string', 'description': '需要交给委员会进行评估的议题数据'}
+        'topic': {'type': 'string', 'description': '需要交给委员会进行评估的议题数据'},
+        'session_id': {'type': 'string', 'description': '可选。会话标识，用于把本次表决挂靠到整体会话链路。不传则不绑定会话。', 'default': ''},
+        'trace_id': {'type': 'string', 'description': '可选。调用链路标识（如 DAG task_id）。传了则审计归入该 trace 目录，便于聚合同一链路的多次表决。', 'default': ''}
     }
 )
-def ops_decision(task_type: str, topic: str) -> str:
+def ops_decision(task_type: str, topic: str, session_id: str = '', trace_id: str = '') -> str:
     router = ModelRouter(load_config())
     models = _get_models_from_config()
     if not models:
@@ -192,14 +195,20 @@ def ops_decision(task_type: str, topic: str) -> str:
     audit_data = {
         "run_id": run_id,
         "task_type": task_type,
+        "trace_id": trace_id or "",
+        "session_id": session_id or "",
+        "created_at": time.time(),
         "profile": profile,
         "brief": brief,
         "results": {k: (v["res"].model_dump() if "res" in v else v) for k, v in results.items()}
     }
     project_root = load_config().get("project_root", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    data_dir = os.path.join(project_root, "data", "committee")
-    os.makedirs(data_dir, exist_ok=True)
-    audit_path = os.path.join(data_dir, f"audit_{run_id}.json")
+    # 三层目录: data/committee/{task_type}/{trace_id or 'no_trace'}/{run_id}/audit.json
+    # trace_id 把同一调用链路的多次表决聚到一起; 无 trace_id 归入 no_trace
+    trace_dir = trace_id.strip() or "no_trace"
+    audit_dir = os.path.join(project_root, "data", "committee", task_type, trace_dir, run_id)
+    os.makedirs(audit_dir, exist_ok=True)
+    audit_path = os.path.join(audit_dir, "audit.json")
     with open(audit_path, "w", encoding="utf-8") as f:
         json.dump(audit_data, f, ensure_ascii=False, indent=2)
         
