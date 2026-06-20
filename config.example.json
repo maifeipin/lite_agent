@@ -62,7 +62,7 @@
             "/root/script",
             "/root/cert",
             "/root/alert",
-            "/root/mail-statement-parser"
+            "/home/liteagent/mail-statement-parser"
         ],
         "blocked_commands": [
             "rm -rf /",
@@ -110,6 +110,9 @@
     "rssdb": {
         "uri": "${RSSDB_URI}",
         "database": "rsslite"
+    },
+    "billing": {
+        "script_dir": "/home/liteagent/mail-statement-parser"
     },
     "v2ex": {
         "token": "${V2EX_TOKEN}"
