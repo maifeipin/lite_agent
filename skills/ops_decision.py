@@ -98,7 +98,7 @@ def _call_model(router: ModelRouter, model_name: str, prompt: str, schema_cls) -
             res = client.models.generate_content(
                 model=model_id,
                 contents=sys_prompt + "\n\n" + prompt,
-                config={"timeout": 45000} # Provide Gemini SDK timeout to avoid hanging
+                config={"response_mime_type": "application/json"} 
             )
             return res.text
         else:
@@ -108,8 +108,8 @@ def _call_model(router: ModelRouter, model_name: str, prompt: str, schema_cls) -
                     {"role": "system", "content": sys_prompt},
                     {"role": "user", "content": prompt}
                 ],
-                response_format={"type": "json_object"},
-                timeout=45
+                response_format={"type": "json_object"},  # Doubao/OpenAI 兼容接口需显式强制 JSON
+                timeout=60
             )
             return response.choices[0].message.content
     except Exception as e:
