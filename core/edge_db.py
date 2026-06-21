@@ -15,7 +15,7 @@ import sqlite3
 import time
 from datetime import datetime, timedelta
 
-_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+from core.constants import PROJECT_ROOT as _PROJECT_ROOT
 _DB_PATH = os.path.join(_PROJECT_ROOT, "data", "sentinel", "edge_tasks.db")
 _DEFAULT_TIMEOUT_MIN = 10
 
