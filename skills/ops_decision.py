@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from typing import List, Dict, Literal, Optional
 from skill_engine import skill
 from config_loader import load_config
-from model_router import ModelRouter
+from core.model_router import ModelRouter
 
 # =========================================================
 # 1. Schema 定义 (稳定输出协议)

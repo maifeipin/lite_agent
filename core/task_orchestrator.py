@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Callable, Optional
 
 from openai import OpenAI
-from model_router import ModelRouter
+from core.model_router import ModelRouter
 from worker_agent import WorkerAgent
 from skill_engine import SkillEngine
 from subtask_dag import Subtask, SubtaskDAG, SubtaskType, SubtaskStatus
