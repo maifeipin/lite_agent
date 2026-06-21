@@ -167,6 +167,7 @@ class TaskOrchestrator:
     # ==================================================================
     def _classify_and_route(self, subtasks: list[Subtask]):
         print(f"  [ORCH:ROUTE] 模型路由中... {len(subtasks)} 个子任务")
+        valid_names = self.skill_engine.get_all_names()
         for s in subtasks:
             model_name, client, tool_filter = self.router.route(s.type.value)
             s.assigned_model = model_name
@@ -179,6 +180,14 @@ class TaskOrchestrator:
                 for t in (s.tools or []):
                     if t not in merged:
                         merged.append(t)
+                # 校验: 剔除 planner/route_rule 里不存在于技能注册表的假名
+                # (planner 常凭语义脑补 "ops_security_audit" 等不存在的技能名,
+                #  假名占 allowlist 名额却调不动, 还可能让 worker 误判缺工具)。
+                # 同时 route_rule 的工具也校验 (防 config 配错)。
+                invalid = [t for t in merged if t not in valid_names]
+                if invalid:
+                    print(f"  ⚠️ [{s.id}] 剔除非注册技能名: {invalid}")
+                    merged = [t for t in merged if t in valid_names]
                 s.tools = merged
             tools_str = f" tools={s.tools}" if s.tools else ""
             print(f"  [ORCH:ROUTE]   {s.id} type={s.type.value} → model={model_name}{tools_str}")

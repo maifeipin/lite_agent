@@ -162,6 +162,10 @@ class SkillEngine:
         """返回所有已注册技能的 OpenAI Tool Schema 列表"""
         return [info["schema"] for info in _skill_registry.values()]
 
+    def get_all_names(self) -> set:
+        """返回所有已注册技能名集合 (供 planner tools_hint 校验用)。"""
+        return set(_skill_registry.keys())
+
     def get_guest_schemas(self) -> List[Dict]:
         """返回所有已注册且 guest_ok=True 的技能 OpenAI Tool Schema 列表"""
         return [info["schema"] for info in _skill_registry.values() if info.get("guest_ok")]
