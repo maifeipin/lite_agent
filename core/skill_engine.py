@@ -10,7 +10,8 @@ import importlib
 import traceback
 from typing import Any, Dict, List, Optional
 
-AUDIT_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'workspace', 'audit.log')
+from core.constants import PROJECT_ROOT
+AUDIT_LOG = os.path.join(PROJECT_ROOT, 'workspace', 'audit.log')
 
 # 工具结果最大长度（字符）。超过则保留头尾、丢弃中段，避免单个工具返回撑爆 LLM 上下文
 # 12000 字符 ≈ 中文 ~4000 token / 英文 ~3000 token，留足后续轮次空间
@@ -121,8 +122,8 @@ class SkillEngine:
 
     def __init__(self, skills_dir: str = None):
         if skills_dir is None:
-            base = os.path.dirname(os.path.abspath(__file__))
-            skills_dir = os.path.join(base, "skills")
+            from core.constants import PROJECT_ROOT
+            skills_dir = os.path.join(PROJECT_ROOT, "skills")
         self.skills_dir = skills_dir
         self._load_skills()
 
