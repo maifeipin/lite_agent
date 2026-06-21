@@ -21,7 +21,7 @@ PLANNER_PROMPT = """你是一个任务编排专家。请将以下用户目标拆
 
 请输出严格的 JSON，格式如下:
 {{
-  "global_strategy": "本次任务的全局战略描述 (StraTA 范式): 关键路径是什么、哪些子任务可以并行、遇到什么情况应该 fallback、各子任务之间如何衔接。这段战略会被注入到每一个 Worker 的系统提示中, 确保所有执行者对齐目标不跑偏。",
+  "global_strategy": "本次任务的全局战略描述。请简明扼要，控制在200字以内。",
   "subtasks": [
     {{
       "id": "sub_1",
@@ -119,7 +119,7 @@ class TaskOrchestrator:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,
                 max_tokens=4096,
-                timeout=60.0,
+                timeout=120.0,
             )
             print(f"  ✅ [LLM Response] 耗时: {time.time()-start_t:.2f}s, Tokens: {response.usage.total_tokens if response.usage else 0}")
             raw = response.choices[0].message.content
