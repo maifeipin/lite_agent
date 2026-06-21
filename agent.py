@@ -920,8 +920,6 @@ class Agent:
             kwargs["stream_options"] = {"include_usage": True}
 
             print(f"  🧠 [LLM Stream] 角色: SyncAgent, 模型: {self.model}, 步骤: {step+1}/{self.max_steps}")
-            import time
-            import traceback
             start_t = time.time()
 
             try:
