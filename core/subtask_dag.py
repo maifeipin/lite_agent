@@ -31,6 +31,7 @@ class Subtask:
     status: SubtaskStatus = SubtaskStatus.PENDING
     result: str = ""
     error: str = ""
+    tool_results: list = field(default_factory=list)
     token_usage: int = 0
     steps_used: int = 0
     started_at: float = 0.0
@@ -149,6 +150,7 @@ class SubtaskDAG:
                 "assigned_model": s.assigned_model,
                 "status": s.status.value,
                 "result": s.result[:1000] if s.result else "",
+                "tool_results": [{"name": tr.get("name"), "args": tr.get("args"), "result": (tr.get("result", "")[:1000] if tr.get("result") else "")} for tr in s.tool_results] if s.tool_results else [],
                 "error": s.error,
                 "token_usage": s.token_usage,
                 "steps_used": s.steps_used,
@@ -185,6 +187,7 @@ class SubtaskDAG:
                 status=SubtaskStatus(item.get("status", "pending")),
                 result=item.get("result", ""),
                 error=item.get("error", ""),
+                tool_results=item.get("tool_results", []),
                 token_usage=item.get("token_usage", 0),
                 steps_used=item.get("steps_used", 0),
             ))

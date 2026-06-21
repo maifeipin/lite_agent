@@ -288,7 +288,10 @@ class TaskOrchestrator:
                 for dep in subtask.depends_on:
                     dep_node = dag.subtasks.get(dep)
                     if dep_node and dep_node.result:
-                        upstream[dep] = dep_node.result
+                        upstream[dep] = {
+                            "result": dep_node.result,
+                            "tool_results": dep_node.tool_results or []
+                        }
 
                 future = self.executor.submit(
                     self._run_single_subtask,
@@ -302,6 +305,7 @@ class TaskOrchestrator:
                 node = dag.subtasks.get(sid)
                 if node:
                     node.result = result["result"]
+                    node.tool_results = result.get("tool_results", [])
                     node.status = SubtaskStatus(result["status"])
                     node.error = result.get("error", "")
                     node.token_usage = result.get("token_usage", 0)
@@ -353,13 +357,14 @@ class TaskOrchestrator:
                 tools_allowlist=subtask.tools if subtask.tools else None,
                 provider=self.router.get_provider(subtask.assigned_model),
             )
-            result_text = worker.run(subtask, upstream,
+            result_text, tool_results = worker.run(subtask, upstream,
                                      goal=goal, global_strategy=global_strategy)
             subtask.finished_at = time.time()
 
             with lock:
                 results[subtask.id] = {
                     "result": result_text,
+                    "tool_results": tool_results,
                     "status": "done",
                     "token_usage": subtask.token_usage,
                     "steps_used": subtask.steps_used,
@@ -385,12 +390,13 @@ class TaskOrchestrator:
                         tools_allowlist=subtask.tools if subtask.tools else None,
                         provider=self.router.get_provider(fb_name),
                     )
-                    result_text = worker_fb.run(subtask, upstream,
+                    result_text, tool_results = worker_fb.run(subtask, upstream,
                                                 goal=goal, global_strategy=global_strategy)
                     subtask.finished_at = time.time()
                     with lock:
                         results[subtask.id] = {
                             "result": result_text,
+                            "tool_results": tool_results,
                             "status": "done",
                             "token_usage": subtask.token_usage,
                             "steps_used": subtask.steps_used,
@@ -403,6 +409,7 @@ class TaskOrchestrator:
             with lock:
                 results[subtask.id] = {
                     "result": "",
+                    "tool_results": [],
                     "status": "failed",
                     "error": error_text,
                     "token_usage": subtask.token_usage,
