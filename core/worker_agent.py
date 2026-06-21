@@ -250,11 +250,22 @@ class WorkerAgent:
         for step in range(self.max_steps):
             try:
                 subtask.steps_used += 1
-                response = self.client.models.generate_content(
-                    model=gemini_model,
-                    contents=contents,
-                    config=generate_config,
-                )
+                max_retries = 3
+                response = None
+                for attempt in range(max_retries):
+                    try:
+                        response = self.client.models.generate_content(
+                            model=gemini_model,
+                            contents=contents,
+                            config=generate_config,
+                        )
+                        break
+                    except Exception as e:
+                        if "429" in str(e) and attempt < max_retries - 1:
+                            print(f"  ⚠️ [Rate Limit] {self.name} hit 429, sleeping 35s...")
+                            time.sleep(35)
+                        else:
+                            raise
             except Exception as e:
                 traceback.print_exc()
                 return f"❌ Gemini 调用失败: {e}"
