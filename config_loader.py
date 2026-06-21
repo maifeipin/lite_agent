@@ -6,12 +6,15 @@ import sqlite3
 import time
 import copy
 import logging
+import tempfile
 
 _base_cache = None
 _sqlite_cache = {}
 _sqlite_ttl = 0
 _merged_cache = None
 _merged_ttl = 0
+
+SENSITIVE_SEGS = {'api_key', 'apikey', 'token', 'secret', 'password', 'passwd', 'credential', 'authorization', 'private_key', 'webhook'}
 
 def load_env():
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
@@ -105,8 +108,6 @@ def _get_sqlite_overrides():
             if cursor.fetchone():
                 cursor.execute("SELECT key, value FROM settings")
                 
-                SENSITIVE_SEGS = {'api_key', 'apikey', 'token', 'secret', 'password', 'passwd', 'credential', 'authorization', 'private_key', 'webhook'}
-                
                 for k, v in cursor.fetchall():
                     # 核心安全红线: 分段精确判断，屏蔽一切对 edge 的重写
                     if any(seg == 'edge' for seg in k.split('.')):
@@ -151,3 +152,109 @@ def load_config():
     _merged_cache = _deep_merge(base, overrides)
     _merged_ttl = now + 5.0
     return _merged_cache
+
+def bust_base_cache():
+    """使 _base_cache 失效，下次加载时重新读取 config.json 和 conf.d/"""
+    global _base_cache, _merged_ttl
+    _base_cache = None
+    _merged_ttl = 0
+
+def _init_db():
+    db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'settings.db')
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    conn = sqlite3.connect(db_path, timeout=5.0)
+    cursor = conn.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT
+                    )''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS audit_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        action TEXT,
+                        target_key TEXT,
+                        old_value TEXT,
+                        new_value TEXT,
+                        operator TEXT,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )''')
+    conn.commit()
+    conn.close()
+    return db_path
+
+def write_setting(key: str, value: any, operator: str = "system") -> bool:
+    """更新 SQLite 配置，附带安全审计与自动 TTL 驱逐。"""
+    if any(seg == 'edge' for seg in key.split('.')):
+        raise ValueError("Access to 'edge' configuration is strictly blocked by Security Red Line.")
+    if any(seg in SENSITIVE_SEGS for seg in key.split('.')):
+        raise ValueError(f"Writing to sensitive key '{key}' via SQLite is prohibited.")
+        
+    db_path = _init_db()
+    new_val_str = json.dumps(value, ensure_ascii=False)
+    
+    conn = sqlite3.connect(db_path, timeout=5.0)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("BEGIN TRANSACTION")
+        
+        cursor.execute("SELECT value FROM settings WHERE key=?", (key,))
+        row = cursor.fetchone()
+        old_val_str = row[0] if row else None
+        
+        cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, new_val_str))
+        
+        cursor.execute("""
+            INSERT INTO audit_log (action, target_key, old_value, new_value, operator)
+            VALUES (?, ?, ?, ?, ?)
+        """, ('WRITE_SQLITE', key, old_val_str, new_val_str, operator))
+        
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        conn.close()
+        
+    global _sqlite_ttl, _merged_ttl
+    _sqlite_ttl = 0
+    _merged_ttl = 0
+    return True
+
+def write_conf_d(module_name: str, data: dict, operator: str = "system") -> bool:
+    """将字典原子化写入 conf.d/{module_name}.json。"""
+    if module_name == 'edge':
+        raise ValueError("Module 'edge' is protected and cannot be written via Web UI.")
+        
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    conf_d_path = os.path.join(base_dir, 'conf.d')
+    os.makedirs(conf_d_path, exist_ok=True)
+    
+    target_path = os.path.join(conf_d_path, f"{module_name}.json")
+    new_val_str = json.dumps(data, indent=4, ensure_ascii=False)
+    
+    old_val_str = None
+    if os.path.exists(target_path):
+        try:
+            with open(target_path, 'r', encoding='utf-8') as f:
+                old_val_str = f.read()
+        except Exception:
+            pass
+            
+    fd, tmp_path = tempfile.mkstemp(dir=conf_d_path, prefix=f"{module_name}_", suffix=".tmp", text=True)
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        f.write(new_val_str)
+    os.replace(tmp_path, target_path)
+    
+    try:
+        db_path = _init_db()
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn.execute("""
+            INSERT INTO audit_log (action, target_key, old_value, new_value, operator)
+            VALUES (?, ?, ?, ?, ?)
+        """, ('WRITE_CONFD', module_name, old_val_str, new_val_str, operator))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logging.warning(f"Failed to write audit_log for conf_d: {e}")
+        
+    bust_base_cache()
+    return True
