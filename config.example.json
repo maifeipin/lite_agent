@@ -165,6 +165,11 @@
     "v2ex": {
         "token": "${V2EX_TOKEN}"
     },
+    "fleet": {
+        "nodes": ["vps2", "vps3", "bwg", "oracle1", "vps5"],
+        "sync_wait_sec": 70,
+        "task_timeout_min": 15
+    },
     "project_root": "/home/liteagent/lite_agent",
     "cron_jobs": [
         {

@@ -21,14 +21,17 @@ from edge_node import edge_whitelist
 
 _cfg = load_config() or {}
 _edge_cfg = _cfg.get("edge", {})
+_fleet_cfg = _cfg.get("fleet", {})
 _whitelist = _edge_cfg.get("whitelist") or edge_whitelist.DEFAULT_WHITELIST
-_NODES = _edge_cfg.get("nodes") or ["vps2", "vps3", "bwg", "oracle1", "vps5"]
+_NODES = _fleet_cfg.get("nodes") or ["vps2", "vps3", "bwg", "oracle1", "vps5"]
 
 # 确定性安全巡检清单 (必须完全符合 config.json / whitelist.json 的限制)
+# 注意: 边缘 cron 每分钟只 claim 1 条任务(见 edge_db.claim_task LIMIT 1),
+# 故 N 条命令 = 至少 N×60s 才能全部拉完。轮询时限必须 > len(COMMANDS)*60。
+# 删除了 free -m (内存信息价值低于其他项, 省一个拉取周期)。
 COMMANDS = [
     "w",
     "df -h",
-    "free -m",
     "ss -tunlp",
     "journalctl -u ssh --since \"2 hours ago\" --no-pager",
     "journalctl -u sshd --since \"2 hours ago\" --no-pager"
@@ -36,7 +39,7 @@ COMMANDS = [
 
 @skill(
     name='fleet_audit',
-    description='对所有边缘节点执行批量确定性安全巡检，并发获取网络、进程、会话和日志快照。自动轮询等待（1-3分钟），耗时极少Token。',
+    description='对所有边缘节点执行批量确定性安全巡检，并发获取网络、进程、会话和日志快照。自动轮询等待（最长7分钟），耗时极少Token。',
     params={},
     tags=['security', 'sysadmin']
 )
@@ -70,11 +73,11 @@ def fleet_audit() -> str:
     if not task_map:
         return "❌ 没有符合白名单的命令下发。"
 
-    # 2. 长轮询等待结果 (最长 150 秒, 足以覆盖 cron 60s + 边缘顺序执行耗时)
+    # 2. 长轮询等待结果 (最长 420 秒, 足以覆盖异常重试和慢速命令)
     start_time = time.time()
-    deadline = start_time + 150
+    deadline = start_time + 420
     
-    print(f"  [FleetAudit] 开始长轮询等待结果，最长 150s (零Token消耗)...")
+    print(f"  [FleetAudit] 开始长轮询等待结果，最长 420s (零Token消耗)...")
     
     while time.time() < deadline:
         all_done = True
@@ -110,7 +113,9 @@ def fleet_audit() -> str:
             else:
                 node_results[node].append(f"### `$ {cmd}`\n```\n{text.strip()[:8000]}\n```") # 防单输出过大
         else:
-            node_results[node].append(f"### `$ {cmd}`\n> ⚠️ 执行超时 (状态: {status})")
+            # 注意: 超时≠节点故障。最常见原因是边缘 cron 尚未拉取到该任务(每分钟1条)。
+            # 明确标注"非节点故障", 防止 LLM 误判为节点异常/无法巡检。
+            node_results[node].append(f"### `$ {cmd}`\n> ⏳ 轮询超时未回传 (状态: {status}, 非节点故障, 多为 cron 未拉取到该任务, 可重试)")
 
     # 4. 格式化报告返回
     report = ["# 🛡️ Fleet Audit 全网边缘节点安全快照\n"]

@@ -26,9 +26,10 @@ from edge_node import edge_whitelist
 
 _cfg = load_config() or {}
 _edge_cfg = _cfg.get("edge", {})
+_fleet_cfg = _cfg.get("fleet", {})
 _whitelist = _edge_cfg.get("whitelist") or edge_whitelist.DEFAULT_WHITELIST
-_sync_wait_sec = int(_edge_cfg.get("sync_wait_sec", 70))
-_NODES = _edge_cfg.get("nodes") or ["vps2", "vps3", "bwg", "oracle1", "vps5"]
+_sync_wait_sec = int(_fleet_cfg.get("sync_wait_sec", 70))
+_NODES = _fleet_cfg.get("nodes") or ["vps2", "vps3", "bwg", "oracle1", "vps5"]
 
 
 @skill(
@@ -121,8 +122,8 @@ def edge_query(task_id: str) -> str:
     tags=['system']
 )
 def edge_sweep() -> str:
-    # default timeout from edge_cfg or edge_db
-    timeout_min = _edge_cfg.get("task_timeout_min", edge_db._DEFAULT_TIMEOUT_MIN)
+    # default timeout from fleet_cfg or edge_db
+    timeout_min = _fleet_cfg.get("task_timeout_min", edge_db._DEFAULT_TIMEOUT_MIN)
     n = edge_db.sweep_timeouts(timeout_min)
     if n > 0:
         return f"✅ 成功回收 {n} 个超时 Edge 任务回 pending 状态。"
