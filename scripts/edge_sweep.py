@@ -13,7 +13,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import edge_db
+from core import edge_db
 
 if __name__ == "__main__":
     n = edge_db.sweep_timeouts(edge_db._DEFAULT_TIMEOUT_MIN)

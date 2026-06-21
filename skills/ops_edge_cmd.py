@@ -20,9 +20,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.skill_engine import skill
 from core.config_loader import load_config
-import edge_crypto
-import edge_db
-import edge_whitelist
+from edge_node import edge_crypto
+from core import edge_db
+from edge_node import edge_whitelist
 
 _cfg = load_config() or {}
 _edge_cfg = _cfg.get("edge", {})

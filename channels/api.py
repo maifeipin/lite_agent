@@ -227,7 +227,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         """边缘节点拉取下发任务: GET /api/pull_task?node=<node_id>。
 
         拉取即 dispatched (原子 claim), 返回验签执行所需 payload 或 {task: null}。"""
-        import edge_db
+        from core import edge_db
         qs = parse_qs(query)
         node = (qs.get('node', [None])[0] or '').strip()
         if not node:
@@ -250,7 +250,7 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def _handle_task_result(self):
         """边缘回传执行结果: POST /api/task_result {task_id, exit_code, stdout, stderr}。"""
-        import edge_db
+        from core import edge_db
         body = self._read_json()
         if body is None:
             return
@@ -272,7 +272,7 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         cmd 写入后不可变 (id 冲突报 409)。仅接受 key_tier=root。"""
         import uuid
-        import edge_db
+        from core import edge_db
         if getattr(self, 'is_edge', False) or getattr(self, 'is_guest', False):
             self.send_error(403, "Forbidden: admin only")
             return

@@ -140,7 +140,7 @@
         "script_dir": "/home/liteagent/mail-statement-parser"
     },
     "edge": {
-        "_comment": "Edge Sentinel 阶段二下行指令。密钥(EDGE_HOT_PRIV_KEY/EDGE_HOT_PUBKEY/EDGE_ROOT_PUBKEY)与 EDGE_TOKEN 均在 .env, 不在此处。whitelist 与边缘 /opt/edge_sentinel/whitelist.json 必须一致。",
+        "_comment": "Edge Sentinel 阶段二下行指令。密钥(EDGE_HOT_PRIV_KEY/EDGE_HOT_PUBKEY/EDGE_ROOT_PUBKEY)与 EDGE_TOKEN 均在 .env, 不在此处。whitelist 与边缘 /opt/edge_sentinel/whitelist.json 必须一致 (可参考 edge_node/whitelist.json)。",
         "pull_enabled": true,
         "task_timeout_min": 10,
         "sync_wait_sec": 70,

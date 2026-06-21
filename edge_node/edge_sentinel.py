@@ -26,8 +26,6 @@ import subprocess
 import urllib.request
 from datetime import datetime, timedelta
 
-# 让本目录的 edge_crypto / edge_whitelist 可 import (边缘部署同目录)
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import edge_crypto  # noqa: E402
 import edge_whitelist  # noqa: E402
 
