@@ -118,4 +118,9 @@ DEFAULT_WHITELIST = [
     },
     {"cmd": "ss", "allow_args": ["-tlnp", "-tunlp"]},
     {"cmd": "systemctl", "allow_args": ["status"], "allow_if": ["ssh", "sshd", "fail2ban"], "value_flags": []},
+    {"cmd": "crontab", "allow_args": ["-l"]},
+    {"cmd": "sha256sum", "allow_args": [], "allow_files": ["/etc/passwd", "/etc/ssh/sshd_config", "/root/.ssh/authorized_keys", "/opt/edge_sentinel/whitelist.json"]},
+    {"cmd": "md5sum", "allow_args": [], "allow_files": ["/etc/passwd", "/etc/ssh/sshd_config", "/root/.ssh/authorized_keys", "/opt/edge_sentinel/whitelist.json"]},
+    {"cmd": "tail", "allow_args": ["-n", "10", "20", "50", "100", "-f"], "allow_files": ["/var/log/auth.log", "/var/log/secure", "/var/log/syslog"]},
+    {"cmd": "ls", "allow_args": ["-l", "-la", "-al", "-h", "-t", "-r"], "allow_files": ["/opt/edge_sentinel", "/var/log", "/etc/ssh"]}
 ]

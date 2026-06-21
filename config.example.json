@@ -154,7 +154,12 @@
             {"cmd": "cat", "allow_args": [], "allow_files": ["/var/log/auth.log", "/var/log/secure", "/etc/ssh/sshd_config"]},
             {"cmd": "journalctl", "allow_args": ["--no-pager", "-n", "today", "yesterday", "1 hour ago", "2 hours ago"], "allow_if": ["ssh", "sshd"], "value_flags": ["-u", "--since", "--unit", "-n"]},
             {"cmd": "ss", "allow_args": ["-tlnp", "-tunlp"]},
-            {"cmd": "systemctl", "allow_args": ["status"], "allow_if": ["ssh", "sshd", "fail2ban"], "value_flags": []}
+            {"cmd": "systemctl", "allow_args": ["status"], "allow_if": ["ssh", "sshd", "fail2ban"], "value_flags": []},
+            {"cmd": "crontab", "allow_args": ["-l"]},
+            {"cmd": "sha256sum", "allow_args": [], "allow_files": ["/etc/passwd", "/etc/ssh/sshd_config", "/root/.ssh/authorized_keys", "/opt/edge_sentinel/whitelist.json"]},
+            {"cmd": "md5sum", "allow_args": [], "allow_files": ["/etc/passwd", "/etc/ssh/sshd_config", "/root/.ssh/authorized_keys", "/opt/edge_sentinel/whitelist.json"]},
+            {"cmd": "tail", "allow_args": ["-n", "10", "20", "50", "100", "-f"], "allow_files": ["/var/log/auth.log", "/var/log/secure", "/var/log/syslog"]},
+            {"cmd": "ls", "allow_args": ["-l", "-la", "-al", "-h", "-t", "-r"], "allow_files": ["/opt/edge_sentinel", "/var/log", "/etc/ssh"]}
         ]
     },
     "v2ex": {
