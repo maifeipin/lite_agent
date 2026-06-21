@@ -76,6 +76,7 @@ def fleet_audit() -> str:
     # 2. 长轮询等待结果 (最长 420 秒, 足以覆盖异常重试和慢速命令)
     start_time = time.time()
     deadline = start_time + 420
+    last_sweep_time = start_time
     
     print(f"  [FleetAudit] 开始长轮询等待结果，最长 420s (零Token消耗)...")
     
@@ -92,6 +93,15 @@ def fleet_audit() -> str:
         
         if all_done:
             break
+            
+        if time.time() - last_sweep_time >= 120:
+            from skills.ops_edge_cmd import edge_sweep
+            sweep_res = edge_sweep()
+            if sweep_res:
+                # Replace newlines with spaces for single-line log
+                print(f"  [FleetAudit] 触发主动自愈: {sweep_res.replace(chr(10), ' ')}")
+            last_sweep_time = time.time()
+
         time.sleep(2)
         
     duration = time.time() - start_time

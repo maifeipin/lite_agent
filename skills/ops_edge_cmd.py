@@ -117,15 +117,37 @@ def edge_query(task_id: str) -> str:
 
 @skill(
     name='edge_sweep',
-    description='清理 Edge Sentinel 超时任务，将超时未 ack 的任务状态重置。供内部 Cron 调用。',
+    description='清理 Edge Sentinel 超时任务，将超时未 ack 的任务重新签名重传，超限则标记失联。',
     params={},
     tags=['system']
 )
 def edge_sweep() -> str:
-    # default timeout from fleet_cfg or edge_db
-    timeout_min = _fleet_cfg.get("task_timeout_min", edge_db._DEFAULT_TIMEOUT_MIN)
-    n = edge_db.sweep_timeouts(timeout_min)
-    if n > 0:
-        return f"✅ 成功回收 {n} 个超时 Edge 任务回 pending 状态。"
-    # Return empty string to keep cron logs clean when nothing is swept
-    return ""
+    from datetime import datetime
+    retransmit_timeout_sec = _fleet_cfg.get("retransmit_timeout_sec", 120)
+    max_retries = _fleet_cfg.get("max_retries", 2)
+    hot_priv = os.environ.get("EDGE_HOT_PRIV_KEY", "")
+    
+    if not hot_priv:
+        return "❌ 无法执行 edge_sweep: 缺失 EDGE_HOT_PRIV_KEY"
+
+    stuck_tasks = edge_db.get_stuck_tasks(retransmit_timeout_sec)
+    if not stuck_tasks:
+        return ""
+        
+    retransmitted = 0
+    lost = 0
+    for task in stuck_tasks:
+        ts = str(int(time.time()))
+        sig = edge_crypto.sign_task(task["cmd"], ts, task["nonce"], hot_priv)
+        if edge_db.update_retransmitted_task(task["id"], ts, sig, max_retries):
+            retransmitted += 1
+        else:
+            lost += 1
+            
+    summary = []
+    if retransmitted > 0:
+        summary.append(f"✅ 成功重签并重传 {retransmitted} 个超时任务。")
+    if lost > 0:
+        summary.append(f"❌ {lost} 个任务重传超限，已标记为节点失联。")
+        
+    return "\n".join(summary)

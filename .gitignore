@@ -8,6 +8,9 @@ wheels/
 hf_cache/
 data/
 *.whl
+
+# Claude Code 工作目录 — 临时调试脚本/方案文档/本地设置, 绝不提交
+.claude/
 deploy*.sh
 
 # vps1-only deploy artifacts (含凭证) — 永不入仓库

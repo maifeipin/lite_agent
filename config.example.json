@@ -328,5 +328,9 @@
             }
         }
     },
-    "edge_token": "${EDGE_TOKEN}"
+    "edge_token": "${EDGE_TOKEN}",
+    "fleet": {
+        "retransmit_timeout_sec": 120,
+        "max_retries": 2
+    }
 }

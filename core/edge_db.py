@@ -6,7 +6,7 @@
 状态机: pending → dispatched → done/failed
   - claim_task: pull 时 pending→dispatched, 用 BEGIN IMMEDIATE 事务防多节点抢同一任务
   - submit_result: 收回传结果 → done/failed
-  - sweep_timeouts: dispatched 超 task_timeout_min 未 ack → 回 pending (nonce 不变, 防绕过去重)
+  - sweep_timeouts: (废弃) 改为 TCP-like 的 get_stuck_tasks + update_retransmitted_task
 nonce 不可变: 任务创建时固定 (hash(task_id)), 重新分发不换 nonce。
 """
 import json
@@ -17,7 +17,6 @@ from datetime import datetime, timedelta
 
 from core.constants import PROJECT_ROOT as _PROJECT_ROOT
 _DB_PATH = os.path.join(_PROJECT_ROOT, "data", "sentinel", "edge_tasks.db")
-_DEFAULT_TIMEOUT_MIN = 10
 
 
 def _conn() -> sqlite3.Connection:
@@ -52,6 +51,10 @@ def init_db():
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_edge_node_status ON edge_tasks(node, status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_edge_status_dispatched ON edge_tasks(status, dispatched_at)")
+        try:
+            conn.execute("ALTER TABLE edge_tasks ADD COLUMN retry_count INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # already exists
     finally:
         conn.close()
 
@@ -149,20 +152,55 @@ def list_pending(node: str = None) -> list:
         conn.close()
 
 
-def sweep_timeouts(timeout_min: int = _DEFAULT_TIMEOUT_MIN) -> int:
-    """dispatched 超 timeout_min 未 ack → 回 pending (nonce 不变)。
-
-    返回回收的任务数。由 cron 引擎定期调用。"""
+def get_stuck_tasks(timeout_sec: int) -> list:
+    """找出长时间 dispatched 却未收到 ack 的任务 (TCP 重传探测)"""
     init_db()
-    cutoff = (datetime.utcnow() - timedelta(minutes=timeout_min)).isoformat() + "Z"
+    cutoff = (datetime.utcnow() - timedelta(seconds=timeout_sec)).isoformat() + "Z"
     conn = _conn()
     try:
-        cur = conn.execute(
-            "UPDATE edge_tasks SET status='pending', dispatched_at=NULL "
-            "WHERE status='dispatched' AND dispatched_at < ?",
-            (cutoff,),
-        )
-        return cur.rowcount
+        rows = conn.execute(
+            "SELECT * FROM edge_tasks WHERE status='dispatched' AND dispatched_at < ?",
+            (cutoff,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def update_retransmitted_task(task_id: str, new_ts: str, new_sig: str, max_retries: int) -> bool:
+    """原子化更新重传任务。返回 True 表示重签并回退 pending 成功，返回 False 表示重传超限被判死刑。"""
+    init_db()
+    conn = _conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM edge_tasks WHERE id=? AND status='dispatched'",
+            (task_id,)
+        ).fetchone()
+        if not row:
+            conn.execute("COMMIT")
+            return False
+
+        row_dict = dict(row)
+        current_retry = row_dict.get("retry_count", 0) if row_dict.get("retry_count") is not None else 0
+        if current_retry < max_retries:
+            conn.execute(
+                "UPDATE edge_tasks SET status='pending', dispatched_at=NULL, ts=?, sig=?, retry_count=? WHERE id=?",
+                (new_ts, new_sig, current_retry + 1, task_id)
+            )
+            conn.execute("COMMIT")
+            return True
+        else:
+            result = json.dumps({"exit_code": -1, "stdout": "", "stderr": "节点失联，重传失败 (Lost Connection)"}, ensure_ascii=False)
+            conn.execute(
+                "UPDATE edge_tasks SET status='failed', result=?, done_at=? WHERE id=?",
+                (result, _now(), task_id)
+            )
+            conn.execute("COMMIT")
+            return False
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
     finally:
         conn.close()
 
