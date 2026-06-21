@@ -312,6 +312,9 @@ def _smart_deliver(result: dict, force_hedgedoc: bool = False) -> str:
     guest_ok=True,
     description="""网页剪藏工具（Playwright 真浏览器抓取）—— 处理 URL 转 Markdown 的首选工具。
 
+⚠️ 本工具只能**抓取 URL**（必须传 urls 参数）。抓取的网页 > 2500 字或含图时自动上传 HedgeDoc 返回链接，force_hedgedoc=True 可强制上传。
+**如果你要把已有文本/报告/Markdown 直接上传到 HedgeDoc（而非抓取网页），不要用本工具，改用 `hedgedoc_upload` 技能——它接受任意 markdown 内容直接上传。**
+
 ✅ 必须使用本工具的场景：
   • 微信公众号文章 (mp.weixin.qq.com) — 反爬墙必须绕过
   • 知乎问答 / 专栏 (zhihu.com / zhuanlan.zhihu.com) — 必须登录态
@@ -384,3 +387,40 @@ def web_clip(urls: str, screenshot: bool = False, force_hedgedoc: bool = False) 
         output_lines.append(f"---\n### [{i}] {result.get('Title') or result.get('title') or url_list[i-1][:50]}\n{delivery}\n")
 
     return "\n".join(output_lines)
+
+
+@skill(
+    name='hedgedoc_upload',
+    description="""把任意 Markdown 文本直接上传到 HedgeDoc，返回公网可访问链接。
+
+✅ **专用于"上传已有内容"**：当你已经生成了一份报告/总结/文档（Markdown 或纯文本），
+需要把它变成一个可分享的在线链接时，用本工具。**不需要提供 URL，直接传内容即可。**
+
+❌ 不要用本工具抓取网页（那是 web_clip 的职责）。也不要自己写 Python/requests 代码
+去调 HedgeDoc API——本工具已封装登录+创建笔记+返回公网链接的全流程，直接调用即可。
+
+💡 典型用法示例：
+  场景：上游子任务生成了安全巡检报告，需要上传到 HedgeDoc 获取链接。
+  正确做法：hedgedoc_upload(content="<报告的完整 Markdown 内容>")
+  返回：一个 https://md.maifeipin.com/xxxx 形式的公网链接，原样转给用户即可。
+
+注意：content 参数放完整的 Markdown 内容（支持标题、列表、表格、代码块等所有 Markdown 语法）。""",
+    params={
+        'content': {
+            'type': 'string',
+            'description': '要上传的 Markdown 文本（完整内容，支持标题/列表/表格/代码块等语法）',
+        },
+    },
+    tags=['web', 'tool'],
+)
+def hedgedoc_upload(content: str) -> str:
+    """上传 Markdown 文本到 HedgeDoc，返回公网链接"""
+    content = content or ""
+    if not content.strip():
+        return "❌ content 不能为空"
+
+    url = _upload_to_hedgedoc(content)
+    if not url:
+        return "❌ 上传 HedgeDoc 失败（服务未启用或登录失败），请检查 hedgedoc 配置"
+
+    return f"✅ 已上传到 HedgeDoc：{url}"
