@@ -104,13 +104,16 @@ def _get_sqlite_overrides():
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='settings'")
             if cursor.fetchone():
                 cursor.execute("SELECT key, value FROM settings")
+                
+                SENSITIVE_SEGS = {'api_key', 'apikey', 'token', 'secret', 'password', 'passwd', 'credential', 'authorization', 'private_key', 'webhook'}
+                
                 for k, v in cursor.fetchall():
                     # 核心安全红线: 分段精确判断，屏蔽一切对 edge 的重写
                     if any(seg == 'edge' for seg in k.split('.')):
                         continue
                         
-                    # 安全防御: 防止敏感信息通过这里写入或意外泄露
-                    if any(s in k for s in ['api_key', 'token', 'secret', 'password']):
+                    # 安全防御: 段精确匹配，防止敏感信息写入，同时避免误伤 (如 rss.token_count)
+                    if any(seg in SENSITIVE_SEGS for seg in k.split('.')):
                         continue
                         
                     try:
@@ -132,7 +135,11 @@ def _get_sqlite_overrides():
     return _sqlite_cache
 
 def load_config():
-    """返回合并后的纯 dict 配置快照。由于返回 pure dict，完美兼容 isinstance 和 json.dumps"""
+    """
+    返回合并后的纯 dict 配置快照。
+    由于返回 pure dict，完美兼容 isinstance 和 json.dumps。
+    注意：返回的字典在 5 秒 TTL 内为全系统共享引用，禁止就地修改 (mutate)，否则将引发全局污染！
+    """
     global _merged_cache, _merged_ttl
     now = time.time()
     if _merged_cache is not None and now < _merged_ttl:
