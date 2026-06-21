@@ -112,3 +112,19 @@ def edge_query(task_id: str) -> str:
     if not task_id:
         return "❌ task_id 不能为空"
     return edge_db.task_result_text(task_id)
+
+
+@skill(
+    name='edge_sweep',
+    description='清理 Edge Sentinel 超时任务，将超时未 ack 的任务状态重置。供内部 Cron 调用。',
+    params={},
+    tags=['system']
+)
+def edge_sweep() -> str:
+    # default timeout from edge_cfg or edge_db
+    timeout_min = _edge_cfg.get("task_timeout_min", edge_db._DEFAULT_TIMEOUT_MIN)
+    n = edge_db.sweep_timeouts(timeout_min)
+    if n > 0:
+        return f"✅ 成功回收 {n} 个超时 Edge 任务回 pending 状态。"
+    # Return empty string to keep cron logs clean when nothing is swept
+    return ""

@@ -175,7 +175,7 @@
         {
             "name": "Edge任务超时回收",
             "time": "every_minute",
-            "command": "python3 {root}/scripts/edge_sweep.py"
+            "skill": "ops_edge_cmd::edge_sweep"
         },
         {
             "_comment": "记忆蒸馏复盘 已迁移至 lite-agent 主进程后台线程 (memory_engine.lite_integration.start_distill_scheduler) - 启动 5 分钟后跑首次，之后每 24h 一次。这里 03:00 cron 因 ops_memory_distiller.py 读 LLM_API_KEY env 拿不到，会降级为规则蒸馏并提前消化未蒸馏消息，破坏后台 LLM 蒸馏数据源。删除避免冲突。"
