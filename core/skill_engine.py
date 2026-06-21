@@ -18,17 +18,17 @@ AUDIT_LOG = os.path.join(PROJECT_ROOT, 'workspace', 'audit.log')
 MAX_TOOL_RESULT_LEN = 12000
 
 
-def _cap_tool_result(skill_name: str, result: str) -> str:
+def _cap_tool_result(skill_name: str, result: str, max_len: int = MAX_TOOL_RESULT_LEN) -> str:
     """超长工具结果做头尾截断，并在中段插入提示，引导模型用更精确的参数重新调用"""
-    if len(result) <= MAX_TOOL_RESULT_LEN:
+    if len(result) <= max_len:
         return result
-    keep_head = MAX_TOOL_RESULT_LEN // 3
-    keep_tail = MAX_TOOL_RESULT_LEN - keep_head - 200  # 留 200 字符给提示
+    keep_head = max_len // 3
+    keep_tail = max_len - keep_head - 200  # 留 200 字符给提示
     omitted = len(result) - keep_head - keep_tail
     notice = (
-        f"\n\n... ⚠️ [已截断] 原始结果共 {len(result)} 字符，超过单次工具返回上限 "
-        f"{MAX_TOOL_RESULT_LEN}，中间省略 {omitted} 字符。"
-        f"请用更精确的参数（如缩小时间范围、增加关键词、减少 lines/limit）重新调用 {skill_name}。\n\n..."
+        f"\n\n... ⚠️ [已截断] 原始结果共 {len(result)} 字符，超过单次返回上限 "
+        f"{max_len}，中间省略 {omitted} 字符。"
+        f"请考虑更精确的参数（如缩小时间范围、增加关键词）重新调用。\n\n..."
     )
     return result[:keep_head] + notice + result[-keep_tail:]
 

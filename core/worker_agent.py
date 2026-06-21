@@ -76,15 +76,17 @@ class WorkerAgent:
                     if tool_res:
                         block += "\n[工具调用明细]:\n"
                         for tr in tool_res:
-                            block += f"- 工具 `{tr.get('name')}(args={tr.get('args')})`:\n返回数据: {tr.get('result', '')[:4000]}\n"
+                            block += f"- 工具 `{tr.get('name')}(args={tr.get('args')})`:\n返回数据: {str(tr.get('result', ''))}\n"
                     ctx_lines.append(block)
                 else:
                     # Legacy fallback for old string formats
                     ctx_lines.append(f"### {dep_id}\n{str(dep_result)[:1500]}")
                     
             ctx_block = "\n\n上游子任务结果（参考上下文）:\n" + "\n\n".join(ctx_lines)
-            # Total fan-in truncation to prevent context explosion (~10K tokens)
-            ctx_block = ctx_block[:24000]
+            
+            # Total fan-in truncation to prevent context explosion (~16K+ tokens if CJK)
+            if len(ctx_block) > 24000:
+                ctx_block = ctx_block[:24000] + "\n\n... ⚠️ [上游已截断, 依赖的部分内容被省略] ..."
 
         goal_block = ""
         if goal:
@@ -122,6 +124,15 @@ class WorkerAgent:
         if self.provider == "gemini":
             return self._run_gemini(subtask, upstream, images, goal, global_strategy)
         return self._run_openai(subtask, upstream, images, goal, global_strategy)
+
+    def _extract_tool_result(self, name: str, args: str, raw_result: Any) -> dict:
+        from core.skill_engine import _cap_tool_result
+        res_str = str(raw_result)
+        return {
+            "name": name,
+            "args": args,
+            "result": _cap_tool_result(name, res_str, max_len=4000)
+        }
 
     # ==================================================================
     #  OpenAI 路径 (原有)
@@ -215,11 +226,9 @@ class WorkerAgent:
                     result = self.skill_engine.execute(
                         tc.function.name, tc.function.arguments
                     )
-                    extracted_tools.append({
-                        "name": tc.function.name,
-                        "args": tc.function.arguments,
-                        "result": result[:4000]
-                    })
+                    extracted_tools.append(self._extract_tool_result(
+                        tc.function.name, tc.function.arguments, result
+                    ))
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
@@ -336,11 +345,9 @@ class WorkerAgent:
                         f"{name}({args_json[:80]})"
                     )
                     tool_result = self.skill_engine.execute(name, args_json)
-                    extracted_tools.append({
-                        "name": name,
-                        "args": args_json,
-                        "result": tool_result[:4000]
-                    })
+                    extracted_tools.append(self._extract_tool_result(
+                        name, args_json, tool_result
+                    ))
 
                     fn_response_part = types.Part.from_function_response(
                         name=name,
