@@ -43,6 +43,8 @@ def stream_task(port, token, task_id):
     print(f"[*] Connected to stream for task_id={task_id}")
     try:
         with urllib.request.urlopen(req) as response:
+            last_status = None
+            finished_subtasks = set()
             for line in response:
                 decoded_line = line.decode('utf-8').strip()
                 if decoded_line.startswith('data: '):
@@ -52,8 +54,28 @@ def stream_task(port, token, task_id):
                         break
                     try:
                         data = json.loads(data_str)
-                        delta = data.get('choices', [{}])[0].get('delta', {}).get('content', '')
-                        print(delta, end='', flush=True)
+                        status = data.get('status')
+                        msg = data.get('message')
+                        
+                        if msg and msg != last_status:
+                            print(f"\n[*] {msg}", end='', flush=True)
+                            last_status = msg
+                        elif msg:
+                            print(".", end='', flush=True)
+                            
+                        progress = data.get('progress')
+                        if progress and isinstance(progress, dict) and 'subtasks' in progress:
+                            for sub in progress['subtasks']:
+                                sub_id = sub.get('id')
+                                sub_status = sub.get('status')
+                                if sub_status in ('done', 'failed') and sub_id not in finished_subtasks:
+                                    finished_subtasks.add(sub_id)
+                                    res = sub.get('result', '') or sub.get('error', '')
+                                    print(f"\n[Subtask {sub_id}] {sub.get('name')} -> {sub_status.upper()}:\n{res}")
+                        
+                        if status in ('done', 'completed', 'failed', 'error'):
+                            print(f"\n\n[*] Task {status.upper()}!")
+                            break
                     except json.JSONDecodeError:
                         pass
     except Exception as e:
