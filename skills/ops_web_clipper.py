@@ -312,6 +312,11 @@ def _smart_deliver(result: dict, force_hedgedoc: bool = False) -> str:
     guest_ok=True,
     description="""网页剪藏工具（Playwright 真浏览器抓取）—— 处理 URL 转 Markdown 的首选工具。
 
+🔧 **上传 HedgeDoc 能力**：本工具同时是上传内容到 HedgeDoc 的唯一入口。
+  - 抓取的网页内容 > 2500 字或含图时自动上传 HedgeDoc 返回在线 🔗 链接。
+  - force_hedgedoc=True 可强制上传（即使内容较短）。
+  - **当任务需要"把报告/Markdown 上传到 HedgeDoc 获取可访问 URL"时，用本工具并设 force_hedgedoc=True——没有独立的 upload_hedgedoc 技能，上传就是 web_clip 的职责。**
+
 ✅ 必须使用本工具的场景：
   • 微信公众号文章 (mp.weixin.qq.com) — 反爬墙必须绕过
   • 知乎问答 / 专栏 (zhihu.com / zhuanlan.zhihu.com) — 必须登录态
