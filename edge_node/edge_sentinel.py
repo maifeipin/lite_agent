@@ -405,6 +405,7 @@ def report():
         print(f"  ⏭ 跳过上报 ({reason})")
         return
 
+    payload["report_reason"] = reason
     status, data = _http_request(API_URL, method="POST", payload=payload, token=EDGE_TOKEN, timeout=10)
     if status == 200:
         _save_last_report(payload)

@@ -110,6 +110,17 @@ def _register_cron_jobs(agent: Agent, config: dict):
                         _send_card(text, '🛡️ Sentinel 安全告警', 'red')
                     return text
                 fn = _sentinel
+            elif fn_name == 'edge_health':
+                def _edge_health():
+                    try:
+                        text = _import_skill('ops_edge_health', 'edge_health')()
+                        if '🔴' in text:
+                            from core.alerts import push_alert
+                            push_alert(agent, text, title='🛡️ Edge 失联告警', color='red')
+                        return text
+                    except Exception as e:
+                        return f"edge_health 失败: {e}"
+                fn = _edge_health
             else:
                 kwargs = job.get('kwargs', {})
                 def _generic(module=module, fn_name=fn_name, kwargs=kwargs):

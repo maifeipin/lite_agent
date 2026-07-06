@@ -199,14 +199,84 @@ class ApiHandler(BaseHTTPRequestHandler):
         try:
             with open(file_path, 'w', encoding='utf-8') as f:
                 json.dump(req_data, f, ensure_ascii=False, indent=2)
-            
+
+            # ── 1. 先 ACK 边缘 (解锁, 不等 IM) ──
             self.send_response(200)
             self._send_cors_headers()
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({"status": "success", "message": "Report saved"}).encode('utf-8'))
+            self.wfile.flush()                       # ← 保证边缘立刻收到
+
+            # ── 2. 再评估告警 (失败不影响 ACK) ──
+            try:
+                agent = self.server.api_server.agent
+                self._evaluate_edge_alert(agent, safe_node_id, req_data)
+            except Exception as e:
+                print(f"  ⚠️ [edge_report] 告警评估异常: {e}")
         except Exception as e:
             self.send_error(500, f"Internal Server Error: {str(e)}")
+
+    def _evaluate_edge_alert(self, agent, node: str, data: dict):
+        """根据报告内容评估并推送告警。
+
+        三档:
+          A. 安全事件 — 按 report_reason (边缘已 diff, 中心不重算)
+          B. 绝对资源阈值 — 每次都查 (含心跳/首次, 补 sub-threshold 漂移盲区)
+          C. (失联由 cron skill 处理, 见 2.4)
+        """
+        from core.config_loader import load_config
+        from core.alerts import push_alert
+        import time
+
+        cfg = load_config() or {}
+        acfg = cfg.get('edge', {}).get('alerts', {}) or {}
+        if not acfg.get('enabled', True):
+            return
+
+        dedup_window = int(acfg.get('dedup_window_min', 10)) * 60
+        win = int(time.time() // dedup_window)  # 时间窗进 key
+
+        reason = data.get('report_reason') or ''
+        metrics = data.get('metrics', {}) or {}
+        security = data.get('security', {}) or {}
+
+        # ── A. 安全事件 (非心跳/非首次 即视为变化) ──
+        is_routine = (reason == '首次上报') or reason.startswith('心跳')
+        if reason and not is_routine:
+            text = f"🚨 [{node}] 边缘安全事件\n原因: {reason}"
+            # 把关键安全字段带上
+            af = security.get('auth_fails', 0)
+            if af: text += f"\nauth_fails(近1h): {af}"
+            logins = security.get('recent_logins') or []
+            if logins:
+                last = logins[-1]
+                text += f"\n最近登录: {last.get('user','?')} @ {last.get('ip','?')} ({last.get('method','?')})"
+            push_alert(agent, text, title='🚨 Edge 安全告警', color='red',
+                       dedup_key=f"{node}:security:{win}:{reason[:30]}")
+
+        # ── B. 绝对资源阈值 (每次都查, 含 routine) ──
+        disk = metrics.get('disk_percent', 0) or 0
+        mem = metrics.get('mem_percent', 0) or 0
+        cpu = metrics.get('cpu_load', (0, 0, 0))
+        cpu1 = cpu[0] if isinstance(cpu, (list, tuple)) and cpu else 0
+
+        d_thr = acfg.get('disk_percent', 85)
+        m_thr = acfg.get('mem_percent', 90)
+        c_thr = acfg.get('cpu_load', 5.0)
+
+        if disk >= d_thr:
+            push_alert(agent, f"⚠️ [{node}] 磁盘 {disk:.1f}% ≥ 阈值 {d_thr}%",
+                       title='⚠️ Edge 资源告警', color='orange',
+                       dedup_key=f"{node}:disk:{win}")
+        if mem >= m_thr:
+            push_alert(agent, f"⚠️ [{node}] 内存 {mem:.1f}% ≥ 阈值 {m_thr}%",
+                       title='⚠️ Edge 资源告警', color='orange',
+                       dedup_key=f"{node}:mem:{win}")
+        if cpu1 >= c_thr:
+            push_alert(agent, f"⚠️ [{node}] 1min load {cpu1:.1f} ≥ 阈值 {c_thr}",
+                       title='⚠️ Edge 资源告警', color='orange',
+                       dedup_key=f"{node}:cpu:{win}")
 
     def _read_json(self):
         content_length = int(self.headers.get('Content-Length', 0))

@@ -144,31 +144,180 @@
         "pull_enabled": true,
         "task_timeout_min": 10,
         "sync_wait_sec": 70,
-        "nodes": ["vps2", "vps3", "bwg", "oracle1", "vps5"],
+        "nodes": [
+            "vps2",
+            "vps3",
+            "bwg",
+            "oracle1",
+            "vps5"
+        ],
         "whitelist": [
-            {"cmd": "df", "allow_args": ["-h", "-i"]},
-            {"cmd": "free", "allow_args": ["-m", "-h", "-g"]},
-            {"cmd": "w", "allow_args": []},
-            {"cmd": "uptime", "allow_args": []},
-            {"cmd": "vnstat", "allow_args": ["-d", "-h", "-m", "-5", "--oneline"], "allow_if": ["eth0", "eth1", "ens3", "enp3s0"], "value_flags": ["-i", "--interface"]},
-            {"cmd": "cat", "allow_args": [], "allow_files": ["/var/log/auth.log", "/var/log/secure", "/etc/ssh/sshd_config"]},
-            {"cmd": "journalctl", "allow_args": ["--no-pager", "-n", "today", "yesterday", "1 hour ago", "2 hours ago"], "allow_if": ["ssh", "sshd"], "value_flags": ["-u", "--since", "--unit", "-n"]},
-            {"cmd": "ss", "allow_args": ["-tlnp", "-tunlp"]},
-            {"cmd": "systemctl", "allow_args": ["status"], "allow_if": ["ssh", "sshd", "fail2ban"], "value_flags": []},
-            {"cmd": "crontab", "allow_args": ["-l"]},
-            {"cmd": "sha256sum", "allow_args": [], "allow_files": ["/etc/passwd", "/etc/ssh/sshd_config", "/root/.ssh/authorized_keys", "/opt/edge_sentinel/whitelist.json"]},
-            {"cmd": "md5sum", "allow_args": [], "allow_files": ["/etc/passwd", "/etc/ssh/sshd_config", "/root/.ssh/authorized_keys", "/opt/edge_sentinel/whitelist.json"]},
-            {"cmd": "tail", "allow_args": ["-n", "10", "20", "50", "100", "-f"], "allow_files": ["/var/log/auth.log", "/var/log/secure", "/var/log/syslog"]},
-            {"cmd": "ls", "allow_args": ["-l", "-la", "-al", "-h", "-t", "-r"], "allow_files": ["/opt/edge_sentinel", "/var/log", "/etc/ssh"]}
-        ]
+            {
+                "cmd": "df",
+                "allow_args": [
+                    "-h",
+                    "-i"
+                ]
+            },
+            {
+                "cmd": "free",
+                "allow_args": [
+                    "-m",
+                    "-h",
+                    "-g"
+                ]
+            },
+            {
+                "cmd": "w",
+                "allow_args": []
+            },
+            {
+                "cmd": "uptime",
+                "allow_args": []
+            },
+            {
+                "cmd": "vnstat",
+                "allow_args": [
+                    "-d",
+                    "-h",
+                    "-m",
+                    "-5",
+                    "--oneline"
+                ],
+                "allow_if": [
+                    "eth0",
+                    "eth1",
+                    "ens3",
+                    "enp3s0"
+                ],
+                "value_flags": [
+                    "-i",
+                    "--interface"
+                ]
+            },
+            {
+                "cmd": "cat",
+                "allow_args": [],
+                "allow_files": [
+                    "/var/log/auth.log",
+                    "/var/log/secure",
+                    "/etc/ssh/sshd_config"
+                ]
+            },
+            {
+                "cmd": "journalctl",
+                "allow_args": [
+                    "--no-pager",
+                    "-n",
+                    "today",
+                    "yesterday",
+                    "1 hour ago",
+                    "2 hours ago"
+                ],
+                "allow_if": [
+                    "ssh",
+                    "sshd"
+                ],
+                "value_flags": [
+                    "-u",
+                    "--since",
+                    "--unit",
+                    "-n"
+                ]
+            },
+            {
+                "cmd": "ss",
+                "allow_args": [
+                    "-tlnp",
+                    "-tunlp"
+                ]
+            },
+            {
+                "cmd": "systemctl",
+                "allow_args": [
+                    "status"
+                ],
+                "allow_if": [
+                    "ssh",
+                    "sshd",
+                    "fail2ban"
+                ],
+                "value_flags": []
+            },
+            {
+                "cmd": "crontab",
+                "allow_args": [
+                    "-l"
+                ]
+            },
+            {
+                "cmd": "sha256sum",
+                "allow_args": [],
+                "allow_files": [
+                    "/etc/passwd",
+                    "/etc/ssh/sshd_config",
+                    "/root/.ssh/authorized_keys",
+                    "/opt/edge_sentinel/whitelist.json"
+                ]
+            },
+            {
+                "cmd": "md5sum",
+                "allow_args": [],
+                "allow_files": [
+                    "/etc/passwd",
+                    "/etc/ssh/sshd_config",
+                    "/root/.ssh/authorized_keys",
+                    "/opt/edge_sentinel/whitelist.json"
+                ]
+            },
+            {
+                "cmd": "tail",
+                "allow_args": [
+                    "-n",
+                    "10",
+                    "20",
+                    "50",
+                    "100",
+                    "-f"
+                ],
+                "allow_files": [
+                    "/var/log/auth.log",
+                    "/var/log/secure",
+                    "/var/log/syslog"
+                ]
+            },
+            {
+                "cmd": "ls",
+                "allow_args": [
+                    "-l",
+                    "-la",
+                    "-al",
+                    "-h",
+                    "-t",
+                    "-r"
+                ],
+                "allow_files": [
+                    "/opt/edge_sentinel",
+                    "/var/log",
+                    "/etc/ssh"
+                ]
+            }
+        ],
+        "alerts": {
+            "enabled": true,
+            "disk_percent": 85,
+            "mem_percent": 90,
+            "cpu_load": 5.0,
+            "staleness_min": 30,
+            "dedup_window_min": 10
+        }
     },
     "v2ex": {
         "token": "${V2EX_TOKEN}"
     },
     "fleet": {
-        "nodes": ["vps2", "vps3", "bwg", "oracle1", "vps5"],
-        "sync_wait_sec": 70,
-        "task_timeout_min": 15
+        "retransmit_timeout_sec": 120,
+        "max_retries": 2
     },
     "project_root": "/home/liteagent/lite_agent",
     "cron_jobs": [
@@ -220,6 +369,11 @@
             "kwargs": {
                 "mode": "quick"
             }
+        },
+        {
+            "name": "edge_health_sweep",
+            "skill": "ops_edge_health::edge_health",
+            "time": "*/10 * * * *"
         }
     ],
     "service_name": "lite-agent",
@@ -328,9 +482,5 @@
             }
         }
     },
-    "edge_token": "${EDGE_TOKEN}",
-    "fleet": {
-        "retransmit_timeout_sec": 120,
-        "max_retries": 2
-    }
+    "edge_token": "${EDGE_TOKEN}"
 }
