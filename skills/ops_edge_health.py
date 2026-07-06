@@ -26,6 +26,9 @@ _REPORT_DIR = os.path.join(_cfg.get('project_root', os.getcwd()), 'data', 'senti
     tags=['system']
 )
 def edge_health() -> str:
+    if not _acfg.get('enabled', True):
+        return "✅ 告警已禁用"
+
     staleness = int(_acfg.get('staleness_min', 30)) * 60
     now = time.time()
     stale = []
@@ -38,5 +41,5 @@ def edge_health() -> str:
         if age > staleness:
             stale.append(f"🔴 [{node}] 失联 {int(age//60)} 分钟 (阈值 {staleness//60} 分钟)")
     if not stale:
-        return f"✅ 全部 {_NODES.__len__()} 个边缘节点心跳正常"
+        return f"✅ 全部 {len(_NODES)} 个边缘节点心跳正常"
     return "🛡️ Edge 失联告警\n" + "\n".join(stale)

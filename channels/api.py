@@ -201,11 +201,13 @@ class ApiHandler(BaseHTTPRequestHandler):
                 json.dump(req_data, f, ensure_ascii=False, indent=2)
 
             # ── 1. 先 ACK 边缘 (解锁, 不等 IM) ──
+            body_bytes = json.dumps({"status": "success", "message": "Report saved"}).encode('utf-8')
             self.send_response(200)
             self._send_cors_headers()
             self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body_bytes)))
             self.end_headers()
-            self.wfile.write(json.dumps({"status": "success", "message": "Report saved"}).encode('utf-8'))
+            self.wfile.write(body_bytes)
             self.wfile.flush()                       # ← 保证边缘立刻收到
 
             # ── 2. 再评估告警 (失败不影响 ACK) ──
@@ -247,7 +249,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             text = f"🚨 [{node}] 边缘安全事件\n原因: {reason}"
             # 把关键安全字段带上
             af = security.get('auth_fails', 0)
-            if af: text += f"\nauth_fails(近1h): {af}"
+            if af and af > 0: text += f"\nauth_fails(近1h): {af}"
             logins = security.get('recent_logins') or []
             if logins:
                 last = logins[-1]

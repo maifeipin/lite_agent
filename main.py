@@ -116,7 +116,9 @@ def _register_cron_jobs(agent: Agent, config: dict):
                         text = _import_skill('ops_edge_health', 'edge_health')()
                         if '🔴' in text:
                             from core.alerts import push_alert
-                            push_alert(agent, text, title='🛡️ Edge 失联告警', color='red')
+                            import time
+                            push_alert(agent, text, title='🛡️ Edge 失联告警', color='red',
+                                       dedup_key=f"stale_batch:{int(time.time()//600)}")
                         return text
                     except Exception as e:
                         return f"edge_health 失败: {e}"
