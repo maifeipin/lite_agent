@@ -47,6 +47,10 @@ WHITELIST_FILE = os.path.join(SCRIPT_DIR, "whitelist.json")
 TS_WINDOW_SEC = 600
 EXEC_TIMEOUT = 30
 
+# 差分上报: 指标无变化时跳过 report, 每 HEARTBEAT_INTERVAL 秒强制上报一次
+HEARTBEAT_INTERVAL = 900  # 15 分钟
+REPORT_CACHE_FILE = "/tmp/edge_sentinel_last_report.json"
+
 
 def load_env():
     env_file = os.path.join(SCRIPT_DIR, '.env')
@@ -322,8 +326,66 @@ def pull_and_execute():
         print(f"  本轮执行 {count} 个任务")
 
 
+def _load_last_report():
+    """加载上次上报的缓存 (payload + 时间戳)"""
+    try:
+        with open(REPORT_CACHE_FILE, 'r') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
+def _save_last_report(payload):
+    """保存本次上报的缓存"""
+    try:
+        cache = {"payload": payload, "reported_at": time.time()}
+        with open(REPORT_CACHE_FILE, 'w') as f:
+            json.dump(cache, f)
+    except OSError:
+        pass
+
+
+def _should_report(current, cached):
+    """比较当前 payload 和缓存, 决定是否需要上报。
+    返回 (should: bool, reason: str)"""
+    if cached is None:
+        return True, "首次上报"
+
+    last = cached.get("payload", {})
+    last_time = cached.get("reported_at", 0)
+
+    # 心跳兜底: 超过 HEARTBEAT_INTERVAL 强制上报
+    if time.time() - last_time > HEARTBEAT_INTERVAL:
+        return True, f"心跳({int(time.time() - last_time)}s)"
+
+    # 安全指标: 任何变化必报
+    cur_sec = current.get("security", {})
+    old_sec = last.get("security", {})
+    if cur_sec.get("sshd_hash") != old_sec.get("sshd_hash"):
+        return True, "sshd_config 变更"
+    if cur_sec.get("auth_fails", 0) != old_sec.get("auth_fails", 0):
+        return True, f"auth_fails 变化({old_sec.get('auth_fails', 0)}→{cur_sec.get('auth_fails', 0)})"
+    if cur_sec.get("recent_logins") != old_sec.get("recent_logins"):
+        return True, "登录记录变化"
+
+    # 资源指标: 超阈值才报
+    cur_m = current.get("metrics", {})
+    old_m = last.get("metrics", {})
+    cur_cpu = cur_m.get("cpu_load", (0,))
+    old_cpu = old_m.get("cpu_load", (0,))
+    if isinstance(cur_cpu, (list, tuple)) and isinstance(old_cpu, (list, tuple)):
+        if abs(cur_cpu[0] - old_cpu[0]) > 0.5:
+            return True, f"CPU load 变化({old_cpu[0]:.1f}→{cur_cpu[0]:.1f})"
+    if abs(cur_m.get("mem_percent", 0) - old_m.get("mem_percent", 0)) > 3.0:
+        return True, f"内存变化({old_m.get('mem_percent', 0):.1f}%→{cur_m.get('mem_percent', 0):.1f}%)"
+    if abs(cur_m.get("disk_percent", 0) - old_m.get("disk_percent", 0)) > 1.0:
+        return True, f"磁盘变化({old_m.get('disk_percent', 0):.1f}%→{cur_m.get('disk_percent', 0):.1f}%)"
+
+    return False, "无显著变化"
+
+
 def report():
-    """阶段一上行汇报。"""
+    """阶段一上行汇报 (差分上报: 指标无变化时跳过, 每 15 分钟心跳一次)。"""
     sec = collect_ssh_security()
     payload = {
         "node_id": NODE_ID,
@@ -336,9 +398,17 @@ def report():
             "log_source": sec["source"],
         }
     }
+
+    cached = _load_last_report()
+    should, reason = _should_report(payload, cached)
+    if not should:
+        print(f"  ⏭ 跳过上报 ({reason})")
+        return
+
     status, data = _http_request(API_URL, method="POST", payload=payload, token=EDGE_TOKEN, timeout=10)
     if status == 200:
-        print(f"  ✓ 汇报成功: {data}")
+        _save_last_report(payload)
+        print(f"  ✓ 汇报成功 ({reason}): {data}")
     else:
         print(f"  ✗ 汇报失败: status={status}")
 

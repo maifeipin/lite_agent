@@ -9,6 +9,10 @@ class ApiHandler(BaseHTTPRequestHandler):
     """
     统一的开放 API 处理器，处理 HTTP 请求。
     """
+    def log_message(self, format, *args):
+        if getattr(self, '_quiet', False):
+            return
+        super().log_message(format, *args)
     
     def _send_cors_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
@@ -235,6 +239,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         task = edge_db.claim_task(node)
         if not task:
+            self._quiet = True  # 空轮询不打 access log
             self._json(200, {"task": None})
             return
         payload = {
