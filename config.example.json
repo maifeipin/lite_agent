@@ -317,7 +317,14 @@
     },
     "fleet": {
         "retransmit_timeout_sec": 120,
-        "max_retries": 2
+        "max_retries": 2,
+        "nodes": [
+            "vps2",
+            "vps3",
+            "bwg",
+            "oracle1",
+            "vps5"
+        ]
     },
     "project_root": "/home/liteagent/lite_agent",
     "cron_jobs": [
