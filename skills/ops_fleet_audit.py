@@ -23,7 +23,7 @@ _cfg = load_config() or {}
 _edge_cfg = _cfg.get("edge", {})
 _fleet_cfg = _cfg.get("fleet", {})
 _whitelist = _edge_cfg.get("whitelist") or edge_whitelist.DEFAULT_WHITELIST
-_NODES = _fleet_cfg.get("nodes") or ["vps2", "vps3", "bwg", "oracle1", "vps5"]
+_NODES = _fleet_cfg.get("nodes", [])
 
 # 确定性安全巡检清单 (必须完全符合 config.json / whitelist.json 的限制)
 # 注意: 边缘 cron 每分钟只 claim 1 条任务(见 edge_db.claim_task LIMIT 1),

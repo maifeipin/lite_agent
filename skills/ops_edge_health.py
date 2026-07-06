@@ -15,7 +15,7 @@ from core.config_loader import load_config
 _cfg = load_config() or {}
 _fleet_cfg = _cfg.get('fleet', {})
 _acfg = _cfg.get('edge', {}).get('alerts', {}) or {}
-_NODES = _fleet_cfg.get('nodes') or ['vps2', 'vps3', 'bwg', 'oracle1', 'vps5']
+_NODES = _fleet_cfg.get('nodes', [])
 _REPORT_DIR = os.path.join(_cfg.get('project_root', os.getcwd()), 'data', 'sentinel', 'edge_reports')
 
 

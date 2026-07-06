@@ -29,7 +29,7 @@ _edge_cfg = _cfg.get("edge", {})
 _fleet_cfg = _cfg.get("fleet", {})
 _whitelist = _edge_cfg.get("whitelist") or edge_whitelist.DEFAULT_WHITELIST
 _sync_wait_sec = int(_fleet_cfg.get("sync_wait_sec", 70))
-_NODES = _fleet_cfg.get("nodes") or ["vps2", "vps3", "bwg", "oracle1", "vps5"]
+_NODES = _fleet_cfg.get("nodes", [])
 
 
 @skill(
