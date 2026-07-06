@@ -363,10 +363,17 @@ def _should_report(current, cached):
     old_sec = last.get("security", {})
     if cur_sec.get("sshd_hash") != old_sec.get("sshd_hash"):
         return True, "sshd_config 变更"
-    if cur_sec.get("auth_fails", 0) != old_sec.get("auth_fails", 0):
-        return True, f"auth_fails 变化({old_sec.get('auth_fails', 0)}→{cur_sec.get('auth_fails', 0)})"
-    if cur_sec.get("recent_logins") != old_sec.get("recent_logins"):
-        return True, "登录记录变化"
+    cur_af = cur_sec.get("auth_fails", 0)
+    old_af = old_sec.get("auth_fails", 0)
+    # 只有涨幅超过一定阈值（比如 >0 即有新失败，但为了降噪这里只要上涨就报，靠固定 reason 利用中心去重）
+    if cur_af > old_af:
+        return True, "auth_fails 异常上涨"
+
+    cur_logins = cur_sec.get("recent_logins") or []
+    old_logins = old_sec.get("recent_logins") or []
+    # 只有最新一条登录记录发生变化，才算是新登录，避免旧记录滑出窗口导致的误报
+    if cur_logins and (not old_logins or cur_logins[-1] != old_logins[-1]):
+        return True, "新 SSH 登录"
 
     # 资源指标: 超阈值才报
     cur_m = current.get("metrics", {})
