@@ -365,9 +365,10 @@ def _should_report(current, cached):
         return True, "sshd_config 变更"
     cur_af = cur_sec.get("auth_fails", 0)
     old_af = old_sec.get("auth_fails", 0)
-    # 只有涨幅超过一定阈值（比如 >0 即有新失败，但为了降噪这里只要上涨就报，靠固定 reason 利用中心去重）
-    if cur_af > old_af:
-        return True, "auth_fails 异常上涨"
+    # [降噪] 公网机器被扫弱口令是常态，只要没成功就不报警。
+    # 失败次数仅作为附带信息，在发生『新登录』或『配置变更』时随同上报。
+    # if cur_af > old_af:
+    #     return True, "auth_fails 异常上涨"
 
     cur_logins = cur_sec.get("recent_logins") or []
     old_logins = old_sec.get("recent_logins") or []
