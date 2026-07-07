@@ -372,9 +372,14 @@ def _should_report(current, cached):
 
     cur_logins = cur_sec.get("recent_logins") or []
     old_logins = old_sec.get("recent_logins") or []
-    # 只有最新一条登录记录发生变化，才算是新登录，避免旧记录滑出窗口导致的误报
+    # 对比上次登录成功的信息，账号IP对比变化统计
     if cur_logins and (not old_logins or cur_logins[-1] != old_logins[-1]):
-        return True, "新 SSH 登录"
+        new_login = cur_logins[-1]
+        last_known = old_logins[-1] if old_logins else None
+        if last_known and new_login.get("ip") == last_known.get("ip") and new_login.get("user") == last_known.get("user"):
+            return True, "常规登录"
+        else:
+            return True, "异地/新账号登录"
 
     # 资源指标: 超阈值才报
     cur_m = current.get("metrics", {})

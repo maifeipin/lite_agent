@@ -244,7 +244,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         security = data.get('security', {}) or {}
 
         # ── A. 安全事件 (非心跳/非首次 即视为变化) ──
-        is_routine = (reason == '首次上报') or reason.startswith('心跳')
+        is_routine = (reason == '首次上报') or reason.startswith('心跳') or ('变化(' in reason) or (reason == '常规登录')
         if reason and not is_routine:
             text = f"🚨 [{node}] 边缘安全事件\n原因: {reason}"
             # 把关键安全字段带上
