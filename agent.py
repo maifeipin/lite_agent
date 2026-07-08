@@ -292,7 +292,11 @@ class Agent:
             wait_ms = (time.time() - wait_start) * 1000
             if wait_ms > 100:
                 print(f"  ⏳ 会话锁等待 {wait_ms:.0f}ms session={msg.session_key}")
-            return self._handle_locked(msg)
+            response = self._handle_locked(msg)
+
+        # ---- 超长消息截断与 HedgeDoc 上传移出会话锁锁区间，解决并发锁阻塞瓶颈 ----
+        response.text = self._truncate_long_message_if_needed(response.text, msg.channel)
+        return response
 
     def _handle_locked(self, msg: IncomingMessage) -> AgentResponse:
         """实际处理逻辑, 调用方必须已持有 session 锁"""
@@ -312,50 +316,37 @@ class Agent:
             print(f"  [ROUTE] 简单任务 → 走同步AI Loop: {text[:60]}")
             response = self._run_ai_loop(msg)
 
-        # 超长消息拦截：如果不是 Web 端（api），且配置了 HedgeDoc，则尝试上传并截断
-        response.text = self._truncate_long_message_if_needed(response.text, msg.channel)
         return response
 
     def _truncate_long_message_if_needed(self, text: str, channel: str) -> str:
-        hc = self._config.get("hedgedoc", {})
-        if channel != 'api' and hc.get("enabled") and len(text) > 2500:
-            try:
-                url = self._upload_to_hedgedoc(text, hc)
-                if url:
-                    return text[:2000] + f"\n\n... (由于字数超出平台限制，剩余内容已截断)\n\n[🔗 点击此处在 Web 网页中查看完整报告]({url})"
-            except Exception as e:
-                print(f"❌ 上传至 HedgeDoc 失败: {e}")
-        return text
+        # API 渠道（Web/SSE 端）直接放行，不做任何截断
+        if channel == 'api':
+            return text
 
-    def _upload_to_hedgedoc(self, markdown_text: str, hc: dict) -> str:
-        import requests
-        s = requests.Session()
-        headers = {'X-Forwarded-Proto': 'https'}
-        # 1. 登录换取 Cookie
-        login_url = hc.get("internal_url", "http://127.0.0.1:3030").rstrip('/') + "/login"
-        r_login = s.post(login_url, data={'email': hc.get("email"), 'password': hc.get("password")}, headers=headers, allow_redirects=False, timeout=10)
-        
-        # Express.js 会返回 set-cookie，我们需要手动提取由于 HTTP 被忽略的 Secure Cookie
-        cookie_str = '; '.join([f'{k}={v}' for k, v in s.cookies.items()])
-        
-        # 2. 发文
-        headers['Cookie'] = cookie_str
-        headers['Content-Type'] = 'text/markdown'
-        new_url = hc.get("internal_url", "http://127.0.0.1:3030").rstrip('/') + "/new"
-        r_new = requests.post(new_url, data=markdown_text.encode('utf-8'), headers=headers, allow_redirects=False, timeout=10)
-        
-        location = r_new.headers.get('Location')
-        if location:
-            # location 可能是内部地址或完整的 public URL
-            public_url = hc.get("public_url", "https://md.maifeipin.com").rstrip('/')
-            if location.startswith("http"):
-                # 如果返回了完整的内部 URL，替换为公网 URL
-                import urllib.parse
-                parsed = urllib.parse.urlparse(location)
-                return public_url + parsed.path
-            else:
-                return public_url + location
-        return ""
+        hc = self._config.get("hedgedoc", {})
+        if not hc.get("enabled"):
+            return text
+
+        # 针对渠道特性配置个性化超长阈值
+        channel_limits = {
+            "telegram": 4000,
+            "feishu": 4000,
+            "dingtalk": 2500,
+            "wecom": 2048
+        }
+        max_len = channel_limits.get(channel.lower(), 2500)
+
+        if len(text) <= max_len:
+            return text
+
+        # 调用抽离的外部工具包
+        from core.utils.hedgedoc import upload_to_hedgedoc
+        url = upload_to_hedgedoc(text, hc)
+        if url:
+            # 动态根据渠道的最大限制截断（预留 200 字符用于提示文案和 URL 链接）
+            cut_len = max_len - 200
+            return text[:cut_len] + f"\n\n... (由于字数超出平台限制，剩余内容已截断)\n\n[🔗 点击此处在 Web 网页中查看完整报告]({url})"
+        return text
 
     # ------------------------------------------------------------------
     #  内置指令

@@ -160,43 +160,13 @@ def _cache_put(url: str, result: dict, hedgedoc_url: str = ''):
         print(f'  ⚠️ 缓存写入异常: {e}', flush=True)
 
 # ============================================================
-#  HedgeDoc 上传（复用 agent.py 中的逻辑）
+#  HedgeDoc 上传（复用通用工具包）
 # ============================================================
 def _upload_to_hedgedoc(markdown_text: str) -> str:
-    """上传 Markdown 到 HedgeDoc，返回公网链接"""
-    import requests
+    """上传 Markdown 到 HedgeDoc，返回公网链接（复用通用工具包）"""
+    from core.utils.hedgedoc import upload_to_hedgedoc
     hc = _get_hedgedoc_config()
-    if not hc.get("enabled"):
-        return ""
-
-    s = requests.Session()
-    headers = {'X-Forwarded-Proto': 'https'}
-
-    # 1. 登录获取 Cookie
-    login_url = hc.get("internal_url", "http://127.0.0.1:3030").rstrip('/') + "/login"
-    s.post(login_url, data={
-        'email': hc.get("email"),
-        'password': hc.get("password")
-    }, headers=headers, allow_redirects=False, timeout=10)
-
-    cookie_str = '; '.join([f'{k}={v}' for k, v in s.cookies.items()])
-
-    # 2. 创建文档
-    headers['Cookie'] = cookie_str
-    headers['Content-Type'] = 'text/markdown'
-    new_url = hc.get("internal_url", "http://127.0.0.1:3030").rstrip('/') + "/new"
-    r = requests.post(new_url, data=markdown_text.encode('utf-8'),
-                      headers=headers, allow_redirects=False, timeout=10)
-
-    location = r.headers.get('Location')
-    if location:
-        public_url = hc.get("public_url", "https://md.maifeipin.com").rstrip('/')
-        if location.startswith("http"):
-            import urllib.parse
-            parsed = urllib.parse.urlparse(location)
-            return public_url + parsed.path
-        return public_url + location
-    return ""
+    return upload_to_hedgedoc(markdown_text, hc)
 
 # ============================================================
 #  RssAdapter API 调用
