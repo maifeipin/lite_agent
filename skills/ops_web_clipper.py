@@ -66,6 +66,11 @@ def _normalize_url(url: str) -> str:
     except Exception:
         return url
 
+def _connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(_CACHE_DB_PATH, timeout=10.0, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
 def _cache_init():
     """建表（幂等）"""
     global _cache_inited
@@ -75,7 +80,7 @@ def _cache_init():
     with _cache_lock:
         if _cache_inited:
             return
-        with sqlite3.connect(_CACHE_DB_PATH, timeout=10.0) as conn:
+        with _connect() as conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS web_clips (
                     url_key       TEXT PRIMARY KEY,
@@ -103,7 +108,7 @@ def _cache_get(url: str):
     key = _normalize_url(url)
     now = time.time()
     try:
-        with sqlite3.connect(_CACHE_DB_PATH, timeout=10.0) as conn:
+        with _connect() as conn:
             row = conn.execute(
                 'SELECT success, title, markdown, image_count, error, hedgedoc_url, created_at, expires_at '
                 'FROM web_clips WHERE url_key = ?',
@@ -139,7 +144,7 @@ def _cache_put(url: str, result: dict, hedgedoc_url: str = ''):
     success = bool(result.get('success', result.get('Success')))
     ttl = _TTL_SUCCESS if success else _TTL_FAILURE
     try:
-        with sqlite3.connect(_CACHE_DB_PATH, timeout=10.0) as conn:
+        with _connect() as conn:
             conn.execute(
                 'INSERT OR REPLACE INTO web_clips '
                 '(url_key, original_url, success, title, markdown, image_count, error, hedgedoc_url, created_at, expires_at) '
