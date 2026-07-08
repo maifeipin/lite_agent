@@ -138,7 +138,7 @@ class WeComChannel(BaseChannel):
 
         text_stripped = text.strip()
         from channels import smart_truncate
-        self._do_send(f"🤔 已收到: _{smart_truncate(text_stripped, 60)}_", use_md=True, user_id=user_id)
+        self._do_send(f"🤔 已收到: *{smart_truncate(text_stripped, 60)}*", use_md=True, user_id=user_id)
 
         admin_id = self.config.get('admin_userid')
         is_guest = False
