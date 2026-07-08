@@ -29,31 +29,36 @@ class LRUCache:
     def __init__(self, maxsize=200):
         self.cache = collections.OrderedDict()
         self.maxsize = maxsize
+        self.lock = threading.Lock()
 
     def setdefault(self, key, default):
-        if key in self.cache:
-            self.cache.move_to_end(key)
+        with self.lock:
+            if key in self.cache:
+                self.cache.move_to_end(key)
+                return self.cache[key]
+            self.cache[key] = default
+            if len(self.cache) > self.maxsize:
+                self.cache.popitem(last=False)
             return self.cache[key]
-        self.cache[key] = default
-        if len(self.cache) > self.maxsize:
-            self.cache.popitem(last=False)
-        return self.cache[key]
 
     def get(self, key, default=None):
-        if key in self.cache:
-            self.cache.move_to_end(key)
-            return self.cache[key]
-        return default
+        with self.lock:
+            if key in self.cache:
+                self.cache.move_to_end(key)
+                return self.cache[key]
+            return default
 
     def __getitem__(self, key):
-        self.cache.move_to_end(key)
-        return self.cache[key]
+        with self.lock:
+            self.cache.move_to_end(key)
+            return self.cache[key]
 
     def __setitem__(self, key, value):
-        self.cache[key] = value
-        self.cache.move_to_end(key)
-        if len(self.cache) > self.maxsize:
-            self.cache.popitem(last=False)
+        with self.lock:
+            self.cache[key] = value
+            self.cache.move_to_end(key)
+            if len(self.cache) > self.maxsize:
+                self.cache.popitem(last=False)
 
 # 记忆引擎 (可选 — 缺失时优雅降级)
 try:
@@ -201,6 +206,14 @@ class Agent:
 
         # 系统提示词
         self.system_prompt = self._build_system_prompt()
+
+    def cleanup_locks(self, expired_keys: list):
+        """清理已过期会话的互斥锁，防止内存泄漏"""
+        with self._session_locks_guard:
+            for key in expired_keys:
+                lock = self._session_locks.get(key)
+                if lock and not lock.locked():
+                    self._session_locks.pop(key, None)
 
     def broadcast(self, response: AgentResponse):
         """将消息广播到所有挂载的通道"""

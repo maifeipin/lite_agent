@@ -31,7 +31,9 @@ def session_cleanup_task(agent: Agent, interval: int = 300):
     while True:
         try:
             time.sleep(interval)
-            agent.session_mgr.cleanup_expired()
+            expired_keys = agent.session_mgr.cleanup_expired()
+            if expired_keys:
+                agent.cleanup_locks(expired_keys)
         except Exception as e:
             print(f"⚠️ 清理任务异常: {e}")
 

@@ -628,6 +628,8 @@ class SessionManager:
             except sqlite3.OperationalError:
                 pass  # 锁冲突时跳过, 下次清理
 
+        return expired_keys
+
     def get_session_info(self, session_key: str) -> dict:
         """获取会话状态摘要 (供 /status 指令使用)"""
         session = self.get_or_create(session_key)
