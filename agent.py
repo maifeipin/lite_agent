@@ -10,7 +10,18 @@ import traceback
 import collections
 from concurrent.futures import ThreadPoolExecutor
 from openai import OpenAI
+import openai
 from session import SessionManager
+
+# 定义不可重试的大模型接口异常类型（4xx 客户端错误、鉴权、限流等）
+_NON_RETRYABLE_EXCEPTIONS = (
+    openai.BadRequestError,
+    openai.AuthenticationError,
+    openai.NotFoundError,
+    openai.PermissionDeniedError,
+    openai.UnprocessableEntityError,
+    openai.RateLimitError,
+)
 from core.cron_engine import CronManager
 from core.skill_engine import SkillEngine
 
@@ -915,72 +926,98 @@ class Agent:
             if tools:
                 kwargs["tools"] = tools
                 kwargs["tool_choice"] = "auto"
-            kwargs["timeout"] = 600.0
+
+            # ---- 智能动态计算读取超时，防止 TCP 静默老化和 LLM 挂起导致机器人锁定 ----
+            if is_pro:
+                dynamic_timeout = 180.0  # 推理模型给 3 分钟首字生成时间（理论值）
+            else:
+                dynamic_timeout = 45.0   # 快速模型给 45 秒静默判定
+
+            # 字符补偿：类型安全，只对 str 型 content 进行累加（避免多模态 list 算错）
+            total_chars = sum(
+                len(m["content"]) if isinstance(m.get("content"), str) else 0
+                for m in messages
+            )
+            dynamic_timeout += (total_chars // 10000) * 5.0
+
+            kwargs["timeout"] = min(dynamic_timeout, 300.0)  # 最大封顶 5 分钟
             kwargs["stream"] = True
             kwargs["stream_options"] = {"include_usage": True}
 
             print(f"  🧠 [LLM Stream] 角色: SyncAgent, 模型: {self.model}, 步骤: {step+1}/{self.max_steps}")
             start_t = time.time()
 
-            try:
-                response_stream = self.client.chat.completions.create(**kwargs)
-            except Exception as e:
-                error_msg = f"LLM 调用失败: {e}"
-                print(f"  ❌ {error_msg}")
-                traceback.print_exc()
-                yield {"type": "error", "msg": error_msg}
-                yield {"type": "done", "usage": total_usage}
-                return
-
-            # ---- 消费流: 累积 text/reasoning/tool_calls, 独立抓 usage ----
+            # ---- 消费流: 累积 text/reasoning/tool_calls, 独立抓 usage 并支持首字断线重试一次 ----
             tool_calls_accumulator = {}
             text_content = ""
             reasoning_content = ""
             step_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             finish_reason = None
 
-            try:
-                for chunk in response_stream:
-                    # P0-1: usage 提取独立于 delta, 防止 "content+usage 同 chunk" 被吞
-                    if getattr(chunk, "usage", None):
-                        step_usage["prompt_tokens"] = chunk.usage.prompt_tokens or 0
-                        step_usage["completion_tokens"] = chunk.usage.completion_tokens or 0
-                        step_usage["total_tokens"] = chunk.usage.total_tokens or 0
+            max_attempts = 2
+            for attempt in range(max_attempts):
+                try:
+                    if attempt > 0:
+                        print(f"  🔄 [LLM Stream] 正在重试流式连接 (第 {attempt+1} 次尝试)...")
+                    
+                    with self.client.chat.completions.create(**kwargs) as response_stream:
+                        for chunk in response_stream:
+                            # P0-1: usage 提取独立于 delta, 防止 "content+usage 同 chunk" 被吞
+                            if getattr(chunk, "usage", None):
+                                step_usage["prompt_tokens"] = chunk.usage.prompt_tokens or 0
+                                step_usage["completion_tokens"] = chunk.usage.completion_tokens or 0
+                                step_usage["total_tokens"] = chunk.usage.total_tokens or 0
 
-                    if not chunk.choices:
-                        continue
-                    choice0 = chunk.choices[0]
-                    if getattr(choice0, "finish_reason", None):
-                        finish_reason = choice0.finish_reason
-                    delta = choice0.delta
-                    if not delta:
-                        continue
+                            if not chunk.choices:
+                                continue
+                            choice0 = chunk.choices[0]
+                            if getattr(choice0, "finish_reason", None):
+                                finish_reason = choice0.finish_reason
+                            delta = choice0.delta
+                            if not delta:
+                                continue
 
-                    if getattr(delta, "content", None):
-                        text_content += delta.content
-                        yield {"type": "token", "delta": delta.content}
-                    if getattr(delta, "reasoning_content", None):
-                        reasoning_content += delta.reasoning_content
-                        yield {"type": "reasoning_token", "delta": delta.reasoning_content}
-                    if getattr(delta, "tool_calls", None):
-                        # P0-2: 分片逐字段补全, 防 None 覆盖
-                        for tc_delta in delta.tool_calls:
-                            idx = tc_delta.index if tc_delta.index is not None else 0
-                            acc = tool_calls_accumulator.setdefault(idx, {"id": "", "name": "", "arguments": ""})
-                            if getattr(tc_delta, "id", None):
-                                acc["id"] = tc_delta.id
-                            if getattr(tc_delta, "function", None):
-                                if getattr(tc_delta.function, "name", None):
-                                    acc["name"] = tc_delta.function.name
-                                if getattr(tc_delta.function, "arguments", None):
-                                    acc["arguments"] += tc_delta.function.arguments
-            except Exception as e:
-                error_msg = f"流式读取中断: {e}"
-                print(f"  ❌ {error_msg}")
-                traceback.print_exc()
-                yield {"type": "error", "msg": error_msg}
-                yield {"type": "done", "usage": total_usage}
-                return
+                            if getattr(delta, "content", None):
+                                text_content += delta.content
+                                yield {"type": "token", "delta": delta.content}
+                            if getattr(delta, "reasoning_content", None):
+                                reasoning_content += delta.reasoning_content
+                                yield {"type": "reasoning_token", "delta": delta.reasoning_content}
+                            if getattr(delta, "tool_calls", None):
+                                # P0-2: 分片逐字段补全, 防 None 覆盖
+                                for tc_delta in delta.tool_calls:
+                                    idx = tc_delta.index if tc_delta.index is not None else 0
+                                    acc = tool_calls_accumulator.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                                    if getattr(tc_delta, "id", None):
+                                        acc["id"] = tc_delta.id
+                                    if getattr(tc_delta, "function", None):
+                                        if getattr(tc_delta.function, "name", None):
+                                            acc["name"] = tc_delta.function.name
+                                        if getattr(tc_delta.function, "arguments", None):
+                                            acc["arguments"] += tc_delta.function.arguments
+                    # 成功消费完流，跳出重试
+                    break
+                except Exception as e:
+                    # 仅在“首字未生成” 且 “不是不可重试的异常类型” 且 “仍有重试名额” 时才进行自动重试
+                    has_generated = bool(text_content or reasoning_content or tool_calls_accumulator)
+                    if (not has_generated 
+                            and not isinstance(e, _NON_RETRYABLE_EXCEPTIONS) 
+                            and attempt < max_attempts - 1):
+                        print(f"  ⚠️ [LLM Stream] {type(e).__name__}: {e}，1s 后重连重试...")
+                        time.sleep(1.0)
+                        continue
+                    
+                    # 区分请求被拒与流式读取异常，给 ops 提供准确的诊断信息
+                    if isinstance(e, _NON_RETRYABLE_EXCEPTIONS):
+                        error_msg = f"LLM 请求被拒({type(e).__name__}): {e}"
+                    else:
+                        error_msg = f"流式读取中断({type(e).__name__}): {e}"
+                        
+                    print(f"  ❌ {error_msg}")
+                    traceback.print_exc()
+                    yield {"type": "error", "msg": error_msg}
+                    yield {"type": "done", "usage": total_usage}
+                    return
 
             print(f"  ✅ [LLM Stream] 耗时: {time.time()-start_t:.2f}s, 步骤Tokens: {step_usage['total_tokens']}")
 

@@ -18,3 +18,7 @@
 - Always verify your code changes locally or on the target VPS before considering a task complete.
 - **No Temporary Files in Project Directory**: All temporary testing files, scratch scripts, or intermediate data files MUST NOT be placed in the project directory. Always use the dedicated artifact scratch directory (`<appDataDir>\brain\<conversation-id>/scratch/`) or the system `tempfile` module. **Never pollute the project's Git repository with testing artifacts.**
 - When creating throwaway test scripts, clean them up after verifying functionality.
+
+## 4. Pair Programming Workflow (结对编程与提交流程)
+- **自动生成修改总结**：修改或编写代码后，AI 助手**必须自动生成详细的修改总结（包含核心修改说明和 Git Diff 形式的代码对照）**，供用户交由另一个 AI 进行复核。
+- **确认后提交/上线**：在用户没有明确反馈“另一个 AI 已确认，可以提交/上线”之前，AI 助手**严禁**直接执行 `git commit`、`git push` 或向 VPS 部署更新代码。
