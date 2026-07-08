@@ -114,7 +114,8 @@ def _list_view(items, g, total, nodes, db, msg, session_mgr):
         summary = exc[:120].strip() if exc and exc != 'None' else ''
         lines.append(f'**[{i}] {site}**\n{title}')
         if summary:
-            lines.append(f'_{summary}_')
+            # 使用 blockquote 引用排版，避免使用 _ 包裹导致 URL 吞掉下划线破坏 Markdown 闭合
+            lines.append(f'> {summary}')
         lines.append('')
         ctx_brief.append(f'[{i}] {title[:60]} ({site})')
         ctx_brief.append(f'     link: {item.get("link", "N/A")}')
@@ -298,7 +299,8 @@ def _rss_brief_compute() -> str:
         if link and 'http' not in (exc or ''):
             lines.append(link)
         if exc:
-            lines.append(f'_{exc}_')
+            # 使用 blockquote 引用排版，避免使用 _ 包裹导致 URL 吞掉下划线破坏 Markdown 闭合
+            lines.append(f'> {exc}')
         lines.append('')
         new_pushed.add(sid)
 
