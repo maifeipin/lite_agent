@@ -67,6 +67,18 @@
                     "text",
                     "complex_reasoning"
                 ]
+            },
+            "nvidia-glm-5.2": {
+                "base_url": "https://integrate.api.nvidia.com/v1",
+                "api_key": "${NVIDIA_API_KEY}",
+                "model": "z-ai/glm-5.2",
+                "max_tokens": 16384,
+                "temperature": 1.0,
+                "max_steps": 30,
+                "tags": [
+                    "text",
+                    "creative"
+                ]
             }
         },
         "default": "flash"
