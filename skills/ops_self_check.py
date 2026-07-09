@@ -64,8 +64,13 @@ def _get_health_report() -> str:
         try:
             from core import config_loader
             cfg = config_loader.load_config()
-            llm_key = cfg.get('llm', {}).get('api_key', '')
-            if llm_key.startswith('sk-') and len(llm_key) > 10:
+            llm_cfg = cfg.get('llm', {})
+            llm_key = llm_cfg.get('api_key', '')
+            default_model = llm_cfg.get('default', llm_cfg.get('model', 'unknown'))
+            
+            report.append(f"🧠 **当前配置的主模型 (Default Model)**: ✅ {default_model}")
+            
+            if llm_key.startswith('sk-') and len(llm_key) > 10 or '${' in llm_key:
                 report.append("🔑 **大模型 API 密钥**: ✅ 已配置 (格式正确)")
             else:
                 report.append("🔑 **大模型 API 密钥**: ❌ 配置异常 (格式不合规或缺失)")
