@@ -140,20 +140,27 @@ class Agent:
         session_cfg = config.get("session", {})
 
         # LLM 客户端
+        import httpx
         if "models" in llm_cfg:
             default_model = llm_cfg.get("default", "")
             default_cfg = llm_cfg["models"].get(default_model, {})
+            proxy_url = default_cfg.get("proxy", llm_cfg.get("proxy"))
+            http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
             self.client = OpenAI(
                 api_key=default_cfg.get("api_key", llm_cfg.get("api_key", "")),
                 base_url=default_cfg.get("base_url", llm_cfg.get("base_url", "")),
+                http_client=http_client
             )
             self.model = default_cfg.get("model", default_model)
             self.max_tokens = default_cfg.get("max_tokens", 2048)
             self.temperature = default_cfg.get("temperature", 0.3)
         else:
+            proxy_url = llm_cfg.get("proxy")
+            http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
             self.client = OpenAI(
                 api_key=llm_cfg["api_key"],
                 base_url=llm_cfg["base_url"],
+                http_client=http_client
             )
             self.model = llm_cfg["model"]
             self.max_tokens = llm_cfg.get("max_tokens", 2048)

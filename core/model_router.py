@@ -24,9 +24,13 @@ class ModelRouter:
             if provider == "gemini":
                 self._clients[name] = self._make_gemini_client(name, cfg)
             else:
+                import httpx
+                proxy_url = cfg.get("proxy")
+                http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
                 self._clients[name] = OpenAI(
                     api_key=cfg["api_key"],
                     base_url=cfg["base_url"],
+                    http_client=http_client
                 )
 
     def _detect_provider(self, cfg: dict) -> str:
