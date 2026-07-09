@@ -45,7 +45,7 @@ def _run_mail_reader_cmd(cmd_args: list, timeout=180) -> str:
     if model:
         env["LLM_MODEL"] = model
         
-    cmd = ["python", mail_client_py] + cmd_args
+    cmd = [sys.executable, mail_client_py] + cmd_args
     try:
         r = subprocess.run(cmd, cwd=billing_dir, capture_output=True, text=True, encoding='utf-8', timeout=timeout, env=env)
         output = r.stdout.strip()
