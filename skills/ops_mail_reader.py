@@ -194,7 +194,7 @@ def mail_feedback_noise(summary_id: int) -> str:
     
     # 载入默认的 protected domains
     try:
-        import mail_client
+        import mail_client  # type: ignore
         rules = mail_client.load_static_noise_rules()
     except Exception:
         rules = {"protected_domains": ["qq.com", "gmail.com", "163.com", "outlook.com", "hotmail.com", "yahoo.com", "icloud.com"]}
@@ -225,7 +225,7 @@ def mail_delete_noise_rule(arg_val: str) -> str:
             local, domain = addr_l.split('@') if '@' in addr_l else (addr_l, '')
             
             try:
-                import mail_client
+                import mail_client  # type: ignore
                 rules = mail_client.load_static_noise_rules()
             except Exception:
                 rules = {"protected_domains": ["qq.com", "gmail.com", "163.com", "outlook.com", "hotmail.com", "yahoo.com", "icloud.com"]}
