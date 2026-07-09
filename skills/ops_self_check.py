@@ -65,12 +65,15 @@ def _get_health_report() -> str:
             from core import config_loader
             cfg = config_loader.load_config()
             llm_cfg = cfg.get('llm', {})
-            llm_key = llm_cfg.get('api_key', '')
-            default_model = llm_cfg.get('default', llm_cfg.get('model', 'unknown'))
+            # 解析当前激活的默认模型配置块(与 agent.py / ops_mail_reader 一致)
+            default_key = llm_cfg.get('default')
+            mc = llm_cfg.get('models', {}).get(default_key, {}) if default_key else {}
+            default_model = mc.get('model', default_key or llm_cfg.get('model', 'unknown'))
+            llm_key = mc.get('api_key', llm_cfg.get('api_key', ''))
             
             report.append(f"🧠 **当前配置的主模型 (Default Model)**: ✅ {default_model}")
             
-            if llm_key.startswith('sk-') and len(llm_key) > 10 or '${' in llm_key:
+            if (llm_key.startswith('sk-') and len(llm_key) > 10) or '${' in llm_key:
                 report.append("🔑 **大模型 API 密钥**: ✅ 已配置 (格式正确)")
             else:
                 report.append("🔑 **大模型 API 密钥**: ❌ 配置异常 (格式不合规或缺失)")
