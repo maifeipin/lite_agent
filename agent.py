@@ -370,9 +370,60 @@ class Agent:
         cmd = parts[0].lower()
         args = parts[1:]
 
+        is_guest = getattr(msg, "is_guest", True)
+
         if cmd in ("/cmd", "/balance", "/memory", "/remember", "/persona", "/cron", "/check"):
-            if msg.is_guest:
+            if is_guest:
                 return AgentResponse("❌ 权限不足：只有管理员可使用该指令", title="⚠️ 权限不足", color="red")
+
+        if cmd in ("/ok", "/noise", "/unnoise", "/headers", "/missed", "/noiselist"):
+            if is_guest:
+                return AgentResponse("❌ 权限拒绝：该命令仅限管理员执行。", title="安全警告", color="red")
+            
+            from skills.ops_mail_reader import (
+                mail_feedback_ok,
+                mail_feedback_noise,
+                mail_delete_noise_rule,
+                mail_show_headers,
+                mail_show_missed,
+                mail_list_noise_rules
+            )
+            
+            try:
+                if cmd == "/ok":
+                    if not args:
+                        return AgentResponse("❌ 用法错误：/ok <id>", title="用法提示", color="yellow")
+                    res_text = mail_feedback_ok(int(args[0]))
+                    return AgentResponse(res_text, title="操作成功", color="green")
+                    
+                elif cmd == "/noise":
+                    if not args:
+                        return AgentResponse("❌ 用法错误：/noise <id>", title="用法提示", color="yellow")
+                    res_text = mail_feedback_noise(int(args[0]))
+                    return AgentResponse(res_text, title="操作成功", color="green")
+                    
+                elif cmd == "/unnoise":
+                    if not args:
+                        return AgentResponse("❌ 用法错误：/unnoise <id|pattern>", title="用法提示", color="yellow")
+                    res_text = mail_delete_noise_rule(args[0])
+                    return AgentResponse(res_text, title="操作成功", color="green")
+                    
+                elif cmd == "/headers":
+                    limit = int(args[0]) if args and args[0].isdigit() else 15
+                    res_text = mail_show_headers(limit)
+                    return AgentResponse(res_text, title="邮件标题列表", color="blue")
+                    
+                elif cmd == "/missed":
+                    limit = int(args[0]) if args and args[0].isdigit() else 15
+                    res_text = mail_show_missed(limit)
+                    return AgentResponse(res_text, title="可能错过的非高优邮件", color="blue")
+                    
+                elif cmd == "/noiselist":
+                    res_text = mail_list_noise_rules()
+                    return AgentResponse(res_text, title="当前降噪过滤规则列表", color="blue")
+                    
+            except Exception as cmd_err:
+                return AgentResponse(f"❌ 执行失败：{cmd_err}", title="执行错误", color="red")
 
         if cmd == "/new":
             self.session_mgr.reset_session(msg.session_key)

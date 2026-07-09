@@ -127,8 +127,12 @@ def _register_cron_jobs(agent: Agent, config: dict):
                 fn = _edge_health
             else:
                 kwargs = job.get('kwargs', {})
-                def _generic(module=module, fn_name=fn_name, kwargs=kwargs):
-                    return _import_skill(module, fn_name)(**kwargs)
+                def _generic(module=module, fn_name=fn_name, kwargs=kwargs, job_name=name, push=job.get('push_on_output', False)):
+                    text = _import_skill(module, fn_name)(**kwargs)
+                    if push and text and not text.startswith("✅") and not text.startswith("("):
+                        color = 'red' if any(err in text for err in ('⚠️', '❌', '失败', '错误', 'Error', 'Exception')) else 'blue'
+                        _send_card(text, job_name, color)
+                    return text
                 fn = _generic
 
             if 'time_range' in job:
