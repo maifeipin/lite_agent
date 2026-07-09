@@ -64,7 +64,7 @@ def _get_db_path_and_import_db():
     import sys
     if billing_dir not in sys.path:
         sys.path.insert(0, billing_dir)
-    import statement_db
+    import statement_db  # type: ignore
     db_path = os.path.join(billing_dir, "statements.db")
     return db_path, statement_db
 
