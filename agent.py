@@ -383,7 +383,7 @@ class Agent:
             if is_guest:
                 return AgentResponse("❌ 权限不足：只有管理员可使用该指令", title="⚠️ 权限不足", color="red")
 
-        if cmd in ("/ok", "/noise", "/unnoise", "/headers", "/missed", "/noiselist"):
+        if cmd in ("/ok", "/noise", "/unnoise", "/headers", "/missed", "/noiselist", "/reprocess", "/mail", "/mailstats", "/search"):
             if is_guest:
                 return AgentResponse("❌ 权限拒绝：该命令仅限管理员执行。", title="安全警告", color="red")
             
@@ -428,6 +428,34 @@ class Agent:
                 elif cmd == "/noiselist":
                     res_text = mail_list_noise_rules()
                     return AgentResponse(res_text, title="当前降噪过滤规则列表", color="blue")
+
+                elif cmd == "/reprocess":
+                    from skills.ops_mail_reprocess import mail_reprocess
+                    res_text = mail_reprocess()
+                    return AgentResponse(res_text, title="补跑结果", color="blue")
+
+                elif cmd == "/mail":
+                    limit = int(args[0]) if args and args[0].isdigit() else 10
+                    account = args[1] if len(args) > 1 else None
+                    from skills.ops_mail_list import mail_list
+                    res_text = mail_list(limit=limit, account_name=account)
+                    return AgentResponse(res_text, title="收件箱", color="blue")
+
+                elif cmd == "/mailstats":
+                    from skills.ops_mail_stats import mail_stats
+                    res_text = mail_stats()
+                    return AgentResponse(res_text, title="邮件统计", color="blue")
+
+                elif cmd == "/search":
+                    if not args:
+                        return AgentResponse("❌ 用法错误：/search <关键词> [limit] [账户]", title="用法提示", color="yellow")
+                    keyword = args[0]
+                    limit = int(args[1]) if len(args) > 1 and args[1].isdigit() else 20
+                    account = args[2] if len(args) > 2 else None
+                    from skills.ops_mail_search import mail_search
+                    res_text = mail_search(keyword=keyword, limit=limit, account_name=account)
+                    return AgentResponse(res_text, title=f"搜索结果: {keyword}", color="blue")
+
                     
             except Exception as cmd_err:
                 return AgentResponse(f"❌ 执行失败：{cmd_err}", title="执行错误", color="red")
