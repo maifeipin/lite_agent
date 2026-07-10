@@ -232,7 +232,9 @@ class SkillEngine:
 
         # 执行
         try:
-            print(f"  🔧 执行技能: {skill_name}({kwargs})")
+            from core.utils.masker import mask_secrets
+            safe_kwargs = mask_secrets(str(kwargs))
+            print(f"  🔧 执行技能: {skill_name}({safe_kwargs})")
             _write_audit(skill_name, arguments)
             result = func(**kwargs)
             if not isinstance(result, str):
@@ -308,10 +310,13 @@ class SkillEngine:
 
 
 def _write_audit(name: str, args: str):
+    """写审计日志"""
     try:
+        from core.utils.masker import mask_secrets
+        safe_args = mask_secrets(str(args or ''))
+        args_short = safe_args[:200] if len(safe_args) > 200 else safe_args
         os.makedirs(os.path.dirname(AUDIT_LOG), exist_ok=True)
         ts = time.strftime('%Y-%m-%d %H:%M:%S')
-        args_short = args[:200] if len(args) > 200 else args
         with open(AUDIT_LOG, 'a', encoding='utf-8') as f:
             f.write(f'[{ts}] {name}  {args_short}\n')
     except Exception:

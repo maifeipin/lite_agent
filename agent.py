@@ -1167,7 +1167,9 @@ class Agent:
                     result = f"❌ 权限不足：当前账户为访客，无权调用工具 {tc['name']}"
                     ok = False
                 else:
-                    print(f"  🔧 [{step+1}/{self.max_steps}] 调用: {tc['name']}({tc['arguments']})")
+                    from core.utils.masker import mask_secrets
+                    safe_args = mask_secrets(str(tc.get('arguments', '')))
+                    print(f"  🔧 [{step+1}/{self.max_steps}] 调用: {tc['name']}({safe_args})")
                     try:
                         result = self.skill_engine.execute(tc["name"], tc["arguments"])
                         ok = True
@@ -1181,6 +1183,7 @@ class Agent:
                 )
                 # P1-5: 截断过大 result 防撑爆前端 (session 里存全量, 事件里截断)
                 display = result if len(result) <= 1000 else result[:1000] + "...(截断)"
+                display = mask_secrets(str(display)) if display else display
                 yield {"type": "tool_result", "name": tc["name"], "ok": ok, "result": display}
 
             # 工具结果已回传, 进入下一轮 loop

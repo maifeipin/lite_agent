@@ -24,8 +24,60 @@ def ops_workspace_run(code: str, timeout: int = 30) -> str:
     os.makedirs(WORKSPACE, exist_ok=True)
     ts = int(time.time() * 1000)
     script_path = os.path.join(WORKSPACE, f'task_{ts}.py')
+    
+    # 注入安全探针：禁止提权命令
+    audit_code = """
+import sys, os, re
+def _lite_agent_audit_hook(event, args):
+    if event not in ["subprocess.Popen", "os.system", "os.exec", "os.posix_spawn"]:
+        return
+        
+    c = None
+    if event == "os.system":
+        c = args[0]
+    elif event in ("subprocess.Popen", "os.posix_spawn"):
+        c = args[1]
+    elif event == "os.exec":
+        c = args[1] if len(args) > 1 else []
+        
+    if not c: return
+    
+    shell_regex = r'(?:^|[\\\"\\'|&;\\n])\\s*(sudo|su|visudo|passwd|pkexec|doas|sg|newgrp)\\b'
+    bad = {'sudo', 'su', 'visudo', 'passwd', 'pkexec', 'doas', 'sg', 'newgrp'}
+    
+    if event == "os.system" or isinstance(c, (str, bytes)):
+        m = re.search(shell_regex, str(c))
+        if m:
+            print(f"❌ [Security Sandbox] 拒绝执行特权命令(Shell解释): {m.group(1)}")
+            sys.exit(126)
+        return
+    
+    if isinstance(c, (list, tuple)):
+        cmd_list = [str(x) for x in c]
+    else:
+        return
+            
+    if not cmd_list: return
+    
+    cmd0 = os.path.basename(cmd_list[0])
+    
+    if cmd0 in bad:
+        print(f"❌ [Security Sandbox] 拒绝执行特权命令: {cmd0}")
+        sys.exit(126)
+        
+    if cmd0 in ('bash', 'sh', 'zsh', 'dash', 'cmd', 'powershell', 'env'):
+        for i, arg in enumerate(cmd_list):
+            if arg in ('-c', '/c', '-Command', '-lc') and i + 1 < len(cmd_list):
+                script = cmd_list[i+1]
+                m = re.search(shell_regex, script)
+                if m:
+                    print(f"❌ [Security Sandbox] 拒绝执行特权命令(Shell包裹): {m.group(1)}")
+                    sys.exit(126)
+                    
+sys.addaudithook(_lite_agent_audit_hook)
+"""
     with open(script_path, 'w', encoding='utf-8') as f:
-        f.write(code)
+        f.write(audit_code + "\n" + code)
 
     try:
         r = subprocess.run(
