@@ -24,56 +24,72 @@ def ops_workspace_run(code: str, timeout: int = 30) -> str:
     os.makedirs(WORKSPACE, exist_ok=True)
     ts = int(time.time() * 1000)
     script_path = os.path.join(WORKSPACE, f'task_{ts}.py')
-    
-    # 注入安全探针：禁止提权命令
-    audit_code = """
+
+    # 注入安全探针：拦截提权命令 (best-effort 减速带，非隔离边界)
+    audit_code = r"""
 import sys, os, re
+
+_BAD = ('sudo', 'su', 'visudo', 'passwd', 'pkexec', 'doas', 'sg', 'newgrp')
+# 仅在命令起始位置匹配 (行首 / 管道 / 与或 / 分号 / 换行 / 子shell / 反引号), 避免误伤 `cat /etc/passwd` 这类参数
+_CMDPOS = re.compile(r'(?:^|[|&;\n(`])\s*(sudo|su|visudo|passwd|pkexec|doas|sg|newgrp)\b')
+
+
+def _lite_agent_deny(hit):
+    print(f"❌ [Security Sandbox] 拒绝执行特权命令: {hit}")
+    sys.exit(126)
+
+
 def _lite_agent_audit_hook(event, args):
-    if event not in ["subprocess.Popen", "os.system", "os.exec", "os.posix_spawn"]:
+    if event not in ("subprocess.Popen", "os.system", "os.exec", "os.posix_spawn"):
         return
-        
-    c = None
     if event == "os.system":
         c = args[0]
     elif event in ("subprocess.Popen", "os.posix_spawn"):
         c = args[1]
-    elif event == "os.exec":
-        c = args[1] if len(args) > 1 else []
-        
-    if not c: return
-    
-    shell_regex = r'(?:^|[\\\"\\'|&;\\n])\\s*(sudo|su|visudo|passwd|pkexec|doas|sg|newgrp)\\b'
-    bad = {'sudo', 'su', 'visudo', 'passwd', 'pkexec', 'doas', 'sg', 'newgrp'}
-    
-    if event == "os.system" or isinstance(c, (str, bytes)):
-        m = re.search(shell_regex, str(c))
+    else:  # os.exec
+        c = args[1] if len(args) > 1 else None
+    if not c:
+        return
+
+    if isinstance(c, (bytes, bytearray)):
+        c = c.decode("utf-8", "ignore")
+
+    # 走 shell 解释的字符串命令 (os.system 恒经 shell; subprocess shell=True 传字符串): 整串按命令位扫描
+    if isinstance(c, str):
+        m = _CMDPOS.search(c)
         if m:
-            print(f"❌ [Security Sandbox] 拒绝执行特权命令(Shell解释): {m.group(1)}")
-            sys.exit(126)
+            _lite_agent_deny(m.group(1))
         return
-    
-    if isinstance(c, (list, tuple)):
+
+    # 列表形式 argv
+    try:
         cmd_list = [str(x) for x in c]
-    else:
+    except Exception:
         return
-            
-    if not cmd_list: return
-    
+    if not cmd_list:
+        return
     cmd0 = os.path.basename(cmd_list[0])
-    
-    if cmd0 in bad:
-        print(f"❌ [Security Sandbox] 拒绝执行特权命令: {cmd0}")
-        sys.exit(126)
-        
-    if cmd0 in ('bash', 'sh', 'zsh', 'dash', 'cmd', 'powershell', 'env'):
+    if cmd0 in _BAD:
+        _lite_agent_deny(cmd0)
+
+    # 壳包裹: bash -c "<script>" 等, 抽取内嵌脚本按命令位扫描
+    if cmd0 in ("bash", "sh", "zsh", "dash", "ash", "busybox"):
         for i, arg in enumerate(cmd_list):
-            if arg in ('-c', '/c', '-Command', '-lc') and i + 1 < len(cmd_list):
-                script = cmd_list[i+1]
-                m = re.search(shell_regex, script)
+            if arg in ("-c", "-lc", "-ic") and i + 1 < len(cmd_list):
+                m = _CMDPOS.search(cmd_list[i + 1])
                 if m:
-                    print(f"❌ [Security Sandbox] 拒绝执行特权命令(Shell包裹): {m.group(1)}")
-                    sys.exit(126)
-                    
+                    _lite_agent_deny(m.group(1))
+
+    # env 包装器: env [VAR=..] <cmd> ..
+    if cmd0 == "env":
+        for tok in cmd_list[1:]:
+            if "=" in tok or tok.startswith("-"):
+                continue
+            if os.path.basename(tok) in _BAD:
+                _lite_agent_deny(os.path.basename(tok))
+            break
+
+
 sys.addaudithook(_lite_agent_audit_hook)
 """
     with open(script_path, 'w', encoding='utf-8') as f:
