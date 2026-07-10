@@ -73,10 +73,12 @@ def _get_health_report() -> str:
             
             report.append(f"🧠 **当前配置的主模型 (Default Model)**: ✅ {default_model}")
             
-            if (llm_key.startswith('sk-') and len(llm_key) > 10) or '${' in llm_key:
-                report.append("🔑 **大模型 API 密钥**: ✅ 已配置 (格式正确)")
+            # 密钥已由 config_loader 解析为真实值(非空且非未解析的 ${占位符})即视为已配置;
+            # 不限定 sk- 前缀,以兼容 NVIDIA(nvapi-)、Ark 等其它格式的真实密钥
+            if llm_key and not llm_key.startswith('${'):
+                report.append("🔑 **大模型 API 密钥**: ✅ 已配置")
             else:
-                report.append("🔑 **大模型 API 密钥**: ❌ 配置异常 (格式不合规或缺失)")
+                report.append("🔑 **大模型 API 密钥**: ❌ 配置异常 (未配置或环境变量未解析)")
                 
             feishu = cfg.get('channels', {}).get('feishu', {}).get('enabled', False)
             dingtalk = cfg.get('channels', {}).get('dingtalk', {}).get('enabled', False)

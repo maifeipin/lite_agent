@@ -1,4 +1,4 @@
-import sys, os
+import sys, os, re
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agent import AgentResponse
 
@@ -23,6 +23,15 @@ def _get_db():
 def _v2ex_token():
     v2ex = _rss_config().get('v2ex', {})
     return v2ex.get('token', '') or os.environ.get('V2EX_TOKEN', '')
+
+
+def _clean_excerpt(exc: str, limit: int = 120) -> str:
+    """清理摘要中的 HTML 标签，并将换行替换为空格，避免排版断层"""
+    if not exc or exc == 'None':
+        return ""
+    exc_clean = re.sub(r'<[^>]+>', '', exc)
+    exc_clean = exc_clean.replace('\n', ' ').replace('\r', '').strip()
+    return exc_clean[:limit]
 
 
 def handle_rss(msg, args: str, session_mgr) -> AgentResponse:
@@ -111,10 +120,12 @@ def _list_view(items, g, total, nodes, db, msg, session_mgr):
         site = nodes.get(int(nid) if nid else 0, '?')
         title = item.get('title', '(无标题)')
         exc = (item.get('excerpt') or '')
-        summary = exc[:120].strip() if exc and exc != 'None' else ''
+        
+        summary = _clean_excerpt(exc, 120)
+            
         lines.append(f'**[{i}] {site}**\n{title}')
         if summary:
-            # 使用 blockquote 引用排版，避免使用 _ 包裹导致 URL 吞掉下划线破坏 Markdown 闭合
+            # 使用 blockquote 引用排版，过滤换行防止 markdown 的 > 断层
             lines.append(f'> {summary}')
         lines.append('')
         ctx_brief.append(f'[{i}] {title[:60]} ({site})')
@@ -181,7 +192,7 @@ def rss_brief() -> str:
 
 
 def _v2ex_reply_count(link: str) -> int:
-    import re, subprocess, json
+    import subprocess, json
     m = re.search(r'/t/(\d+)', link)
     if not m:
         return 0
@@ -239,7 +250,7 @@ def _rss_brief_compute() -> str:
         pass
 
     scored = []
-    seen_titles = set()
+    seen = set()
     for item in articles:
         sid = str(item['_id'])
         if sid in pushed_ids:
@@ -248,13 +259,24 @@ def _rss_brief_compute() -> str:
         site = nodes.get(int(item.get('rssNodeId', 0)), '?')
         exc = (item.get('excerpt') or '')
         title = item.get('title', '')
-        if not exc or exc == 'None' or len(exc) < 10:
+        
+        # 1. 先进行摘要清理 (不截断)
+        exc_clean = _clean_excerpt(exc, limit=10**9)
+        
+        # 2. 检查有效性 (依据清理后的摘要)
+        if not exc_clean or len(exc_clean) < 10:
             continue
-
-        title_key = title[:80]
-        if title_key in seen_titles:
+            
+        link = item.get('link', '')
+        link_base = link.split('#')[0].split('?')[0] if link else ""
+        clean_title = re.sub(r'^(\[.*?\]\s*)+', '', title).strip()
+        
+        # 3. 去重逻辑: 单主键 (有链接按链接，无链接按清理后的标题前 80 字)
+        key = link_base or clean_title[:80]
+        if key and key in seen:
             continue
-        seen_titles.add(title_key)
+        if key:
+            seen.add(key)
 
         score = SITE_QUALITY.get(site, 5)
         score += sum(1 for kw in HOT_KEYWORDS if kw.lower() in (title + exc).lower())
@@ -262,8 +284,9 @@ def _rss_brief_compute() -> str:
             if f'[{tag}]' in title:
                 score -= 10
                 break
-        link = item.get('link', '')
-        scored.append((score, item, site, exc[:120], sid, link))
+                
+        # 截取最终摘要
+        scored.append((score, item, site, exc_clean[:120], sid, link))
 
     v2ex_calls = 0
     for i, (score, item, site, exc, sid, link) in enumerate(scored):
