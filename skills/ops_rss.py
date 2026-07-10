@@ -148,11 +148,27 @@ SITE_QUALITY = {
 
 BRIEF_GROUPS = [5, 3]
 
-HOT_KEYWORDS = [
-    '大模型', 'Agent', 'Agent', '英伟达', 'OpenAI', 'DeepSeek',
-    '架构', '开源', '离职', '模型', '训练', '推理', '多模态',
-    '机器人', '具身', 'GPU', '蒸馏', 'RAG', '向量',
-]
+KEYWORD_WEIGHTS = {
+    '大模型': 2, '多模态': 2, 'DeepSeek': 2, '英伟达': 1, 'OpenAI': 1,
+    'Agent': 1, 'GPU': 1, 'RAG': 1, '向量': 1, '蒸馏': 1, '架构': 1,
+    '开源': 1, '离职': 1, '模型': 1, '训练': 1, '推理': 1, '机器人': 1, '具身': 1
+}
+
+def _keyword_score(text, cap=4):
+    t = text.lower()
+    n = len(t)
+    used = [False] * n
+    total = 0
+    for kw in sorted(KEYWORD_WEIGHTS, key=len, reverse=True):
+        lk = kw.lower()
+        i = t.find(lk)
+        while i != -1:
+            if not any(used[i:i+len(lk)]):
+                for j in range(i, i+len(lk)):
+                    used[j] = True
+                total += KEYWORD_WEIGHTS[kw]
+            i = t.find(lk, i+1)
+    return min(total, cap)
 
 V2EX_LOW_TAGS = ['推广', '交易', '外包', '酷工作', '招聘', '广告']
 
@@ -221,7 +237,11 @@ def _v2ex_reply_count(link: str) -> int:
         if isinstance(data, list):
             return len(data)
         return 0
-    except Exception:
+    except Exception as e:
+        try:
+            print(f"  [Error] V2EX API: {e}")
+        except:
+            pass
         return 0
 
 
@@ -245,7 +265,9 @@ def _rss_brief_compute() -> str:
     pushed_ids = set()
     try:
         with open(PUSHED_FILE, 'r') as f:
-            pushed_ids = set(json.load(f).get('ids', []))
+            data = json.load(f)
+            if isinstance(data, dict) and data.get('updated') == today:
+                pushed_ids = set(data.get('ids', []))
     except (FileNotFoundError, json.JSONDecodeError):
         pass
 
@@ -279,31 +301,45 @@ def _rss_brief_compute() -> str:
             seen.add(key)
 
         score = SITE_QUALITY.get(site, 5)
-        score += sum(1 for kw in HOT_KEYWORDS if kw.lower() in (title + exc).lower())
+        score += _keyword_score(title + " " + exc_clean)
+        
+        pubdate_str = item.get("pubdate", "")
+        if pubdate_str and len(pubdate_str) >= 13:
+            try:
+                score += int(pubdate_str[11:13]) * 0.02
+            except ValueError:
+                pass
+                
+        skip = False
         for tag in V2EX_LOW_TAGS:
             if f'[{tag}]' in title:
-                score -= 10
+                skip = True
                 break
+        if skip:
+            continue
                 
         # 截取最终摘要
         scored.append((score, item, site, exc_clean[:120], sid, link))
 
+    scored.sort(key=lambda x: x[0], reverse=True)
+    candidates = scored[:30]
+
     v2ex_calls = 0
-    for i, (score, item, site, exc, sid, link) in enumerate(scored):
+    for i, (score, item, site, exc, sid, link) in enumerate(candidates):
         if 'V2EX' in site or '话题' in site:
             if v2ex_calls >= 20:
-                break
+                continue
             v2ex_calls += 1
             replies = _v2ex_reply_count(link)
             if replies >= 100:
-                scored[i] = (score + 5, item, site, exc, sid, link)
+                candidates[i] = (score + 5, item, site, exc, sid, link)
             elif replies >= 50:
-                scored[i] = (score + 3, item, site, exc, sid, link)
+                candidates[i] = (score + 3, item, site, exc, sid, link)
             elif replies >= 20:
-                scored[i] = (score + 1, item, site, exc, sid, link)
+                candidates[i] = (score + 1, item, site, exc, sid, link)
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top = scored[:5]
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    top = candidates[:5]
 
     print(f'  📡 V2EX API 调用: {v2ex_calls} 次')
     print(f'  🏆 Top 5:')
