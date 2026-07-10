@@ -448,12 +448,21 @@ class Agent:
 
                 elif cmd == "/search":
                     if not args:
-                        return AgentResponse("❌ 用法错误：/search <关键词> [limit] [账户]", title="用法提示", color="yellow")
-                    keyword = args[0]
-                    limit = int(args[1]) if len(args) > 1 and args[1].isdigit() else 20
-                    account = args[2] if len(args) > 2 else None
+                        return AgentResponse("❌ 用法错误：/search <关键词> [条数] [账户]", title="用法提示", color="yellow")
+                    # 灵活解析：数字做 limit，其余拼 keyword（支持 /search 2 账号 或 /search 账号 2）
+                    _kw_parts = []
+                    _limit = 20
+                    _account = None
+                    for a in args:
+                        if a.isdigit():
+                            _limit = int(a)
+                        else:
+                            _kw_parts.append(a)
+                    if not _kw_parts:
+                        return AgentResponse("❌ 请提供搜索关键词", title="用法提示", color="yellow")
+                    keyword = " ".join(_kw_parts)
                     from skills.ops_mail_search import mail_search
-                    res_text = mail_search(keyword=keyword, limit=limit, account_name=account)
+                    res_text = mail_search(keyword=keyword, limit=_limit, account_name=_account)
                     return AgentResponse(res_text, title=f"搜索结果: {keyword}", color="blue")
 
                     
