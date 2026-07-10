@@ -116,6 +116,38 @@ def _handle_large_content(text: str, title: str) -> str:
     return text[:2400] + "\n\n...(内容超长已自动截断)"
 
 
+def _parse_high_importance(res: str) -> str:
+    """从 mail_client.py fetch_summaries 输出中解析高优邮件并格式化推送卡片。"""
+    import re, json
+    match = re.search(r'--- JSON_PUSH_START ---\n(.*?)\n--- JSON_PUSH_END ---', res, re.DOTALL)
+    if not match:
+        return ""
+    try:
+        summaries = json.loads(match.group(1))
+    except Exception:
+        return ""
+    if not summaries:
+        return ""
+
+    card_lines = []
+    for s in summaries:
+        card_text = (
+            f"✉️ **[ID: {s.get('id')}] [账户: {s.get('account_name', 'default')}] 邮件提炼：{s.get('subject', '无主题')}**\n"
+            f"👤 **发件人**：{s.get('sender')}\n"
+            f"📅 **分类/级别**：{s.get('category')} / `{s.get('importance')}`\n"
+            f"📝 **摘要**：{s.get('summary')}\n"
+        )
+        if s.get('actions'):
+            card_text += "🔔 **待办行动**：\n"
+            for idx, act in enumerate(s.get('actions'), 1):
+                card_text += f"  {idx}. {act}\n"
+        if s.get('deadline'):
+            card_text += f"⏰ **截止时间**：{s.get('deadline')} (原文: {s.get('deadline_raw')})\n"
+        card_text += f"💡 快捷操作: 回复 `/ok {s.get('id')}` 确认；回复 `/noise {s.get('id')}` 降噪此来源\n"
+        card_lines.append(card_text)
+    return "\n---\n\n".join(card_lines)
+
+
 @skill(
     name='mail_fetch_summaries',
     description='批量抓取最近几月的邮件，识别账单自动入库，并将通用邮件利用大模型生成分类和智能摘要。比较耗时，请耐心等待。',
@@ -128,44 +160,20 @@ def _handle_large_content(text: str, title: str) -> str:
     }
 )
 def mail_fetch_summaries(months: int = 1) -> str:
-    return _run_mail_reader_cmd(["fetch_summaries", str(months)])
+    res = _run_mail_reader_cmd(["fetch_summaries", str(months)])
+    high = _parse_high_importance(res)
+    if high:
+        return high
+    # 无高优邮件时返回摘要行（去掉 JSON_PUSH 标记块）
+    import re
+    res = re.sub(r'\n--- JSON_PUSH_START ---\n.*?\n--- JSON_PUSH_END ---', '', res, flags=re.DOTALL)
+    return res or "✅ 邮件同步完成，无高优先邮件。"
 
 
 def mail_fetch_cron() -> str:
     res = mail_fetch_summaries(months=1)
-    
-    # 解析重要的推送邮件并格式化
-    import re, json
-    match = re.search(r'--- JSON_PUSH_START ---\n(.*?)\n--- JSON_PUSH_END ---', res, re.DOTALL)
-    if not match:
-        return "✅ 邮件同步完成，无重要邮件推送。"
-        
-    try:
-        summaries = json.loads(match.group(1))
-        if not summaries:
-            return "✅ 邮件同步完成，无重要邮件推送。"
-            
-        card_lines = []
-        for s in summaries:
-            card_text = (
-                f"✉️ **[ID: {s.get('id')}] [账户: {s.get('account_name', 'default')}] 邮件提炼：{s.get('subject', '无主题')}**\n"
-                f"👤 **发件人**：{s.get('sender')}\n"
-                f"📅 **分类/级别**：{s.get('category')} / `{s.get('importance')}`\n"
-                f"📝 **摘要**：{s.get('summary')}\n"
-            )
-            if s.get('actions'):
-                card_text += "🔔 **待办行动**：\n"
-                for idx, act in enumerate(s.get('actions'), 1):
-                    card_text += f"  {idx}. {act}\n"
-            if s.get('deadline'):
-                card_text += f"⏰ **截止时间**：{s.get('deadline')} (原文: {s.get('deadline_raw')})\n"
-                
-            card_text += f"💡 快捷操作: 回复 `/ok {s.get('id')}` 确认；回复 `/noise {s.get('id')}` 降噪此来源\n"
-            card_lines.append(card_text)
-            
-        return "\n---\n\n".join(card_lines)
-    except Exception as parse_err:
-        return f"⚠️ 邮件解析成功但格式化失败: {parse_err}\n原始输出:\n{res}"
+    high = _parse_high_importance(res)
+    return high or "✅ 邮件同步完成，无重要邮件推送。"
 
 
 def mail_feedback_ok(summary_id: int) -> str:
