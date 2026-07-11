@@ -187,6 +187,40 @@ def mail_fetch_cron() -> str:
     return res
 
 
+def push_unpushed_high() -> str:
+    """纯 DB 查询未推送高优邮件并 push_alert。不连 POP3，不调 LLM。每20分钟调用。"""
+    db_path, sdb = _get_db_path_and_import_db()
+    rows = sdb.get_unpushed_high(db_path)
+    if not rows:
+        return "✅ 无待推送高优邮件。"
+    import json
+    summaries = []
+    card_ids = []
+    for r in rows:
+        summaries.append({
+            "id": r["id"], "account_name": r["account_name"], "uid": r["uid"],
+            "sender": r["sender"], "subject": r["subject"], "email_date": r["email_date"],
+            "category": r["category"], "importance": r["importance"],
+            "summary": r["summary"],
+            "actions": json.loads(r["actions_json"] or "[]"),
+            "deadline": r["deadline"], "deadline_raw": r["deadline_raw"]
+        })
+        card_ids.append(r["id"])
+    # 构造 JSON_PUSH 输出后解析为卡片
+    fake = "--- JSON_PUSH_START ---\n" + json.dumps(summaries, ensure_ascii=False) + "\n--- JSON_PUSH_END ---"
+    card = _parse_high_importance(fake)
+    if card and _agent:
+        try:
+            from core.alerts import push_alert
+            import time
+            push_alert(_agent, card, title='🔥 高优邮件推送', color='red',
+                       dedup_key=f"high_prio_db:{int(time.time()//300)}")
+        except Exception:
+            pass
+    sdb.mark_pushed(db_path, card_ids)
+    return card or "✅ 无待推送高优邮件。"
+
+
 def mail_feedback_ok(summary_id: int) -> str:
     db_path, sdb = _get_db_path_and_import_db()
     row = sdb.get_email_summary_by_id(db_path, summary_id)
