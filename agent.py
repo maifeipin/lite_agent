@@ -447,17 +447,17 @@ class Agent:
                     return AgentResponse(res_text, title="邮件统计", color="blue")
 
                 elif cmd == "/search":
-                    # /search [--hedgedoc|--full] <关键词> [条数] [账户]
+                    # /search [--hedgedoc|--full|+] <关键词> [条数] [账户]
                     _replytype = 0
                     _filtered = []
                     for a in args:
-                        if a in ("--hedgedoc", "--full"):
+                        if a in ("--hedgedoc", "--full", "+"):
                             _replytype = 2
                         else:
                             _filtered.append(a)
                     args = _filtered
                     if not args:
-                        return AgentResponse("❌ 用法：/search [--hedgedoc|--full] <关键词> [条数] [账户]", title="用法提示", color="yellow")
+                        return AgentResponse("❌ 用法：/search [+] <关键词> [条数]", title="用法提示", color="yellow")
                     # 灵活解析：数字做 limit，其余拼 keyword
                     _kw_parts = []
                     _limit = 20
