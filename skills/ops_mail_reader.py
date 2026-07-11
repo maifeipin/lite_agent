@@ -312,3 +312,16 @@ def mail_show_missed(limit: int = 15) -> str:
         return _handle_large_content(text, "可能错过的邮件")
     except Exception as e:
         return f"❌ 解析错过邮件失败: {e}\n{output}"
+
+
+# ── 模块级自注册定时任务 ──────────────────────────────────────────────
+def _mail_sync_tick():
+    """每20分钟轻量拉取 (不打 push, 幂等: 已处理邮件自动跳过)。"""
+    mail_fetch_summaries(months=1)
+    return None  # 不触发 push
+
+
+from core.cron_engine import CronManager
+_mgr = CronManager()
+if not any(j.name == 'mail_sync_tick' for j in _mgr.jobs.values()):
+    _mgr.add_job('mail_sync_tick', '*/20 * * * *', _mail_sync_tick)
