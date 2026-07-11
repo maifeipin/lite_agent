@@ -172,8 +172,7 @@ def mail_fetch_summaries(months: int = 1) -> str:
 
 def mail_fetch_cron() -> str:
     res = mail_fetch_summaries(months=1)
-    high = _parse_high_importance(res)
-    return high or "✅ 邮件同步完成，无重要邮件推送。"
+    return res  # mail_fetch_summaries 已解析 JSON_PUSH, 直接返回卡片/摘要
 
 
 def mail_feedback_ok(summary_id: int) -> str:
