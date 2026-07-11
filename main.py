@@ -125,16 +125,6 @@ def _register_cron_jobs(agent: Agent, config: dict):
                     except Exception as e:
                         return f"edge_health 失败: {e}"
                 fn = _edge_health
-            elif fn_name == 'mail_fetch_cron':
-                def _mail_fetch_cron_fn():
-                    text = _import_skill(module, fn_name)()
-                    if text and text.startswith('✉️'):
-                        from core.alerts import push_alert
-                        import time
-                        push_alert(agent, text, title='🔥 高优邮件推送', color='red',
-                                   dedup_key=f"high_prio:{int(time.time()//300)}")
-                    return text
-                fn = _mail_fetch_cron_fn
             else:
                 kwargs = job.get('kwargs', {})
                 def _generic(module=module, fn_name=fn_name, kwargs=kwargs, job_name=name, push=job.get('push_on_output', False)):
@@ -152,16 +142,9 @@ def _register_cron_jobs(agent: Agent, config: dict):
             else:
                 cron.add_job(name, job['time'], fn)
 
-    # ─ 20分钟自动邮件同步 (独立注册，每20分钟秒级推送高优) ─
-    def _mail_sync_fn():
-        text = _import_skill('ops_mail_reader', 'mail_fetch_cron')()
-        if text and text.startswith('✉️'):
-            from core.alerts import push_alert
-            import time
-            push_alert(agent, text, title='🔥 高优邮件推送', color='red',
-                       dedup_key=f"high_prio_sync:{int(time.time()//300)}")
-        return text
-    cron.add_job('邮件同步_每20分钟', '*/20 * * * *', _mail_sync_fn)
+    # ─ agent 注入到 ops_mail_reader (用于秒级推送高优邮件) ─
+    import skills.ops_mail_reader
+    skills.ops_mail_reader._agent = agent
 
     cron.start()
     print(f"📅 定时任务引擎就绪: 共注册 {len(cron.jobs)} 个任务")

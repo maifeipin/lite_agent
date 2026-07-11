@@ -4,6 +4,10 @@ from core.skill_engine import skill
 from core.config_loader import load_config
 import subprocess
 
+# 由 main.py 注入，用于秒级推送高优邮件到 IM 通道
+_agent = None
+
+
 def _run_mail_reader_cmd(cmd_args: list, timeout=180) -> str:
     cfg = load_config() or {}
     
@@ -172,7 +176,15 @@ def mail_fetch_summaries(months: int = 1) -> str:
 
 def mail_fetch_cron() -> str:
     res = mail_fetch_summaries(months=1)
-    return res  # mail_fetch_summaries 已解析 JSON_PUSH, 直接返回卡片/摘要
+    if res and res.startswith('✉️') and _agent:
+        try:
+            from core.alerts import push_alert
+            import time
+            push_alert(_agent, res, title='🔥 高优邮件推送', color='red',
+                       dedup_key=f"high_prio:{int(time.time()//300)}")
+        except Exception:
+            pass
+    return res
 
 
 def mail_feedback_ok(summary_id: int) -> str:
