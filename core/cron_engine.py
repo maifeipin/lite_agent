@@ -19,8 +19,21 @@ class CronJob:
             
         today_str = current_time.strftime("%Y-%m-%d")
         
-        # 简单策略：按 "HH:MM" 匹配
         if ":" in self.cron_expr:
+            # 支持每N分钟格式: */N * * * *
+            if self.cron_expr.startswith("*/") and self.cron_expr.endswith(" * * * *"):
+                try:
+                    interval = int(self.cron_expr[2:self.cron_expr.index(" ")])
+                    minute = current_time.minute
+                    if minute % interval == 0:
+                        last_minute_key = f"{self.name}_last_minute"
+                        last_min = getattr(self, last_minute_key, None)
+                        if last_min != minute:
+                            setattr(self, last_minute_key, minute)
+                            return True
+                except (ValueError, IndexError):
+                    pass
+                return False
             current_hm = current_time.strftime("%H:%M")
             if current_hm == self.cron_expr and self.last_run_date != today_str:
                 self.last_run_date = today_str
