@@ -535,6 +535,11 @@ class Agent:
                 if args[0] == "fetch":
                     months = int(args[1]) if len(args) > 1 else 1
                     result = billing_fetch(months)
+                elif args[0] in ("fetch_summaries", "fs"):
+                    # 邮件 LLM 摘要走 mail_fetch_summaries (解析 JSON_PUSH)
+                    months = int(args[1]) if len(args) > 1 else 1
+                    from skills.ops_mail_reader import mail_fetch_summaries
+                    result = mail_fetch_summaries(months=months)
                 else:
                     result = _run_billing_cmd(args)
                 return AgentResponse(result, title=f"执行结果: {args[0]}", color="blue")
