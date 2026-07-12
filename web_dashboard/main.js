@@ -124,10 +124,12 @@ async function performSearch() {
 // Meilisearch 索引检索 API
 async function searchIndex(indexUid, query) {
     try {
+        const sortField = indexUid === 'emails' ? 'email_date:desc' : 'published:desc';
         const body = {
             q: query,
             limit: 40,
-            attributesToHighlight: ['subject', 'plain_text', 'title', 'content'],
+            sort: [sortField],
+            attributesToHighlight: ['subject', 'plain_text', 'summary', 'title', 'content'],
             highlightPreTag: '<mark>',
             highlightPostTag: '</mark>'
         };
@@ -189,8 +191,11 @@ function renderEmailCard(doc) {
     const subject = doc._formatted?.subject || doc.subject || '无主题';
     const sender = doc.sender || '未知发件人';
     const plainText = doc._formatted?.plain_text || doc.plain_text || '';
+    const summary = doc._formatted?.summary || doc.summary || '';
     const date = doc.email_date || doc.fetched_at || '';
     
+    const summaryBlock = summary ? `<div class="card-summary" style="background:#f0f7ff; padding:8px; margin-bottom:8px; border-left: 3px solid #0066cc; border-radius: 4px; font-size: 0.9em; color:#333;"><strong>🤖 AI 摘要：</strong><br/>${summary}</div>` : '';
+
     return `
         <div class="result-card">
             <div class="card-meta">
@@ -200,6 +205,7 @@ function renderEmailCard(doc) {
                 <span>账户: ${doc.account_name}</span>
             </div>
             <div class="card-title">${subject}</div>
+            ${summaryBlock}
             <div class="card-snippet">${plainText.substring(0, 300)}...</div>
             <div class="card-actions">
                 <button class="card-btn btn-reprocess" data-uid="${doc.uid}" data-account="${doc.account_name}">🔄 重新解析</button>
