@@ -110,6 +110,10 @@
                     <span class="cmd-trigger">/reprocess</span>
                     <span class="cmd-desc">重新解析历史未分类/失败的银行账单邮件</span>
                 </div>
+                <div class="command-item" data-cmd="执行 /home/liteagent/mail-statement-parser/scripts/backfill_email_bodies.py">
+                    <span class="cmd-trigger">/backfill_bodies</span>
+                    <span class="cmd-desc">回填缺失的早期账单原文 (修复搜索查不到的问题)</span>
+                </div>
                 <div class="command-item" data-cmd="/mail g 1">
                     <span class="cmd-trigger">/mail g 1</span>
                     <span class="cmd-desc">主动从 Gmail 邮箱拉取最新一封邮件</span>
