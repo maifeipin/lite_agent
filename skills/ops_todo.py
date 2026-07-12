@@ -285,6 +285,24 @@ def todo_list(status: str = "pending,active", project: str = None, kind: str = N
         
     return "\n".join(result)
 
+def get_todos_json(status: str = "pending,active", limit: int = 50) -> list:
+    conn = _conn()
+    cursor = conn.cursor()
+    query = "SELECT id, title, description, status, kind, project, created_at, updated_at, due_at, snoozed_until, shelved_reason FROM todos WHERE 1=1"
+    params = []
+    if status and status != 'all':
+        statuses = status.split(',')
+        query += f" AND status IN ({','.join(['?'] * len(statuses))})"
+        params.extend(statuses)
+    query += " ORDER BY updated_at DESC LIMIT ?"
+    params.append(limit)
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+    columns = [col[0] for col in cursor.description]
+    todos = [dict(zip(columns, row)) for row in rows]
+    conn.close()
+    return todos
+
 @skill(name="todo_get", description="获取待办事项详情", params={"id": {"type": "string", "description": "任务 ID"}})
 def todo_get(id: str) -> str:
     conn = _conn()

@@ -101,14 +101,24 @@ async function performSearch() {
                 )
             );
         }
+        if (state.activeSource === 'todos') {
+            // 如果仅选择 todos，或者未来在 all 里也展示，可以加在 all 判断里
+            // 根据需求，用户如果点了 todos tab 就只展示 todos
+            queryPromises.push(
+                fetchTodos().then(res => 
+                    res.filter(t => !state.searchQuery || t.title.includes(state.searchQuery) || (t.description && t.description.includes(state.searchQuery)))
+                       .map(d => ({ ...d, _source: 'todos' }))
+                )
+            );
+        }
         
         const resultsArray = await Promise.all(queryPromises);
         docs = resultsArray.flat();
         
         // 根据时间或获取顺序重新排序
         docs.sort((a, b) => {
-            const timeA = new Date(a.fetched_at || a.email_date || 0);
-            const timeB = new Date(b.fetched_at || b.email_date || 0);
+            const timeA = new Date(a.fetched_at || a.email_date || a.updated_at || 0);
+            const timeB = new Date(b.fetched_at || b.email_date || b.updated_at || 0);
             return timeB - timeA;
         });
         
@@ -151,6 +161,19 @@ async function searchIndex(indexUid, query) {
     }
 }
 
+// 抓取 TODO API
+async function fetchTodos() {
+    try {
+        const res = await fetch(`/agent/api/v1/todos`);
+        if (!res.ok) return [];
+        const data = await res.json();
+        return data.data || [];
+    } catch (e) {
+        console.error(`Fetch todos failed:`, e);
+        return [];
+    }
+}
+
 // 渲染结果卡片
 function renderResults() {
     const grid = document.getElementById('results-grid');
@@ -162,6 +185,8 @@ function renderResults() {
     grid.innerHTML = state.results.map(doc => {
         if (doc._source === 'emails') {
             return renderEmailCard(doc);
+        } else if (doc._source === 'todos') {
+            return renderTodoCard(doc);
         } else {
             return renderRssCard(doc);
         }
@@ -231,6 +256,28 @@ function renderRssCard(doc) {
             </div>
             <div class="card-title"><a href="${doc.link}" target="_blank" style="color:inherit;text-decoration:none;">${title}</a></div>
             <div class="card-snippet">${content.substring(0, 300)}...</div>
+        </div>
+    `;
+}
+
+// 渲染 TODO 卡片
+function renderTodoCard(doc) {
+    const title = doc.title || '无标题';
+    const desc = doc.description || '';
+    const date = doc.updated_at ? doc.updated_at.replace('T', ' ').substring(0, 16) : '';
+    const kindIcon = doc.kind === 'code' ? '💻' : '📝';
+    
+    return `
+        <div class="result-card" style="border-left: 4px solid #10b981;">
+            <div class="card-meta">
+                <span class="tag" style="background:#10b98122;color:#10b981;">✅ TODO</span>
+                <span>${kindIcon} ${doc.kind}</span>
+                ${doc.project ? `<span>📦 ${doc.project}</span>` : ''}
+                <span>更新: ${date}</span>
+                <span>状态: <strong>${doc.status}</strong></span>
+            </div>
+            <div class="card-title">${title}</div>
+            ${desc ? `<div class="card-snippet" style="background:#f8fafc; padding:8px; border-radius:4px; color:#475569;">${desc}</div>` : ''}
         </div>
     `;
 }
