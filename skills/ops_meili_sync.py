@@ -74,9 +74,11 @@ def sync_meili() -> str:
     state = _get_sync_state()
     now_str = datetime.now(timezone.utc).isoformat()
     
-    # 确保索引存在
+    # 确保索引存在及配置排序属性
     _meili_request("/indexes", "POST", {"uid": "emails", "primaryKey": "id"})
+    _meili_request("/indexes/emails/settings", "PATCH", {"sortableAttributes": ["email_date", "fetched_at"]})
     _meili_request("/indexes", "POST", {"uid": "rss", "primaryKey": "id"})
+    _meili_request("/indexes/rss/settings", "PATCH", {"sortableAttributes": ["published", "fetched_at"]})
     
     # --- 1. 同步邮件 ---
     email_count = 0
@@ -89,10 +91,11 @@ def sync_meili() -> str:
             # 增量查询
             cursor.execute(
                 "SELECT eb.account_name, eb.uid, eb.plain_text, eb.fetched_at, "
-                "es.subject, es.sender, es.email_date, es.category, es.importance "
+                "es.subject, es.sender, es.email_date, es.category, es.importance, es.summary, es.processed_at "
                 "FROM email_bodies eb "
                 "JOIN email_summaries es ON eb.account_name=es.account_name AND eb.uid=es.uid "
-                "WHERE eb.fetched_at > ? ORDER BY eb.fetched_at ASC", (state["last_email_sync"],)
+                "WHERE eb.fetched_at > ? OR es.processed_at > ? ORDER BY MAX(eb.fetched_at, COALESCE(es.processed_at, '1970-01-01')) ASC", 
+                (state["last_email_sync"], state["last_email_sync"])
             )
             rows = cursor.fetchall()
             
@@ -109,8 +112,10 @@ def sync_meili() -> str:
                         "email_date": r["email_date"],
                         "category": r["category"],
                         "importance": r["importance"],
+                        "summary": r["summary"],
                         "plain_text": (r["plain_text"] or "")[:50000],  # 截断超长文本
-                        "fetched_at": r["fetched_at"]
+                        "fetched_at": r["fetched_at"],
+                        "processed_at": r["processed_at"]
                     })
                 
                 # 分批推送到 Meilisearch 防止 Payload 过大
@@ -121,7 +126,9 @@ def sync_meili() -> str:
                     if res:
                         email_count += len(batch)
                         # 取最新的一封邮件的时间作为 last_email_sync
-                        state["last_email_sync"] = batch[-1]["fetched_at"]
+                        last_rec = batch[-1]
+                        last_time = max(last_rec.get("fetched_at") or "", last_rec.get("processed_at") or "")
+                        state["last_email_sync"] = max(state.get("last_email_sync", ""), last_time)
             conn.close()
         except Exception as e:
             print(f"Error syncing emails: {e}")
