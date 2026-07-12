@@ -398,3 +398,58 @@ def mail_show_missed(limit: int = 15) -> str:
         return _handle_large_content(text, "可能错过的邮件")
     except Exception as e:
         return f"❌ 解析错过邮件失败: {e}\n{output}"
+
+@skill(
+    name='mail_view_original',
+    description='查看某封邮件的原文并自动生成 HedgeDoc 链接',
+    params={
+        'account': {
+            'type': 'string',
+            'description': '邮箱账号'
+        },
+        'uid': {
+            'type': 'string',
+            'description': '邮件 UID'
+        }
+    }
+)
+def mail_view_original(account: str, uid: str) -> str:
+    db_path, _sdb = _get_db_path_and_import_db()
+    if not db_path or not os.path.exists(db_path):
+        return "❌ 找不到 statements.db 数据库"
+    
+    import sqlite3
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT es.subject, es.sender, es.email_date, eb.raw_html, eb.plain_text "
+                    "FROM email_bodies eb "
+                    "JOIN email_summaries es ON eb.account_name=es.account_name AND eb.uid=es.uid "
+                    "WHERE eb.account_name=? AND eb.uid=?", (account, uid))
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return f"❌ 找不到该邮件原文 (Account: {account}, UID: {uid})"
+            
+        subject, sender, date, raw_html, plain_text = row
+        content = raw_html if raw_html else plain_text
+        if not content:
+            content = "无邮件正文内容"
+            
+        md_text = f"# 邮件原文: {subject}\n\n**发件人**: {sender}\n**时间**: {date}\n\n---\n\n```html\n{content}\n```"
+        
+        cfg = load_config() or {}
+        hc = cfg.get("hedgedoc", {})
+        if hc.get("enabled"):
+            try:
+                from core.utils.hedgedoc import upload_to_hedgedoc
+                url = upload_to_hedgedoc(md_text, hc)
+                if url:
+                    return f"✅ 邮件原文已为您生成 HedgeDoc 链接：\n👉 [点击查看完整原文]({url})"
+            except Exception as e:
+                print(f"HedgeDoc upload failed: {e}")
+                
+        return _handle_large_content(md_text, "邮件原文")
+    except Exception as e:
+        return f"❌ 查看邮件原文失败: {e}"
+
