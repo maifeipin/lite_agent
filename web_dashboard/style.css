@@ -242,6 +242,7 @@ body {
 /* 结果列表画布 */
 .results-canvas {
     flex-grow: 1;
+    min-height: 0;
     padding: 32px;
     overflow-y: auto;
 }
