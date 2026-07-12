@@ -215,13 +215,27 @@ function renderResults() {
     });
 }
 
+// 文本安全过滤与截断（保留高亮且不破坏 DOM）
+function safeSnippet(html, length = 300) {
+    if (!html) return '';
+    let text = html.replace(/<mark>/gi, '%%MARK%%').replace(/<\/mark>/gi, '%%/MARK%%');
+    text = text.replace(/<[^>]+>/g, ' ');
+    text = text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    if (text.length > length) text = text.substring(0, length) + '...';
+    text = text.replace(/%%MARK%%/g, '<mark>').replace(/%%\/MARK%%/g, '</mark>');
+    const openCount = (text.match(/<mark>/g) || []).length;
+    const closeCount = (text.match(/<\/mark>/g) || []).length;
+    if (openCount > closeCount) text += '</mark>';
+    return text;
+}
+
 // 渲染邮件卡片
 function renderEmailCard(doc) {
     // 获取高亮或正常字段
-    const subject = doc._formatted?.subject || doc.subject || '无主题';
-    const sender = doc.sender || '未知发件人';
-    const plainText = doc._formatted?.plain_text || doc.plain_text || '';
-    const summary = doc._formatted?.summary || doc.summary || '';
+    const subject = safeSnippet(doc._formatted?.subject || doc.subject || '无主题', 200);
+    const sender = safeSnippet(doc.sender || '未知发件人', 100);
+    const plainText = safeSnippet(doc._formatted?.plain_text || doc.plain_text || '', 300);
+    const summary = safeSnippet(doc._formatted?.summary || doc.summary || '', 500);
     const date = doc.email_date || doc.fetched_at || '';
     
     const summaryBlock = summary ? `<div class="card-summary" style="background:#f0f7ff; padding:8px; margin-bottom:8px; border-left: 3px solid #0066cc; border-radius: 4px; font-size: 0.9em; color:#333;"><strong>🤖 AI 摘要：</strong><br/>${summary}</div>` : '';
@@ -236,7 +250,7 @@ function renderEmailCard(doc) {
             </div>
             <div class="card-title">${subject}</div>
             ${summaryBlock}
-            <div class="card-snippet">${plainText.substring(0, 300)}...</div>
+            <div class="card-snippet">${plainText}</div>
             <div class="card-actions">
                 <button class="card-btn btn-reprocess" data-uid="${doc.uid}" data-account="${doc.account_name}">🔄 重新解析</button>
                 <button class="card-btn btn-view-original" data-uid="${doc.uid}" data-account="${doc.account_name}">👁️ 查看原文</button>
@@ -247,9 +261,9 @@ function renderEmailCard(doc) {
 
 // 渲染 RSS 卡片
 function renderRssCard(doc) {
-    const title = doc._formatted?.title || doc.title || '无标题';
-    const site = doc.node_name || 'RSS';
-    const content = doc._formatted?.content || doc.content || '';
+    const title = safeSnippet(doc._formatted?.title || doc.title || '无标题', 200);
+    const site = safeSnippet(doc.node_name || 'RSS', 100);
+    const content = safeSnippet(doc._formatted?.content || doc.content || '', 300);
     const date = doc.published || doc.fetched_at || '';
     
     return `
@@ -260,15 +274,15 @@ function renderRssCard(doc) {
                 <span>发布: ${date}</span>
             </div>
             <div class="card-title"><a href="${doc.link}" target="_blank" style="color:inherit;text-decoration:none;">${title}</a></div>
-            <div class="card-snippet">${content.substring(0, 300)}...</div>
+            <div class="card-snippet">${content}</div>
         </div>
     `;
 }
 
 // 渲染 TODO 卡片
 function renderTodoCard(doc) {
-    const title = doc.title || '无标题';
-    const desc = doc.description || '';
+    const title = safeSnippet(doc.title || '无标题', 200);
+    const desc = safeSnippet(doc.description || '', 500);
     const date = doc.updated_at ? doc.updated_at.replace('T', ' ').substring(0, 16) : '';
     const kindIcon = doc.kind === 'code' ? '💻' : '📝';
     
