@@ -435,10 +435,16 @@ class Agent:
                     return AgentResponse(res_text, title="补跑结果", color="blue")
 
                 elif cmd == "/mail":
-                    limit = int(args[0]) if args and args[0].isdigit() else 10
-                    account = args[1] if len(args) > 1 else None
+                    # 灵活解析：数字=limit，其余=账号/别名；支持 /mail qq 5 或 /mail 5 qq
+                    _limit = 10
+                    _account = None
+                    for a in args:
+                        if a.isdigit():
+                            _limit = int(a)
+                        else:
+                            _account = a
                     from skills.ops_mail_list import mail_list
-                    res_text = mail_list(limit=limit, account_name=account)
+                    res_text = mail_list(limit=_limit, account_name=_account)
                     return AgentResponse(res_text, title="收件箱", color="blue")
 
                 elif cmd == "/mailstats":

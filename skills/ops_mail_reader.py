@@ -8,9 +8,35 @@ import subprocess
 _agent = None
 
 
-def _run_mail_reader_cmd(cmd_args: list, timeout=180) -> str:
+def _build_llm_pool_env(cfg) -> dict:
+    """根据 cfg['llm']['mail_pool']（model key 列表）解析端点池，返回含 LLM_POOL 的 env dict。
+    未配置 mail_pool 时返回空 dict（call_llm 退回单端点 env，向后兼容）。"""
+    import json
+    llm_cfg = cfg.get('llm', {}) if cfg else {}
+    models = llm_cfg.get('models', {})
+    pool_keys = llm_cfg.get('mail_pool') or []
+    endpoints = []
+    for key in pool_keys:
+        m = models.get(key) or {}
+        api_key = m.get('api_key', '')
+        if isinstance(api_key, str) and api_key.startswith('${') and api_key.endswith('}'):
+            api_key = os.environ.get(api_key[2:-1], '')
+        burl = m.get('base_url', 'https://api.openai.com/v1')
+        mtags = m.get('tags', [])
+        provider = 'gemini' if ('gemini' in mtags or 'generativelanguage' in burl or 'googleapis' in burl) else 'openai'
+        if not api_key:
+            continue
+        endpoints.append({'api_key': api_key, 'base_url': burl, 'provider': provider, 'model': m.get('model', '')})
+    if not endpoints:
+        return {}
+    return {'LLM_POOL': json.dumps(endpoints, ensure_ascii=False)}
+
+
+def _run_mail_reader_cmd(cmd_args: list, timeout=None) -> str:
     cfg = load_config() or {}
-    
+    if timeout is None:
+        timeout = cfg.get('mail', {}).get('subprocess_timeout', 300)
+
     # 从 billing 获取 script_dir
     billing_dir = cfg.get("billing", {}).get("script_dir", "/home/liteagent/mail-statement-parser")
     mail_client_py = os.path.join(billing_dir, "mail_client.py")
@@ -48,7 +74,10 @@ def _run_mail_reader_cmd(cmd_args: list, timeout=180) -> str:
         env["LLM_PROVIDER"] = provider
     if model:
         env["LLM_MODEL"] = model
-        
+
+    # LLM 端点池注入（配置了 llm.mail_pool 时启用 429 轮换）
+    env.update(_build_llm_pool_env(cfg))
+
     cmd = [sys.executable, mail_client_py] + cmd_args
     try:
         r = subprocess.run(cmd, cwd=billing_dir, capture_output=True, text=True, encoding='utf-8', timeout=timeout, env=env)
@@ -189,6 +218,47 @@ def mail_fetch_cron() -> str:
 
 
 # push_unpushed_high 已废弃——拉取+推送应在同一周期, 见 mail_fetch_cron
+
+
+@skill(
+    name='mail_fetch_only',
+    description='幂等拉取最近邮件正文入库(不调LLM)，新邮件标 status=pending 留待 enrich。秒级，适合频繁定时同步。',
+    params={
+        'months': {
+            'type': 'integer',
+            'description': '回溯抓取的月数，默认 1',
+            'default': 1
+        }
+    }
+)
+def mail_fetch_only(months: int = 1) -> str:
+    res = _run_mail_reader_cmd(["fetch_only", str(months)])
+    return res or "✅ 拉取完成，无新增。"
+
+
+@skill(
+    name='mail_llm_enrich',
+    description='对 status=pending 的邮件做 LLM 摘要提炼(限量+429退避+端点池轮换)，高优邮件秒级推送。',
+    params={
+        'limit': {
+            'type': 'integer',
+            'description': '单次处理上限，默认 30',
+            'default': 30
+        }
+    }
+)
+def mail_llm_enrich(limit: int = 30) -> str:
+    res = _run_mail_reader_cmd(["enrich_pending", str(limit)])
+    high = _parse_high_importance(res)
+    if high and _agent:
+        try:
+            from core.alerts import push_alert
+            import time
+            push_alert(_agent, high, title='🔥 高优邮件推送', color='red',
+                       dedup_key=f"high_prio:{int(time.time()//300)}")
+        except Exception:
+            pass
+    return high or res
 
 
 def mail_feedback_ok(summary_id: int) -> str:
