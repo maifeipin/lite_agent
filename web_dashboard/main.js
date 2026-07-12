@@ -30,17 +30,22 @@ document.addEventListener('DOMContentLoaded', () => {
 // 获取 Meilisearch 真实的数据统计信息
 async function fetchStats() {
     try {
-        const [emailsRes, rssRes] = await Promise.all([
+        const [emailsRes, rssRes, todosRes] = await Promise.all([
             fetch('/meili/indexes/emails/stats').then(r => r.ok ? r.json() : { numberOfDocuments: 0 }).catch(() => ({ numberOfDocuments: 0 })),
-            fetch('/meili/indexes/rss/stats').then(r => r.ok ? r.json() : { numberOfDocuments: 0 }).catch(() => ({ numberOfDocuments: 0 }))
+            fetch('/meili/indexes/rss/stats').then(r => r.ok ? r.json() : { numberOfDocuments: 0 }).catch(() => ({ numberOfDocuments: 0 })),
+            fetch('/agent/api/v1/todos').then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] }))
         ]);
         
         state.emailCount = emailsRes.numberOfDocuments || 0;
         state.rssCount = rssRes.numberOfDocuments || 0;
+        state.todoCount = (todosRes.data || []).length;
         
         document.getElementById('badge-all').textContent = state.emailCount + state.rssCount;
         document.getElementById('badge-emails').textContent = state.emailCount;
         document.getElementById('badge-rss').textContent = state.rssCount;
+        
+        const badgeTodos = document.getElementById('badge-todos');
+        if (badgeTodos) badgeTodos.textContent = state.todoCount;
     } catch (e) {
         console.error('Fetch stats failed:', e);
     }
