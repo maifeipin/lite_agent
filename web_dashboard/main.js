@@ -12,6 +12,13 @@ const state = {
     eventSource: null
 };
 
+// 初始化 Session ID
+let sessionId = localStorage.getItem('agent_session_id');
+if (!sessionId) {
+    sessionId = 'web_dashboard_' + Math.random().toString(36).substring(2, 15);
+    localStorage.setItem('agent_session_id', sessionId);
+}
+
 // 页面加载初始化
 document.addEventListener('DOMContentLoaded', () => {
     initSearch();
@@ -375,7 +382,7 @@ async function triggerCommand(commandText) {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                session_id: 'web_dashboard_session_v2',
+                session_id: sessionId,
                 text: commandText
             })
         });
