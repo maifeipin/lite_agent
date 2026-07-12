@@ -113,12 +113,15 @@ def sync_meili() -> str:
                         "fetched_at": r["fetched_at"]
                     })
                 
-                # 批量推送到 Meilisearch
-                res = _meili_request("/indexes/emails/documents", "POST", docs)
-                if res:
-                    email_count = len(docs)
-                    # 取最新的一封邮件的时间作为 last_email_sync
-                    state["last_email_sync"] = rows[-1]["fetched_at"]
+                # 分批推送到 Meilisearch 防止 Payload 过大
+                batch_size = 100
+                for i in range(0, len(docs), batch_size):
+                    batch = docs[i:i + batch_size]
+                    res = _meili_request("/indexes/emails/documents", "POST", batch)
+                    if res:
+                        email_count += len(batch)
+                        # 取最新的一封邮件的时间作为 last_email_sync
+                        state["last_email_sync"] = batch[-1]["fetched_at"]
             conn.close()
         except Exception as e:
             print(f"Error syncing emails: {e}")

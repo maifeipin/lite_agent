@@ -90,6 +90,22 @@
                     <span class="cmd-trigger">/ops_backup_data</span>
                     <span class="cmd-desc">打包备份系统数据 (SQLite, Mail, Vaultwarden, Meilisearch)</span>
                 </div>
+                <div class="command-item" data-cmd="/sync_meili">
+                    <span class="cmd-trigger">/sync_meili</span>
+                    <span class="cmd-desc">增量同步邮件和 RSS 到 Meilisearch 搜索引擎</span>
+                </div>
+                <div class="command-item" data-cmd="/mail_llm_enrich">
+                    <span class="cmd-trigger">/mail_llm_enrich</span>
+                    <span class="cmd-desc">对未处理邮件进行 AI 摘要、分类与提取</span>
+                </div>
+                <div class="command-item" data-cmd="/mail_fetch_only">
+                    <span class="cmd-trigger">/mail_fetch_only</span>
+                    <span class="cmd-desc">快速拉取最新邮件正文入库（不消耗 Token）</span>
+                </div>
+                <div class="command-item" data-cmd="/mail_fetch_summaries">
+                    <span class="cmd-trigger">/mail_fetch_summaries</span>
+                    <span class="cmd-desc">同步拉取邮件并立即执行 AI 摘要与权重提炼</span>
+                </div>
                 <div class="command-item" data-cmd="/reprocess">
                     <span class="cmd-trigger">/reprocess</span>
                     <span class="cmd-desc">重新解析历史未分类/失败的银行账单邮件</span>

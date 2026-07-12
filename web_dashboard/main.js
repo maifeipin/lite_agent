@@ -166,6 +166,14 @@ function renderResults() {
             triggerCommand(`/reprocess account=${account} uid=${uid}`);
         });
     });
+
+    document.querySelectorAll('.btn-view-original').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            const uid = e.target.getAttribute('data-uid');
+            const account = e.target.getAttribute('data-account');
+            window.open(`/agent/api/v1/email/html?account=${encodeURIComponent(account)}&uid=${encodeURIComponent(uid)}`, '_blank');
+        });
+    });
 }
 
 // 渲染邮件卡片
@@ -188,6 +196,7 @@ function renderEmailCard(doc) {
             <div class="card-snippet">${plainText.substring(0, 300)}...</div>
             <div class="card-actions">
                 <button class="card-btn btn-reprocess" data-uid="${doc.uid}" data-account="${doc.account_name}">🔄 重新解析</button>
+                <button class="card-btn btn-view-original" data-uid="${doc.uid}" data-account="${doc.account_name}">👁️ 查看原文</button>
             </div>
         </div>
     `;

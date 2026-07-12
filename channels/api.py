@@ -71,6 +71,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_pull_task(parsed_url.query)
         elif parsed_url.path == '/api/v1/task/stream':
             self._handle_task_stream(parsed_url.query)
+        elif parsed_url.path == '/api/v1/email/html':
+            self._handle_email_html(parsed_url.query)
         elif parsed_url.path == '/v1/models':
             self._handle_openai_models()
         else:
@@ -423,6 +425,64 @@ class ApiHandler(BaseHTTPRequestHandler):
                 break
                 
             time.sleep(1)
+
+    def _handle_email_html(self, query: str):
+        """直接返回邮件原始 HTML，供浏览器原生渲染预览。
+        GET /api/v1/email/html?account=<account>&uid=<uid>
+        """
+        import os, sqlite3
+        qs = parse_qs(query)
+        account = (qs.get('account', [None])[0] or '').strip()
+        uid = (qs.get('uid', [None])[0] or '').strip()
+        if not account or not uid:
+            self.send_error(400, "Bad Request: Missing account or uid")
+            return
+
+        from core.config_loader import load_config
+        cfg = load_config() or {}
+        billing_dir = cfg.get('billing', {}).get('script_dir', '/home/liteagent/mail-statement-parser')
+        db_path = os.path.join(billing_dir, 'statements.db')
+        if not os.path.exists(db_path):
+            self.send_error(500, "Database not found")
+            return
+
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT es.subject, es.sender, es.email_date, eb.raw_html, eb.plain_text "
+                "FROM email_bodies eb "
+                "JOIN email_summaries es ON eb.account_name=es.account_name AND eb.uid=es.uid "
+                "WHERE eb.account_name=? AND eb.uid=?", (account, uid)
+            )
+            row = cur.fetchone()
+            conn.close()
+        except Exception as e:
+            self.send_error(500, f"Database error: {e}")
+            return
+
+        if not row:
+            self.send_error(404, "Email not found")
+            return
+
+        subject, sender, email_date, raw_html, plain_text = row
+        if raw_html:
+            html_content = raw_html
+        elif plain_text:
+            # 纯文本用 <pre> 包裹
+            import html
+            html_content = f"<html><head><meta charset='utf-8'><title>{html.escape(subject or '')}</title></head><body><pre>{html.escape(plain_text)}</pre></body></html>"
+        else:
+            self.send_error(404, "Email body is empty")
+            return
+
+        body_bytes = html_content.encode('utf-8')
+        self.send_response(200)
+        self._send_cors_headers()
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(body_bytes)))
+        self.end_headers()
+        self.wfile.write(body_bytes)
 
     def _handle_openai_models(self):
         models_obj = {
