@@ -20,24 +20,16 @@ document.addEventListener('DOMContentLoaded', () => {
     performSearch();
 });
 
-// 获取 Meilisearch 统计信息 (通过 Search API 获取以适配只读 Search Key 限制)
+// 获取 Meilisearch 真实的数据统计信息
 async function fetchStats() {
     try {
         const [emailsRes, rssRes] = await Promise.all([
-            fetch('/meili/indexes/emails/search', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ q: '', limit: 0 })
-            }).then(r => r.ok ? r.json() : { estimatedTotalHits: 0 }).catch(() => ({ estimatedTotalHits: 0 })),
-            fetch('/meili/indexes/rss/search', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ q: '', limit: 0 })
-            }).then(r => r.ok ? r.json() : { estimatedTotalHits: 0 }).catch(() => ({ estimatedTotalHits: 0 }))
+            fetch('/meili/indexes/emails/stats').then(r => r.ok ? r.json() : { numberOfDocuments: 0 }).catch(() => ({ numberOfDocuments: 0 })),
+            fetch('/meili/indexes/rss/stats').then(r => r.ok ? r.json() : { numberOfDocuments: 0 }).catch(() => ({ numberOfDocuments: 0 }))
         ]);
         
-        state.emailCount = emailsRes.estimatedTotalHits || 0;
-        state.rssCount = rssRes.estimatedTotalHits || 0;
+        state.emailCount = emailsRes.numberOfDocuments || 0;
+        state.rssCount = rssRes.numberOfDocuments || 0;
         
         document.getElementById('badge-all').textContent = state.emailCount + state.rssCount;
         document.getElementById('badge-emails').textContent = state.emailCount;
