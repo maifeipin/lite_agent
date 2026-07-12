@@ -453,3 +453,28 @@ def mail_view_original(account: str, uid: str) -> str:
     except Exception as e:
         return f"❌ 查看邮件原文失败: {e}"
 
+
+@skill(
+    name='backfill_bodies',
+    description='回填缺失的早期账单原文正文 (修复搜索查不到历史数据的问题)。'
+)
+def backfill_bodies() -> str:
+    """运行 scripts/backfill_email_bodies.py 脚本补齐历史邮件正文"""
+    cfg = load_config() or {}
+    billing_dir = cfg.get("billing", {}).get("script_dir", "/home/liteagent/mail-statement-parser")
+    script_path = os.path.join(billing_dir, "scripts", "backfill_email_bodies.py")
+    
+    if not os.path.exists(script_path):
+        return f"❌ 找不到回填脚本: {script_path}"
+        
+    cmd = [sys.executable, script_path]
+    try:
+        r = subprocess.run(cmd, cwd=billing_dir, capture_output=True, text=True, encoding='utf-8', timeout=600)
+        output = r.stdout.strip()
+        if r.returncode != 0:
+            return f"⚠️ 回填脚本执行出错 (代码 {r.returncode}):\n{r.stderr.strip()}"
+        return output or "✅ 历史邮件正文回填完成！"
+    except subprocess.TimeoutExpired:
+        return "❌ 回填脚本执行超时 (> 600秒)，请在服务器上手动运行。"
+    except Exception as e:
+        return f"❌ 脚本调用失败: {e}"
