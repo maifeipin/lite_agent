@@ -24,3 +24,8 @@ secrets/
 *.conf
 vps*.json
 .trae/
+
+# Generic sensitive files
+*.log
+*.db
+*.sqlite
