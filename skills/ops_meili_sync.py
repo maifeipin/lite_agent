@@ -166,10 +166,13 @@ def sync_meili() -> str:
         
         if docs:
             docs.sort(key=lambda x: x["fetched_at"])
-            res = _meili_request("/indexes/rss/documents", "POST", docs)
-            if res:
-                rss_count = len(docs)
-                state["last_rss_sync"] = docs[-1]["fetched_at"]
+            batch_size = 200
+            for i in range(0, len(docs), batch_size):
+                batch = docs[i:i + batch_size]
+                res = _meili_request("/indexes/rss/documents", "POST", batch)
+                if res:
+                    rss_count += len(batch)
+                    state["last_rss_sync"] = batch[-1]["fetched_at"]
     except Exception as e:
         print(f"Error syncing RSS: {e}")
 
