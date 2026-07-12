@@ -263,7 +263,11 @@ function initUIEvents() {
     });
 
     // 绑定指令列表点击
-    document.querySelectorAll('.command-item').forEach(item => {
+    document.querySelectorAll('.command-item').forEach((item, index) => {
+        item.addEventListener('mouseenter', () => {
+            state.selectedCommandIndex = index;
+            updateCommandListSelection(false);
+        });
         item.addEventListener('click', () => {
             const cmd = item.getAttribute('data-cmd');
             closeCommandModal();
@@ -305,7 +309,7 @@ function openCommandModal() {
     setTimeout(() => input.focus(), 50);
     
     state.selectedCommandIndex = 0;
-    updateCommandListSelection();
+    updateCommandListSelection(false);
 }
 
 // 关闭指令弹窗
@@ -321,11 +325,11 @@ function handleCommandNavigation(e) {
     if (e.key === 'ArrowDown') {
         e.preventDefault();
         state.selectedCommandIndex = (state.selectedCommandIndex + 1) % items.length;
-        updateCommandListSelection();
+        updateCommandListSelection(true);
     } else if (e.key === 'ArrowUp') {
         e.preventDefault();
         state.selectedCommandIndex = (state.selectedCommandIndex - 1 + items.length) % items.length;
-        updateCommandListSelection();
+        updateCommandListSelection(true);
     } else if (e.key === 'Enter' && document.activeElement.id !== 'command-input') {
         e.preventDefault();
         items[state.selectedCommandIndex].click();
@@ -333,12 +337,19 @@ function handleCommandNavigation(e) {
 }
 
 // 更新指令列表选中的高亮类
-function updateCommandListSelection() {
+function updateCommandListSelection(fillInput = true) {
     const items = document.querySelectorAll('.command-item');
     items.forEach((item, index) => {
         if (index === state.selectedCommandIndex) {
             item.classList.add('selected');
             item.scrollIntoView({ block: 'nearest' });
+            if (fillInput) {
+                const cmd = item.getAttribute('data-cmd');
+                const input = document.getElementById('command-input');
+                if (input) {
+                    input.value = cmd;
+                }
+            }
         } else {
             item.classList.remove('selected');
         }

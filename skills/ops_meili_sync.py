@@ -145,7 +145,7 @@ def sync_meili() -> str:
             if col_name in db.list_collection_names():
                 for item in db[col_name].find({"_id": {"$gt": oid_filter}}).sort("_id", 1):
                     # 获取 node 名字
-                    node_id = item.get("node_id")
+                    node_id = item.get("rssNodeId")
                     node_name = "?"
                     if node_id:
                         node_doc = db["RssNode"].find_one({"id": int(node_id)})
