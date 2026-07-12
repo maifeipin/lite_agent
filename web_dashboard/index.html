@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>统一检索与控制中枢 | Unified Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- 毛玻璃背景装饰球 -->
+    <div class="bg-glow bg-glow-1"></div>
+    <div class="bg-glow bg-glow-2"></div>
+
+    <div class="app-container">
+        <!-- 侧边导航 / 过滤器 -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <span class="logo-icon">📡</span>
+                <h2>控制中枢</h2>
+            </div>
+            
+            <nav class="nav-filters">
+                <div class="nav-section">
+                    <h3>数据源</h3>
+                    <button class="filter-btn active" data-source="all">
+                        <span class="icon">🌐</span> 全部 <span class="badge" id="badge-all">0</span>
+                    </button>
+                    <button class="filter-btn" data-source="emails">
+                        <span class="icon">📧</span> 邮件 <span class="badge" id="badge-emails">0</span>
+                    </button>
+                    <button class="filter-btn" data-source="rss">
+                        <span class="icon">📰</span> RSS 新闻 <span class="badge" id="badge-rss">0</span>
+                    </button>
+                </div>
+
+                <div class="nav-section" id="section-categories" style="display:none;">
+                    <h3>智能分类</h3>
+                    <!-- 动态分类复选框 -->
+                </div>
+            </nav>
+
+            <div class="sidebar-footer">
+                <div class="status-indicator online"></div>
+                <span>Agent 连接正常</span>
+            </div>
+        </aside>
+
+        <!-- 主内容区 -->
+        <main class="main-content">
+            <!-- 顶栏检索框 -->
+            <header class="top-header">
+                <div class="search-wrapper">
+                    <span class="search-icon">🔍</span>
+                    <input type="text" id="search-input" placeholder="输入关键词搜索，或输入 / 唤起指令台..." autocomplete="off">
+                    <span class="search-shortcut">/</span>
+                </div>
+            </header>
+
+            <!-- 结果画布 -->
+            <section class="results-canvas">
+                <div class="results-header">
+                    <span id="results-count">正在加载索引数据...</span>
+                </div>
+                
+                <!-- 卡片网格 -->
+                <div class="results-grid" id="results-grid">
+                    <!-- 动态卡片 -->
+                    <div class="loading-placeholder">
+                        <div class="spinner"></div>
+                        <p>正在检索 Meilisearch 索引...</p>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- 命令面板 (Command Palette Modal) -->
+    <div class="modal-overlay" id="command-modal">
+        <div class="modal-content command-palette">
+            <div class="command-header">
+                <span class="prefix">></span>
+                <input type="text" id="command-input" placeholder="输入 Agent 指令 (如: /reprocess)..." autocomplete="off">
+            </div>
+            <div class="command-list" id="command-list">
+                <!-- 指令快捷项 -->
+                <div class="command-item" data-cmd="/ops_backup_data">
+                    <span class="cmd-trigger">/ops_backup_data</span>
+                    <span class="cmd-desc">打包备份系统数据 (SQLite, Mail, Vaultwarden, Meilisearch)</span>
+                </div>
+                <div class="command-item" data-cmd="/reprocess">
+                    <span class="cmd-trigger">/reprocess</span>
+                    <span class="cmd-desc">重新解析历史未分类/失败的银行账单邮件</span>
+                </div>
+                <div class="command-item" data-cmd="/mail g 1">
+                    <span class="cmd-trigger">/mail g 1</span>
+                    <span class="cmd-desc">主动从 Gmail 邮箱拉取最新一封邮件</span>
+                </div>
+                <div class="command-item" data-cmd="查看上一个月的外币交易明细">
+                    <span class="cmd-trigger">查看上个月外币明细</span>
+                    <span class="cmd-desc">自然语言查询：AI 智能提炼上月外币账单明细</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 拟物化终端控制台 (SSE Terminal Console) -->
+    <div class="terminal-container minimized" id="terminal-window">
+        <div class="terminal-header" id="terminal-header">
+            <div class="terminal-dots">
+                <span class="dot red" id="term-close"></span>
+                <span class="dot yellow"></span>
+                <span class="dot green"></span>
+            </div>
+            <span class="terminal-title">Agent 任务控制台</span>
+            <button class="terminal-toggle" id="term-toggle">展开</button>
+        </div>
+        <div class="terminal-body" id="terminal-body">
+            <div class="terminal-line system">[*] 控制台就绪。等待下发任务...</div>
+        </div>
+    </div>
+
+    <script src="main.js"></script>
+</body>
+</html>

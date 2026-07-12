@@ -31,6 +31,60 @@ def _backup_vaultwarden() -> str:
         # 如果 sqlite3 命令不可用，直接使用原文件（仍然安全，因为是加密密文）
         return db_path
 
+def _create_meili_dump() -> str:
+    """触发 Meilisearch 生成备份 Dump，返回 dump 目录路径或 None"""
+    import urllib.request
+    import urllib.parse
+    import json
+    import time
+    
+    cfg = load_config() or {}
+    meili_cfg = cfg.get("meilisearch", {})
+    url_base = meili_cfg.get("url", "http://127.0.0.1:7700")
+    key = meili_cfg.get("master_key", "")
+    
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json"
+    }
+    
+    # 1. 触发 Dump
+    req = urllib.request.Request(f"{url_base}/dumps", headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            task_uid = data.get("taskUid")
+    except Exception as e:
+        print(f"Failed to trigger Meilisearch dump: {e}")
+        return None
+        
+    if task_uid is None:
+        return None
+        
+    # 2. 轮询等待成功 (最大等待 15s)
+    for _ in range(15):
+        req_status = urllib.request.Request(f"{url_base}/tasks/{task_uid}", headers=headers)
+        try:
+            with urllib.request.urlopen(req_status) as resp:
+                task_data = json.loads(resp.read().decode('utf-8'))
+                status = task_data.get("status")
+                if status == "succeeded":
+                    # Dump 导出成功，返回宿主机挂载的 dump 目录
+                    dumps_dir = "/home/liteagent/meilisearch/meili_data/dumps"
+                    if os.path.exists(dumps_dir):
+                        return dumps_dir
+                    return None
+                elif status == "failed":
+                    print(f"Meilisearch dump task failed: {task_data.get('error')}")
+                    return None
+        except Exception as e:
+            print(f"Error checking dump task status: {e}")
+            
+        time.sleep(1.0)
+        
+    print("Meilisearch dump timed out")
+    return None
+
 def do_backup() -> str:
     """内部函数：执行备份逻辑"""
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -55,6 +109,13 @@ def do_backup() -> str:
     if vw_snapshot:
         targets.append(vw_snapshot)
         vw_included = True
+        
+    # Meilisearch 索引库快照
+    meili_snapshot = _create_meili_dump()
+    meili_included = False
+    if meili_snapshot:
+        targets.append(meili_snapshot)
+        meili_included = True
     
     # 过滤掉不存在的路径
     valid_targets = []
@@ -91,10 +152,12 @@ def do_backup() -> str:
                     os.remove(f_path)
                     cleaned_count += 1
 
+        meili_status = "✅ 已包含" if meili_included else "⚠️ 失败"
         vw_status = "✅ 已包含" if vw_included else "⚠️ 未找到"
         return (f"✅ 备份成功！\n"
                 f"- 备份文件: `{zip_name}`\n"
                 f"- 大小: `{size_mb:.2f} MB`\n"
+                f"- Meilisearch 索引库: {meili_status}\n"
                 f"- Vaultwarden 密码库: {vw_status}\n"
                 f"- 清理了 {cleaned_count} 个过期备份。")
         

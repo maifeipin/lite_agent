@@ -501,5 +501,9 @@
             }
         }
     },
-    "edge_token": "${EDGE_TOKEN}"
+    "edge_token": "${EDGE_TOKEN}",
+    "meilisearch": {
+        "url": "http://127.0.0.1:7700",
+        "master_key": "${MEILI_MASTER_KEY}"
+    }
 }
