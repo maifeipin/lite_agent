@@ -375,7 +375,7 @@ async function triggerCommand(commandText) {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                session_id: 'web_dashboard_session',
+                session_id: 'web_dashboard_session_v2',
                 text: commandText
             })
         });
