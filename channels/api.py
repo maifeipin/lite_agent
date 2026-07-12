@@ -486,6 +486,20 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body_bytes)
 
+    def _handle_todos(self, query: str):
+        qs = parse_qs(query)
+        status = qs.get("status", ["pending,active"])[0]
+        try:
+            from skills.ops_todo import get_todos_json
+            todos = get_todos_json(status=status)
+            self.send_response(200)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "data": todos}).encode('utf-8'))
+        except Exception as e:
+            self.send_error(500, str(e))
+
     def _handle_openai_models(self):
         models_obj = {
             "object": "list",
