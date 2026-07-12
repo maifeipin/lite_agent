@@ -16,16 +16,17 @@ def _run_reprocess_cmd() -> str:
         return "❌ 找不到邮件脚本，请确认 mail-statement-parser 已部署到项目同级目录。"
 
     env = os.environ.copy()
-    for k in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_PROVIDER", "LLM_MODEL"):
-        if not env.get(k):
-            from core.config_loader import load_config
-            cfg = load_config()
-            llm = cfg.get("llm", {})
-            env["LLM_API_KEY"] = llm.get("api_key", "")
-            env["LLM_BASE_URL"] = llm.get("base_url", "https://api.openai.com/v1")
-            env["LLM_PROVIDER"] = llm.get("provider", "openai")
-            env["LLM_MODEL"] = llm.get("model", "gpt-4o-mini")
-            break
+    from core.config_loader import load_config
+    from skills.ops_mail_reader import _build_llm_pool_env
+    cfg = load_config() or {}
+    if not all(env.get(k) for k in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_PROVIDER", "LLM_MODEL")):
+        llm = cfg.get("llm", {})
+        env["LLM_API_KEY"] = llm.get("api_key", "")
+        env["LLM_BASE_URL"] = llm.get("base_url", "https://api.openai.com/v1")
+        env["LLM_PROVIDER"] = llm.get("provider", "openai")
+        env["LLM_MODEL"] = llm.get("model", "gpt-4o-mini")
+    # LLM 端点池注入（配置了 llm.mail_pool 时启用 429 轮换）
+    env.update(_build_llm_pool_env(cfg))
 
     r = subprocess.run(
         [sys.executable, os.path.join(_SCRIPT_DIR, "mail_client.py"), "reprocess_failed"],
