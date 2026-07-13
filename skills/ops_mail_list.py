@@ -44,6 +44,16 @@ def _run_read_cmd(limit: int = 10, account_name: str = None) -> str:
 def mail_list(limit: int = 10, account_name: str = None) -> str:
     return _run_read_cmd(limit, account_name)
 
+def _cmd_mail_list(agent, msg, args):
+    limit = 10
+    account = None
+    for a in args:
+        if a.isdigit():
+            limit = int(a)
+        else:
+            account = a
+    return mail_list(limit=limit, account_name=account)
+
 slash_command('/mail_list', category='邮件管理',
               description='查看收件箱最新邮件列表',
-              show_in_dashboard=True, guest_ok=False)(mail_list)
+              show_in_dashboard=True, guest_ok=False)(_cmd_mail_list)

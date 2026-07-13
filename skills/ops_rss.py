@@ -1,6 +1,7 @@
 import sys, os, re
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agent import AgentResponse
+from core.command_registry import slash_command
 
 _config = None
 
@@ -391,3 +392,8 @@ def _overview_view(groups, col_name, today, db):
         lines.append(f'`::rss {g["code"]}` **{g["name"]}**: {cnt} 篇')
     lines.append('\n发送 `::rss <分组>` 查看详情')
     return AgentResponse('\n'.join(lines), title='📊 RSS 概览', color='blue')
+
+slash_command('/rss_fetch', category='RSS',
+              description='获取今日 RSS 精选摘要 (Top 5)',
+              show_in_dashboard=False, guest_ok=False)(
+    lambda agent, msg, args: rss_brief() or '(今日暂无精选文章)')

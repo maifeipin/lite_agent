@@ -7,6 +7,7 @@ replytype: 0=截断摘要(默认), 1=分批(待实现), 2=上传HedgeDoc+链接
 import os, sqlite3
 from datetime import datetime
 from core.skill_engine import skill
+from core.command_registry import slash_command
 from core.utils.hedgedoc import upload_to_hedgedoc
 
 _SCRIPT_DIR = os.path.join(
@@ -116,3 +117,11 @@ def mail_search(keyword: str, replytype: int = 0, limit: int = 20, account_name:
         return f"_(分批待实现,先用摘要)_\n\n{_format_summary(keyword, rows)}"
 
     return _format_summary(keyword, rows)
+
+slash_command('/mail_search', category='邮件管理',
+              description='全文搜索邮件正文/主题/发件人',
+              show_in_dashboard=False, guest_ok=False)(
+    lambda agent, msg, args: mail_search(
+        keyword=args[0] if args else '',
+        replytype=int(args[1]) if len(args) > 1 else 0,
+        limit=int(args[2]) if len(args) > 2 else 20))

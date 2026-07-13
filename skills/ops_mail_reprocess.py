@@ -46,6 +46,9 @@ def _run_reprocess_cmd() -> str:
 def mail_reprocess() -> str:
     return _run_reprocess_cmd()
 
+def _cmd_mail_reprocess(agent, msg, args):
+    return mail_reprocess()
+
 slash_command('/mail_reprocess', category='邮件管理',
               description='重新解析历史未分类/失败的银行账单邮件',
-              show_in_dashboard=False, guest_ok=False)(mail_reprocess)
+              show_in_dashboard=False, guest_ok=False)(_cmd_mail_reprocess)

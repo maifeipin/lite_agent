@@ -215,6 +215,89 @@ class Agent:
             self.memory.start_distill_scheduler(interval_hours=24)
             print("  ✅ 记忆引擎已启用 (蒸馏 LLM callback 已注入)")
 
+            # 注册记忆指令（需要 self.memory 实例）
+            self._register_memory_commands()
+
+    def _register_memory_commands(self):
+        """将依赖 self.memory 的指令注册到 CommandRegistry"""
+        agent_self = self
+
+        def _cmd_memory_stats(agent, msg, args):
+            if not agent_self.memory:
+                return "记忆引擎未安装，请将 memory_engine/ 目录放入项目根目录"
+            stats = agent_self.memory.stats()
+            type_stats = stats.get('by_type', {})
+            type_lines = "\n".join(f"  {t}: {c} 条" for t, c in type_stats.items())
+            type_suffix = f"\n四维分布:\n{type_lines}" if type_lines else ''
+            return (
+                f"**记忆池状态**\n"
+                f"总消息: {stats['total_messages']}\n"
+                f"蒸馏产物: {stats['distilled']}\n"
+                f"平均质量分: {stats['avg_importance']}\n"
+                f"用户数: {stats['users']}"
+                f"{type_suffix}"
+            )
+
+        def _cmd_memory_add(agent, msg, args):
+            if not agent_self.memory:
+                return "记忆引擎未安装"
+            if len(args) < 2:
+                return (
+                    "用法: `/memory_add <type> <内容>`\n"
+                    "type: concept | event | preference | troubleshooting\n"
+                    "示例: `/memory_add troubleshooting 钉钉Stream必须勾选后台开关并发布才能生效`"
+                )
+            mem_type = args[0]
+            if mem_type not in ('concept', 'event', 'preference', 'troubleshooting'):
+                return f"未知类型 {mem_type}。可选: concept, event, preference, troubleshooting"
+            content = msg.text[len('/memory_add ') + len(mem_type) + 1:]
+            mid = agent_self.memory.force_remember(
+                msg.session_key, '', content, memory_type=mem_type
+            )
+            return f"已存入 [{mem_type}] 记忆池 (id:{mid})"
+
+        def _cmd_memory_persona(agent, msg, args):
+            if not agent_self.memory:
+                return "记忆引擎未安装"
+            if not args:
+                content = agent_self.memory.persona_content()
+                pending = agent_self.memory.persona_pending()
+                if not content:
+                    return "(persona.md 还没生成。lite-agent 启动 5 分钟后会跑首次蒸馏。)"
+                preview = content if len(content) < 1800 else content[:1700] + '\n...(已截断，VPS 完整文件: /root/lite_agent/data/persona.md)'
+                if pending:
+                    pending_lines = '\n'.join(f"  {i+1}. {p.lstrip('- ').strip()}" for i, p in enumerate(pending))
+                    preview += f"\n\n---\n📋 待确认条目（用 `/memory_persona confirm <序号>` 升格）：\n{pending_lines}"
+                return preview
+
+            sub = args[0].lower()
+            if sub == "confirm":
+                if len(args) < 2 or not args[1].isdigit():
+                    return (
+                        "用法: `/memory_persona confirm <序号> [分类]`\n"
+                        "分类可选: 身份与角色 / 工作偏好 / 技术栈熟练度 / 当前进行中项目 / 已知决策 / 个人事实\n"
+                        "默认升格到 `工作偏好`。\n"
+                        "先用 `/memory_persona` 看待确认条目编号。"
+                    )
+                idx = int(args[1])
+                section_short = ' '.join(args[2:]).strip() if len(args) >= 3 else '工作偏好'
+                target_section = '## ' + section_short
+                moved = agent_self.memory.persona_confirm(idx, target_section=target_section)
+                if not moved:
+                    return f"升格失败：序号 {idx} 越界或分类「{section_short}」不存在。\n用 `/memory_persona` 看当前待确认列表。"
+                return f"已将下面这条移入 **{section_short}** / 手动校正:\n\n{moved}"
+            return "未知子命令。可用: `/memory_persona` (查看), `/memory_persona confirm <序号>` (升格)"
+
+        _registry.register('/memory_stats', _cmd_memory_stats,
+                           category='记忆管理', description='查看记忆池统计信息',
+                           show_in_dashboard=True, guest_ok=False)
+        _registry.register('/memory_add', _cmd_memory_add,
+                           category='记忆管理', description='手动添加记忆条目',
+                           show_in_dashboard=False, guest_ok=False)
+        _registry.register('/memory_persona', _cmd_memory_persona,
+                           category='记忆管理', description='查看/管理个人画像',
+                           show_in_dashboard=False, guest_ok=False)
+
         # 定时任务引擎
         self.cron = CronManager()
 
@@ -395,132 +478,14 @@ class Agent:
         if is_guest and not cmd.startswith('/mail_') and cmd in ("/cmd", "/balance", "/cron", "/check"):
             return AgentResponse("❌ 权限不足：只有管理员可使用该指令", title="⚠️ 权限不足", color="red")
  
-        from skills.ops_mail_reader import (
-            mail_feedback_ok,
-            mail_feedback_noise,
-            mail_delete_noise_rule,
-            mail_show_headers,
-            mail_show_missed,
-            mail_list_noise_rules,
-            mail_llm_enrich,
-            mail_view_original,
-            mail_fetch_cron,
-            mail_fetch_summaries,
-            backfill_bodies
-        )
-        
+ 
         # 优先查注册表（@slash_command 装饰器注册的指令）
         reg_resp = _registry_dispatch(cmd, self, msg, args)
         if reg_resp is not None:
             if isinstance(reg_resp, str):
-                return AgentResponse(reg_resp, title=f"执行结果: {cmd}", color="blue")
+                return AgentResponse(reg_resp, title="执行结果", color="blue")
             return reg_resp
-        
-        try:
-            if cmd == "/mail_ok":
-                if not args:
-                    return AgentResponse("❌ 用法错误：/mail_ok <id>", title="用法提示", color="yellow")
-                res_text = mail_feedback_ok(int(args[0]))
-                return AgentResponse(res_text, title="操作成功", color="green")
-                
-            elif cmd == "/mail_noise":
-                if not args:
-                    return AgentResponse("❌ 用法错误：/mail_noise <id>", title="用法提示", color="yellow")
-                res_text = mail_feedback_noise(int(args[0]))
-                return AgentResponse(res_text, title="操作成功", color="green")
-                
-            elif cmd == "/mail_unnoise":
-                if not args:
-                    return AgentResponse("❌ 用法错误：/mail_unnoise <id|pattern>", title="用法提示", color="yellow")
-                res_text = mail_delete_noise_rule(args[0])
-                return AgentResponse(res_text, title="操作成功", color="green")
-                
-            elif cmd == "/mail_headers":
-                limit = int(args[0]) if args and args[0].isdigit() else 15
-                res_text = mail_show_headers(limit)
-                return AgentResponse(res_text, title="邮件标题列表", color="blue")
-                
-            elif cmd == "/mail_missed":
-                limit = int(args[0]) if args and args[0].isdigit() else 15
-                res_text = mail_show_missed(limit)
-                return AgentResponse(res_text, title="可能错过的非高优邮件", color="blue")
-                
-            elif cmd == "/mail_noiselist":
-                res_text = mail_list_noise_rules()
-                return AgentResponse(res_text, title="当前降噪过滤规则列表", color="blue")
-
-            elif cmd == "/mail_reprocess":
-                from skills.ops_mail_reprocess import mail_reprocess
-                res_text = mail_reprocess()
-                return AgentResponse(res_text, title="补跑结果", color="blue")
-
-            elif cmd == "/mail_list":
-                _limit = 10
-                _account = None
-                for a in args:
-                    if a.isdigit():
-                        _limit = int(a)
-                    else:
-                        _account = a
-                from skills.ops_mail_list import mail_list
-                res_text = mail_list(limit=_limit, account_name=_account)
-                return AgentResponse(res_text, title="收件箱", color="blue")
-
-            elif cmd == "/mail_stats":
-                from skills.ops_mail_stats import mail_stats
-                res_text = mail_stats()
-                return AgentResponse(res_text, title="邮件统计", color="blue")
-
-            elif cmd == "/mail_search":
-                _replytype = 0
-                _filtered = []
-                for a in args:
-                    if a in ("--hedgedoc", "--full", "+"):
-                        _replytype = 2
-                    else:
-                        _filtered.append(a)
-                args = _filtered
-                if not args:
-                    return AgentResponse("❌ 用法：/mail_search [+] <关键词> [条数]", title="用法提示", color="yellow")
-                _kw_parts = []
-                _limit = 20
-                _account = None
-                for a in args:
-                    if a.isdigit():
-                        _limit = int(a)
-                    else:
-                        _kw_parts.append(a)
-                if not _kw_parts:
-                    return AgentResponse("❌ 请提供搜索关键词", title="用法提示", color="yellow")
-                keyword = " ".join(_kw_parts)
-                from skills.ops_mail_search import mail_search
-                res_text = mail_search(keyword=keyword, replytype=_replytype, limit=_limit, account_name=_account)
-                return AgentResponse(res_text, title=f"搜索结果: {keyword}", color="blue")
-
-            elif cmd == "/mail_enrich":
-                limit = int(args[0]) if args and args[0].isdigit() else 30
-                res_text = mail_llm_enrich(limit=limit)
-                return AgentResponse(res_text, title="LLM 补打结果", color="blue")
-
-            elif cmd == "/mail_view":
-                if len(args) < 2:
-                    return AgentResponse("❌ 用法：/mail_view <账户> <UID>", title="用法提示", color="yellow")
-                res_text = mail_view_original(account=args[0], uid=args[1])
-                return AgentResponse(res_text, title="邮件原文", color="blue")
-
-            elif cmd == "/mail_fetch":
-                months = int(args[0]) if args and args[0].isdigit() else 1
-                res_text = mail_fetch_cron()
-                return AgentResponse(res_text, title="邮件同步结果", color="blue")
-
-            elif cmd == "/mail_backfill":
-                res_text = backfill_bodies()
-                return AgentResponse(res_text, title="历史邮件回填", color="blue")
-
-                
-        except Exception as cmd_err:
-            return AgentResponse(f"❌ 执行失败：{cmd_err}", title="执行错误", color="red")
-
+ 
         if cmd == "/new":
             self.session_mgr.reset_session(msg.session_key)
             return AgentResponse("🔄 会话已重置，可以开始新的对话", title="新会话", color="green")
@@ -588,115 +553,6 @@ class Agent:
                 return AgentResponse(result, title=f"执行结果: {args[0]}", color="blue")
             except Exception as e:
                 return AgentResponse(f"执行失败: {e}", title="错误", color="red")
-
-        if cmd == "/balance":
-            try:
-                import sys, os
-                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-                from skills.ops_llm import check_deepseek_balance
-                return AgentResponse(check_deepseek_balance(), title="💰 账户余额", color="yellow")
-            except Exception as e:
-                return AgentResponse(f"查询余额失败: {e}", title="错误", color="red")
-
-        if cmd == "/memory_stats":
-            if not self.memory:
-                return AgentResponse("记忆引擎未安装，请将 memory_engine/ 目录放入项目根目录", title="⚠️ 未启用", color="grey")
-            stats = self.memory.stats()
-            type_stats = stats.get('by_type', {})
-            type_lines = "\n".join(
-                f"  {t}: {c} 条" for t, c in type_stats.items()
-            )
-            type_suffix = f"\n四维分布:\n{type_lines}" if type_lines else ''
-            return AgentResponse(
-                f"**记忆池状态**\n"
-                f"总消息: {stats['total_messages']}\n"
-                f"蒸馏产物: {stats['distilled']}\n"
-                f"平均质量分: {stats['avg_importance']}\n"
-                f"用户数: {stats['users']}"
-                f"{type_suffix}",
-                title="🧠 记忆池", color="blue"
-            )
-
-        if cmd == "/memory_add":
-            # /memory_add <type> <内容>
-            if not self.memory:
-                return AgentResponse("记忆引擎未安装", title="⚠️", color="grey")
-            if len(args) < 2:
-                return AgentResponse(
-                    "用法: `/memory_add <type> <内容>`\n"
-                    "type: concept | event | preference | troubleshooting\n"
-                    "示例: `/memory_add troubleshooting 钉钉Stream必须勾选后台开关并发布才能生效`",
-                    title="📝 强制记忆", color="grey"
-                )
-            mem_type = args[0]
-            if mem_type not in ('concept', 'event', 'preference', 'troubleshooting'):
-                return AgentResponse(
-                    f"未知类型 {mem_type}。可选: concept, event, preference, troubleshooting",
-                    title="⚠️", color="red"
-                )
-            content = msg.text[len('/memory_add ')+len(mem_type)+1:]
-            mid = self.memory.force_remember(
-                msg.session_key, '', content, memory_type=mem_type
-            )
-            return AgentResponse(
-                f"已存入 [{mem_type}] 记忆池 (id:{mid})",
-                title="🧠 已记忆", color="green"
-            )
-
-        if cmd == "/memory_persona":
-            # /memory_persona              → 显示 persona.md 概览 + 待确认编号列表
-            # /memory_persona confirm <N>  → 把"待确认"第 N 条升格到"工作偏好/手动校正"
-            # /memory_persona confirm <N> <分类>  → 升格到指定分类
-            if not self.memory:
-                return AgentResponse("记忆引擎未安装", title="⚠️", color="grey")
-
-            if not args:
-                # 概览模式
-                content = self.memory.persona_content()
-                pending = self.memory.persona_pending()
-                if not content:
-                    return AgentResponse(
-                        "(persona.md 还没生成。lite-agent 启动 5 分钟后会跑首次蒸馏。)",
-                        title="🧬 个人画像", color="grey"
-                    )
-                # IM 卡片字符限制，截断显示 + 列出待确认编号
-                preview = content if len(content) < 1800 else content[:1700] + '\n...(已截断，VPS 完整文件: /root/lite_agent/data/persona.md)'
-                if pending:
-                    pending_lines = '\n'.join(f"  {i+1}. {p.lstrip('- ').strip()}" for i, p in enumerate(pending))
-                    preview += f"\n\n---\n📋 待确认条目（用 `/memory_persona confirm <序号>` 升格）：\n{pending_lines}"
-                return AgentResponse(preview, title="🧬 个人画像", color="blue")
-
-            sub = args[0].lower()
-            if sub == "confirm":
-                if len(args) < 2 or not args[1].isdigit():
-                    return AgentResponse(
-                        "用法: `/memory_persona confirm <序号> [分类]`\n"
-                        "分类可选: 身份与角色 / 工作偏好 / 技术栈熟练度 / 当前进行中项目 / 已知决策 / 个人事实\n"
-                        "默认升格到 `工作偏好`。\n"
-                        "先用 `/memory_persona` 看待确认条目编号。",
-                        title="📋 用法", color="grey"
-                    )
-                idx = int(args[1])
-                # 用户输入分类名（不带 ## 前缀）；映射到完整章节标题
-                section_short = ' '.join(args[2:]).strip() if len(args) >= 3 else '工作偏好'
-                target_section = '## ' + section_short
-
-                moved = self.memory.persona_confirm(idx, target_section=target_section)
-                if not moved:
-                    return AgentResponse(
-                        f"升格失败：序号 {idx} 越界或分类「{section_short}」不存在。\n"
-                        "用 `/memory_persona` 看当前待确认列表。",
-                        title="⚠️", color="red"
-                    )
-                return AgentResponse(
-                    f"已将下面这条移入 **{section_short}** / 手动校正:\n\n{moved}",
-                    title="✅ 升格成功", color="green"
-                )
-
-            return AgentResponse(
-                "未知子命令。可用: `/memory_persona` (查看), `/memory_persona confirm <序号>` (升格)",
-                title="⚠️", color="grey"
-            )
 
         if cmd == "/cron":
             if not args:
