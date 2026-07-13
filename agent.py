@@ -393,8 +393,22 @@ class Agent:
                 mail_delete_noise_rule,
                 mail_show_headers,
                 mail_show_missed,
-                mail_list_noise_rules
+                mail_list_noise_rules,
+                mail_llm_enrich,
+                mail_view_original,
+                mail_fetch_cron,
+                mail_fetch_summaries
             )
+            
+            # 新旧指令别名映射（30天过渡期，旧名保留可用）
+            _mail_alias = {
+                '/mail_list': '/mail', '/mail_search': '/search', '/mail_stats': '/mailstats',
+                '/mail_ok': '/ok', '/mail_noise': '/noise', '/mail_unnoise': '/unnoise',
+                '/mail_headers': '/headers', '/mail_missed': '/missed',
+                '/mail_noiselist': '/noiselist', '/mail_reprocess': '/reprocess',
+            }
+            if cmd in _mail_alias:
+                cmd = _mail_alias[cmd]
             
             try:
                 if cmd == "/ok":
@@ -480,6 +494,22 @@ class Agent:
                     res_text = mail_search(keyword=keyword, replytype=_replytype, limit=_limit, account_name=_account)
                     return AgentResponse(res_text, title=f"搜索结果: {keyword}", color="blue")
 
+                elif cmd == "/mail_enrich":
+                    limit = int(args[0]) if args and args[0].isdigit() else 30
+                    res_text = mail_llm_enrich(limit=limit)
+                    return AgentResponse(res_text, title="LLM 补打结果", color="blue")
+
+                elif cmd == "/mail_view":
+                    if len(args) < 2:
+                        return AgentResponse("❌ 用法：/mail_view <账户> <UID>", title="用法提示", color="yellow")
+                    res_text = mail_view_original(account=args[0], uid=args[1])
+                    return AgentResponse(res_text, title="邮件原文", color="blue")
+
+                elif cmd == "/mail_fetch":
+                    months = int(args[0]) if args and args[0].isdigit() else 1
+                    res_text = mail_fetch_cron()
+                    return AgentResponse(res_text, title="邮件同步结果", color="blue")
+
                     
             except Exception as cmd_err:
                 return AgentResponse(f"❌ 执行失败：{cmd_err}", title="执行错误", color="red")
@@ -561,6 +591,10 @@ class Agent:
             except Exception as e:
                 return AgentResponse(f"查询余额失败: {e}", title="错误", color="red")
 
+        if cmd == "/memory_stats":
+            # 新旧别名映射
+            cmd = '/memory'
+
         if cmd == "/memory":
             if not self.memory:
                 return AgentResponse("记忆引擎未安装，请将 memory_engine/ 目录放入项目根目录", title="⚠️ 未启用", color="grey")
@@ -579,6 +613,9 @@ class Agent:
                 f"{type_suffix}",
                 title="🧠 记忆池", color="blue"
             )
+
+        if cmd == "/memory_add":
+            cmd = '/remember'
 
         if cmd == "/remember":
             # /remember <type> <内容>
@@ -605,6 +642,9 @@ class Agent:
                 f"已存入 [{mem_type}] 记忆池 (id:{mid})",
                 title="🧠 已记忆", color="green"
             )
+
+        if cmd == "/memory_persona":
+            cmd = '/persona'
 
         if cmd == "/persona":
             # /persona              → 显示 persona.md 概览 + 待确认编号列表
@@ -756,7 +796,7 @@ class Agent:
             if msg.is_guest:
                 return AgentResponse("❌ 权限不足：只有管理员可使用该指令", title="⚠️ 权限不足", color="red")
 
-        if cmd == "goal":
+        if cmd in ("goal", "/goal"):
             if not args:
                 session = self.session_mgr.get_or_create(msg.session_key)
                 if session.goal:
@@ -788,7 +828,7 @@ class Agent:
             msg.text = args
             return self._run_ai_loop(msg)
 
-        if cmd == "rss":
+        if cmd in ("rss", "/rss"):
             if args == "push":
                 return self._handle_rss_push()
             if args == "log":
