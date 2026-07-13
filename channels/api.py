@@ -57,10 +57,15 @@ class ApiHandler(BaseHTTPRequestHandler):
         return False
 
     def do_GET(self):
+        parsed_url = urlparse(self.path)
+
+        # 仪表盘 API 无需认证（仅返回注册表指令列表，无敏感数据）
+        if parsed_url.path == '/api/v1/dashboard':
+            self._handle_dashboard()
+            return
+
         if not self._auth():
             return
-            
-        parsed_url = urlparse(self.path)
         
         # 边缘节点权限隔离：仅允许 /api/report, /api/pull_task
         if getattr(self, 'is_edge', False) and parsed_url.path not in ('/api/report', '/api/pull_task'):
