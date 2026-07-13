@@ -9,7 +9,11 @@ const state = {
     rssCount: 0,
     selectedCommandIndex: 0,
     currentTaskId: null,
-    eventSource: null
+    eventSource: null,
+    offset: 0,
+    limit: 40,
+    hasMore: true,
+    isLoading: false
 };
 
 // 初始化 Session ID
@@ -25,7 +29,21 @@ document.addEventListener('DOMContentLoaded', () => {
     initUIEvents();
     fetchStats();
     performSearch();
+    initIntersectionObserver();
 });
+
+function initIntersectionObserver() {
+    const sentinel = document.getElementById('scroll-sentinel');
+    if (!sentinel) return;
+    
+    const observer = new IntersectionObserver((entries) => {
+        if (entries[0].isIntersecting && !state.isLoading && state.hasMore) {
+            performSearch(true);
+        }
+    }, { rootMargin: '200px' });
+    
+    observer.observe(sentinel);
+}
 
 // 获取 Meilisearch 真实的数据统计信息
 async function fetchStats() {
@@ -74,75 +92,108 @@ function initSearch() {
 }
 
 // 检索核心方法
-async function performSearch() {
+async function performSearch(isAppend = false) {
+    if (state.isLoading) return;
+    
+    if (!isAppend) {
+        state.offset = 0;
+        state.hasMore = true;
+        state.results = [];
+    }
+    
+    if (!state.hasMore) return;
+    
+    state.isLoading = true;
     const grid = document.getElementById('results-grid');
     const countSpan = document.getElementById('results-count');
+    const sentinel = document.getElementById('scroll-sentinel');
     
-    // 显示加载中
-    grid.innerHTML = `
-        <div class="loading-placeholder">
-            <div class="spinner"></div>
-            <p>正在检索中枢索引...</p>
-        </div>
-    `;
+    if (!isAppend) {
+        // 显示加载中
+        grid.innerHTML = `
+            <div class="loading-placeholder">
+                <div class="spinner"></div>
+                <p>正在检索中枢索引...</p>
+            </div>
+        `;
+    }
+    
+    if (sentinel) sentinel.style.display = 'block';
     
     try {
-        let docs = [];
+        let newDocs = [];
         
         // 依据当前过滤源并发请求
         const queryPromises = [];
         
         if (state.activeSource === 'all' || state.activeSource === 'emails') {
             queryPromises.push(
-                searchIndex('emails', state.searchQuery).then(res => 
+                searchIndex('emails', state.searchQuery, state.offset, state.limit).then(res => 
                     res.map(d => ({ ...d, _source: 'emails' }))
                 )
             );
         }
         if (state.activeSource === 'all' || state.activeSource === 'rss') {
             queryPromises.push(
-                searchIndex('rss', state.searchQuery).then(res => 
+                searchIndex('rss', state.searchQuery, state.offset, state.limit).then(res => 
                     res.map(d => ({ ...d, _source: 'rss' }))
                 )
             );
         }
         if (state.activeSource === 'todos') {
             // 如果仅选择 todos，或者未来在 all 里也展示，可以加在 all 判断里
-            // 根据需求，用户如果点了 todos tab 就只展示 todos
-            queryPromises.push(
-                fetchTodos().then(res => 
-                    res.filter(t => !state.searchQuery || t.title.includes(state.searchQuery) || (t.description && t.description.includes(state.searchQuery)))
-                       .map(d => ({ ...d, _source: 'todos' }))
-                )
-            );
+            // 根据需求，用户如果点了 todos tab 就只展示 todos。 这里我们假设 todos 数量不多，一次性拉取，不支持追加分页。
+            if (!isAppend) {
+                queryPromises.push(
+                    fetchTodos().then(res => 
+                        res.filter(t => !state.searchQuery || t.title.includes(state.searchQuery) || (t.description && t.description.includes(state.searchQuery)))
+                           .map(d => ({ ...d, _source: 'todos' }))
+                    )
+                );
+            }
         }
         
         const resultsArray = await Promise.all(queryPromises);
-        docs = resultsArray.flat();
+        newDocs = resultsArray.flat();
         
-        // 根据时间或获取顺序重新排序
-        docs.sort((a, b) => {
-            const timeA = new Date(a.fetched_at || a.email_date || a.updated_at || 0);
-            const timeB = new Date(b.fetched_at || b.email_date || b.updated_at || 0);
-            return timeB - timeA;
-        });
+        if (newDocs.length === 0) {
+            state.hasMore = false;
+        } else {
+            state.results = [...state.results, ...newDocs];
+            // 根据时间或获取顺序重新排序
+            state.results.sort((a, b) => {
+                const timeA = new Date(a.fetched_at || a.email_date || a.updated_at || 0);
+                const timeB = new Date(b.fetched_at || b.email_date || b.updated_at || 0);
+                return timeB - timeA;
+            });
+            state.offset += state.limit;
+        }
         
-        state.results = docs;
         renderResults();
         
-        countSpan.textContent = `找到 ${docs.length} 个结果`;
+        countSpan.textContent = `找到 ${state.results.length} 个结果${state.hasMore ? '' : ' (已触底)'}`;
     } catch (e) {
-        grid.innerHTML = `<div class="loading-placeholder"><p class="error">❌ 检索失败: ${e.message}</p></div>`;
+        if (!isAppend) {
+            grid.innerHTML = `<div class="loading-placeholder"><p class="error">❌ 检索失败: ${e.message}</p></div>`;
+        } else {
+            console.error("加载更多失败:", e);
+        }
+    } finally {
+        state.isLoading = false;
+        if (!state.hasMore && sentinel) {
+            sentinel.style.display = 'none';
+        }
     }
 }
 
 // Meilisearch 索引检索 API
-async function searchIndex(indexUid, query) {
+async function searchIndex(indexUid, query, offset = 0, limit = 40) {
     try {
         const sortField = indexUid === 'emails' ? 'email_date:desc' : 'published:desc';
         const body = {
             q: query,
-            limit: 40,
+            limit: limit,
+            offset: offset,
             sort: [sortField],
             attributesToHighlight: ['subject', 'plain_text', 'summary', 'title', 'content'],
             highlightPreTag: '<mark>',
@@ -588,4 +639,265 @@ function jsonParseSafe(str) {
     } catch (e) {
         return null;
     }
+}
+
+// =========================================================
+// 聊天抽屉 (Chat Drawer) 逻辑
+// =========================================================
+
+let chatEventSource = null;
+let currentChatTaskId = null;
+let isChatBusy = false;
+
+document.addEventListener('DOMContentLoaded', () => {
+    initChatDrawer();
+});
+
+function initChatDrawer() {
+    const fab = document.getElementById('chat-fab');
+    const drawer = document.getElementById('chat-drawer');
+    const closeBtn = document.getElementById('close-drawer-btn');
+    const input = document.getElementById('chat-input');
+    const sendBtn = document.getElementById('chat-send-btn');
+    
+    if (!fab || !drawer) return;
+    
+    // 开关抽屉
+    fab.addEventListener('click', () => {
+        drawer.classList.add('open');
+        input.focus();
+    });
+    
+    closeBtn.addEventListener('click', () => {
+        drawer.classList.remove('open');
+    });
+    
+    // 自动高度和发送
+    input.addEventListener('input', function() {
+        this.style.height = '48px';
+        this.style.height = (this.scrollHeight) + 'px';
+    });
+    
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendChatMessage();
+        }
+    });
+    
+    sendBtn.addEventListener('click', sendChatMessage);
+}
+
+async function sendChatMessage() {
+    if (isChatBusy) return;
+    
+    const input = document.getElementById('chat-input');
+    const text = input.value.trim();
+    if (!text) return;
+    
+    input.value = '';
+    input.style.height = '48px';
+    
+    appendChatBubble('user', text);
+    
+    isChatBusy = true;
+    updateChatStatus(true);
+    
+    // 显示等待状态气泡
+    const thinkingId = 'thinking-' + Date.now();
+    appendChatBubble('agent', '<div class="typing-dots"><span></span><span></span><span></span></div>', thinkingId);
+    
+    try {
+        const res = await fetch('/agent/api/v1/chat', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                session_id: sessionId, // 复用 dashboard session
+                text: text
+            })
+        });
+        
+        const thinkingBubble = document.getElementById(thinkingId);
+        
+        if (!res.ok) {
+            if (thinkingBubble) thinkingBubble.innerHTML = '<div class="bubble error">网络请求失败，请重试</div>';
+            resetChatStatus();
+            return;
+        }
+        
+        const data = await res.json();
+        
+        if (data.type === 'sync') {
+            // 同步应答
+            if (thinkingBubble) {
+                thinkingBubble.innerHTML = `<div class="bubble">${parseMarkdown(data.response)}</div>`;
+            } else {
+                appendChatBubble('agent', data.response);
+            }
+            resetChatStatus();
+        } else if (data.type === 'async' && data.task_id) {
+            // 异步任务，启动流式解析
+            currentChatTaskId = data.task_id;
+            startDrawerTaskStream(data.task_id, thinkingBubble);
+        } else {
+            if (thinkingBubble) thinkingBubble.innerHTML = `<div class="bubble error">未知响应格式</div>`;
+            resetChatStatus();
+        }
+    } catch (e) {
+        console.error('Chat error:', e);
+        resetChatStatus();
+    }
+}
+
+function startDrawerTaskStream(taskId, agentBubbleContainer) {
+    if (chatEventSource) {
+        chatEventSource.close();
+    }
+    
+    const url = `/agent/api/v1/task/stream?task_id=${taskId}&session_id=${sessionId}`;
+    chatEventSource = new EventSource(url);
+    
+    let lastMsg = null;
+    const finishedSubtasks = new Set();
+    
+    // 初始化气泡内容为空，保留引用用于不断追加内容
+    let bubbleContentHtml = '';
+    const bubbleEl = agentBubbleContainer.querySelector('.bubble') || agentBubbleContainer.appendChild(document.createElement('div'));
+    bubbleEl.className = 'bubble';
+    bubbleEl.innerHTML = '';
+    
+    chatEventSource.onmessage = (event) => {
+        const decoded = event.data;
+        if (decoded === '[DONE]') {
+            chatEventSource.close();
+            chatEventSource = null;
+            resetChatStatus();
+            return;
+        }
+        
+        try {
+            const data = jsonParseSafe(decoded);
+            if (!data) return;
+            
+            const status = data.status;
+            let msg = data.message;
+            let newlyAppended = false;
+            
+            // 系统状态/过程提示，我们使用一个小卡片附在上方，不污染主回答
+            if (msg && msg !== lastMsg && status !== 'done' && status !== 'completed') {
+                const sysLog = document.createElement('div');
+                sysLog.className = 'chat-message system';
+                sysLog.innerText = `[${status.toUpperCase()}] ${msg}`;
+                agentBubbleContainer.before(sysLog);
+                lastMsg = msg;
+                newlyAppended = true;
+            }
+            
+            // 子任务进度 (Tools: ops_workspace, web_clip 等)
+            const progress = data.progress;
+            if (progress && progress.subtasks) {
+                for (const sub of progress.subtasks) {
+                    const subId = sub.id;
+                    const subStatus = sub.status;
+                    if ((subStatus === 'done' || subStatus === 'failed') && !finishedSubtasks.has(subId)) {
+                        finishedSubtasks.add(subId);
+                        const res = sub.result || sub.error || '';
+                        const cssColor = subStatus === 'done' ? '#8b5cf6' : 'var(--danger)';
+                        
+                        // 生成一个 Tool Call 结果的小卡片，拼接在 bubbleHTML 内部或者外部
+                        bubbleContentHtml += `
+                            <div class="subtask-box" style="border-left-color: ${cssColor}">
+                                <strong>[Tool] ${sub.name}</strong><br>
+                                <pre><code>${formatTerminalOutput(res)}</code></pre>
+                            </div>
+                        `;
+                        newlyAppended = true;
+                    }
+                }
+            }
+            
+            // 最终结果输出
+            if ((status === 'done' || status === 'completed') && msg) {
+                // 这个 msg 通常是最终的回答文本
+                bubbleContentHtml += parseMarkdown(msg);
+                newlyAppended = true;
+            }
+            
+            if (newlyAppended) {
+                bubbleEl.innerHTML = bubbleContentHtml;
+                scrollToBottom();
+            }
+            
+            if (status === 'done' || status === 'completed' || status === 'failed' || status === 'error') {
+                chatEventSource.close();
+                chatEventSource = null;
+                resetChatStatus();
+            }
+            
+        } catch (e) {
+            console.error('Parse drawer stream event failed:', e);
+        }
+    };
+    
+    chatEventSource.onerror = () => {
+        bubbleContentHtml += '<br><span style="color:var(--danger)">[连接已断开]</span>';
+        bubbleEl.innerHTML = bubbleContentHtml;
+        chatEventSource.close();
+        resetChatStatus();
+    };
+}
+
+function appendChatBubble(role, content, id = null) {
+    const history = document.getElementById('chat-history');
+    const msgDiv = document.createElement('div');
+    msgDiv.className = `chat-message ${role}`;
+    if (id) msgDiv.id = id;
+    
+    // 用户消息纯文本，Agent 消息可能带 HTML 或 Markdown
+    if (role === 'user') {
+        msgDiv.innerHTML = `<div class="bubble">${formatTerminalOutput(content)}</div>`;
+    } else {
+        // 直接使用传入的内容（如 typing-dots 或 markdown HTML）
+        if (content.includes('typing-dots') || content.includes('bubble error')) {
+            msgDiv.innerHTML = `<div class="bubble">${content}</div>`;
+        } else {
+            msgDiv.innerHTML = `<div class="bubble">${parseMarkdown(content)}</div>`;
+        }
+    }
+    
+    history.appendChild(msgDiv);
+    scrollToBottom();
+    return msgDiv;
+}
+
+function updateChatStatus(busy) {
+    const dot = document.querySelector('.drawer-title .status-dot');
+    const sendBtn = document.getElementById('chat-send-btn');
+    if (busy) {
+        dot.classList.add('busy');
+        sendBtn.disabled = true;
+    } else {
+        dot.classList.remove('busy');
+        sendBtn.disabled = false;
+    }
+}
+
+function resetChatStatus() {
+    isChatBusy = false;
+    updateChatStatus(false);
+}
+
+function scrollToBottom() {
+    const history = document.getElementById('chat-history');
+    history.scrollTop = history.scrollHeight;
+}
+
+function parseMarkdown(text) {
+    if (!text) return '';
+    if (typeof marked !== 'undefined') {
+        return marked.parse(text);
+    }
+    return formatTerminalOutput(text);
 }

@@ -241,6 +241,11 @@ def mail_fetch_only(months: int = 1) -> str:
     res = _run_mail_reader_cmd(["fetch_only", str(months)])
     return res or "✅ 拉取完成，无新增。"
 
+slash_command('/mail_fetch_only', category='邮件管理',
+              description='幂等拉取最近邮件入库 (不调 LLM)',
+              show_in_dashboard=True, guest_ok=False)(
+    lambda agent, msg, args: mail_fetch_only(int(args[0]) if args else 1))
+
 
 @skill(
     name='mail_llm_enrich',
