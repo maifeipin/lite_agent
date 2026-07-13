@@ -146,14 +146,6 @@ def _register_cron_jobs(agent: Agent, config: dict):
     import skills.ops_mail_reader
     skills.ops_mail_reader._agent = agent
 
-    # ─ 邮件同步 cron: 每20分钟拉取+LLM评分+高优推送 ─
-    def _mail_cron_wrapper():
-        try:
-            return skills.ops_mail_reader.mail_fetch_cron()
-        except Exception as e:
-            return f"邮件同步失败: {e}"
-    cron.add_job('智能邮件助手同步', '*/20 * * * *', _mail_cron_wrapper)
-
     cron.start()
     print(f"📅 定时任务引擎就绪: 共注册 {len(cron.jobs)} 个任务")
 
