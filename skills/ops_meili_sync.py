@@ -191,5 +191,10 @@ def sync_meili() -> str:
     
     return f"✅ 同步完成！导入新邮件 {email_count} 封，新 RSS 文章 {rss_count} 篇。"
 
+from core.command_registry import slash_command
+slash_command('/sync_meili', category='系统',
+              description='增量同步邮件和 RSS 到 Meilisearch 搜索引擎',
+              show_in_dashboard=True, guest_ok=False)(sync_meili)
+
 if __name__ == "__main__":
     print(sync_meili())
