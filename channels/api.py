@@ -80,6 +80,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_email_html(parsed_url.query)
         elif parsed_url.path == '/api/v1/todos':
             self._handle_todos(parsed_url.query)
+        elif parsed_url.path == '/api/v1/sessions':
+            self._handle_sessions()
         elif parsed_url.path == '/api/v1/dashboard':
             self._handle_dashboard()
         elif parsed_url.path == '/v1/models':
@@ -187,6 +189,48 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         self.wfile.write(json.dumps(items, ensure_ascii=False).encode('utf-8'))
+
+    def _handle_sessions(self):
+        """返回当前的会话列表与统计信息"""
+        try:
+            agent = self.server.api_server.agent
+            conn = agent.session_mgr._connect()
+            cursor = conn.cursor()
+            query = """
+                SELECT 
+                    s.session_key, 
+                    s.status, 
+                    s.updated_at, 
+                    s.token_usage, 
+                    s.goal,
+                    (SELECT model FROM api_usage_log WHERE session_key = s.session_key ORDER BY created_at DESC LIMIT 1) as last_model,
+                    (SELECT count(*) FROM messages WHERE session_key = s.session_key) as msg_count
+                FROM sessions s
+                ORDER BY s.updated_at DESC
+                LIMIT 100
+            """
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            columns = [col[0] for col in cursor.description]
+            sessions = [dict(zip(columns, row)) for row in rows]
+            conn.close()
+            
+            # 解析 channel
+            for s in sessions:
+                key = s.get('session_key', '')
+                if ':' in key:
+                    s['channel'] = key.split(':')[0]
+                else:
+                    s['channel'] = 'unknown'
+
+            self.send_response(200)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps({"data": sessions}, ensure_ascii=False).encode('utf-8'))
+        except Exception as e:
+            self.log_message(f"Error handling sessions: {str(e)}")
+            self.send_error(500, f"Internal Server Error: {str(e)}")
 
     def _handle_edge_report(self):
         content_length = int(self.headers.get('Content-Length', 0))
