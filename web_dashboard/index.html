@@ -7,6 +7,8 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css?v=2">
+    <!-- 引入 marked 用于 markdown 渲染 -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
     <!-- 毛玻璃背景装饰球 -->
@@ -75,6 +77,12 @@
                         <p>正在检索 Meilisearch 索引...</p>
                     </div>
                 </div>
+
+                <!-- 无限滚动哨兵元素 -->
+                <div id="scroll-sentinel" class="scroll-sentinel" style="display: none; padding: 20px; text-align: center; color: #a1a1aa; font-size: 0.9rem;">
+                    <div class="spinner" style="width: 20px; height: 20px; border-width: 2px; margin: 0 auto 10px;"></div>
+                    <span>加载更多内容...</span>
+                </div>
             </section>
         </main>
     </div>
@@ -108,7 +116,33 @@
         </div>
     </div>
 
-    <script src="main.js"></script>
+    <!-- 聊天抽屉 (Chat Drawer) -->
+    <div id="chat-fab" class="chat-fab" title="开启智能助理">
+        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+    </div>
+
+    <div id="chat-drawer" class="chat-drawer">
+        <div class="drawer-header">
+            <div class="drawer-title">
+                <span class="status-dot"></span>
+                <span>智能助理</span>
+            </div>
+            <button id="close-drawer-btn" class="icon-btn" title="关闭">&times;</button>
+        </div>
+        <div id="chat-history" class="chat-history">
+            <div class="chat-message agent">
+                <div class="bubble">你好！我是你的智能中枢助理。请问有什么可以帮你的？<br>(支持 ops_workspace 计算、web_clip 联网检索等)</div>
+            </div>
+        </div>
+        <div class="chat-input-area">
+            <textarea id="chat-input" placeholder="输入消息... (Shift+Enter 换行)"></textarea>
+            <button id="chat-send-btn" class="send-btn" title="发送">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+            </button>
+        </div>
+    </div>
+
+    <script src="main.js?v=2"></script>
     <script>
     // 动态加载指令列表（从后端注册表）
     (async function loadCommands() {
