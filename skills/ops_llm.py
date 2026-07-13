@@ -4,6 +4,7 @@ import urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.skill_engine import skill
+from core.command_registry import slash_command
 
 def check_deepseek_balance() -> str:
     """内部函数：查询 DeepSeek 余额"""
@@ -47,6 +48,11 @@ def check_deepseek_balance() -> str:
         return f"❌ 请求 DeepSeek API 失败: {e}"
     except Exception as e:
         return f"❌ 解析余额数据失败: {e}"
+
+slash_command('/balance', category='系统',
+              description='查询 DeepSeek 账户余额',
+              show_in_dashboard=False, guest_ok=False)(
+    lambda agent, msg, args: check_deepseek_balance())
 
 @skill(
     name='llm_check_balance',

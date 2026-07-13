@@ -219,7 +219,8 @@ def mail_fetch_cron() -> str:
 
 slash_command('/mail_fetch', category='邮件管理',
               description='同步拉取邮件 + LLM评分 + 高优推送',
-              show_in_dashboard=True, guest_ok=False)(mail_fetch_cron)
+              show_in_dashboard=True, guest_ok=False)(
+    lambda agent, msg, args: mail_fetch_cron())
 
 
 # push_unpushed_high 已废弃——拉取+推送应在同一周期, 见 mail_fetch_cron
@@ -267,7 +268,8 @@ def mail_llm_enrich(limit: int = 30) -> str:
 
 slash_command('/mail_enrich', category='邮件管理',
               description='对未处理邮件进行 AI 摘要、分类与提取',
-              show_in_dashboard=True, guest_ok=False)(mail_llm_enrich)
+              show_in_dashboard=True, guest_ok=False)(
+    lambda agent, msg, args: mail_llm_enrich(limit=int(args[0]) if args else 30))
 
 
 def mail_feedback_ok(summary_id: int) -> str:
@@ -280,6 +282,11 @@ def mail_feedback_ok(summary_id: int) -> str:
     if success:
         return f"✅ 已成功标记邮件 ID={summary_id} 为已处理状态 (processed)。"
     return f"❌ 标记邮件 ID={summary_id} 失败。"
+
+slash_command('/mail_ok', category='邮件管理',
+              description='标记邮件已处理 (processed)',
+              show_in_dashboard=False, guest_ok=False)(
+    lambda agent, msg, args: mail_feedback_ok(int(args[0]) if args else 0))
 
 
 def mail_feedback_noise(summary_id: int) -> str:
@@ -310,6 +317,11 @@ def mail_feedback_noise(summary_id: int) -> str:
     sdb.update_summary_status(db_path, summary_id, 'noise')
     
     return f"✅ 已学习降噪规则：类型={pattern_type}，规则值={pattern_value}。该邮件 ID={summary_id} 已标为 noise。"
+
+slash_command('/mail_noise', category='邮件管理',
+              description='将邮件标记为噪声并学习降噪规则',
+              show_in_dashboard=False, guest_ok=False)(
+    lambda agent, msg, args: mail_feedback_noise(int(args[0]) if args else 0))
 
 
 def mail_delete_noise_rule(arg_val: str) -> str:
@@ -352,6 +364,11 @@ def mail_delete_noise_rule(arg_val: str) -> str:
         return f"✅ 已成功删除降噪过滤规则：{pattern_value}。"
     return f"❌ 未在数据库中找到匹配的过滤规则值：{pattern_value}。"
 
+slash_command('/mail_unnoise', category='邮件管理',
+              description='删除降噪规则 (按 ID 反查或直接指定)',
+              show_in_dashboard=False, guest_ok=False)(
+    lambda agent, msg, args: mail_delete_noise_rule(args[0]) if args else "❌ 用法：/mail_unnoise <ID或规则值>")
+
 
 def mail_list_noise_rules() -> str:
     db_path, sdb = _get_db_path_and_import_db()
@@ -363,6 +380,11 @@ def mail_list_noise_rules() -> str:
     for idx, (p_type, p_val) in enumerate(rules, 1):
         lines.append(f"{idx}. [{p_type}] `{p_val}`")
     return "\n".join(lines)
+
+slash_command('/mail_noiselist', category='邮件管理',
+              description='查看当前自定义降噪规则列表',
+              show_in_dashboard=False, guest_ok=False)(
+    lambda agent, msg, args: mail_list_noise_rules())
 
 
 @skill(
@@ -386,6 +408,11 @@ def mail_show_headers(limit: int = 15) -> str:
     except Exception as e:
         return f"❌ 解析标题列表失败: {e}\n{output}"
 
+slash_command('/mail_headers', category='邮件管理',
+              description='查看最近邮件标题列表',
+              show_in_dashboard=False, guest_ok=False)(
+    lambda agent, msg, args: mail_show_headers(limit=int(args[0]) if args else 15))
+
 
 @skill(
     name='mail_show_missed',
@@ -407,6 +434,11 @@ def mail_show_missed(limit: int = 15) -> str:
         return _handle_large_content(text, "可能错过的邮件")
     except Exception as e:
         return f"❌ 解析错过邮件失败: {e}\n{output}"
+
+slash_command('/mail_missed', category='邮件管理',
+              description='查看最近7天可能错过的非高优邮件',
+              show_in_dashboard=False, guest_ok=False)(
+    lambda agent, msg, args: mail_show_missed(limit=int(args[0]) if args else 15))
 
 @skill(
     name='mail_view_original',
@@ -464,7 +496,8 @@ def mail_view_original(account: str, uid: str) -> str:
 
 slash_command('/mail_view', category='邮件管理',
               description='查看邮件原文 (HedgeDoc)',
-              show_in_dashboard=False, guest_ok=False)(mail_view_original)
+              show_in_dashboard=False, guest_ok=False)(
+    lambda agent, msg, args: mail_view_original(account=args[0], uid=args[1]) if len(args) >= 2 else "❌ 用法：/mail_view <账户> <UID>")
 
 
 @skill(
@@ -494,4 +527,5 @@ def backfill_bodies() -> str:
 
 slash_command('/mail_backfill', category='邮件管理',
               description='回填缺失的早期账单原文 (修复搜索查不到的问题)',
-              show_in_dashboard=True, guest_ok=False)(backfill_bodies)
+              show_in_dashboard=True, guest_ok=False)(
+    lambda agent, msg, args: backfill_bodies())
