@@ -120,7 +120,7 @@
         ];
 
         try {
-            const resp = await fetch('/api/v1/dashboard');
+            const resp = await fetch('/agent/api/v1/dashboard');
             if (resp.ok) {
                 const items = await resp.json();
                 list.innerHTML = '';

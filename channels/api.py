@@ -75,6 +75,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_email_html(parsed_url.query)
         elif parsed_url.path == '/api/v1/todos':
             self._handle_todos(parsed_url.query)
+        elif parsed_url.path == '/api/v1/dashboard':
+            self._handle_dashboard()
         elif parsed_url.path == '/v1/models':
             self._handle_openai_models()
         else:
