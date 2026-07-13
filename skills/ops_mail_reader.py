@@ -91,10 +91,6 @@ def _run_mail_reader_cmd(cmd_args: list, timeout=None) -> str:
     except Exception as e:
         return f"❌ 脚本调用失败: {e}"
 
-slash_command('/mail_backfill', category='邮件管理',
-              description='回填缺失的早期账单原文 (修复搜索查不到的问题)',
-              show_in_dashboard=True, guest_ok=False)(backfill_bodies)
-
 
 def _get_db_path_and_import_db():
     cfg = load_config() or {}
@@ -495,3 +491,7 @@ def backfill_bodies() -> str:
         return "❌ 回填脚本执行超时 (> 600秒)，请在服务器上手动运行。"
     except Exception as e:
         return f"❌ 脚本调用失败: {e}"
+
+slash_command('/mail_backfill', category='邮件管理',
+              description='回填缺失的早期账单原文 (修复搜索查不到的问题)',
+              show_in_dashboard=True, guest_ok=False)(backfill_bodies)
