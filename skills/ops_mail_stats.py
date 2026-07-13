@@ -5,6 +5,7 @@
 
 import sys, os, sqlite3
 from core.skill_engine import skill
+from core.command_registry import slash_command
 
 _SCRIPT_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
@@ -94,4 +95,11 @@ def _compute_stats() -> str:
     guest_ok=False,
 )
 def mail_stats() -> str:
+    return _compute_stats()
+
+
+@slash_command('/mail_stats', category='邮件管理',
+               description='邮件处理统计：分类/重要性/状态/成功率分布',
+               show_in_dashboard=True)
+def _cmd_mail_stats(agent, msg, args):
     return _compute_stats()
