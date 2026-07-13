@@ -87,43 +87,7 @@
                 <input type="text" id="command-input" placeholder="输入 Agent 指令 (如: /mail_reprocess)..." autocomplete="off">
             </div>
             <div class="command-list" id="command-list">
-                <!-- 指令快捷项 -->
-                <div class="command-item" data-cmd="/ops_backup_data">
-                    <span class="cmd-trigger">/ops_backup_data</span>
-                    <span class="cmd-desc">打包备份系统数据 (SQLite, Mail, Vaultwarden, Meilisearch)</span>
-                </div>
-                <div class="command-item" data-cmd="/sync_meili">
-                    <span class="cmd-trigger">/sync_meili</span>
-                    <span class="cmd-desc">增量同步邮件和 RSS 到 Meilisearch 搜索引擎</span>
-                </div>
-                <div class="command-item" data-cmd="/mail_enrich">
-                    <span class="cmd-trigger">/mail_enrich</span>
-                    <span class="cmd-desc">对未处理邮件进行 AI 摘要、分类与提取</span>
-                </div>
-                <div class="command-item" data-cmd="/mail_fetch">
-                    <span class="cmd-trigger">/mail_fetch</span>
-                    <span class="cmd-desc">同步拉取邮件 + LLM评分 + 高优推送</span>
-                </div>
-                <div class="command-item" data-cmd="/mail_reprocess">
-                    <span class="cmd-trigger">/mail_reprocess</span>
-                    <span class="cmd-desc">重新解析历史未分类/失败的银行账单邮件</span>
-                </div>
-                <div class="command-item" data-cmd="/new">
-                    <span class="cmd-trigger">/new</span>
-                    <span class="cmd-desc">重置当前会话记忆，开启全新对话上下文</span>
-                </div>
-                <div class="command-item" data-cmd="/mail_backfill">
-                    <span class="cmd-trigger">/mail_backfill</span>
-                    <span class="cmd-desc">回填缺失的早期账单原文 (修复搜索查不到的问题)</span>
-                </div>
-                <div class="command-item" data-cmd="/mail_list g 1">
-                    <span class="cmd-trigger">/mail_list g 1</span>
-                    <span class="cmd-desc">主动从 Gmail 邮箱拉取最新一封邮件</span>
-                </div>
-                <div class="command-item" data-cmd="查看上一个月的外币交易明细">
-                    <span class="cmd-trigger">查看上个月外币明细</span>
-                    <span class="cmd-desc">自然语言查询：AI 智能提炼上月外币账单明细</span>
-                </div>
+                <!-- 动态加载中，请稍候... -->
             </div>
         </div>
     </div>
@@ -145,5 +109,58 @@
     </div>
 
     <script src="main.js"></script>
+    <script>
+    // 动态加载指令列表（从后端注册表）
+    (async function loadCommands() {
+        const list = document.getElementById('command-list');
+        const defaults = [
+            {name:'/new', description:'重置当前会话记忆，开启全新对话上下文'},
+            {name:'/mail_list g 1', description:'主动从 Gmail 邮箱拉取最新一封邮件'},
+            {name:'查看上一个月的外币交易明细', description:'自然语言查询：AI 智能提炼上月外币账单明细'},
+        ];
+
+        try {
+            const resp = await fetch('/api/v1/dashboard');
+            if (resp.ok) {
+                const items = await resp.json();
+                list.innerHTML = '';
+                for (const item of items) {
+                    const div = document.createElement('div');
+                    div.className = 'command-item';
+                    div.setAttribute('data-cmd', item.name);
+                    div.innerHTML = `<span class="cmd-trigger">${item.name}</span><span class="cmd-desc">${item.description}</span>`;
+                    div.addEventListener('click', () => {
+                        document.getElementById('command-input').value = item.name;
+                        document.getElementById('command-input').dispatchEvent(new Event('input'));
+                    });
+                    list.appendChild(div);
+                }
+            }
+        } catch(e) {
+            // API 不可用时回退到静态列表
+            list.innerHTML = defaults.map(d =>
+                `<div class="command-item" data-cmd="${d.name}">
+                    <span class="cmd-trigger">${d.name}</span>
+                    <span class="cmd-desc">${d.description}</span>
+                </div>`
+            ).join('');
+        }
+
+        // 追加始终可见的快捷项
+        for (const d of defaults) {
+            if (!list.querySelector(`[data-cmd="${d.name}"]`)) {
+                const div = document.createElement('div');
+                div.className = 'command-item';
+                div.setAttribute('data-cmd', d.name);
+                div.innerHTML = `<span class="cmd-trigger">${d.name}</span><span class="cmd-desc">${d.description}</span>`;
+                div.addEventListener('click', () => {
+                    document.getElementById('command-input').value = d.name;
+                    document.getElementById('command-input').dispatchEvent(new Event('input'));
+                });
+                list.appendChild(div);
+            }
+        }
+    })();
+    </script>
 </body>
 </html>

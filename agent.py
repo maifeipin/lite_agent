@@ -27,6 +27,11 @@ from core.skill_engine import SkillEngine
 from core.command_registry import dispatch as _registry_dispatch
 from core.command_registry import _registry
 
+# 仪表盘可见的系统指令
+_registry.register('/new', lambda a,m,args: None,
+                   category='系统', description='重置当前会话记忆，开启全新对话上下文',
+                   show_in_dashboard=True)
+
 class LRUCache:
     def __init__(self, maxsize=200):
         self.cache = collections.OrderedDict()

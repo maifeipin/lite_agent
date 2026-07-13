@@ -5,6 +5,7 @@
 
 import sys, os, subprocess
 from core.skill_engine import skill
+from core.command_registry import slash_command
 
 _SCRIPT_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
@@ -42,3 +43,7 @@ def _run_read_cmd(limit: int = 10, account_name: str = None) -> str:
 )
 def mail_list(limit: int = 10, account_name: str = None) -> str:
     return _run_read_cmd(limit, account_name)
+
+slash_command('/mail_list', category='邮件管理',
+              description='查看收件箱最新邮件列表',
+              show_in_dashboard=True, guest_ok=False)(mail_list)

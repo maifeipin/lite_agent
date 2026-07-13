@@ -95,6 +95,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_chat_or_task()
         elif parsed_url.path == '/v1/chat/completions':
             self._handle_openai_chat_completions()
+        elif parsed_url.path == '/api/v1/dashboard':
+            self._handle_dashboard()
         elif parsed_url.path == '/api/report':
             self._handle_edge_report()
         elif parsed_url.path == '/api/task_result':
@@ -168,6 +170,16 @@ class ApiHandler(BaseHTTPRequestHandler):
             }
 
         self.wfile.write(json.dumps(out_data, ensure_ascii=False).encode('utf-8'))
+
+    def _handle_dashboard(self):
+        """返回仪表盘可用的指令列表（来自注册表）。"""
+        from core.command_registry import CommandRegistry
+        items = CommandRegistry().items_for_dashboard()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(json.dumps(items, ensure_ascii=False).encode('utf-8'))
 
     def _handle_edge_report(self):
         content_length = int(self.headers.get('Content-Length', 0))
