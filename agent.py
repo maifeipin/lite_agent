@@ -24,6 +24,7 @@ _NON_RETRYABLE_EXCEPTIONS = (
 )
 from core.cron_engine import CronManager
 from core.skill_engine import SkillEngine
+from core.command_registry import dispatch as _registry_dispatch
 
 class LRUCache:
     def __init__(self, maxsize=200):
@@ -401,6 +402,13 @@ class Agent:
                 mail_fetch_summaries,
                 backfill_bodies
             )
+            
+            # 优先查注册表（@slash_command 装饰器注册的指令）
+            reg_resp = _registry_dispatch(cmd, self, msg, args)
+            if reg_resp is not None:
+                if isinstance(reg_resp, str):
+                    return AgentResponse(reg_resp, title=f"执行结果: {cmd}", color="blue")
+                return reg_resp
             
             try:
                 if cmd == "/mail_ok":
