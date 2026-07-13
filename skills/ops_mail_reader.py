@@ -2,6 +2,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.skill_engine import skill
 from core.config_loader import load_config
+from core.command_registry import slash_command
 import subprocess
 
 # 由 main.py 注入，用于秒级推送高优邮件到 IM 通道
@@ -89,6 +90,10 @@ def _run_mail_reader_cmd(cmd_args: list, timeout=None) -> str:
         return f"❌ 脚本执行超时 (> {timeout}秒)"
     except Exception as e:
         return f"❌ 脚本调用失败: {e}"
+
+slash_command('/mail_backfill', category='邮件管理',
+              description='回填缺失的早期账单原文 (修复搜索查不到的问题)',
+              show_in_dashboard=True, guest_ok=False)(backfill_bodies)
 
 
 def _get_db_path_and_import_db():
@@ -216,6 +221,10 @@ def mail_fetch_cron() -> str:
             pass
     return res
 
+slash_command('/mail_fetch', category='邮件管理',
+              description='同步拉取邮件 + LLM评分 + 高优推送',
+              show_in_dashboard=True, guest_ok=False)(mail_fetch_cron)
+
 
 # push_unpushed_high 已废弃——拉取+推送应在同一周期, 见 mail_fetch_cron
 
@@ -259,6 +268,10 @@ def mail_llm_enrich(limit: int = 30) -> str:
         except Exception:
             pass
     return high or res
+
+slash_command('/mail_enrich', category='邮件管理',
+              description='对未处理邮件进行 AI 摘要、分类与提取',
+              show_in_dashboard=True, guest_ok=False)(mail_llm_enrich)
 
 
 def mail_feedback_ok(summary_id: int) -> str:
@@ -452,6 +465,10 @@ def mail_view_original(account: str, uid: str) -> str:
         return _handle_large_content(md_text, "邮件原文")
     except Exception as e:
         return f"❌ 查看邮件原文失败: {e}"
+
+slash_command('/mail_view', category='邮件管理',
+              description='查看邮件原文 (HedgeDoc)',
+              show_in_dashboard=False, guest_ok=False)(mail_view_original)
 
 
 @skill(
