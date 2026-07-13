@@ -48,4 +48,4 @@ def mail_reprocess() -> str:
 
 slash_command('/mail_reprocess', category='邮件管理',
               description='重新解析历史未分类/失败的银行账单邮件',
-              show_in_dashboard=True, guest_ok=False)(mail_reprocess)
+              show_in_dashboard=False, guest_ok=False)(mail_reprocess)
