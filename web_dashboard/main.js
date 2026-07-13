@@ -48,15 +48,17 @@ function initIntersectionObserver() {
 // 获取 Meilisearch 真实的数据统计信息
 async function fetchStats() {
     try {
-        const [emailsRes, rssRes, todosRes] = await Promise.all([
+        const [emailsRes, rssRes, todosRes, sessionsRes] = await Promise.all([
             fetch('/meili/indexes/emails/stats').then(r => r.ok ? r.json() : { numberOfDocuments: 0 }).catch(() => ({ numberOfDocuments: 0 })),
             fetch('/meili/indexes/rss/stats').then(r => r.ok ? r.json() : { numberOfDocuments: 0 }).catch(() => ({ numberOfDocuments: 0 })),
-            fetch('/agent/api/v1/todos').then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] }))
+            fetch('/agent/api/v1/todos').then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] })),
+            fetch('/agent/api/v1/sessions').then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] }))
         ]);
         
         state.emailCount = emailsRes.numberOfDocuments || 0;
         state.rssCount = rssRes.numberOfDocuments || 0;
         state.todoCount = (todosRes.data || []).length;
+        state.sessionCount = (sessionsRes.data || []).length;
         
         document.getElementById('badge-all').textContent = state.emailCount + state.rssCount;
         document.getElementById('badge-emails').textContent = state.emailCount;
@@ -64,6 +66,8 @@ async function fetchStats() {
         
         const badgeTodos = document.getElementById('badge-todos');
         if (badgeTodos) badgeTodos.textContent = state.todoCount;
+        const badgeSessions = document.getElementById('badge-sessions');
+        if (badgeSessions) badgeSessions.textContent = state.sessionCount;
     } catch (e) {
         console.error('Fetch stats failed:', e);
     }
@@ -148,6 +152,16 @@ async function performSearch(isAppend = false) {
                     fetchTodos().then(res => 
                         res.filter(t => !state.searchQuery || t.title.includes(state.searchQuery) || (t.description && t.description.includes(state.searchQuery)))
                            .map(d => ({ ...d, _source: 'todos' }))
+                    )
+                );
+            }
+        }
+        if (state.activeSource === 'sessions') {
+            if (!isAppend) {
+                queryPromises.push(
+                    fetchSessions().then(res => 
+                        res.filter(s => !state.searchQuery || (s.goal && s.goal.includes(state.searchQuery)) || s.channel.includes(state.searchQuery))
+                           .map(d => ({ ...d, _source: 'sessions' }))
                     )
                 );
             }
@@ -243,6 +257,8 @@ function renderResults() {
             return renderEmailCard(doc);
         } else if (doc._source === 'todos') {
             return renderTodoCard(doc);
+        } else if (doc._source === 'sessions') {
+            return renderSessionCard(doc);
         } else {
             return renderRssCard(doc);
         }
@@ -891,7 +907,71 @@ function resetChatStatus() {
 
 function scrollToBottom() {
     const history = document.getElementById('chat-history');
-    history.scrollTop = history.scrollHeight;
+    if (history) {
+        history.scrollTop = history.scrollHeight;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Sessions 会话记录集成
+// -----------------------------------------------------------------------------
+
+async function fetchSessions() {
+    try {
+        const res = await fetch('/agent/api/v1/sessions');
+        if (!res.ok) throw new Error('Fetch sessions failed');
+        const json = await res.json();
+        return json.data || [];
+    } catch (e) {
+        console.error('fetchSessions:', e);
+        return [];
+    }
+}
+
+function renderSessionCard(doc) {
+    const safeChannel = safeSnippet(doc.channel || 'unknown', 50);
+    const safeModel = safeSnippet(doc.last_model || 'unknown', 50);
+    const safeGoal = safeSnippet(doc.goal || '闲聊模式...', 150);
+    const safeStatus = safeSnippet(doc.status || 'chatting', 20);
+    
+    let dateStr = "未知时间";
+    if (doc.updated_at) {
+        const d = new Date(doc.updated_at * 1000);
+        dateStr = d.toLocaleString();
+    }
+    
+    // Status color
+    let statusBadgeClass = 'tag-success'; // default to success colors
+    if (safeStatus.toLowerCase() === 'working') statusBadgeClass = 'tag-danger';
+    else if (safeStatus.toLowerCase() === 'archived') statusBadgeClass = 'tag-secondary';
+    
+    // Use session key mapping to an icon, if possible, or a default
+    let sourceIcon = '💬';
+    if (safeChannel.includes('feishu')) sourceIcon = '🕊️';
+    if (safeChannel.includes('cli')) sourceIcon = '🖥️';
+    if (safeChannel.includes('wecom')) sourceIcon = '🟢';
+    
+    return `
+        <div class="result-card animate__animated animate__fadeInUp animate__faster">
+            <div class="card-header">
+                <div class="card-source">
+                    <span class="source-icon">${sourceIcon}</span>
+                    <span class="source-name" style="text-transform: capitalize;">${safeChannel}</span>
+                </div>
+                <div class="card-date">${dateStr}</div>
+            </div>
+            <div class="card-title" style="margin-bottom: 8px;">会话: <span style="font-size: 14px; color: var(--text-secondary);">${safeSnippet(doc.session_key || '', 100)}</span></div>
+            <div class="card-snippet" style="background:#f8fafc; padding:8px; border-radius:4px; color:#475569; margin-bottom: 12px;">
+                <strong>当前目标:</strong> ${safeGoal}
+            </div>
+            <div class="card-tags">
+                <span class="tag ${statusBadgeClass}">Status: ${safeStatus}</span>
+                <span class="tag tag-primary">Token: ${doc.token_usage || 0}</span>
+                <span class="tag tag-warning">Model: ${safeModel}</span>
+                <span class="tag tag-info">Msgs: ${doc.msg_count || 0}</span>
+            </div>
+        </div>
+    `;
 }
 
 function parseMarkdown(text) {
