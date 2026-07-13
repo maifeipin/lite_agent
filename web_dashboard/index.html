@@ -84,7 +84,7 @@
         <div class="modal-content command-palette">
             <div class="command-header">
                 <span class="prefix">></span>
-                <input type="text" id="command-input" placeholder="输入 Agent 指令 (如: /reprocess)..." autocomplete="off">
+                <input type="text" id="command-input" placeholder="输入 Agent 指令 (如: /mail_reprocess)..." autocomplete="off">
             </div>
             <div class="command-list" id="command-list">
                 <!-- 指令快捷项 -->
@@ -96,32 +96,28 @@
                     <span class="cmd-trigger">/sync_meili</span>
                     <span class="cmd-desc">增量同步邮件和 RSS 到 Meilisearch 搜索引擎</span>
                 </div>
-                <div class="command-item" data-cmd="/mail_llm_enrich">
-                    <span class="cmd-trigger">/mail_llm_enrich</span>
+                <div class="command-item" data-cmd="/mail_enrich">
+                    <span class="cmd-trigger">/mail_enrich</span>
                     <span class="cmd-desc">对未处理邮件进行 AI 摘要、分类与提取</span>
                 </div>
-                <div class="command-item" data-cmd="/mail_fetch_only">
-                    <span class="cmd-trigger">/mail_fetch_only</span>
-                    <span class="cmd-desc">快速拉取最新邮件正文入库（不消耗 Token）</span>
+                <div class="command-item" data-cmd="/mail_fetch">
+                    <span class="cmd-trigger">/mail_fetch</span>
+                    <span class="cmd-desc">同步拉取邮件 + LLM评分 + 高优推送</span>
                 </div>
-                <div class="command-item" data-cmd="/mail_fetch_summaries">
-                    <span class="cmd-trigger">/mail_fetch_summaries</span>
-                    <span class="cmd-desc">同步拉取邮件并立即执行 AI 摘要与权重提炼</span>
-                </div>
-                <div class="command-item" data-cmd="/reprocess">
-                    <span class="cmd-trigger">/reprocess</span>
+                <div class="command-item" data-cmd="/mail_reprocess">
+                    <span class="cmd-trigger">/mail_reprocess</span>
                     <span class="cmd-desc">重新解析历史未分类/失败的银行账单邮件</span>
                 </div>
                 <div class="command-item" data-cmd="/new">
                     <span class="cmd-trigger">/new</span>
                     <span class="cmd-desc">重置当前会话记忆，开启全新对话上下文</span>
                 </div>
-                <div class="command-item" data-cmd="/backfill_bodies">
-                    <span class="cmd-trigger">/backfill_bodies</span>
+                <div class="command-item" data-cmd="/mail_backfill">
+                    <span class="cmd-trigger">/mail_backfill</span>
                     <span class="cmd-desc">回填缺失的早期账单原文 (修复搜索查不到的问题)</span>
                 </div>
-                <div class="command-item" data-cmd="/mail g 1">
-                    <span class="cmd-trigger">/mail g 1</span>
+                <div class="command-item" data-cmd="/mail_list g 1">
+                    <span class="cmd-trigger">/mail_list g 1</span>
                     <span class="cmd-desc">主动从 Gmail 邮箱拉取最新一封邮件</span>
                 </div>
                 <div class="command-item" data-cmd="查看上一个月的外币交易明细">
