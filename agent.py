@@ -25,6 +25,7 @@ _NON_RETRYABLE_EXCEPTIONS = (
 from core.cron_engine import CronManager
 from core.skill_engine import SkillEngine
 from core.command_registry import dispatch as _registry_dispatch
+from core.command_registry import _registry
 
 class LRUCache:
     def __init__(self, maxsize=200):
@@ -380,143 +381,140 @@ class Agent:
 
         is_guest = getattr(msg, "is_guest", True)
 
-        if cmd in ("/cmd", "/balance", "/memory_stats", "/memory_add", "/memory_persona", "/cron", "/check"):
-            if is_guest:
-                return AgentResponse("❌ 权限不足：只有管理员可使用该指令", title="⚠️ 权限不足", color="red")
+        # 权限检查优先走注册表
+        perm_denied = _registry.check_permission(cmd, is_guest)
+        if perm_denied:
+            return AgentResponse(perm_denied, title="⚠️ 权限不足", color="red")
 
-        if cmd in ("/mail_ok", "/mail_noise", "/mail_unnoise", "/mail_headers", "/mail_missed",
-                   "/mail_noiselist", "/mail_reprocess", "/mail_list", "/mail_stats", "/mail_search"):
-            if is_guest:
-                return AgentResponse("❌ 权限拒绝：该命令仅限管理员执行。", title="安全警告", color="red")
-            
-            from skills.ops_mail_reader import (
-                mail_feedback_ok,
-                mail_feedback_noise,
-                mail_delete_noise_rule,
-                mail_show_headers,
-                mail_show_missed,
-                mail_list_noise_rules,
-                mail_llm_enrich,
-                mail_view_original,
-                mail_fetch_cron,
-                mail_fetch_summaries,
-                backfill_bodies
-            )
-            
-            # 优先查注册表（@slash_command 装饰器注册的指令）
-            reg_resp = _registry_dispatch(cmd, self, msg, args)
-            if reg_resp is not None:
-                if isinstance(reg_resp, str):
-                    return AgentResponse(reg_resp, title=f"执行结果: {cmd}", color="blue")
-                return reg_resp
-            
-            try:
-                if cmd == "/mail_ok":
-                    if not args:
-                        return AgentResponse("❌ 用法错误：/mail_ok <id>", title="用法提示", color="yellow")
-                    res_text = mail_feedback_ok(int(args[0]))
-                    return AgentResponse(res_text, title="操作成功", color="green")
-                    
-                elif cmd == "/mail_noise":
-                    if not args:
-                        return AgentResponse("❌ 用法错误：/mail_noise <id>", title="用法提示", color="yellow")
-                    res_text = mail_feedback_noise(int(args[0]))
-                    return AgentResponse(res_text, title="操作成功", color="green")
-                    
-                elif cmd == "/mail_unnoise":
-                    if not args:
-                        return AgentResponse("❌ 用法错误：/mail_unnoise <id|pattern>", title="用法提示", color="yellow")
-                    res_text = mail_delete_noise_rule(args[0])
-                    return AgentResponse(res_text, title="操作成功", color="green")
-                    
-                elif cmd == "/mail_headers":
-                    limit = int(args[0]) if args and args[0].isdigit() else 15
-                    res_text = mail_show_headers(limit)
-                    return AgentResponse(res_text, title="邮件标题列表", color="blue")
-                    
-                elif cmd == "/mail_missed":
-                    limit = int(args[0]) if args and args[0].isdigit() else 15
-                    res_text = mail_show_missed(limit)
-                    return AgentResponse(res_text, title="可能错过的非高优邮件", color="blue")
-                    
-                elif cmd == "/mail_noiselist":
-                    res_text = mail_list_noise_rules()
-                    return AgentResponse(res_text, title="当前降噪过滤规则列表", color="blue")
+        # 注册表未覆盖的敏感指令兜底
+        if is_guest and not cmd.startswith('/mail_') and cmd in ("/cmd", "/balance", "/cron", "/check"):
+            return AgentResponse("❌ 权限不足：只有管理员可使用该指令", title="⚠️ 权限不足", color="red")
+ 
+        from skills.ops_mail_reader import (
+            mail_feedback_ok,
+            mail_feedback_noise,
+            mail_delete_noise_rule,
+            mail_show_headers,
+            mail_show_missed,
+            mail_list_noise_rules,
+            mail_llm_enrich,
+            mail_view_original,
+            mail_fetch_cron,
+            mail_fetch_summaries,
+            backfill_bodies
+        )
+        
+        # 优先查注册表（@slash_command 装饰器注册的指令）
+        reg_resp = _registry_dispatch(cmd, self, msg, args)
+        if reg_resp is not None:
+            if isinstance(reg_resp, str):
+                return AgentResponse(reg_resp, title=f"执行结果: {cmd}", color="blue")
+            return reg_resp
+        
+        try:
+            if cmd == "/mail_ok":
+                if not args:
+                    return AgentResponse("❌ 用法错误：/mail_ok <id>", title="用法提示", color="yellow")
+                res_text = mail_feedback_ok(int(args[0]))
+                return AgentResponse(res_text, title="操作成功", color="green")
+                
+            elif cmd == "/mail_noise":
+                if not args:
+                    return AgentResponse("❌ 用法错误：/mail_noise <id>", title="用法提示", color="yellow")
+                res_text = mail_feedback_noise(int(args[0]))
+                return AgentResponse(res_text, title="操作成功", color="green")
+                
+            elif cmd == "/mail_unnoise":
+                if not args:
+                    return AgentResponse("❌ 用法错误：/mail_unnoise <id|pattern>", title="用法提示", color="yellow")
+                res_text = mail_delete_noise_rule(args[0])
+                return AgentResponse(res_text, title="操作成功", color="green")
+                
+            elif cmd == "/mail_headers":
+                limit = int(args[0]) if args and args[0].isdigit() else 15
+                res_text = mail_show_headers(limit)
+                return AgentResponse(res_text, title="邮件标题列表", color="blue")
+                
+            elif cmd == "/mail_missed":
+                limit = int(args[0]) if args and args[0].isdigit() else 15
+                res_text = mail_show_missed(limit)
+                return AgentResponse(res_text, title="可能错过的非高优邮件", color="blue")
+                
+            elif cmd == "/mail_noiselist":
+                res_text = mail_list_noise_rules()
+                return AgentResponse(res_text, title="当前降噪过滤规则列表", color="blue")
 
-                elif cmd == "/mail_reprocess":
-                    from skills.ops_mail_reprocess import mail_reprocess
-                    res_text = mail_reprocess()
-                    return AgentResponse(res_text, title="补跑结果", color="blue")
+            elif cmd == "/mail_reprocess":
+                from skills.ops_mail_reprocess import mail_reprocess
+                res_text = mail_reprocess()
+                return AgentResponse(res_text, title="补跑结果", color="blue")
 
-                elif cmd == "/mail_list":
-                    # 灵活解析：数字=limit，其余=账号/别名；支持 /mail_list qq 5 或 /mail_list 5 qq
-                    _limit = 10
-                    _account = None
-                    for a in args:
-                        if a.isdigit():
-                            _limit = int(a)
-                        else:
-                            _account = a
-                    from skills.ops_mail_list import mail_list
-                    res_text = mail_list(limit=_limit, account_name=_account)
-                    return AgentResponse(res_text, title="收件箱", color="blue")
+            elif cmd == "/mail_list":
+                _limit = 10
+                _account = None
+                for a in args:
+                    if a.isdigit():
+                        _limit = int(a)
+                    else:
+                        _account = a
+                from skills.ops_mail_list import mail_list
+                res_text = mail_list(limit=_limit, account_name=_account)
+                return AgentResponse(res_text, title="收件箱", color="blue")
 
-                elif cmd == "/mail_stats":
-                    from skills.ops_mail_stats import mail_stats
-                    res_text = mail_stats()
-                    return AgentResponse(res_text, title="邮件统计", color="blue")
+            elif cmd == "/mail_stats":
+                from skills.ops_mail_stats import mail_stats
+                res_text = mail_stats()
+                return AgentResponse(res_text, title="邮件统计", color="blue")
 
-                elif cmd == "/mail_search":
-                    # /mail_search [--hedgedoc|--full|+] <关键词> [条数] [账户]
-                    _replytype = 0
-                    _filtered = []
-                    for a in args:
-                        if a in ("--hedgedoc", "--full", "+"):
-                            _replytype = 2
-                        else:
-                            _filtered.append(a)
-                    args = _filtered
-                    if not args:
-                        return AgentResponse("❌ 用法：/mail_search [+] <关键词> [条数]", title="用法提示", color="yellow")
-                    # 灵活解析：数字做 limit，其余拼 keyword
-                    _kw_parts = []
-                    _limit = 20
-                    _account = None
-                    for a in args:
-                        if a.isdigit():
-                            _limit = int(a)
-                        else:
-                            _kw_parts.append(a)
-                    if not _kw_parts:
-                        return AgentResponse("❌ 请提供搜索关键词", title="用法提示", color="yellow")
-                    keyword = " ".join(_kw_parts)
-                    from skills.ops_mail_search import mail_search
-                    res_text = mail_search(keyword=keyword, replytype=_replytype, limit=_limit, account_name=_account)
-                    return AgentResponse(res_text, title=f"搜索结果: {keyword}", color="blue")
+            elif cmd == "/mail_search":
+                _replytype = 0
+                _filtered = []
+                for a in args:
+                    if a in ("--hedgedoc", "--full", "+"):
+                        _replytype = 2
+                    else:
+                        _filtered.append(a)
+                args = _filtered
+                if not args:
+                    return AgentResponse("❌ 用法：/mail_search [+] <关键词> [条数]", title="用法提示", color="yellow")
+                _kw_parts = []
+                _limit = 20
+                _account = None
+                for a in args:
+                    if a.isdigit():
+                        _limit = int(a)
+                    else:
+                        _kw_parts.append(a)
+                if not _kw_parts:
+                    return AgentResponse("❌ 请提供搜索关键词", title="用法提示", color="yellow")
+                keyword = " ".join(_kw_parts)
+                from skills.ops_mail_search import mail_search
+                res_text = mail_search(keyword=keyword, replytype=_replytype, limit=_limit, account_name=_account)
+                return AgentResponse(res_text, title=f"搜索结果: {keyword}", color="blue")
 
-                elif cmd == "/mail_enrich":
-                    limit = int(args[0]) if args and args[0].isdigit() else 30
-                    res_text = mail_llm_enrich(limit=limit)
-                    return AgentResponse(res_text, title="LLM 补打结果", color="blue")
+            elif cmd == "/mail_enrich":
+                limit = int(args[0]) if args and args[0].isdigit() else 30
+                res_text = mail_llm_enrich(limit=limit)
+                return AgentResponse(res_text, title="LLM 补打结果", color="blue")
 
-                elif cmd == "/mail_view":
-                    if len(args) < 2:
-                        return AgentResponse("❌ 用法：/mail_view <账户> <UID>", title="用法提示", color="yellow")
-                    res_text = mail_view_original(account=args[0], uid=args[1])
-                    return AgentResponse(res_text, title="邮件原文", color="blue")
+            elif cmd == "/mail_view":
+                if len(args) < 2:
+                    return AgentResponse("❌ 用法：/mail_view <账户> <UID>", title="用法提示", color="yellow")
+                res_text = mail_view_original(account=args[0], uid=args[1])
+                return AgentResponse(res_text, title="邮件原文", color="blue")
 
-                elif cmd == "/mail_fetch":
-                    months = int(args[0]) if args and args[0].isdigit() else 1
-                    res_text = mail_fetch_cron()
-                    return AgentResponse(res_text, title="邮件同步结果", color="blue")
+            elif cmd == "/mail_fetch":
+                months = int(args[0]) if args and args[0].isdigit() else 1
+                res_text = mail_fetch_cron()
+                return AgentResponse(res_text, title="邮件同步结果", color="blue")
 
-                elif cmd == "/mail_backfill":
-                    res_text = backfill_bodies()
-                    return AgentResponse(res_text, title="历史邮件回填", color="blue")
+            elif cmd == "/mail_backfill":
+                res_text = backfill_bodies()
+                return AgentResponse(res_text, title="历史邮件回填", color="blue")
 
-                    
-            except Exception as cmd_err:
-                return AgentResponse(f"❌ 执行失败：{cmd_err}", title="执行错误", color="red")
+                
+        except Exception as cmd_err:
+            return AgentResponse(f"❌ 执行失败：{cmd_err}", title="执行错误", color="red")
 
         if cmd == "/new":
             self.session_mgr.reset_session(msg.session_key)
