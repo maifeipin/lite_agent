@@ -288,7 +288,11 @@ registerTabModule({
         html += `<span title="Token 消耗">🪙 ${tokenUsage}</span>`;
         html += `<span title="工具调用次数">🔧 ${toolCalls} 次</span>`;
         html += `<span title="LLM 模型">🧠 ${h(model)}</span>`;
-        html += '</div></div>';
+        html += '</div>';
+        html += '<div class="card-actions">';
+        html += `<button class="card-btn btn-view-session" data-session="${h(doc.session_key)}">📋 查看对话</button>`;
+        html += '</div>';
+        html += '</div>';
         return html;
     },
 
@@ -433,6 +437,24 @@ function renderResults() {
             const acc = btn.getAttribute('data-account');
             const uid = btn.getAttribute('data-uid');
             if (acc && uid) window.open(`/agent/api/v1/email/html?account=${encodeURIComponent(acc)}&uid=${encodeURIComponent(uid)}`, '_blank');
+        });
+    });
+    // Session: view messages
+    document.querySelectorAll('.btn-view-session').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const sessionKey = btn.getAttribute('data-session');
+            if (!sessionKey) return;
+            btn.textContent = '加载中...';
+            btn.disabled = true;
+            try {
+                const r = await fetch(`/agent/api/v1/sessions/messages?session_key=${encodeURIComponent(sessionKey)}&limit=15`);
+                const d = await r.json();
+                showSessionMessagesModal(sessionKey, d.messages || []);
+            } catch(e) {
+                alert('加载失败: ' + e.message);
+            }
+            btn.textContent = '📋 查看对话';
+            btn.disabled = false;
         });
     });
 }
@@ -816,6 +838,44 @@ function initTerminal() {
 function initModalClose() {
     document.getElementById('command-modal').addEventListener('click', (e) => {
         if (e.target === e.currentTarget) closeCommandModal();
+    });
+}
+
+// ============================================================
+//  Session Messages Modal
+// ============================================================
+function showSessionMessagesModal(sessionKey, messages) {
+    // Remove existing modal if any
+    document.querySelectorAll('.session-modal-overlay').forEach(el => el.remove());
+
+    const roleIcons = { user: '👤', assistant: '🤖', system: '⚙️', tool: '🔧' };
+    const rows = messages.map(m => {
+        const icon = roleIcons[m.role] || '💬';
+        const time = m.time ? new Date(m.time * 1000).toLocaleTimeString('zh-CN') : '';
+        const content = h(m.content || '(空)');
+        return `<div class="session-msg"><span class="msg-role">${icon} ${m.role}</span><span class="msg-time">${time}</span><div class="msg-content">${content}</div></div>`;
+    }).join('') || '<p style="color:var(--text-muted);text-align:center">暂无消息记录</p>';
+
+    const overlay = document.createElement('div');
+    overlay.className = 'session-modal-overlay';
+    overlay.innerHTML = `
+        <div class="session-modal">
+            <div class="session-modal-header">
+                <span>📋 会话对话记录</span>
+                <span style="font-size:0.78rem;color:var(--text-muted)">${h(sessionKey)}</span>
+                <button class="icon-btn session-modal-close">&times;</button>
+            </div>
+            <div class="session-modal-body">${rows}</div>
+        </div>`;
+    document.body.appendChild(overlay);
+
+    overlay.addEventListener('click', (e) => {
+        if (e.target === overlay || e.target.classList.contains('session-modal-close')) {
+            overlay.remove();
+        }
+    });
+    document.addEventListener('keydown', function escHandler(e) {
+        if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', escHandler); }
     });
 }
 
