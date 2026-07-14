@@ -6,6 +6,7 @@ import urllib.request
 import urllib.parse
 import hashlib
 import re
+import html
 import email.utils as email_utils
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
@@ -115,6 +116,24 @@ def _parse_to_timestamp(date_val):
     except Exception:
         pass
     return 0
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
+
+
+def _strip_html(raw):
+    """HTML 片段 -> 纯文本(RssAdapter 的 excerpt 字段是 HTML)"""
+    if not raw:
+        return ""
+    t = _TAG_RE.sub(" ", str(raw))
+    t = html.unescape(t)
+    return _WS_RE.sub(" ", t).strip()
+
+
+def _extract_rss_content(item):
+    """RSS 正文:优先 excerpt(HTML,strip 标签),回退 content/description"""
+    raw = item.get("excerpt") or item.get("content") or item.get("description") or ""
+    return _strip_html(raw)
 
 def _get_mongodb():
     """连接到 MongoDB"""
@@ -236,14 +255,14 @@ def sync_meili() -> str:
                         "title": item.get("title", ""),
                         "link": item.get("link", ""),
                         "author": item.get("author", ""),
-                        "content": item.get("content", "") or item.get("description", ""),
-                        "published": item.get("published", ""),
+                        "content": _extract_rss_content(item),
+                        "published": item.get("pubdate", "") or item.get("published", ""),
                         "node_name": node_name,
                         "group_code": item.get("group_code", ""),
                         "fetched_at": item["_id"].generation_time.isoformat(),
                         "source": _extract_source('rss', {"link": item.get("link", "")}),
                         "type": "article",
-                        "date": _parse_to_timestamp(item.get("published", "")),
+                        "date": _parse_to_timestamp(item.get("pubdate", "") or item.get("published", "")),
                         "tags": [],
                     })
         
