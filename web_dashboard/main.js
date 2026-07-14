@@ -699,6 +699,20 @@ function appendChatBubble(role, html) {
 function sendChatMessage(text) {
     if (chatEventSource) chatEventSource.close();
 
+    // Show typing indicator
+    const typingEl = document.createElement('div');
+    typingEl.className = 'chat-message agent';
+    typingEl.innerHTML = '<div class="bubble"><div class="typing-dots"><span></span><span></span><span></span></div></div>';
+    typingEl.id = 'chat-typing-indicator';
+    const history = document.getElementById('chat-history');
+    history.appendChild(typingEl);
+    history.scrollTop = history.scrollHeight;
+
+    function removeTyping() {
+        const el = document.getElementById('chat-typing-indicator');
+        if (el) el.remove();
+    }
+
     fetch('/agent/api/v1/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -706,6 +720,7 @@ function sendChatMessage(text) {
     })
     .then(r => r.json())
     .then(data => {
+        removeTyping();
         if (data.type === 'sync') {
             const md = marked.parse(data.response || '(空)');
             appendChatBubble('agent', md);
@@ -713,7 +728,10 @@ function sendChatMessage(text) {
             subscribeChatStream(data.task_id);
         }
     })
-    .catch(e => appendChatBubble('system', `请求失败: ${e.message}`));
+    .catch(e => {
+        removeTyping();
+        appendChatBubble('system', `请求失败: ${e.message}`);
+    });
 }
 
 function subscribeChatStream(taskId) {
