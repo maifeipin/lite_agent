@@ -76,6 +76,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_pull_task(parsed_url.query)
         elif parsed_url.path == '/api/v1/sessions':
             self._handle_sessions(parsed_url.query)
+        elif parsed_url.path == '/api/v1/sessions/messages':
+            self._handle_session_messages(parsed_url.query)
         elif parsed_url.path == '/api/v1/task/stream':
             self._handle_task_stream(parsed_url.query)
         elif parsed_url.path == '/api/v1/email/html':
@@ -275,6 +277,56 @@ class ApiHandler(BaseHTTPRequestHandler):
                                         ensure_ascii=False).encode('utf-8'))
         except Exception as e:
             self.send_error(500, str(e))
+
+    def _handle_session_messages(self, query: str):
+        """返回指定会话的最近消息列表。"""
+        import sqlite3, os
+        qs = parse_qs(query)
+        session_key = qs.get("session_key", [None])[0]
+        limit = int(qs.get("limit", ["20"])[0])
+
+        if not session_key:
+            self.send_error(400, "Missing session_key")
+            return
+
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        db_path = os.path.join(project_root, "data", "sessions.db")
+
+        if not os.path.exists(db_path):
+            self._send_json({"messages": []})
+            return
+
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT role, content, created_at FROM messages "
+                "WHERE session_key = ? ORDER BY created_at DESC LIMIT ?",
+                (session_key, limit)
+            ).fetchall()
+            conn.close()
+
+            messages = []
+            for r in reversed(rows):
+                content = (r["content"] or "")
+                if len(content) > 500:
+                    content = content[:500] + "..."
+                messages.append({
+                    "role": r["role"],
+                    "content": content,
+                    "time": r["created_at"] or 0,
+                })
+
+            self._send_json({"messages": messages})
+        except Exception as e:
+            self.send_error(500, str(e))
+
+    def _send_json(self, data: dict):
+        self.send_response(200)
+        self._send_cors_headers()
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
 
     def _handle_auth(self):
         """登录验证：读取 htpasswd 文件校验用户名/密码。用于 Dashboard 表单登录。"""
