@@ -25,6 +25,7 @@ secrets/
 vps*.json
 .trae/
 .agents/
+.DS_Store
 
 # Generic sensitive files
 *.log
