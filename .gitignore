@@ -24,6 +24,7 @@ secrets/
 *.conf
 vps*.json
 .trae/
+.agents/
 
 # Generic sensitive files
 *.log
