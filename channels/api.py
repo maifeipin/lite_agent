@@ -336,20 +336,27 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _verify_htpasswd(password: str, stored_hash: str) -> bool:
-        """验证 Apache htpasswd $apr1$ 格式密码。"""
+        """验证 Apache htpasswd 格式密码。支持 bcrypt $2b$ / $2y$ / $apr1$ / {SHA} / 明文。"""
         import hashlib
+        # bcrypt ($2b$ or $2y$)
+        if stored_hash.startswith('$2b$') or stored_hash.startswith('$2y$'):
+            try:
+                import bcrypt
+                return bcrypt.checkpw(password.encode('utf-8'), stored_hash.encode('utf-8'))
+            except ImportError:
+                return False
+        # apr1
         if stored_hash.startswith('$apr1$'):
-            # $apr1$<salt>$<hash>
             parts = stored_hash.split('$')
             if len(parts) < 4:
                 return False
             salt = parts[2]
             return stored_hash == ApiHandler._apr1_hash(password, salt)
-        # 也支持 {SHA} 和明文
+        # SHA
         if stored_hash.startswith('{SHA}'):
             import base64
             return stored_hash == '{SHA}' + base64.b64encode(hashlib.sha1(password.encode()).digest()).decode()
-        # 明文（不推荐，但兼容）
+        # 明文
         return password == stored_hash
 
     @staticmethod
