@@ -90,6 +90,13 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_error(404, "Not Found")
 
     def do_POST(self):
+        parsed_url = urlparse(self.path)
+
+        # 登录接口无需认证
+        if parsed_url.path == '/api/v1/auth':
+            self._handle_auth()
+            return
+
         if not self._auth():
             return
             
@@ -268,6 +275,121 @@ class ApiHandler(BaseHTTPRequestHandler):
                                         ensure_ascii=False).encode('utf-8'))
         except Exception as e:
             self.send_error(500, str(e))
+
+    def _handle_auth(self):
+        """登录验证：读取 htpasswd 文件校验用户名/密码。用于 Dashboard 表单登录。"""
+        import hashlib, os
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length == 0:
+            self.send_error(400, "Bad Request: Empty body")
+            return
+        try:
+            body = json.loads(self.rfile.read(content_length).decode('utf-8'))
+        except json.JSONDecodeError:
+            self.send_error(400, "Bad Request: Invalid JSON")
+            return
+
+        username = (body.get('username') or '').strip()
+        password = (body.get('password') or '')
+
+        if not username or not password:
+            self._send_auth_fail('账号和密码不能为空')
+            return
+
+        # 读取 htpasswd 文件
+        htpasswd_path = '/etc/nginx/conf.d/dashboard.htpasswd'
+        if not os.path.exists(htpasswd_path):
+            self._send_auth_fail('服务端配置错误')
+            return
+
+        try:
+            with open(htpasswd_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if ':' not in line:
+                        continue
+                    u, pwd_hash = line.split(':', 1)
+                    if u != username:
+                        continue
+
+                    if self._verify_htpasswd(password, pwd_hash):
+                        self.send_response(200)
+                        self._send_cors_headers()
+                        self.send_header('Content-Type', 'application/json; charset=utf-8')
+                        self.end_headers()
+                        self.wfile.write(json.dumps({'success': True}, ensure_ascii=False).encode('utf-8'))
+                        return
+                    else:
+                        self._send_auth_fail('账号或密码错误')
+                        return
+        except Exception:
+            pass
+
+        self._send_auth_fail('账号或密码错误')
+
+    def _send_auth_fail(self, msg: str):
+        self.send_response(401)
+        self._send_cors_headers()
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(json.dumps({'success': False, 'error': msg}, ensure_ascii=False).encode('utf-8'))
+
+    @staticmethod
+    def _verify_htpasswd(password: str, stored_hash: str) -> bool:
+        """验证 Apache htpasswd $apr1$ 格式密码。"""
+        import hashlib
+        if stored_hash.startswith('$apr1$'):
+            # $apr1$<salt>$<hash>
+            parts = stored_hash.split('$')
+            if len(parts) < 4:
+                return False
+            salt = parts[2]
+            return stored_hash == ApiHandler._apr1_hash(password, salt)
+        # 也支持 {SHA} 和明文
+        if stored_hash.startswith('{SHA}'):
+            import base64
+            return stored_hash == '{SHA}' + base64.b64encode(hashlib.sha1(password.encode()).digest()).decode()
+        # 明文（不推荐，但兼容）
+        return password == stored_hash
+
+    @staticmethod
+    def _apr1_hash(password: str, salt: str) -> str:
+        """Apache $apr1$ MD5 哈希实现。"""
+        import hashlib
+        def _apr1_md5(pw, slt):
+            ctx = hashlib.md5((pw + '$apr1$' + slt).encode('utf-8')).digest()
+            ctx = hashlib.md5((pw + slt + pw).encode('utf-8')).digest()
+            # 迭代 1000 次
+            final = pw + '$apr1$' + slt
+            for i in range(1000):
+                digest = hashlib.md5()
+                if i & 1:
+                    digest.update(pw.encode('utf-8'))
+                else:
+                    digest.update(ctx)
+                if i % 3:
+                    digest.update(slt.encode('utf-8'))
+                if i % 7:
+                    digest.update(pw.encode('utf-8'))
+                if i & 1:
+                    digest.update(ctx)
+                else:
+                    digest.update(pw.encode('utf-8'))
+                ctx = digest.digest()
+            # 转 base64
+            b64 = './0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+            result = ''
+            for a, b, c in ((ctx[i], ctx[i+1] if i+1 < 16 else 0, ctx[i+2] if i+2 < 16 else 0)
+                            for i in range(0, 16, 3)):
+                result += b64[a & 0x3f]
+                result += b64[((a >> 6) & 0x03) | ((b << 2) & 0x3c)]
+                result += b64[((b >> 4) & 0x0f)]
+                if i + 1 < 16:
+                    result += b64[((b >> 2) & 0x03) | ((c << 4) & 0x30)]
+                if i + 2 < 16:
+                    result += b64[(c >> 2) & 0x3f]
+            return '$apr1$' + slt + '$' + result
+        return _apr1_md5(password, salt)
 
     def _handle_edge_report(self):
         content_length = int(self.headers.get('Content-Length', 0))

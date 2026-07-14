@@ -1,4 +1,11 @@
 // ============================================================
+//  Auth guard: check sessionStorage, redirect to login if needed
+// ============================================================
+if (!sessionStorage.getItem('dashboard_auth')) {
+    window.location.href = '/login.html';
+}
+
+// ============================================================
 //  Unified Dashboard — TabModule Registry Pattern
 //  每个数据源封装为独立 Module，侧边栏、搜索、卡片渲染均委托给 Module
 // ============================================================
@@ -232,8 +239,7 @@ registerTabModule({
 
     async fetchCount() {
         try {
-            const r = await fetch('/agent/api/v1/sessions?limit=1',
-                { headers: { 'Authorization': `Bearer ${getApiToken()}` } });
+            const r = await fetch('/agent/api/v1/sessions?limit=1');
             const d = await r.json();
             return d.total || 0;
         } catch { return 0; }
@@ -241,8 +247,7 @@ registerTabModule({
 
     async search(query, offset, limit) {
         try {
-            const r = await fetch(`/agent/api/v1/sessions?limit=${limit}`,
-                { headers: { 'Authorization': `Bearer ${getApiToken()}` } });
+            const r = await fetch(`/agent/api/v1/sessions?limit=${limit}`);
             const d = await r.json();
             let items = (d.sessions || []).map(s => { s._module = 'sessions'; return s; });
             if (query) {
@@ -549,7 +554,7 @@ function triggerCommand(cmdText) {
 
     fetch('/agent/api/v1/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${getApiToken()}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: 'dashboard_admin', text: cmdText }),
     })
     .then(r => r.json())
@@ -674,7 +679,7 @@ function sendChatMessage(text) {
 
     fetch('/agent/api/v1/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${getApiToken()}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: 'dashboard_chat', text }),
     })
     .then(r => r.json())
@@ -812,19 +817,6 @@ function initModalClose() {
     document.getElementById('command-modal').addEventListener('click', (e) => {
         if (e.target === e.currentTarget) closeCommandModal();
     });
-}
-
-// ============================================================
-//  API Token helper
-// ============================================================
-function getApiToken() {
-    // Read from sessionStorage or prompt
-    let token = sessionStorage.getItem('api_token');
-    if (!token) {
-        token = prompt('请输入 API Auth Token (存储在会话中):');
-        if (token) sessionStorage.setItem('api_token', token);
-    }
-    return token || '';
 }
 
 // ============================================================

@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 | 统一控制中枢</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #0a0b10;
+            --panel: rgba(20,22,35,0.6);
+            --border: rgba(255,255,255,0.08);
+            --text: #f3f4f6;
+            --muted: #9ca3af;
+            --accent: #6366f1;
+            --danger: #ef4444;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            display: flex; align-items: center; justify-content: center;
+            min-height: 100vh;
+        }
+        .bg-glow {
+            position: fixed; border-radius: 50%; filter: blur(100px); opacity: 0.15;
+            pointer-events: none; z-index: 0;
+        }
+        .bg-glow-1 { width: 500px; height: 500px; background: #6366f1; top: -200px; left: -100px; }
+        .bg-glow-2 { width: 400px; height: 400px; background: #10b981; bottom: -150px; right: -100px; }
+
+        .login-container {
+            position: relative; z-index: 1;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 16px; padding: 48px 40px;
+            width: 400px; max-width: 90vw;
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+        }
+        .logo { text-align: center; margin-bottom: 32px; }
+        .logo span { font-size: 2.5rem; }
+        .logo h1 { font-size: 1.3rem; font-weight: 600; margin-top: 8px; color: var(--text); }
+        .logo p { font-size: 0.85rem; color: var(--muted); margin-top: 4px; }
+
+        .form-group { margin-bottom: 20px; }
+        .form-group label {
+            display: block; font-size: 0.85rem; font-weight: 500;
+            color: var(--muted); margin-bottom: 6px;
+        }
+        .form-group input {
+            width: 100%; padding: 12px 16px;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid var(--border);
+            border-radius: 10px; color: var(--text);
+            font-size: 0.95rem; font-family: inherit;
+            transition: border-color 0.2s, box-shadow 0.2s;
+            outline: none;
+        }
+        .form-group input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(99,102,241,0.2);
+        }
+        .form-group input::placeholder { color: rgba(255,255,255,0.2); }
+
+        .btn-login {
+            width: 100%; padding: 12px;
+            background: var(--accent);
+            border: none; border-radius: 10px;
+            color: #fff; font-size: 1rem; font-weight: 600;
+            cursor: pointer; transition: background 0.2s, transform 0.1s;
+            font-family: inherit;
+        }
+        .btn-login:hover { background: #5558e6; }
+        .btn-login:active { transform: scale(0.98); }
+
+        .error-msg {
+            text-align: center; color: var(--danger);
+            font-size: 0.85rem; margin-top: 12px;
+            min-height: 20px;
+        }
+        .hint {
+            text-align: center; color: var(--muted);
+            font-size: 0.78rem; margin-top: 20px;
+            opacity: 0.6;
+        }
+    </style>
+</head>
+<body>
+    <div class="bg-glow bg-glow-1"></div>
+    <div class="bg-glow bg-glow-2"></div>
+
+    <div class="login-container">
+        <div class="logo">
+            <span>📡</span>
+            <h1>统一控制中枢</h1>
+            <p>Dashboard · Meilisearch · Agent</p>
+        </div>
+        <form id="login-form" autocomplete="on">
+            <div class="form-group">
+                <label for="username">账号</label>
+                <input type="text" id="username" name="username"
+                       placeholder="用户名" autocomplete="username" required>
+            </div>
+            <div class="form-group">
+                <label for="password">密码</label>
+                <input type="password" id="password" name="password"
+                       placeholder="密码" autocomplete="current-password" required>
+            </div>
+            <button type="submit" class="btn-login" id="login-btn">登 录</button>
+        </form>
+        <div class="error-msg" id="error-msg"></div>
+        <div class="hint">密码管理器 (Bitwarden/Vaultwarden) 可自动填充</div>
+    </div>
+
+    <script>
+        const form = document.getElementById('login-form');
+        const errEl = document.getElementById('error-msg');
+        const btn = document.getElementById('login-btn');
+
+        // 如果已有有效 session，直接跳转
+        if (sessionStorage.getItem('dashboard_auth') === 'ok') {
+            window.location.href = '/';
+        }
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            errEl.textContent = '';
+            btn.textContent = '验证中...';
+            btn.disabled = true;
+
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value.trim();
+
+            try {
+                const r = await fetch('/agent/api/v1/auth', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password }),
+                });
+                const d = await r.json();
+                if (d.success) {
+                    sessionStorage.setItem('dashboard_auth', 'ok');
+                    window.location.href = '/';
+                } else {
+                    errEl.textContent = d.error || '账号或密码错误';
+                    btn.textContent = '登 录';
+                    btn.disabled = false;
+                }
+            } catch (e) {
+                errEl.textContent = '网络错误，请稍后重试';
+                btn.textContent = '登 录';
+                btn.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>
