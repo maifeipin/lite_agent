@@ -22,7 +22,23 @@ const state = {
     selectedCommandIndex: 0,
     currentTaskId: null,
     eventSource: null,
+    activeFilters: {},       // { source: ['v2ex.com'], type: ['bill'] }
+    lastFacets: null,         // Meilisearch facetDistribution from last response
 };
+
+// Meili-backed sources (support facets)
+const FACET_SOURCES = new Set(['emails', 'rss']);
+
+// ---- Filter builder ----
+function buildFilter() {
+    const parts = [];
+    for (const [field, values] of Object.entries(state.activeFilters)) {
+        if (!values || values.length === 0) continue;
+        parts.push(values.map(v => `${field} = "${v}"`).join(' OR '));
+    }
+    if (parts.length === 0) return undefined;
+    return parts.map(p => `(${p})`).join(' AND ');
+}
 
 // ---- TabModule Registry ----
 const tabModules = {};
@@ -48,23 +64,28 @@ registerTabModule({
         } catch { return 0; }
     },
 
-    async search(query, offset, limit) {
+    async search(query, offset, limit, filter) {
         const payload = {
             q: query || '',
-            sort: ['email_date:desc'],
+            sort: ['date:desc'],
+            filter,
             offset, limit,
+            facets: FACET_SOURCES.has(this.id) ? ['source', 'type'] : undefined,
             attributesToHighlight: ['subject', 'sender', 'plain_text', 'summary'],
             highlightPreTag: '<mark>', highlightPostTag: '</mark>',
         };
+        if (!payload.filter) delete payload.filter;
+        if (!payload.facets) delete payload.facets;
         const r = await fetch('/agent/meili/indexes/emails/search', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
         });
-        if (!r.ok) return { hits: [], total: 0 };
+        if (!r.ok) return { hits: [], total: 0, facets: {} };
         const d = await r.json();
         return {
             hits: (d.hits || []).map(h => { h._module = 'emails'; return h; }),
             total: d.estimatedTotalHits || d.totalHits || 0,
+            facets: d.facetDistribution || {},
         };
     },
 
@@ -120,23 +141,28 @@ registerTabModule({
         } catch { return 0; }
     },
 
-    async search(query, offset, limit) {
+    async search(query, offset, limit, filter) {
         const payload = {
             q: query || '',
-            sort: ['published:desc'],
+            sort: ['date:desc'],
+            filter,
             offset, limit,
+            facets: FACET_SOURCES.has(this.id) ? ['source', 'type'] : undefined,
             attributesToHighlight: ['title', 'content'],
             highlightPreTag: '<mark>', highlightPostTag: '</mark>',
         };
+        if (!payload.filter) delete payload.filter;
+        if (!payload.facets) delete payload.facets;
         const r = await fetch('/agent/meili/indexes/rss/search', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
         });
-        if (!r.ok) return { hits: [], total: 0 };
+        if (!r.ok) return { hits: [], total: 0, facets: {} };
         const d = await r.json();
         return {
             hits: (d.hits || []).map(h => { h._module = 'rss'; return h; }),
             total: d.estimatedTotalHits || d.totalHits || 0,
+            facets: d.facetDistribution || {},
         };
     },
 
@@ -333,6 +359,24 @@ function safeSnippet(text, maxLen) {
     return result;
 }
 
+function getDocTimestamp(doc) {
+    if (doc.date) return Number(doc.date);
+    if (doc.published) {
+        const t = Date.parse(doc.published);
+        if (!isNaN(t)) return t / 1000;
+    }
+    if (doc.email_date) {
+        const t = Date.parse(doc.email_date);
+        if (!isNaN(t)) return t / 1000;
+    }
+    if (doc.updated_at) {
+        if (typeof doc.updated_at === 'number') return doc.updated_at;
+        const t = Date.parse(doc.updated_at);
+        if (!isNaN(t)) return t / 1000;
+    }
+    return 0;
+}
+
 // ============================================================
 //  Core: Unified Search Pipeline
 // ============================================================
@@ -349,36 +393,34 @@ async function performSearch(append = false) {
 
     state.isLoading = true;
     showSearchSpinner(!append);
+    const filterStr = buildFilter();
 
     try {
         if (state.activeSource === 'all') {
-            // Aggregate all modules (except 'all' itself)
             const activeModules = Object.values(tabModules).filter(m => m.search && m.id !== 'all');
             const results = await Promise.all(activeModules.map(async m => {
                 try {
-                    return await m.search(query, append ? state.offset : 0, Math.floor(limit / activeModules.length));
-                } catch { return { hits: [], total: 0 }; }
+                    return await m.search(query, append ? state.offset : 0, Math.floor(limit / activeModules.length), filterStr);
+                } catch { return { hits: [], total: 0, facets: {} }; }
             }));
             const allHits = results.flatMap(r => r.hits);
-            // Sort by date proxy
-            allHits.sort((a, b) => {
-                const da = a.email_date || a.published || (a.updated_at ? new Date(a.updated_at * 1000).toISOString() : '');
-                const db = b.email_date || b.published || (b.updated_at ? new Date(b.updated_at * 1000).toISOString() : '');
-                return db.localeCompare(da);
-            });
+            allHits.sort((a, b) => getDocTimestamp(b) - getDocTimestamp(a));
             state.results = append ? [...state.results, ...allHits] : allHits;
-            state.hasMore = false; // 'all' view doesn't support true pagination
+            state.hasMore = false;
             state.offset += limit;
+            state.lastFacets = null;
         } else {
             const mod = tabModules[state.activeSource];
             if (!mod || !mod.search) {
                 state.results = [];
                 state.hasMore = false;
+                state.lastFacets = null;
             } else {
-                const r = await mod.search(query, append ? state.offset : 0, limit);
+                const r = await mod.search(query, append ? state.offset : 0, limit, filterStr);
                 state.results = append ? [...state.results, ...r.hits] : r.hits;
                 state.hasMore = r.hits.length >= limit;
                 state.offset += limit;
+                state.lastFacets = r.facets || null;
             }
         }
     } catch (e) {
@@ -390,6 +432,7 @@ async function performSearch(append = false) {
     updateResultsCount();
     state.isLoading = false;
     hideSearchSpinner();
+    if (state.lastFacets) renderFacetPanel(state.lastFacets);
 }
 
 function showSearchSpinner(reset) {
@@ -532,6 +575,74 @@ function initFilterButtons() {
             document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
             state.activeSource = btn.getAttribute('data-source');
+            state.offset = 0;
+            state.activeFilters = {};
+            performSearch(false);
+            updateFacetPanelVisibility();
+        });
+    });
+}
+
+// ============================================================
+//  Facet Panel — Render / Visibility / Events
+// ============================================================
+function updateFacetPanelVisibility() {
+    const panel = document.getElementById('facet-panel');
+    if (!panel) return;
+    panel.style.display = FACET_SOURCES.has(state.activeSource) ? '' : 'none';
+}
+
+function renderFacetPanel(facetDist) {
+    if (!facetDist || !FACET_SOURCES.has(state.activeSource)) return;
+    const panel = document.getElementById('facet-panel');
+    if (!panel || panel.style.display === 'none') return;
+
+    const groups = [];
+    // Build merged value set per group (server values + currently checked)
+    for (const [group, serverVals] of Object.entries(facetDist)) {
+        const merged = new Set([
+            ...Object.keys(serverVals || {}),
+            ...(state.activeFilters[group] || [])
+        ]);
+        if (merged.size === 0) continue;
+
+        const items = [];
+        for (const val of merged) {
+            const count = (serverVals || {})[val] || 0;
+            const checked = (state.activeFilters[group] || []).includes(val);
+            items.push({ val, count, checked });
+        }
+        // Sort by count desc
+        items.sort((a, b) => b.count - a.count);
+        groups.push({ key: group, items });
+    }
+
+    let html = '';
+    for (const g of groups) {
+        html += `<div class="facet-group"><div class="facet-group-title">${g.key === 'source' ? '📂 来源' : '🏷 类型'}</div>`;
+        for (const item of g.items) {
+            const id = `facet-${g.key}-${item.val.replace(/[^a-zA-Z0-9]/g, '_')}`;
+            html += `<label class="facet-item" for="${id}">`;
+            html += `<input type="checkbox" id="${id}" data-facet="${g.key}" data-value="${item.val}" ${item.checked ? 'checked' : ''}>`;
+            html += `<span>${h(item.val)}<b class="count">${item.count}</b></span>`;
+            html += '</label>';
+        }
+        html += '</div>';
+    }
+    panel.innerHTML = html || '';
+
+    // Bind events
+    panel.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+        cb.addEventListener('change', () => {
+            const facet = cb.getAttribute('data-facet');
+            const value = cb.getAttribute('data-value');
+            if (!state.activeFilters[facet]) state.activeFilters[facet] = [];
+            if (cb.checked) {
+                if (!state.activeFilters[facet].includes(value)) state.activeFilters[facet].push(value);
+            } else {
+                state.activeFilters[facet] = state.activeFilters[facet].filter(v => v !== value);
+                if (state.activeFilters[facet].length === 0) delete state.activeFilters[facet];
+            }
             state.offset = 0;
             performSearch(false);
         });
@@ -908,6 +1019,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initChatDrawer();
     initKeyboard();
     initModalClose();
+    updateFacetPanelVisibility();
 
     // Load initial data
     fetchAllStats();

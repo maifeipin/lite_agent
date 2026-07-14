@@ -239,6 +239,75 @@ body {
     pointer-events: none;
 }
 
+/* ---- Facet 过滤面板 ---- */
+#facet-panel {
+    padding: 8px 32px;
+    border-bottom: 1px solid var(--panel-border);
+    background: rgba(10, 11, 16, 0.3);
+    display: flex;
+    gap: 28px;
+    flex-wrap: wrap;
+}
+
+.facet-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.facet-group-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    letter-spacing: 0.8px;
+    margin-right: 4px;
+}
+
+.facet-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    padding: 3px 10px;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid transparent;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    transition: all 0.2s;
+    user-select: none;
+}
+
+.facet-item:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-primary);
+}
+
+.facet-item input[type="checkbox"]:checked + span {
+    color: var(--text-primary);
+    font-weight: 500;
+}
+
+.facet-item:has(input:checked) {
+    background: rgba(99, 102, 241, 0.12);
+    border-color: var(--accent);
+    color: var(--text-primary);
+}
+
+.facet-item .count {
+    font-weight: 600;
+    color: var(--text-muted);
+    opacity: 0.7;
+    font-size: 0.7rem;
+    margin-left: 2px;
+}
+
+.facet-item:has(input:checked) .count {
+    color: var(--accent);
+    opacity: 1;
+}
+
 /* 结果列表画布 */
 .results-canvas {
     flex: 1;
