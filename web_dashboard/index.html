@@ -6,7 +6,7 @@
     <title>统一检索与控制中枢 | Unified Dashboard</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css?v=2">
+    <link rel="stylesheet" href="style.css?v=3">
     <!-- 引入 marked 用于 markdown 渲染 -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
@@ -37,6 +37,9 @@
                     </button>
                     <button class="filter-btn" data-source="todos">
                         <span class="icon">✅</span> 待办事项 <span class="badge" id="badge-todos">0</span>
+                    </button>
+                    <button class="filter-btn" data-source="sessions">
+                        <span class="icon">💬</span> 会话记录 <span class="badge" id="badge-sessions">0</span>
                     </button>
                 </div>
 
@@ -142,7 +145,7 @@
         </div>
     </div>
 
-    <script src="main.js?v=2"></script>
+    <script src="main.js?v=3"></script>
     <script>
     // 动态加载指令列表（从后端注册表）
     (async function loadCommands() {

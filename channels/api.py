@@ -74,6 +74,8 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         if parsed_url.path == '/api/pull_task':
             self._handle_pull_task(parsed_url.query)
+        elif parsed_url.path == '/api/v1/sessions':
+            self._handle_sessions(parsed_url.query)
         elif parsed_url.path == '/api/v1/task/stream':
             self._handle_task_stream(parsed_url.query)
         elif parsed_url.path == '/api/v1/email/html':
@@ -187,6 +189,85 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         self.wfile.write(json.dumps(items, ensure_ascii=False).encode('utf-8'))
+
+    def _handle_sessions(self, query: str):
+        """返回最近会话记录列表（来源通道、时间、Token量、模型）。"""
+        import sqlite3, os
+        qs = parse_qs(query)
+        limit = int(qs.get("limit", ["30"])[0])
+        channel_filter = qs.get("channel", [None])[0]
+
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        db_path = os.path.join(project_root, "data", "sessions.db")
+
+        if not os.path.exists(db_path):
+            self.send_response(200)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps({"sessions": [], "total": 0}, ensure_ascii=False).encode('utf-8'))
+            return
+
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+
+            # 总数
+            total_row = conn.execute("SELECT COUNT(*) as cnt FROM sessions").fetchone()
+            total = total_row["cnt"] if total_row else 0
+
+            # 查询会话，关联最新使用的模型
+            sql = """
+                SELECT s.session_key, s.status, s.tool_calls,
+                       s.token_usage, s.updated_at, s.goal,
+                       (SELECT a.model FROM api_usage_log a
+                        WHERE a.session_key = s.session_key
+                        ORDER BY a.created_at DESC LIMIT 1) as model
+                FROM sessions s
+            """
+            params = []
+            if channel_filter:
+                sql += " WHERE s.session_key LIKE ?"
+                params.append(f"{channel_filter}:%")
+            sql += " ORDER BY s.updated_at DESC LIMIT ?"
+            params.append(limit)
+
+            rows = conn.execute(sql, params).fetchall()
+            conn.close()
+
+            sessions = []
+            for r in rows:
+                # 解析 session_key 提取通道名
+                key = r["session_key"] or ""
+                channel = "unknown"
+                channel_icon = "❓"
+                if ":" in key:
+                    ch = key.split(":")[0]
+                    channel = ch
+                    channel_icon = {"feishu": "🕊️", "telegram": "📡",
+                                    "dingtalk": "🔷", "wecom": "💚",
+                                    "api": "🌐", "oai_u": "🤖"}.get(ch, "🔌")
+
+                sessions.append({
+                    "session_key": key,
+                    "channel": channel,
+                    "channel_icon": channel_icon,
+                    "status": r["status"] or "chatting",
+                    "tool_calls": r["tool_calls"] or 0,
+                    "token_usage": r["token_usage"] or 0,
+                    "model": r["model"] or "—",
+                    "goal": (r["goal"] or "")[:60],
+                    "updated_at": r["updated_at"] or 0,
+                })
+
+            self.send_response(200)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps({"sessions": sessions, "total": total},
+                                        ensure_ascii=False).encode('utf-8'))
+        except Exception as e:
+            self.send_error(500, str(e))
 
     def _handle_edge_report(self):
         content_length = int(self.headers.get('Content-Length', 0))

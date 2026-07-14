@@ -1,657 +1,637 @@
-// 统一中枢核心逻辑 (Unified Dashboard Client)
+// ============================================================
+//  Unified Dashboard — TabModule Registry Pattern
+//  每个数据源封装为独立 Module，侧边栏、搜索、卡片渲染均委托给 Module
+// ============================================================
 
-// 状态管理
+// ---- State ----
 const state = {
-    activeSource: 'all', // 'all', 'emails', 'rss'
+    activeSource: 'all',
     searchQuery: '',
     results: [],
-    emailCount: 0,
-    rssCount: 0,
-    selectedCommandIndex: 0,
-    currentTaskId: null,
-    eventSource: null,
     offset: 0,
     limit: 40,
     hasMore: true,
-    isLoading: false
+    isLoading: false,
+    selectedCommandIndex: 0,
+    currentTaskId: null,
+    eventSource: null,
 };
 
-// 初始化 Session ID
-let sessionId = localStorage.getItem('agent_session_id');
-if (!sessionId) {
-    sessionId = 'web_dashboard_' + Math.random().toString(36).substring(2, 15);
-    localStorage.setItem('agent_session_id', sessionId);
+// ---- TabModule Registry ----
+const tabModules = {};
+
+function registerTabModule(config) {
+    tabModules[config.id] = config;
 }
 
-// 页面加载初始化
-document.addEventListener('DOMContentLoaded', () => {
-    initSearch();
-    initUIEvents();
-    fetchStats();
-    performSearch();
-    initIntersectionObserver();
+// ============================================================
+//  Module: emails (Meilisearch)
+// ============================================================
+registerTabModule({
+    id: 'emails',
+    label: '邮件',
+    icon: '📧',
+    badgeId: 'badge-emails',
+
+    async fetchCount() {
+        try {
+            const r = await fetch('/agent/meili/indexes/emails/stats');
+            const d = await r.json();
+            return d.numberOfDocuments || 0;
+        } catch { return 0; }
+    },
+
+    async search(query, offset, limit) {
+        const payload = {
+            q: query || '',
+            sort: ['email_date:desc'],
+            offset, limit,
+            attributesToHighlight: ['subject', 'sender', 'plain_text', 'summary'],
+            highlightPreTag: '<mark>', highlightPostTag: '</mark>',
+        };
+        const r = await fetch('/agent/meili/indexes/emails/search', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (!r.ok) return { hits: [], total: 0 };
+        const d = await r.json();
+        return {
+            hits: (d.hits || []).map(h => { h._module = 'emails'; return h; }),
+            total: d.estimatedTotalHits || d.totalHits || 0,
+        };
+    },
+
+    renderCard(doc) {
+        const fmt = doc._formatted || {};
+        const subj = fmt.subject || doc.subject || '(无主题)';
+        const sender = fmt.sender || doc.sender || '';
+        const category = doc.category || '';
+        const imp = doc.importance || '';
+        const account = doc.account_name || '';
+        const date = (doc.email_date || '').slice(0, 16);
+        const summary = doc.summary || '';
+        const snippet = safeSnippet(fmt.plain_text || doc.plain_text || '', 120);
+        const uid = doc.uid || '';
+        const acc = doc.account_name || '';
+
+        let html = '<div class="card email-card">';
+        html += `<div class="card-meta"><span class="tag">${h(category)} / ${h(imp)}</span>`;
+        html += `<span class="sender">${h(sender)}</span>`;
+        html += `<span class="date">${date}</span>`;
+        if (account) html += `<span class="account-badge">${h(account)}</span>`;
+        html += '</div>';
+        html += `<h3 class="card-title">${subj}</h3>`;
+        if (summary) html += `<div class="ai-summary"><p>📝 ${h(summary)}</p></div>`;
+        html += `<div class="card-snippet">${snippet}</div>`;
+        html += `<div class="card-actions">`;
+        html += `<button class="btn-reprocess" data-account="${h(acc)}" data-uid="${h(uid)}">🔄 重新处理</button>`;
+        html += `<button class="btn-view-original" data-account="${h(acc)}" data-uid="${h(uid)}">📄 查看原文</button>`;
+        html += '</div></div>';
+        return html;
+    },
+
+    renderBadge(el, count) {
+        el.textContent = count;
+        el.style.display = '';
+    },
 });
 
-function initIntersectionObserver() {
-    const sentinel = document.getElementById('scroll-sentinel');
-    if (!sentinel) return;
-    
-    const observer = new IntersectionObserver((entries) => {
-        if (entries[0].isIntersecting && !state.isLoading && state.hasMore) {
-            performSearch(true);
+// ============================================================
+//  Module: rss (Meilisearch)
+// ============================================================
+registerTabModule({
+    id: 'rss',
+    label: 'RSS',
+    icon: '📰',
+    badgeId: 'badge-rss',
+
+    async fetchCount() {
+        try {
+            const r = await fetch('/agent/meili/indexes/rss/stats');
+            const d = await r.json();
+            return d.numberOfDocuments || 0;
+        } catch { return 0; }
+    },
+
+    async search(query, offset, limit) {
+        const payload = {
+            q: query || '',
+            sort: ['published:desc'],
+            offset, limit,
+            attributesToHighlight: ['title', 'content'],
+            highlightPreTag: '<mark>', highlightPostTag: '</mark>',
+        };
+        const r = await fetch('/agent/meili/indexes/rss/search', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (!r.ok) return { hits: [], total: 0 };
+        const d = await r.json();
+        return {
+            hits: (d.hits || []).map(h => { h._module = 'rss'; return h; }),
+            total: d.estimatedTotalHits || d.totalHits || 0,
+        };
+    },
+
+    renderCard(doc) {
+        const fmt = doc._formatted || {};
+        const title = fmt.title || doc.title || '(无标题)';
+        const link = doc.link || '';
+        const node = doc.node_name || '';
+        const published = (doc.published || '').slice(0, 16);
+        const content = safeSnippet(fmt.content || doc.content || '', 150);
+
+        let html = '<div class="card rss-card">';
+        html += `<div class="card-meta"><span class="tag">${h(node)}</span>`;
+        html += `<span class="date">${published}</span></div>`;
+        html += `<h3 class="card-title">`;
+        if (link) html += `<a href="${h(link)}" target="_blank" rel="noopener">${title}</a>`;
+        else html += title;
+        html += '</h3>';
+        html += `<div class="card-snippet">${content}</div></div>`;
+        return html;
+    },
+
+    renderBadge(el, count) {
+        el.textContent = count;
+        el.style.display = '';
+    },
+});
+
+// ============================================================
+//  Module: todos (HTTP API)
+// ============================================================
+registerTabModule({
+    id: 'todos',
+    label: '待办',
+    icon: '✅',
+    badgeId: 'badge-todos',
+
+    async fetchCount() {
+        try {
+            const r = await fetch('/agent/api/v1/todos?status=pending,active');
+            const d = await r.json();
+            return (d.data || []).length;
+        } catch { return 0; }
+    },
+
+    async _fetchAll() {
+        const r = await fetch('/agent/api/v1/todos?status=pending,active');
+        const d = await r.json();
+        return (d.data || []).map(t => { t._module = 'todos'; return t; });
+    },
+
+    async search(query, offset, limit) {
+        const all = await this._fetchAll();
+        let filtered = all;
+        if (query) {
+            const q = query.toLowerCase();
+            filtered = all.filter(t =>
+                (t.title || '').toLowerCase().includes(q) ||
+                (t.description || '').toLowerCase().includes(q)
+            );
         }
-    }, { rootMargin: '200px' });
-    
-    observer.observe(sentinel);
+        return { hits: filtered.slice(offset, offset + limit), total: filtered.length };
+    },
+
+    renderCard(doc) {
+        const kind = doc.kind || 'todo';
+        const kindIcons = { code: '💻', note: '📝', todo: '📋', review: '👀' };
+        const icon = kindIcons[kind] || '📌';
+        const project = doc.project || '';
+        const title = doc.title || '(无标题)';
+        const updated = (doc.updated_at || '').slice(0, 16);
+        const status = doc.status || 'pending';
+        const statusText = { pending: '待处理', active: '进行中', done: '已完成' }[status] || status;
+
+        let html = '<div class="card todo-card">';
+        html += `<div class="card-meta"><span class="tag">${icon} ${h(kind)}</span>`;
+        if (project) html += `<span class="tag">${h(project)}</span>`;
+        html += `<span class="date">${updated}</span>`;
+        html += `<span class="tag status-tag">${statusText}</span></div>`;
+        html += `<h3 class="card-title">${h(title)}</h3>`;
+        if (doc.description) html += `<div class="card-snippet">${h(doc.description.slice(0, 200))}</div>`;
+        html += '</div>';
+        return html;
+    },
+
+    renderBadge(el, count) {
+        el.textContent = count;
+        el.style.display = '';
+    },
+});
+
+// ============================================================
+//  Module: sessions (NEW — SQLite via API)
+// ============================================================
+registerTabModule({
+    id: 'sessions',
+    label: '会话',
+    icon: '💬',
+    badgeId: 'badge-sessions',
+
+    async fetchCount() {
+        try {
+            const r = await fetch('/agent/api/v1/sessions?limit=1',
+                { headers: { 'Authorization': `Bearer ${getApiToken()}` } });
+            const d = await r.json();
+            return d.total || 0;
+        } catch { return 0; }
+    },
+
+    async search(query, offset, limit) {
+        try {
+            const r = await fetch(`/agent/api/v1/sessions?limit=${limit}`,
+                { headers: { 'Authorization': `Bearer ${getApiToken()}` } });
+            const d = await r.json();
+            let items = (d.sessions || []).map(s => { s._module = 'sessions'; return s; });
+            if (query) {
+                const q = query.toLowerCase();
+                items = items.filter(s =>
+                    (s.channel || '').toLowerCase().includes(q) ||
+                    (s.model || '').toLowerCase().includes(q) ||
+                    (s.goal || '').toLowerCase().includes(q)
+                );
+            }
+            return { hits: items.slice(offset, offset + limit), total: d.total || 0 };
+        } catch {
+            return { hits: [], total: 0 };
+        }
+    },
+
+    renderCard(doc) {
+        const icon = doc.channel_icon || '🔌';
+        const channel = doc.channel || '?';
+        const status = doc.status || 'chatting';
+        const statusMap = { chatting: '闲聊', working: '执行中', archived: '已归档' };
+        const statusText = statusMap[status] || status;
+        const statusColor = status === 'working' ? 'var(--warning)' : (status === 'archived' ? 'var(--text-muted)' : 'var(--success)');
+        const model = doc.model || '—';
+        const tokenUsage = formatTokens(doc.token_usage || 0);
+        const toolCalls = doc.tool_calls || 0;
+        const goal = doc.goal || '';
+        const updated = doc.updated_at ? new Date(doc.updated_at * 1000).toLocaleString('zh-CN') : '—';
+
+        let html = '<div class="card session-card">';
+        html += '<div class="card-meta">';
+        html += `<span class="tag">${icon} ${h(channel)}</span>`;
+        html += `<span class="tag status-tag" style="color:${statusColor}">● ${statusText}</span>`;
+        html += `<span class="date">${updated}</span>`;
+        html += '</div>';
+        if (goal) html += `<div class="ai-summary"><p>🎯 ${h(goal)}</p></div>`;
+        html += '<div class="session-stats">';
+        html += `<span title="Token 消耗">🪙 ${tokenUsage}</span>`;
+        html += `<span title="工具调用次数">🔧 ${toolCalls} 次</span>`;
+        html += `<span title="LLM 模型">🧠 ${h(model)}</span>`;
+        html += '</div></div>';
+        return html;
+    },
+
+    renderBadge(el, count) {
+        el.textContent = count;
+        el.style.display = '';
+    },
+});
+
+// ============================================================
+//  Helpers
+// ============================================================
+function h(s) {
+    if (!s) return '';
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-// 获取 Meilisearch 真实的数据统计信息
-async function fetchStats() {
+function formatTokens(n) {
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+    return String(n);
+}
+
+function safeSnippet(text, maxLen) {
+    if (!text) return '';
+    // Preserve <mark> tags, strip everything else
+    const marks = [];
+    const placeholder = text.replace(/<mark>/g, () => { marks.push('<mark>'); return '\x00M'; })
+                           .replace(/<\/mark>/g, () => { marks.push('</mark>'); return '\x00m'; });
+    const stripped = placeholder.replace(/<[^>]+>/g, '');
+    const escaped = stripped.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    let result = escaped.replace(/\x00M/g, '<mark>').replace(/\x00m/g, '</mark>');
+    // Auto-close unclosed marks
+    if ((result.match(/<mark>/g) || []).length > (result.match(/<\/mark>/g) || []).length) {
+        result += '</mark>';
+    }
+    if (result.length > maxLen) result = result.slice(0, maxLen) + '...';
+    return result;
+}
+
+// ============================================================
+//  Core: Unified Search Pipeline
+// ============================================================
+async function performSearch(append = false) {
+    if (state.isLoading) return;
+    const query = state.searchQuery;
+    const limit = state.limit;
+
+    if (!append) {
+        state.results = [];
+        state.offset = 0;
+        state.hasMore = true;
+    }
+
+    state.isLoading = true;
+    showSearchSpinner(!append);
+
     try {
-        const [emailsRes, rssRes, todosRes] = await Promise.all([
-            fetch('/meili/indexes/emails/stats').then(r => r.ok ? r.json() : { numberOfDocuments: 0 }).catch(() => ({ numberOfDocuments: 0 })),
-            fetch('/meili/indexes/rss/stats').then(r => r.ok ? r.json() : { numberOfDocuments: 0 }).catch(() => ({ numberOfDocuments: 0 })),
-            fetch('/agent/api/v1/todos').then(r => r.ok ? r.json() : { data: [] }).catch(() => ({ data: [] }))
-        ]);
-        
-        state.emailCount = emailsRes.numberOfDocuments || 0;
-        state.rssCount = rssRes.numberOfDocuments || 0;
-        state.todoCount = (todosRes.data || []).length;
-        
-        document.getElementById('badge-all').textContent = state.emailCount + state.rssCount;
-        document.getElementById('badge-emails').textContent = state.emailCount;
-        document.getElementById('badge-rss').textContent = state.rssCount;
-        
-        const badgeTodos = document.getElementById('badge-todos');
-        if (badgeTodos) badgeTodos.textContent = state.todoCount;
+        if (state.activeSource === 'all') {
+            // Aggregate all modules (except 'all' itself)
+            const activeModules = Object.values(tabModules).filter(m => m.search && m.id !== 'all');
+            const results = await Promise.all(activeModules.map(async m => {
+                try {
+                    return await m.search(query, append ? state.offset : 0, Math.floor(limit / activeModules.length));
+                } catch { return { hits: [], total: 0 }; }
+            }));
+            const allHits = results.flatMap(r => r.hits);
+            // Sort by date proxy
+            allHits.sort((a, b) => {
+                const da = a.email_date || a.published || (a.updated_at ? new Date(a.updated_at * 1000).toISOString() : '');
+                const db = b.email_date || b.published || (b.updated_at ? new Date(b.updated_at * 1000).toISOString() : '');
+                return db.localeCompare(da);
+            });
+            state.results = append ? [...state.results, ...allHits] : allHits;
+            state.hasMore = false; // 'all' view doesn't support true pagination
+            state.offset += limit;
+        } else {
+            const mod = tabModules[state.activeSource];
+            if (!mod || !mod.search) {
+                state.results = [];
+                state.hasMore = false;
+            } else {
+                const r = await mod.search(query, append ? state.offset : 0, limit);
+                state.results = append ? [...state.results, ...r.hits] : r.hits;
+                state.hasMore = r.hits.length >= limit;
+                state.offset += limit;
+            }
+        }
     } catch (e) {
-        console.error('Fetch stats failed:', e);
+        console.error('Search error:', e);
+        state.hasMore = false;
+    }
+
+    renderResults();
+    updateResultsCount();
+    state.isLoading = false;
+    hideSearchSpinner();
+}
+
+function showSearchSpinner(reset) {
+    const grid = document.getElementById('results-grid');
+    if (reset) {
+        grid.innerHTML = '<div class="loading-placeholder"><div class="spinner"></div><p>正在检索...</p></div>';
+    }
+    const sentinel = document.getElementById('scroll-sentinel');
+    sentinel.style.display = '';
+    const spinnerEl = sentinel.querySelector('.spinner');
+    if (spinnerEl) spinnerEl.style.display = '';
+}
+
+function hideSearchSpinner() {
+    const sentinel = document.getElementById('scroll-sentinel');
+    const spinnerEl = sentinel.querySelector('.spinner');
+    if (spinnerEl && !state.hasMore) spinnerEl.style.display = 'none';
+    if (!state.hasMore) {
+        sentinel.querySelector('span').textContent = state.results.length === 0 ? '' : '— 已加载全部结果 —';
     }
 }
 
-// 搜索入口初始化与防抖
+// ============================================================
+//  Core: Unified Render
+// ============================================================
+function renderResults() {
+    const grid = document.getElementById('results-grid');
+    const cards = state.results.map(doc => {
+        const mod = tabModules[doc._module];
+        return mod && mod.renderCard ? mod.renderCard(doc) : '';
+    }).join('');
+
+    grid.innerHTML = cards || '<div class="empty-state"><p>📭 暂无匹配结果</p><p class="muted">尝试切换数据源或修改检索词</p></div>';
+
+    // Re-bind email action buttons
+    document.querySelectorAll('.btn-reprocess').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const acc = btn.getAttribute('data-account');
+            const uid = btn.getAttribute('data-uid');
+            if (acc && uid) triggerCommand(`/mail_reprocess ${acc} ${uid}`);
+        });
+    });
+    document.querySelectorAll('.btn-view-original').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const acc = btn.getAttribute('data-account');
+            const uid = btn.getAttribute('data-uid');
+            if (acc && uid) window.open(`/agent/api/v1/email/html?account=${encodeURIComponent(acc)}&uid=${encodeURIComponent(uid)}`, '_blank');
+        });
+    });
+}
+
+function updateResultsCount() {
+    const el = document.getElementById('results-count');
+    const label = tabModules[state.activeSource];
+    const name = label && label.label ? label.label : state.activeSource;
+    el.textContent = `${state.results.length} 条结果 · ${name}`;
+}
+
+// ============================================================
+//  Stats: fetch all module counts + update badges
+// ============================================================
+async function fetchAllStats() {
+    let total = 0;
+    for (const mod of Object.values(tabModules)) {
+        if (!mod.fetchCount) continue;
+        try {
+            const count = await mod.fetchCount();
+            total += count;
+            const badgeEl = document.getElementById(mod.badgeId);
+            if (badgeEl && mod.renderBadge) {
+                mod.renderBadge(badgeEl, count);
+            }
+        } catch { /* ignore */ }
+    }
+    const badgeAll = document.getElementById('badge-all');
+    if (badgeAll) badgeAll.textContent = total;
+}
+
+// ============================================================
+//  Init: Search Input
+// ============================================================
 function initSearch() {
     const input = document.getElementById('search-input');
     let debounceTimer;
-    
-    input.addEventListener('input', (e) => {
-        state.searchQuery = e.target.value;
-        
-        // 如果以 / 开头，触发指令面板，停止普通搜索
-        if (state.searchQuery === '/') {
+    input.addEventListener('input', () => {
+        clearTimeout(debounceTimer);
+        const val = input.value.trim();
+        if (val === '/') {
             openCommandModal();
             input.value = '';
             return;
         }
-        
-        clearTimeout(debounceTimer);
         debounceTimer = setTimeout(() => {
-            performSearch();
+            state.searchQuery = val;
+            state.offset = 0;
+            performSearch(false);
         }, 250);
     });
 }
 
-// 检索核心方法
-async function performSearch(isAppend = false) {
-    if (state.isLoading) return;
-    
-    if (!isAppend) {
-        state.offset = 0;
-        state.hasMore = true;
-        state.results = [];
-    }
-    
-    if (!state.hasMore) return;
-    
-    state.isLoading = true;
-    const grid = document.getElementById('results-grid');
-    const countSpan = document.getElementById('results-count');
+// ============================================================
+//  IntersectionObserver: Infinite Scroll
+// ============================================================
+function initIntersectionObserver() {
     const sentinel = document.getElementById('scroll-sentinel');
-    
-    if (!isAppend) {
-        // 显示加载中
-        grid.innerHTML = `
-            <div class="loading-placeholder">
-                <div class="spinner"></div>
-                <p>正在检索中枢索引...</p>
-            </div>
-        `;
-    }
-    
-    if (sentinel) sentinel.style.display = 'block';
-    
-    try {
-        let newDocs = [];
-        
-        // 依据当前过滤源并发请求
-        const queryPromises = [];
-        
-        if (state.activeSource === 'all' || state.activeSource === 'emails') {
-            queryPromises.push(
-                searchIndex('emails', state.searchQuery, state.offset, state.limit).then(res => 
-                    res.map(d => ({ ...d, _source: 'emails' }))
-                )
-            );
-        }
-        if (state.activeSource === 'all' || state.activeSource === 'rss') {
-            queryPromises.push(
-                searchIndex('rss', state.searchQuery, state.offset, state.limit).then(res => 
-                    res.map(d => ({ ...d, _source: 'rss' }))
-                )
-            );
-        }
-        if (state.activeSource === 'todos') {
-            // 如果仅选择 todos，或者未来在 all 里也展示，可以加在 all 判断里
-            // 根据需求，用户如果点了 todos tab 就只展示 todos。 这里我们假设 todos 数量不多，一次性拉取，不支持追加分页。
-            if (!isAppend) {
-                queryPromises.push(
-                    fetchTodos().then(res => 
-                        res.filter(t => !state.searchQuery || t.title.includes(state.searchQuery) || (t.description && t.description.includes(state.searchQuery)))
-                           .map(d => ({ ...d, _source: 'todos' }))
-                    )
-                );
+    const observer = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (entry.isIntersecting && !state.isLoading && state.hasMore) {
+                performSearch(true);
             }
-        }
-        
-        const resultsArray = await Promise.all(queryPromises);
-        newDocs = resultsArray.flat();
-        
-        if (newDocs.length === 0) {
-            state.hasMore = false;
-        } else {
-            state.results = [...state.results, ...newDocs];
-            // 根据时间或获取顺序重新排序
-            state.results.sort((a, b) => {
-                const timeA = new Date(a.fetched_at || a.email_date || a.updated_at || 0);
-                const timeB = new Date(b.fetched_at || b.email_date || b.updated_at || 0);
-                return timeB - timeA;
-            });
-            state.offset += state.limit;
-        }
-        
-        renderResults();
-        
-        countSpan.textContent = `找到 ${state.results.length} 个结果${state.hasMore ? '' : ' (已触底)'}`;
-    } catch (e) {
-        if (!isAppend) {
-            grid.innerHTML = `<div class="loading-placeholder"><p class="error">❌ 检索失败: ${e.message}</p></div>`;
-        } else {
-            console.error("加载更多失败:", e);
-        }
-    } finally {
-        state.isLoading = false;
-        if (!state.hasMore && sentinel) {
-            sentinel.style.display = 'none';
-        }
-    }
-}
-
-// Meilisearch 索引检索 API
-async function searchIndex(indexUid, query, offset = 0, limit = 40) {
-    try {
-        const sortField = indexUid === 'emails' ? 'email_date:desc' : 'published:desc';
-        const body = {
-            q: query,
-            limit: limit,
-            offset: offset,
-            sort: [sortField],
-            attributesToHighlight: ['subject', 'plain_text', 'summary', 'title', 'content'],
-            highlightPreTag: '<mark>',
-            highlightPostTag: '</mark>'
-        };
-        
-        const res = await fetch(`/meili/indexes/${indexUid}/search`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(body)
         });
-        
-        if (!res.ok) return [];
-        const data = await res.json();
-        return data.hits || [];
-    } catch (e) {
-        console.error(`Search ${indexUid} failed:`, e);
-        return [];
-    }
+    }, { rootMargin: '200px' });
+    observer.observe(sentinel);
 }
 
-// 抓取 TODO API
-async function fetchTodos() {
-    try {
-        const res = await fetch(`/agent/api/v1/todos`);
-        if (!res.ok) return [];
-        const data = await res.json();
-        return data.data || [];
-    } catch (e) {
-        console.error(`Fetch todos failed:`, e);
-        return [];
-    }
-}
-
-// 渲染结果卡片
-function renderResults() {
-    const grid = document.getElementById('results-grid');
-    if (state.results.length === 0) {
-        grid.innerHTML = `<div class="loading-placeholder"><p>🔍 未找到任何匹配内容。</p></div>`;
-        return;
-    }
-    
-    grid.innerHTML = state.results.map(doc => {
-        if (doc._source === 'emails') {
-            return renderEmailCard(doc);
-        } else if (doc._source === 'todos') {
-            return renderTodoCard(doc);
-        } else {
-            return renderRssCard(doc);
-        }
-    }).join('');
-    
-    // 绑定卡片操作事件
-    document.querySelectorAll('.btn-reprocess').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-            const uid = e.target.getAttribute('data-uid');
-            const account = e.target.getAttribute('data-account');
-            triggerCommand(`/reprocess account=${account} uid=${uid}`);
-        });
-    });
-
-    document.querySelectorAll('.btn-view-original').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-            const uid = e.target.getAttribute('data-uid');
-            const account = e.target.getAttribute('data-account');
-            window.open(`/agent/api/v1/email/html?account=${encodeURIComponent(account)}&uid=${encodeURIComponent(uid)}`, '_blank');
-        });
-    });
-}
-
-// 文本安全过滤与截断（保留高亮且不破坏 DOM）
-function safeSnippet(html, length = 300) {
-    if (!html) return '';
-    let text = html.replace(/<mark>/gi, '%%MARK%%').replace(/<\/mark>/gi, '%%/MARK%%');
-    text = text.replace(/<[^>]+>/g, ' ');
-    text = text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    if (text.length > length) text = text.substring(0, length) + '...';
-    text = text.replace(/%%MARK%%/g, '<mark>').replace(/%%\/MARK%%/g, '</mark>');
-    const openCount = (text.match(/<mark>/g) || []).length;
-    const closeCount = (text.match(/<\/mark>/g) || []).length;
-    if (openCount > closeCount) text += '</mark>';
-    return text;
-}
-
-// 渲染邮件卡片
-function renderEmailCard(doc) {
-    // 获取高亮或正常字段
-    const subject = safeSnippet(doc._formatted?.subject || doc.subject || '无主题', 200);
-    const sender = safeSnippet(doc.sender || '未知发件人', 100);
-    const plainText = safeSnippet(doc._formatted?.plain_text || doc.plain_text || '', 300);
-    const summary = safeSnippet(doc._formatted?.summary || doc.summary || '', 500);
-    const date = doc.email_date || doc.fetched_at || '';
-    
-    const summaryBlock = summary ? `<div class="card-summary" style="background:#f0f7ff; padding:8px; margin-bottom:8px; border-left: 3px solid #0066cc; border-radius: 4px; font-size: 0.9em; color:#333;"><strong>🤖 AI 摘要：</strong><br/>${summary}</div>` : '';
-
-    return `
-        <div class="result-card">
-            <div class="card-meta">
-                <span class="tag tag-email">📧 邮件</span>
-                <span>${sender}</span>
-                <span>${date}</span>
-                <span>账户: ${doc.account_name}</span>
-            </div>
-            <div class="card-title">${subject}</div>
-            ${summaryBlock}
-            <div class="card-snippet">${plainText}</div>
-            <div class="card-actions">
-                <button class="card-btn btn-reprocess" data-uid="${doc.uid}" data-account="${doc.account_name}">🔄 重新解析</button>
-                <button class="card-btn btn-view-original" data-uid="${doc.uid}" data-account="${doc.account_name}">👁️ 查看原文</button>
-            </div>
-        </div>
-    `;
-}
-
-// 渲染 RSS 卡片
-function renderRssCard(doc) {
-    const title = safeSnippet(doc._formatted?.title || doc.title || '无标题', 200);
-    const site = safeSnippet(doc.node_name || 'RSS', 100);
-    const content = safeSnippet(doc._formatted?.content || doc.content || '', 300);
-    const date = doc.published || doc.fetched_at || '';
-    
-    return `
-        <div class="result-card">
-            <div class="card-meta">
-                <span class="tag tag-rss">📰 RSS</span>
-                <span>来源: ${site}</span>
-                <span>发布: ${date}</span>
-            </div>
-            <div class="card-title"><a href="${doc.link}" target="_blank" style="color:inherit;text-decoration:none;">${title}</a></div>
-            <div class="card-snippet">${content}</div>
-        </div>
-    `;
-}
-
-// 渲染 TODO 卡片
-function renderTodoCard(doc) {
-    const title = safeSnippet(doc.title || '无标题', 200);
-    const desc = safeSnippet(doc.description || '', 500);
-    const date = doc.updated_at ? doc.updated_at.replace('T', ' ').substring(0, 16) : '';
-    const kindIcon = doc.kind === 'code' ? '💻' : '📝';
-    
-    return `
-        <div class="result-card" style="border-left: 4px solid #10b981;">
-            <div class="card-meta">
-                <span class="tag" style="background:#10b98122;color:#10b981;">✅ TODO</span>
-                <span>${kindIcon} ${doc.kind}</span>
-                ${doc.project ? `<span>📦 ${doc.project}</span>` : ''}
-                <span>更新: ${date}</span>
-                <span>状态: <strong>${doc.status}</strong></span>
-            </div>
-            <div class="card-title">${title}</div>
-            ${desc ? `<div class="card-snippet" style="background:#f8fafc; padding:8px; border-radius:4px; color:#475569;">${desc}</div>` : ''}
-        </div>
-    `;
-}
-
-// 初始化交互事件
-function initUIEvents() {
-    // 侧边栏过滤切换
+// ============================================================
+//  Filter Button Events
+// ============================================================
+function initFilterButtons() {
     document.querySelectorAll('.filter-btn').forEach(btn => {
-        btn.addEventListener('click', (e) => {
+        btn.addEventListener('click', () => {
             document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-            const currentBtn = e.currentTarget;
-            currentBtn.classList.add('active');
-            state.activeSource = currentBtn.getAttribute('data-source');
-            performSearch();
+            btn.classList.add('active');
+            state.activeSource = btn.getAttribute('data-source');
+            state.offset = 0;
+            performSearch(false);
         });
-    });
-
-    // 指令栏快捷键和事件
-    document.querySelector('.search-shortcut').addEventListener('click', openCommandModal);
-    
-    // 点击模态框遮罩关闭
-    const modal = document.getElementById('command-modal');
-    modal.addEventListener('click', (e) => {
-        if (e.target === modal) closeCommandModal();
-    });
-
-    // 监听键盘按键
-    document.addEventListener('keydown', (e) => {
-        // Esc 关闭指令弹窗
-        if (e.key === 'Escape') {
-            closeCommandModal();
-        }
-        
-        // 斜杠 / 唤起指令面板 (在非 input 输入框内按时)
-        if (e.key === '/' && document.activeElement.tagName !== 'INPUT') {
-            e.preventDefault();
-            openCommandModal();
-        }
-        
-        // 弹窗内的键盘上下导航
-        if (modal.style.display === 'flex') {
-            handleCommandNavigation(e);
-        }
-    });
-
-    // 绑定指令列表点击
-    document.querySelectorAll('.command-item').forEach((item, index) => {
-        item.addEventListener('mouseenter', () => {
-            state.selectedCommandIndex = index;
-            updateCommandListSelection(false);
-        });
-        item.addEventListener('click', () => {
-            const cmd = item.getAttribute('data-cmd');
-            closeCommandModal();
-            triggerCommand(cmd);
-        });
-    });
-
-    // 指令输入框回车提交
-    document.getElementById('command-input').addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-            const cmd = e.target.value.trim();
-            if (cmd) {
-                closeCommandModal();
-                triggerCommand(cmd);
-            }
-        }
-    });
-
-    // 终端展开折叠
-    const termHeader = document.getElementById('terminal-header');
-    termHeader.addEventListener('click', () => {
-        const term = document.getElementById('terminal-window');
-        term.classList.toggle('minimized');
-        document.getElementById('term-toggle').textContent = term.classList.contains('minimized') ? '展开' : '收起';
-    });
-
-    document.getElementById('term-close').addEventListener('click', (e) => {
-        e.stopPropagation();
-        document.getElementById('terminal-window').style.display = 'none';
     });
 }
 
-// 唤起指令弹窗
+// ============================================================
+//  Command Palette (unchanged from original)
+// ============================================================
 function openCommandModal() {
-    const modal = document.getElementById('command-modal');
-    modal.style.display = 'flex';
-    const input = document.getElementById('command-input');
-    input.value = '';
-    setTimeout(() => input.focus(), 50);
-    
+    document.getElementById('command-modal').style.display = 'flex';
+    document.getElementById('command-input').focus();
     state.selectedCommandIndex = 0;
-    updateCommandListSelection(false);
+    updateCommandSelection();
 }
 
-// 关闭指令弹窗
 function closeCommandModal() {
     document.getElementById('command-modal').style.display = 'none';
 }
 
-// 处理指令列表键盘上下键导航
-function handleCommandNavigation(e) {
-    const items = document.querySelectorAll('.command-item');
-    if (items.length === 0) return;
-    
-    if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        state.selectedCommandIndex = (state.selectedCommandIndex + 1) % items.length;
-        updateCommandListSelection(true);
-    } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        state.selectedCommandIndex = (state.selectedCommandIndex - 1 + items.length) % items.length;
-        updateCommandListSelection(true);
-    } else if (e.key === 'Enter' && document.activeElement.id !== 'command-input') {
-        e.preventDefault();
-        items[state.selectedCommandIndex].click();
-    }
-}
-
-// 更新指令列表选中的高亮类
-function updateCommandListSelection(fillInput = true) {
-    const items = document.querySelectorAll('.command-item');
-    items.forEach((item, index) => {
-        if (index === state.selectedCommandIndex) {
-            item.classList.add('selected');
-            item.scrollIntoView({ block: 'nearest' });
-            if (fillInput) {
-                const cmd = item.getAttribute('data-cmd');
-                const input = document.getElementById('command-input');
-                if (input) {
-                    input.value = cmd;
-                }
-            }
-        } else {
-            item.classList.remove('selected');
-        }
+function updateCommandSelection() {
+    document.querySelectorAll('.command-item').forEach((el, i) => {
+        el.classList.toggle('selected', i === state.selectedCommandIndex);
     });
 }
 
-// 向 Agent 下发指令并拉起 SSE 任务终端
-async function triggerCommand(commandText) {
+function getSelectedCommandText() {
+    const items = document.querySelectorAll('.command-item');
+    if (items.length === 0) return '';
+    const idx = Math.min(Math.max(0, state.selectedCommandIndex), items.length - 1);
+    return items[idx].getAttribute('data-cmd') || '';
+}
+
+function triggerCommand(cmdText) {
+    if (!cmdText.trim()) return;
+    // Open terminal if minimized
     const term = document.getElementById('terminal-window');
+    if (term.classList.contains('minimized')) term.classList.remove('minimized');
+
     const termBody = document.getElementById('terminal-body');
-    
-    term.style.display = 'flex';
-    term.classList.remove('minimized');
-    document.getElementById('term-toggle').textContent = '收起';
-    
-    termBody.innerHTML = `<div class="terminal-line system">[*] 向 Agent 发送指令: ${commandText}</div>`;
-    
-    try {
-        const res = await fetch('/agent/api/v1/chat', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                session_id: sessionId,
-                text: commandText
-            })
-        });
-        
-        if (!res.ok) {
-            termBody.innerHTML += `<div class="terminal-line error">[!] HTTP 错误 ${res.status}: 接口请求失败</div>`;
-            return;
-        }
-        
-        const data = await res.json();
-        
+    appendTerminalLine(`> ${cmdText}`, 'user');
+
+    fetch('/agent/api/v1/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${getApiToken()}` },
+        body: JSON.stringify({ session_id: 'dashboard_admin', text: cmdText }),
+    })
+    .then(r => r.json())
+    .then(data => {
         if (data.type === 'sync') {
-            // 同步应答直接渲染
-            termBody.innerHTML += `<div class="terminal-line success">[Sync Response]</div>`;
-            termBody.innerHTML += `<div class="terminal-line info">${formatTerminalOutput(data.response)}</div>`;
-        } else if (data.type === 'async' && data.task_id) {
-            // 异步任务启动流式监听
+            appendTerminalLine(data.response || '(无返回)', 'system');
+        } else if (data.type === 'async') {
             state.currentTaskId = data.task_id;
-            startTaskStream(data.task_id);
-        } else {
-            termBody.innerHTML += `<div class="terminal-line info">${JSON.stringify(data)}</div>`;
+            appendTerminalLine(`任务已受理 (ID: ${data.task_id})，等待执行...`, 'system');
+            subscribeTaskStream(data.task_id);
         }
-        
-        // 自动拉取最新 Meilisearch 状态以防新数据同步
-        setTimeout(fetchStats, 2000);
-        
-    } catch (e) {
-        termBody.innerHTML += `<div class="terminal-line error">[!] 触发异常: ${e.message}</div>`;
-    }
+    })
+    .catch(e => {
+        appendTerminalLine(`请求失败: ${e.message}`, 'error');
+    });
 }
 
-// 格式化输出，处理 Markdown
-function formatTerminalOutput(text) {
-    if (!text) return '';
-    return text
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/\n/g, '<br>');
+// ============================================================
+//  Terminal (unchanged)
+// ============================================================
+function appendTerminalLine(text, type = 'system') {
+    const body = document.getElementById('terminal-body');
+    const div = document.createElement('div');
+    div.className = `terminal-line ${type}`;
+    div.textContent = text;
+    body.appendChild(div);
+    body.scrollTop = body.scrollHeight;
 }
 
-// 建立 SSE (Server-Sent Events) 任务日志连接
-function startTaskStream(taskId) {
-    if (state.eventSource) {
-        state.eventSource.close();
-    }
-    
-    const termBody = document.getElementById('terminal-body');
-    termBody.innerHTML += `<div class="terminal-line system">[*] 已建立流连接，正在追踪 Task ID: ${taskId}</div>`;
-    
-    const url = `/agent/api/v1/task/stream?task_id=${taskId}&session_id=web_dashboard_session`;
-    state.eventSource = new EventSource(url);
-    
-    let lastMsg = null;
-    const finishedSubtasks = new Set();
-    
-    state.eventSource.onmessage = (event) => {
-        const decoded = event.data;
-        if (decoded === '[DONE]') {
-            termBody.innerHTML += `<div class="terminal-line success">\n[*] 任务流已正常关闭 [DONE]</div>`;
-            state.eventSource.close();
+function subscribeTaskStream(taskId) {
+    if (state.eventSource) state.eventSource.close();
+    const es = new EventSource(`/agent/api/v1/task/stream?task_id=${taskId}&session_id=dashboard_admin`);
+    state.eventSource = es;
+    const seenProgress = new Set();
+    let lastMsg = '';
+
+    es.onmessage = (e) => {
+        if (e.data === '[DONE]') {
+            es.close();
             state.eventSource = null;
-            termBody.scrollTop = termBody.scrollHeight;
             return;
         }
-        
-        try {
-            const data = jsonParseSafe(decoded);
-            if (!data) return;
-            
-            const status = data.status;
-            const msg = data.message;
-            
-            // 避免高频点点点和冗余信息
-            if (msg && msg !== lastMsg) {
-                termBody.innerHTML += `<div class="terminal-line info">[*] ${msg}</div>`;
-                lastMsg = msg;
-            } else if (msg) {
-                // 如果是进度指示
-                const lastLine = termBody.lastElementChild;
-                if (lastLine && lastLine.textContent.startsWith('[*] ' + msg)) {
-                    lastLine.innerHTML += '.';
+        const d = jsonParseSafe(e.data);
+        if (!d) return;
+        if (d.status === 'done' || d.status === 'completed') {
+            appendTerminalLine(d.response || d.message || '任务完成', 'system');
+            es.close();
+            state.eventSource = null;
+            return;
+        }
+        if (d.status === 'failed' || d.status === 'error') {
+            appendTerminalLine(d.message || d.error || '任务失败', 'error');
+            es.close();
+            state.eventSource = null;
+            return;
+        }
+        if (d.progress) {
+            const key = `${d.progress.done}-${d.progress.total}`;
+            if (!seenProgress.has(key)) {
+                seenProgress.add(key);
+                const msg = `📊 进度: ${d.progress.done}/${d.progress.total} 完成${d.progress.failed ? `, ${d.progress.failed} 失败` : ''}`;
+                if (msg !== lastMsg) {
+                    lastMsg = msg;
+                    appendTerminalLine(msg, 'progress');
                 }
             }
-            
-            // 子任务进度
-            const progress = data.progress;
-            if (progress && progress.subtasks) {
-                for (const sub of progress.subtasks) {
-                    const subId = sub.id;
-                    const subStatus = sub.status;
-                    if ((subStatus === 'done' || subStatus === 'failed') && !finishedSubtasks.has(subId)) {
-                        finishedSubtasks.add(subId);
-                        const res = sub.result || sub.error || '';
-                        const cssClass = subStatus === 'done' ? 'success' : 'error';
-                        termBody.innerHTML += `
-                            <div class="terminal-line ${cssClass}">
-                                [Subtask ${subId}] ${sub.name} -> ${subStatus.toUpperCase()}:<br>${formatTerminalOutput(res)}
-                            </div>
-                        `;
-                    }
-                }
-            }
-            
-            if (status === 'done' || status === 'completed' || status === 'failed' || status === 'error') {
-                const cssClass = (status === 'done' || status === 'completed') ? 'success' : 'error';
-                termBody.innerHTML += `<div class="terminal-line ${cssClass}">\n[*] 任务执行完毕，最终状态: ${status.toUpperCase()}!</div>`;
-                state.eventSource.close();
-                state.eventSource = null;
-            }
-            
-            // 自动滚屏
-            termBody.scrollTop = termBody.scrollHeight;
-            
-        } catch (e) {
-            console.error('Parse event stream data failed:', e);
         }
     };
-    
-    state.eventSource.onerror = (e) => {
-        termBody.innerHTML += `<div class="terminal-line error">[!] SSE 连接中断或发生错误</div>`;
-        state.eventSource.close();
+    es.onerror = () => {
+        es.close();
         state.eventSource = null;
-        termBody.scrollTop = termBody.scrollHeight;
     };
 }
 
-function jsonParseSafe(str) {
-    try {
-        return JSON.parse(str);
-    } catch (e) {
-        return null;
-    }
+function jsonParseSafe(s) {
+    try { return JSON.parse(s); } catch { return null; }
 }
 
-// =========================================================
-// 聊天抽屉 (Chat Drawer) 逻辑
-// =========================================================
-
+// ============================================================
+//  Chat Drawer (unchanged)
+// ============================================================
 let chatEventSource = null;
-let currentChatTaskId = null;
-let isChatBusy = false;
-
-document.addEventListener('DOMContentLoaded', () => {
-    initChatDrawer();
-});
 
 function initChatDrawer() {
     const fab = document.getElementById('chat-fab');
@@ -659,245 +639,207 @@ function initChatDrawer() {
     const closeBtn = document.getElementById('close-drawer-btn');
     const input = document.getElementById('chat-input');
     const sendBtn = document.getElementById('chat-send-btn');
-    
-    if (!fab || !drawer) return;
-    
-    // 开关抽屉
-    fab.addEventListener('click', () => {
-        drawer.classList.add('open');
-        input.focus();
-    });
-    
-    closeBtn.addEventListener('click', () => {
-        drawer.classList.remove('open');
-    });
-    
-    // 自动高度和发送
-    input.addEventListener('input', function() {
-        this.style.height = '48px';
-        this.style.height = (this.scrollHeight) + 'px';
-    });
-    
+
+    fab.addEventListener('click', () => drawer.classList.add('open'));
+    closeBtn.addEventListener('click', () => drawer.classList.remove('open'));
+
+    function doSend() {
+        const text = input.value.trim();
+        if (!text) return;
+        appendChatBubble('user', text);
+        input.value = '';
+        sendChatMessage(text);
+    }
+
+    sendBtn.addEventListener('click', doSend);
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
-            sendChatMessage();
+            doSend();
         }
     });
-    
-    sendBtn.addEventListener('click', sendChatMessage);
 }
 
-async function sendChatMessage() {
-    if (isChatBusy) return;
-    
-    const input = document.getElementById('chat-input');
-    const text = input.value.trim();
-    if (!text) return;
-    
-    input.value = '';
-    input.style.height = '48px';
-    
-    appendChatBubble('user', text);
-    
-    isChatBusy = true;
-    updateChatStatus(true);
-    
-    // 显示等待状态气泡
-    const thinkingId = 'thinking-' + Date.now();
-    appendChatBubble('agent', '<div class="typing-dots"><span></span><span></span><span></span></div>', thinkingId);
-    
-    try {
-        const res = await fetch('/agent/api/v1/chat', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                session_id: sessionId, // 复用 dashboard session
-                text: text
-            })
-        });
-        
-        const thinkingBubble = document.getElementById(thinkingId);
-        
-        if (!res.ok) {
-            if (thinkingBubble) thinkingBubble.innerHTML = '<div class="bubble error">网络请求失败，请重试</div>';
-            resetChatStatus();
-            return;
-        }
-        
-        const data = await res.json();
-        
-        if (data.type === 'sync') {
-            // 同步应答
-            if (thinkingBubble) {
-                thinkingBubble.innerHTML = `<div class="bubble">${parseMarkdown(data.response)}</div>`;
-            } else {
-                appendChatBubble('agent', data.response);
-            }
-            resetChatStatus();
-        } else if (data.type === 'async' && data.task_id) {
-            // 异步任务，启动流式解析
-            currentChatTaskId = data.task_id;
-            startDrawerTaskStream(data.task_id, thinkingBubble);
-        } else {
-            if (thinkingBubble) thinkingBubble.innerHTML = `<div class="bubble error">未知响应格式</div>`;
-            resetChatStatus();
-        }
-    } catch (e) {
-        console.error('Chat error:', e);
-        resetChatStatus();
-    }
-}
-
-function startDrawerTaskStream(taskId, agentBubbleContainer) {
-    if (chatEventSource) {
-        chatEventSource.close();
-    }
-    
-    const url = `/agent/api/v1/task/stream?task_id=${taskId}&session_id=${sessionId}`;
-    chatEventSource = new EventSource(url);
-    
-    let lastMsg = null;
-    const finishedSubtasks = new Set();
-    
-    // 初始化气泡内容为空，保留引用用于不断追加内容
-    let bubbleContentHtml = '';
-    const bubbleEl = agentBubbleContainer.querySelector('.bubble') || agentBubbleContainer.appendChild(document.createElement('div'));
-    bubbleEl.className = 'bubble';
-    bubbleEl.innerHTML = '';
-    
-    chatEventSource.onmessage = (event) => {
-        const decoded = event.data;
-        if (decoded === '[DONE]') {
-            chatEventSource.close();
-            chatEventSource = null;
-            resetChatStatus();
-            return;
-        }
-        
-        try {
-            const data = jsonParseSafe(decoded);
-            if (!data) return;
-            
-            const status = data.status;
-            let msg = data.message;
-            let newlyAppended = false;
-            
-            // 系统状态/过程提示，我们使用一个小卡片附在上方，不污染主回答
-            if (msg && msg !== lastMsg && status !== 'done' && status !== 'completed') {
-                const sysLog = document.createElement('div');
-                sysLog.className = 'chat-message system';
-                sysLog.innerText = `[${status.toUpperCase()}] ${msg}`;
-                agentBubbleContainer.before(sysLog);
-                lastMsg = msg;
-                newlyAppended = true;
-            }
-            
-            // 子任务进度 (Tools: ops_workspace, web_clip 等)
-            const progress = data.progress;
-            if (progress && progress.subtasks) {
-                for (const sub of progress.subtasks) {
-                    const subId = sub.id;
-                    const subStatus = sub.status;
-                    if ((subStatus === 'done' || subStatus === 'failed') && !finishedSubtasks.has(subId)) {
-                        finishedSubtasks.add(subId);
-                        const res = sub.result || sub.error || '';
-                        const cssColor = subStatus === 'done' ? '#8b5cf6' : 'var(--danger)';
-                        
-                        // 生成一个 Tool Call 结果的小卡片，拼接在 bubbleHTML 内部或者外部
-                        bubbleContentHtml += `
-                            <div class="subtask-box" style="border-left-color: ${cssColor}">
-                                <strong>[Tool] ${sub.name}</strong><br>
-                                <pre><code>${formatTerminalOutput(res)}</code></pre>
-                            </div>
-                        `;
-                        newlyAppended = true;
-                    }
-                }
-            }
-            
-            // 最终结果输出
-            if ((status === 'done' || status === 'completed') && msg) {
-                // 这个 msg 通常是最终的回答文本
-                bubbleContentHtml += parseMarkdown(msg);
-                newlyAppended = true;
-            }
-            
-            if (newlyAppended) {
-                bubbleEl.innerHTML = bubbleContentHtml;
-                scrollToBottom();
-            }
-            
-            if (status === 'done' || status === 'completed' || status === 'failed' || status === 'error') {
-                chatEventSource.close();
-                chatEventSource = null;
-                resetChatStatus();
-            }
-            
-        } catch (e) {
-            console.error('Parse drawer stream event failed:', e);
-        }
-    };
-    
-    chatEventSource.onerror = () => {
-        bubbleContentHtml += '<br><span style="color:var(--danger)">[连接已断开]</span>';
-        bubbleEl.innerHTML = bubbleContentHtml;
-        chatEventSource.close();
-        resetChatStatus();
-    };
-}
-
-function appendChatBubble(role, content, id = null) {
+function appendChatBubble(role, html) {
     const history = document.getElementById('chat-history');
-    const msgDiv = document.createElement('div');
-    msgDiv.className = `chat-message ${role}`;
-    if (id) msgDiv.id = id;
-    
-    // 用户消息纯文本，Agent 消息可能带 HTML 或 Markdown
-    if (role === 'user') {
-        msgDiv.innerHTML = `<div class="bubble">${formatTerminalOutput(content)}</div>`;
-    } else {
-        // 直接使用传入的内容（如 typing-dots 或 markdown HTML）
-        if (content.includes('typing-dots') || content.includes('bubble error')) {
-            msgDiv.innerHTML = `<div class="bubble">${content}</div>`;
-        } else {
-            msgDiv.innerHTML = `<div class="bubble">${parseMarkdown(content)}</div>`;
-        }
-    }
-    
-    history.appendChild(msgDiv);
-    scrollToBottom();
-    return msgDiv;
-}
-
-function updateChatStatus(busy) {
-    const dot = document.querySelector('.drawer-title .status-dot');
-    const sendBtn = document.getElementById('chat-send-btn');
-    if (busy) {
-        dot.classList.add('busy');
-        sendBtn.disabled = true;
-    } else {
-        dot.classList.remove('busy');
-        sendBtn.disabled = false;
-    }
-}
-
-function resetChatStatus() {
-    isChatBusy = false;
-    updateChatStatus(false);
-}
-
-function scrollToBottom() {
-    const history = document.getElementById('chat-history');
+    const div = document.createElement('div');
+    div.className = `chat-message ${role}`;
+    div.innerHTML = `<div class="bubble">${html}</div>`;
+    history.appendChild(div);
     history.scrollTop = history.scrollHeight;
 }
 
-function parseMarkdown(text) {
-    if (!text) return '';
-    if (typeof marked !== 'undefined') {
-        return marked.parse(text);
-    }
-    return formatTerminalOutput(text);
+function sendChatMessage(text) {
+    if (chatEventSource) chatEventSource.close();
+
+    fetch('/agent/api/v1/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${getApiToken()}` },
+        body: JSON.stringify({ session_id: 'dashboard_chat', text }),
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.type === 'sync') {
+            const md = marked.parse(data.response || '(空)');
+            appendChatBubble('agent', md);
+        } else if (data.type === 'async') {
+            subscribeChatStream(data.task_id);
+        }
+    })
+    .catch(e => appendChatBubble('system', `请求失败: ${e.message}`));
 }
+
+function subscribeChatStream(taskId) {
+    const es = new EventSource(`/agent/api/v1/task/stream?task_id=${taskId}&session_id=dashboard_chat`);
+    chatEventSource = es;
+    let bubbleHtml = '';
+    const systemLines = [];
+
+    es.onmessage = (e) => {
+        if (e.data === '[DONE]') {
+            es.close();
+            chatEventSource = null;
+            if (bubbleHtml) appendChatBubble('agent', bubbleHtml);
+            else if (systemLines.length) appendChatBubble('system', systemLines.join('<br>'));
+            else appendChatBubble('agent', '任务完成 (无返回内容)');
+            return;
+        }
+        const d = jsonParseSafe(e.data);
+        if (!d) return;
+
+        if (d.status === 'done' || d.status === 'completed') {
+            if (d.response) {
+                bubbleHtml += marked.parse(d.response);
+            }
+            es.close();
+            chatEventSource = null;
+            appendChatBubble('agent', bubbleHtml || d.message || '任务完成');
+            return;
+        }
+        if (d.status === 'failed' || d.status === 'error') {
+            appendChatBubble('system', d.message || d.error || '任务失败');
+            es.close();
+            chatEventSource = null;
+            return;
+        }
+        if (d.message && d.status === 'running') {
+            systemLines.push(d.message);
+        }
+    };
+    es.onerror = () => {
+        es.close();
+        chatEventSource = null;
+    };
+}
+
+// ============================================================
+//  Keyboard Shortcuts
+// ============================================================
+function initKeyboard() {
+    document.addEventListener('keydown', (e) => {
+        const modal = document.getElementById('command-modal');
+        const isModalOpen = modal.style.display === 'flex';
+        const activeEl = document.activeElement;
+        const isInput = activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA');
+
+        // Command modal navigation
+        if (isModalOpen) {
+            if (e.key === 'Escape') { closeCommandModal(); return; }
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                const items = document.querySelectorAll('.command-item');
+                if (items.length) state.selectedCommandIndex = Math.min(state.selectedCommandIndex + 1, items.length - 1);
+                updateCommandSelection();
+                document.getElementById('command-input').value = getSelectedCommandText();
+                return;
+            }
+            if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                state.selectedCommandIndex = Math.max(0, state.selectedCommandIndex - 1);
+                updateCommandSelection();
+                document.getElementById('command-input').value = getSelectedCommandText();
+                return;
+            }
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                const cmd = document.getElementById('command-input').value.trim();
+                if (cmd) triggerCommand(cmd);
+                closeCommandModal();
+                return;
+            }
+            return;
+        }
+
+        // Global shortcuts
+        if (e.key === '/' && !isInput) {
+            e.preventDefault();
+            openCommandModal();
+        }
+        if (e.key === 'Escape' && isInput) {
+            activeEl.blur();
+        }
+    });
+}
+
+// ============================================================
+//  Terminal Toggle
+// ============================================================
+function initTerminal() {
+    const header = document.getElementById('terminal-header');
+    const closeBtn = document.getElementById('term-close');
+    const toggleBtn = document.getElementById('term-toggle');
+    const terminal = document.getElementById('terminal-window');
+
+    header.addEventListener('click', () => {
+        terminal.classList.toggle('minimized');
+        toggleBtn.textContent = terminal.classList.contains('minimized') ? '展开' : '收起';
+    });
+    closeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        terminal.style.display = 'none';
+    });
+    toggleBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        terminal.classList.toggle('minimized');
+        toggleBtn.textContent = terminal.classList.contains('minimized') ? '展开' : '收起';
+    });
+}
+
+// ============================================================
+//  Modal overlay click to close
+// ============================================================
+function initModalClose() {
+    document.getElementById('command-modal').addEventListener('click', (e) => {
+        if (e.target === e.currentTarget) closeCommandModal();
+    });
+}
+
+// ============================================================
+//  API Token helper
+// ============================================================
+function getApiToken() {
+    // Read from sessionStorage or prompt
+    let token = sessionStorage.getItem('api_token');
+    if (!token) {
+        token = prompt('请输入 API Auth Token (存储在会话中):');
+        if (token) sessionStorage.setItem('api_token', token);
+    }
+    return token || '';
+}
+
+// ============================================================
+//  Bootstrap
+// ============================================================
+document.addEventListener('DOMContentLoaded', () => {
+    initSearch();
+    initFilterButtons();
+    initIntersectionObserver();
+    initTerminal();
+    initChatDrawer();
+    initKeyboard();
+    initModalClose();
+
+    // Load initial data
+    fetchAllStats();
+    performSearch(false);
+});

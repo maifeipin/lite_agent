@@ -356,6 +356,42 @@ body {
     color: var(--text-primary);
 }
 
+/* ---- Session Card ---- */
+.session-card .session-stats {
+    display: flex;
+    gap: 16px;
+    margin-top: 10px;
+    font-size: 0.84rem;
+    color: var(--text-muted);
+}
+
+.session-card .session-stats span {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.status-tag {
+    font-size: 0.78rem;
+    font-weight: 500;
+}
+
+/* 空状态 */
+.empty-state {
+    text-align: center;
+    padding: 60px 20px;
+    color: var(--text-muted);
+}
+
+.empty-state p {
+    margin: 4px 0;
+}
+
+.empty-state .muted {
+    font-size: 0.85rem;
+    opacity: 0.6;
+}
+
 /* 模态框遮罩 */
 .modal-overlay {
     position: fixed;
