@@ -6,7 +6,7 @@
     <title>Lite Agent 控制台 | Dashboard</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css?v=4">
+    <link rel="stylesheet" href="style.css?v=5">
     <!-- 引入 marked 用于 markdown 渲染 -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
@@ -57,7 +57,7 @@
 
         <!-- 主内容区 -->
         <main class="main-content">
-            <!-- 顶栏检索框 -->
+            <!-- 顶栏检索框 + Facet -->
             <header class="top-header">
                 <div class="search-wrapper">
                     <span class="search-icon">🔍</span>
@@ -65,6 +65,7 @@
                     <span class="search-shortcut">/</span>
                 </div>
             </header>
+            <div id="facet-panel" style="display:none;"></div>
 
             <!-- 结果画布 -->
             <section class="results-canvas">
@@ -145,7 +146,7 @@
         </div>
     </div>
 
-    <script src="main.js?v=5"></script>
+    <script src="main.js?v=6"></script>
     <script>
     // 动态加载指令列表（从后端注册表）
     (async function loadCommands() {

@@ -5,7 +5,10 @@ import json
 import urllib.request
 import urllib.parse
 import hashlib
+import re
+import email.utils as email_utils
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse
 import pymongo
 from bson import ObjectId
 
@@ -60,6 +63,59 @@ def _save_sync_state(state):
     except Exception as e:
         print(f"Failed to save sync state: {e}")
 
+# ---- Facet Field Extractors ----
+
+def _extract_source(doc_type, raw_data):
+    """提取 source 标签：RSS→域名, 邮件→发件人域名"""
+    if doc_type == 'rss':
+        link = raw_data.get('link', '')
+        if link:
+            netloc = urlparse(link).netloc
+            return netloc.lstrip('www.') or 'unknown'
+        return 'unknown'
+    elif doc_type == 'email':
+        sender = raw_data.get('sender', '')
+        if '@' in sender:
+            return sender.split('@')[-1].rstrip('>').lower()
+        return 'unknown'
+
+_BILL_TITLE_PAT = re.compile(r'(invoice|receipt|payment|账单|消费|交易)', re.IGNORECASE)
+_DEV_SENDER_PAT = re.compile(r'@(github\.com|gitlab\.com|jira\.)')
+_NEWSLETTER_PAT = re.compile(r'(newsletter|digest|weekly|月刊|简报|周刊)', re.IGNORECASE)
+_BILL_SENDER_PAT = re.compile(r'@bank|unionpay|credit')
+
+def _classify_email_type(raw_data):
+    """自动分类邮件类型"""
+    sender = raw_data.get('sender', '').lower()
+    subject = raw_data.get('subject', '').lower()
+    if _BILL_SENDER_PAT.search(sender) or _BILL_TITLE_PAT.search(subject):
+        return 'bill'
+    if _DEV_SENDER_PAT.search(sender):
+        return 'dev'
+    if _NEWSLETTER_PAT.search(subject):
+        return 'newsletter'
+    return 'mail'
+
+def _parse_to_timestamp(date_val):
+    """统一日期→Unix int64: ISO-8601(RSS) / RFC2822(Email)"""
+    if not date_val:
+        return 0
+    if isinstance(date_val, (int, float)):
+        return int(date_val)
+    date_str = str(date_val).strip()
+    try:
+        dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+        return int(dt.timestamp())
+    except (ValueError, TypeError):
+        pass
+    try:
+        dt = email_utils.parsedate_to_datetime(date_str)
+        if dt:
+            return int(dt.timestamp())
+    except Exception:
+        pass
+    return 0
+
 def _get_mongodb():
     """连接到 MongoDB"""
     rssdb = _cfg.get('rssdb', {})
@@ -74,11 +130,17 @@ def sync_meili() -> str:
     state = _get_sync_state()
     now_str = datetime.now(timezone.utc).isoformat()
     
-    # 确保索引存在及配置排序属性
+    # 确保索引存在及配置排序属性 + 过滤属性
     _meili_request("/indexes", "POST", {"uid": "emails", "primaryKey": "id"})
-    _meili_request("/indexes/emails/settings", "PATCH", {"sortableAttributes": ["email_date", "fetched_at"]})
+    _meili_request("/indexes/emails/settings", "PATCH", {
+        "sortableAttributes": ["email_date", "fetched_at", "date"],
+        "filterableAttributes": ["source", "type", "date", "tags"]
+    })
     _meili_request("/indexes", "POST", {"uid": "rss", "primaryKey": "id"})
-    _meili_request("/indexes/rss/settings", "PATCH", {"sortableAttributes": ["published", "fetched_at"]})
+    _meili_request("/indexes/rss/settings", "PATCH", {
+        "sortableAttributes": ["published", "fetched_at", "date"],
+        "filterableAttributes": ["source", "type", "date", "tags"]
+    })
     
     # --- 1. 同步邮件 ---
     email_count = 0
@@ -103,19 +165,26 @@ def sync_meili() -> str:
                 docs = []
                 for r in rows:
                     doc_id = hashlib.md5(f"{r['account_name']}_{r['uid']}".encode()).hexdigest()
+                    sender = r["sender"] or ""
+                    email_date = r["email_date"] or ""
+                    raw = {"sender": sender, "subject": r["subject"] or "", "email_date": email_date}
                     docs.append({
                         "id": doc_id,
                         "account_name": r["account_name"],
                         "uid": r["uid"],
                         "subject": r["subject"],
-                        "sender": r["sender"],
-                        "email_date": r["email_date"],
+                        "sender": sender,
+                        "email_date": email_date,
                         "category": r["category"],
                         "importance": r["importance"],
                         "summary": r["summary"],
-                        "plain_text": (r["plain_text"] or "")[:50000],  # 截断超长文本
+                        "plain_text": (r["plain_text"] or "")[:50000],
                         "fetched_at": r["fetched_at"],
-                        "processed_at": r["processed_at"]
+                        "processed_at": r["processed_at"],
+                        "source": _extract_source('email', raw),
+                        "type": _classify_email_type(raw),
+                        "date": _parse_to_timestamp(email_date),
+                        "tags": [],
                     })
                 
                 # 分批推送到 Meilisearch 防止 Payload 过大
@@ -171,7 +240,11 @@ def sync_meili() -> str:
                         "published": item.get("published", ""),
                         "node_name": node_name,
                         "group_code": item.get("group_code", ""),
-                        "fetched_at": item["_id"].generation_time.isoformat()
+                        "fetched_at": item["_id"].generation_time.isoformat(),
+                        "source": _extract_source('rss', {"link": item.get("link", "")}),
+                        "type": "article",
+                        "date": _parse_to_timestamp(item.get("published", "")),
+                        "tags": [],
                     })
         
         if docs:
