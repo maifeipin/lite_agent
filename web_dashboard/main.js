@@ -70,7 +70,7 @@ registerTabModule({
             sort: ['date:desc'],
             filter,
             offset, limit,
-            facets: FACET_SOURCES.has(this.id) ? ['source', 'type'] : undefined,
+            facets: this.id === 'rss' ? ['category', 'topics', 'source'] : (FACET_SOURCES.has(this.id) ? ['source', 'type'] : undefined),
             attributesToHighlight: ['subject', 'sender', 'plain_text', 'summary'],
             highlightPreTag: '<mark>', highlightPostTag: '</mark>',
         };
@@ -147,7 +147,7 @@ registerTabModule({
             sort: ['date:desc'],
             filter,
             offset, limit,
-            facets: FACET_SOURCES.has(this.id) ? ['source', 'type'] : undefined,
+            facets: this.id === 'rss' ? ['category', 'topics', 'source'] : (FACET_SOURCES.has(this.id) ? ['source', 'type'] : undefined),
             attributesToHighlight: ['title', 'content'],
             highlightPreTag: '<mark>', highlightPostTag: '</mark>',
         };
@@ -619,7 +619,7 @@ function renderFacetPanel(facetDist) {
 
     let html = '';
     for (const g of groups) {
-        html += `<div class="facet-group"><div class="facet-group-title">${g.key === 'source' ? '📂 来源' : '🏷 类型'}</div>`;
+        html += `<div class="facet-group"><div class="facet-group-title">${({category:'🗂 分类',topics:'🏷 主题',source:'📂 来源',type:'📄 类型'})[g.key] || g.key}</div>`;
         for (const item of g.items) {
             const id = `facet-${g.key}-${item.val.replace(/[^a-zA-Z0-9]/g, '_')}`;
             html += `<label class="facet-item" for="${id}">`;

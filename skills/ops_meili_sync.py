@@ -158,7 +158,7 @@ def sync_meili() -> str:
     _meili_request("/indexes", "POST", {"uid": "rss", "primaryKey": "id"})
     _meili_request("/indexes/rss/settings", "PATCH", {
         "sortableAttributes": ["published", "fetched_at", "date"],
-        "filterableAttributes": ["source", "type", "date", "tags"]
+        "filterableAttributes": ["source", "type", "date", "tags", "category", "topics"]
     })
     
     # --- 1. 同步邮件 ---
