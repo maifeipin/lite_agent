@@ -397,3 +397,102 @@ slash_command('/rss_fetch', category='RSS',
               description='获取今日 RSS 精选摘要 (Top 5)',
               show_in_dashboard=False, guest_ok=False)(
     lambda agent, msg, args: rss_brief() or '(今日暂无精选文章)')
+
+
+# ---- Meilisearch 标签查询 (category/topic) ----
+_meili_cfg = _rss_config().get("meilisearch", {})
+_MEILI_URL = _meili_cfg.get("url", "http://127.0.0.1:7700")
+_MEILI_KEY = _meili_cfg.get("master_key", "")
+
+
+def _meili_search(payload):
+    """POST /indexes/rss/search; 失败返回 None (镜像 ops_meili_sync._meili_request, 供调用方降级)。"""
+    import urllib.request, json
+    try:
+        req = urllib.request.Request(_MEILI_URL + "/indexes/rss/search",
+            data=json.dumps(payload).encode("utf-8"), method="POST",
+            headers={"Authorization": "Bearer " + _MEILI_KEY, "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception as e:
+        print(f"  ⚠️ [rss_topic] Meili search failed: {e}")
+        return None
+
+
+def _cmd_rss_list(agent, msg, args):
+    """查看 RSS 分组文章列表 (无参=概览, <分组>[ N]=列表/详情)。走 MongoDB FeedGroup。"""
+    return handle_rss(msg, " ".join(args).strip(), agent.session_mgr)
+
+
+def _cmd_rss_log(agent, msg, args):
+    """查看 RSS 推送/预计算日志 (journalctl 近 2h)。"""
+    import subprocess
+    svc = _rss_config().get("service_name", "lite-agent")
+    r = subprocess.run(
+        f"journalctl -u {svc} --since '2 hours ago' --no-pager | grep -E 'RSS|缓存|文章|V2EX|Top|预计算' | tail -20",
+        shell=True, capture_output=True, text=True, timeout=10)
+    text = (r.stdout.strip() or r.stderr.strip() or '(无日志)')[-2500:]
+    return AgentResponse(text, title='📋 RSS 日志', color='turquoise')
+
+
+def _cmd_rss_topic(agent, msg, args):
+    """按分类/主题查 RSS (Meilisearch)。无参=标签 facet 概览; 参数命中分类->按分类, 否则按主题。"""
+    q = " ".join(args).strip()
+    if not q:
+        d = _meili_search({"q": "", "limit": 0, "facets": ["category", "topics"]})
+        if not d:
+            return AgentResponse("Meilisearch 搜索引擎暂时不可用, 请联系管理员检查",
+                                 title="❌ 错误", color="red")
+        fd = d.get("facetDistribution", {})
+        lines = ["📊 RSS 标签概览 (Meilisearch)\n", "🗂 分类:"]
+        for c, n in sorted(fd.get("category", {}).items(), key=lambda x: -x[1]):
+            lines.append(f"  {c}: {n}")
+        lines.append("\n🏷 主题 (top 15):")
+        for t, n in sorted(fd.get("topics", {}).items(), key=lambda x: -x[1])[:15]:
+            lines.append(f"  {t}: {n}")
+        lines.append("\n用法: `/rss_topic <分类或主题名>` 查该标签下文章")
+        return AgentResponse("\n".join(lines), title="📊 RSS 标签", color="violet")
+    cats_d = _meili_search({"q": "", "limit": 0, "facets": ["category"]})
+    if not cats_d:
+        return AgentResponse("Meilisearch 搜索引擎暂时不可用, 请联系管理员检查",
+                             title="❌ 错误", color="red")
+    cats = set(cats_d.get("facetDistribution", {}).get("category", {}))
+    if q in cats:
+        d = _meili_search({"q": "", "limit": 10, "filter": f'category = "{q}"', "sort": ["date:desc"]})
+        title = f"🗂 分类: {q}"
+    else:
+        d = _meili_search({"q": "", "limit": 10, "filter": f'topics = "{q}"', "sort": ["date:desc"]})
+        title = f"🏷 主题: {q}"
+    if not d:
+        return AgentResponse("Meilisearch 搜索引擎暂时不可用, 请联系管理员检查",
+                             title="❌ 错误", color="red")
+    hits = d.get("hits", [])
+    if not hits:
+        return AgentResponse(f"未找到标签 `{q}` 下文章。\n可用分类: {', '.join(sorted(cats))}",
+                             title="⚠️", color="grey")
+    lines = [f"**{title}** · 约 {d.get('estimatedTotalHits', len(hits))} 篇 (显示 {len(hits)})\n"]
+    for i, h in enumerate(hits, 1):
+        lines.append(f"**[{i}] {h.get('source', '?')}**\n{h.get('title', '(无标题)')}")
+        topics = h.get("topics") or []
+        if topics:
+            lines.append(f"🏷 {' / '.join(topics)}")
+        link = h.get("link", "")
+        if link:
+            lines.append(f"🔗 {link}")
+        lines.append("")
+    return AgentResponse("\n".join(lines), title=title, color="blue")
+
+
+slash_command('/rss_list', category='RSS',
+              description='查看 RSS 分组文章列表 (无参=概览, <分组>=列表)',
+              show_in_dashboard=True, guest_ok=False)(_cmd_rss_list)
+
+
+slash_command('/rss_log', category='RSS',
+              description='查看 RSS 推送/预计算日志',
+              show_in_dashboard=False, guest_ok=False)(_cmd_rss_log)
+
+
+slash_command('/rss_topic', category='RSS',
+              description='按分类/主题查 RSS (Meilisearch, 无参=标签概览)',
+              show_in_dashboard=True, guest_ok=False)(_cmd_rss_topic)

@@ -160,10 +160,10 @@ LLM 返回 `tool_calls` → SkillEngine 查 registry → 调用 `fn(**args)` →
 ### 4.4 :: 直接技能调用（不走 AI）
 
 ```
-::rss push     → 推送 RSS 精选
-::rss ai       → 查看 AI 资讯 Top5
-::rss v2ex     → 查看 V2EX Top5
-::rss log      → 查看推送日志
+/rss_fetch       → 获取今日 RSS 精选摘要 (Top 5)
+/rss_list [分组] → 查看 RSS 分组文章列表 (无参=概览)
+/rss_topic [标签] → 按分类/主题查 RSS (Meilisearch, 无参=标签概览)
+/rss_log         → 查看推送/预计算日志
 ::cron log     → 查看定时任务日志
 ```
 
