@@ -480,7 +480,10 @@ class Agent:
  
  
         # 优先查注册表（@slash_command 装饰器注册的指令）
-        reg_resp = _registry_dispatch(cmd, self, msg, args)
+        try:
+            reg_resp = _registry_dispatch(cmd, self, msg, args)
+        except Exception as e:
+            return AgentResponse(f"指令执行异常: {e}", title="❌ 错误", color="red")
         if reg_resp is not None:
             if isinstance(reg_resp, str):
                 return AgentResponse(reg_resp, title="执行结果", color="blue")
@@ -643,12 +646,25 @@ class Agent:
         text = msg.text.strip()[2:].strip()
         parts = text.split()
         cmd = parts[0].lower() if parts else ""
-        args = " ".join(parts[1:]) if len(parts) > 1 else ""
+        args_list = parts[1:]                            # list, 对齐 _handle_builtin 传给注册 handler
+        args = " ".join(args_list) if args_list else ""  # string, 框架指令(goal/cron)用
 
-        if cmd in ("rss", "/rss", "/rss_fetch", "cron"):
-            if msg.is_guest:
-                return AgentResponse("❌ 权限不足：只有管理员可使用该指令", title="⚠️ 权限不足", color="red")
+        # 优先查注册表 (@slash_command 注册的指令; ::xxx 映射到 /xxx)
+        reg_cmd = cmd if cmd.startswith("/") else "/" + cmd
+        is_guest = getattr(msg, "is_guest", True)
+        perm_denied = _registry.check_permission(reg_cmd, is_guest)
+        if perm_denied:
+            return AgentResponse(perm_denied, title="⚠️ 权限不足", color="red")
+        try:
+            reg_resp = _registry_dispatch(reg_cmd, self, msg, args_list)
+        except Exception as e:
+            return AgentResponse(f"指令执行异常: {e}", title="❌ 错误", color="red")
+        if reg_resp is not None:
+            if isinstance(reg_resp, str):
+                return AgentResponse(reg_resp, title="执行结果", color="blue")
+            return reg_resp
 
+        # 以下为未迁注册表的框架指令 (goal/cron)
         if cmd in ("goal", "/goal"):
             if not args:
                 session = self.session_mgr.get_or_create(msg.session_key)
@@ -681,14 +697,9 @@ class Agent:
             msg.text = args
             return self._run_ai_loop(msg)
 
-        if cmd in ("rss", "/rss", "/rss_fetch"):
-            if args == "push":
-                return self._handle_rss_push()
-            if args == "log":
-                return self._handle_rss_log()
-            return self._handle_rss(msg, args)
-
         if cmd == "cron" and args == "log":
+            if is_guest:
+                return AgentResponse("❌ 权限不足：只有管理员可使用该指令", title="⚠️ 权限不足", color="red")
             import subprocess
             r = subprocess.run(
                 f"journalctl -u {self.svc_name} --since '24 hours ago' --no-pager | grep '定时任务' | tail -30",
@@ -700,39 +711,9 @@ class Agent:
             return AgentResponse(text, title='📋 定时任务日志', color='turquoise')
 
         return AgentResponse(
-            f"未知指令 `::{cmd}`。可用: `::goal <描述>` / `::goal` / `::goal done` / `::rss [分组]`",
+            f"未知指令 `::{cmd}`。可用: `::goal <描述>` / `/rss_list [分组]` / `/rss_topic <标签>`",
             title="⚠️", color="red"
         )
-
-    def _handle_rss(self, msg, group_filter: str = "") -> AgentResponse:
-        try:
-            import sys
-            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-            from skills.ops_rss import handle_rss
-            return handle_rss(msg, group_filter, self.session_mgr)
-        except Exception as e:
-            return AgentResponse(f'RSS 查询失败: {e}', title='❌ 错误', color='red')
-
-    def _handle_rss_push(self) -> AgentResponse:
-        try:
-            from skills.ops_rss import rss_brief
-            text = rss_brief()
-            if text:
-                return AgentResponse(text, title='📰 RSS 精选', color='blue')
-            return AgentResponse('当前无新文章可推送', title='RSS', color='grey')
-        except Exception as e:
-            return AgentResponse(f'推送失败: {e}', title='❌', color='red')
-
-    def _handle_rss_log(self) -> AgentResponse:
-        import subprocess
-        r = subprocess.run(
-            f"journalctl -u {self.svc_name} --since '2 hours ago' --no-pager | grep -E 'RSS|缓存|文章|V2EX|Top|预计算' | tail -20",
-            shell=True, capture_output=True, text=True, timeout=10
-        )
-        text = r.stdout.strip() or r.stderr.strip() or '(无日志)'
-        if len(text) > 2500:
-            text = text[-2500:]
-        return AgentResponse(text, title='📋 RSS 日志', color='turquoise')
 
     # ------------------------------------------------------------------
     #  复杂任务检测 + 编排路由
