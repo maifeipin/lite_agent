@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Stage 5b 话题变化 diff (vps1, weekly)。命名(Stage 4)之后跑。
+本轮 /tmp/topic_labels.json vs 上轮 /tmp/topic_labels_prev.json,
+指纹 = topic中文名 + top5关键词, 匹配延续话题, 输出新/消亡/涨跌。
+把本轮存为下轮基线 (topic_labels_prev.json)。
+"""
+import os, json
+from datetime import datetime
+
+CUR = "/tmp/topic_labels.json"
+PREV = "/home/lileagent/rss_topic_work/topic_labels_prev.json"  # 跨周基线, 必须持久(不放 /tmp)
+
+
+def fingerprint(name, keywords):
+    kw = ",".join(sorted((keywords or [])[:5]))
+    return "{}|{}".format(name, kw)
+
+
+def load_topics(path):
+    if not os.path.exists(path):
+        return {}
+    d = json.load(open(path))
+    names = d.get("topic_names_cn", {})          # cat::tid -> name
+    clusters = d.get("clusters", {})              # cat::tid -> {count, keywords, ...}
+    out = {}
+    for key, info in clusters.items():
+        if key.endswith("::-1"):
+            continue
+        name = names.get(key, "主题" + key.split("::")[-1])
+        fp = fingerprint(name, info.get("keywords", []))
+        out[fp] = {"name": name, "category": key.split("::")[0], "count": info.get("count", 0),
+                   "keywords": info.get("keywords", [])[:5]}
+    return out
+
+
+cur = load_topics(CUR)
+prev = load_topics(PREV)
+cur_fps, prev_fps = set(cur), set(prev)
+same = cur_fps & prev_fps
+new = cur_fps - prev_fps
+gone = prev_fps - cur_fps
+
+print("\n📊 话题变化报告 ({})".format(datetime.now().strftime("%Y-%m-%d")), flush=True)
+print("  延续: {}  新增: {}  消亡: {}".format(len(same), len(new), len(gone)), flush=True)
+
+if new:
+    print("\n🆕 新增话题 ({}):".format(len(new)), flush=True)
+    for fp in sorted(new, key=lambda f: cur[f]["count"], reverse=True)[:10]:
+        t = cur[fp]
+        print("  [{}] {} ({}篇)".format(t["category"], t["name"], t["count"]), flush=True)
+
+if gone:
+    print("\n💨 消亡话题 ({}):".format(len(gone)), flush=True)
+    for fp in sorted(gone)[:10]:
+        t = prev[fp]
+        print("  [{}] {}".format(t["category"], t["name"]), flush=True)
+
+if same:
+    changes = []
+    for fp in same:
+        c, p = cur[fp], prev[fp]
+        pc, cc = p["count"], c["count"]
+        if pc > 10 and cc > 0:
+            changes.append((c["name"], c["category"], cc, pc, (cc - pc) / pc * 100))
+    changes.sort(key=lambda x: x[4], reverse=True)
+    if changes:
+        print("\n📈 涨幅最大:", flush=True)
+        for name, cat, cc, pc, chg in changes[:5]:
+            print("  [{}] {}: {}->{} (+{:.0f}%)".format(cat, name, pc, cc, chg), flush=True)
+        print("📉 跌幅最大:", flush=True)
+        for name, cat, cc, pc, chg in changes[-5:]:
+            print("  [{}] {}: {}->{} ({:.0f}%)".format(cat, name, pc, cc, chg), flush=True)
+
+# 存本轮为下轮基线
+import shutil
+shutil.copy(CUR, PREV)
+print("\n基线已更新 -> {} (下周 diff 用)".format(PREV), flush=True)
