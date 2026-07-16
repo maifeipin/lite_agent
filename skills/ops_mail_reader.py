@@ -168,7 +168,7 @@ def _parse_high_importance(res: str) -> str:
         card_text = (
             f"✉️ **[ID: {s.get('id')}] [账户: {s.get('account_name', 'default')}] 邮件提炼：{s.get('subject', '无主题')}**\n"
             f"👤 **发件人**：{s.get('sender')}\n"
-            f"📅 **分类/级别**：{s.get('category')} / `{s.get('importance')}`\n"
+            f"📅 **时间/分类**：{s.get('email_date')} / {s.get('category')} (级别: `{s.get('importance')}`)\n"
             f"📝 **摘要**：{s.get('summary')}\n"
         )
         if s.get('actions'):

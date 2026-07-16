@@ -20,7 +20,7 @@ def fingerprint(name, keywords):
 def load_topics(path):
     if not os.path.exists(path):
         return {}
-    d = json.load(open(path))
+    d = json.load(open(path, encoding="utf-8"))
     names = d.get("topic_names_cn", {})          # cat::tid -> name
     clusters = d.get("clusters", {})              # cat::tid -> {count, keywords, ...}
     out = {}
@@ -79,7 +79,7 @@ import shutil
 def _outlier_rate(path):
     if not os.path.exists(path):
         return None
-    dt = json.load(open(path)).get("doc_topic", {})
+    dt = json.load(open(path, encoding="utf-8")).get("doc_topic", {})
     return (sum(v.endswith("::-1") for v in dt.values()) / len(dt)) if dt else None
 
 
