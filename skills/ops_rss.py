@@ -389,8 +389,8 @@ def _overview_view(groups, col_name, today, db):
         cnt = db[col_name].count_documents(
             {'groupid': gid, 'pubdate': {'$regex': '^' + today}}
         )
-        lines.append(f'`::rss {g["code"]}` **{g["name"]}**: {cnt} 篇')
-    lines.append('\n发送 `::rss <分组>` 查看详情')
+        lines.append(f'`/rss_list {g["code"]}` **{g["name"]}**: {cnt} 篇')
+    lines.append('\n发送 `/rss_list <分组>` 查看详情')
     return AgentResponse('\n'.join(lines), title='📊 RSS 概览', color='blue')
 
 slash_command('/rss_fetch', category='RSS',
