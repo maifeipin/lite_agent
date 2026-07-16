@@ -4,7 +4,7 @@
 指纹 = topic中文名 + top5关键词, 匹配延续话题, 输出新/消亡/涨跌。
 把本轮存为下轮基线 (topic_labels_prev.json)。
 """
-import os, json
+import os, json, urllib.request
 from datetime import datetime
 
 CUR = "/tmp/topic_labels.json"
@@ -71,7 +71,32 @@ if same:
         for name, cat, cc, pc, chg in changes[-5:]:
             print("  [{}] {}: {}->{} ({:.0f}%)".format(cat, name, pc, cc, chg), flush=True)
 
-# 存本轮为下轮基线
+# 话题质量波动检查: 离群率变化 > 20% 暂存不切基线 + 告警, 否则切基线
 import shutil
-shutil.copy(CUR, PREV)
-print("\n基线已更新 -> {} (下周 diff 用)".format(PREV), flush=True)
+
+
+def _outlier_rate(path):
+    if not os.path.exists(path):
+        return None
+    dt = json.load(open(path)).get("doc_topic", {})
+    return (sum(v.endswith("::-1") for v in dt.values()) / len(dt)) if dt else None
+
+
+def push_alert(msg):
+    try:
+        urllib.request.urlopen(urllib.request.Request(
+            "http://127.0.0.1:5000/agent/api/v1/chat",
+            data=json.dumps({"session_id": "rss_topic_diff_bot", "text": msg}).encode(),
+            method="POST", headers={"Content-Type": "application/json"}), timeout=10)
+        print("  -> alerted lite-agent", flush=True)
+    except Exception as e:
+        print("  alert skip: {}".format(e), flush=True)
+
+
+_co, _po = _outlier_rate(CUR), _outlier_rate(PREV)
+_swing = abs(_co - _po) if (_co is not None and _po is not None) else 0.0
+if _swing < 0.2:
+    shutil.copy(CUR, PREV)
+    print("\n基线已更新 -> {} (离群率 {}->{}, 下周 diff 用)".format(PREV, _po, _co), flush=True)
+else:
+    push_alert("⚠️ 每周话题质量波动 {:.0%} (离群率 {}->{}), 已暂存不切基线, 回复 /accept 切换".format(_swing, _po, _co))
