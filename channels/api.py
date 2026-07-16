@@ -111,6 +111,8 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         if parsed_url.path in ('/api/v1/chat', '/api/v1/task'):
             self._handle_chat_or_task()
+        elif parsed_url.path == '/api/v1/alert':
+            self._handle_alert()
         elif parsed_url.path == '/v1/chat/completions':
             self._handle_openai_chat_completions()
         elif parsed_url.path == '/api/v1/dashboard':
@@ -188,6 +190,50 @@ class ApiHandler(BaseHTTPRequestHandler):
             }
 
         self.wfile.write(json.dumps(out_data, ensure_ascii=False).encode('utf-8'))
+
+    def _handle_alert(self):
+        """透传告警到 IM (push_alert), 非阻塞: 先 ACK 200 再推。
+        供 standalone 脚本(hotspot.py/topic_diff.py)绕开 agent.handle 用。
+        仅 admin (非 guest; edge 已被 do_POST 白名单挡在 /api/report,/api/task_result)。
+        Body: {title?, text, color?, dedup_key?}"""
+        if getattr(self, 'is_guest', False):
+            self.send_error(403, "Forbidden: admin token required")
+            return
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length == 0:
+            self.send_error(400, "Bad Request: Empty body")
+            return
+        body = self.rfile.read(content_length)
+        try:
+            req = json.loads(body.decode('utf-8'))
+        except json.JSONDecodeError:
+            self.send_error(400, "Bad Request: Invalid JSON")
+            return
+        text = (req.get('text') or '').strip()
+        if not text:
+            self.send_error(400, "Bad Request: Missing text")
+            return
+        title = req.get('title') or '📢 告警'
+        color = req.get('color') or 'red'
+        dedup_key = req.get('dedup_key')
+
+        # 1. 先 ACK 200 (调用方不阻塞/不超时; 镜像 _handle_edge_report 的 ACK-first)
+        ack = json.dumps({"status": "accepted"}).encode('utf-8')
+        self.send_response(200)
+        self._send_cors_headers()
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(ack)))
+        self.end_headers()
+        self.wfile.write(ack)
+        self.wfile.flush()
+
+        # 2. 再推 (push_alert 永不 raise, 失败只 print)
+        try:
+            from core.alerts import push_alert
+            agent = self.server.api_server.agent
+            push_alert(agent, text, title=title, color=color, dedup_key=dedup_key)
+        except Exception as e:
+            print(f"  ⚠️ [alert] push_alert 异常: {e}")
 
     def _handle_dashboard(self):
         """返回仪表盘可用的指令列表（来自注册表）。"""

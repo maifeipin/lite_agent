@@ -13,7 +13,7 @@ KEY = os.environ["MEILI_MASTER_KEY"]
 URL = cfg("meili_url", "http://127.0.0.1:7700")
 INDEX = "rss"
 HISTORY = cfg("vps_work_dir", "/home/liteagent/rss_topic_work") + "/history"
-PUSH_URL = cfg("lite_agent_url", "http://127.0.0.1:8887/api/v1/chat")
+PUSH_URL = cfg("lite_agent_alert_url", "http://127.0.0.1:8887/api/v1/alert")
 PUSH_TOKEN = os.environ.get("API_AUTH_TOKEN", "")
 
 
@@ -78,9 +78,11 @@ print(msg, flush=True)
 try:
     urllib.request.urlopen(urllib.request.Request(
         PUSH_URL,
-        data=json.dumps({"session_id": "rss_hotspot_bot", "text": msg}).encode(),
+        data=json.dumps({"title": "🔥 RSS 热点话题 ({})".format(today_str),
+                         "text": msg, "color": "red",
+                         "dedup_key": "hotspot:{}".format(today_str)}).encode(),
         method="POST",
         headers={"Content-Type": "application/json", "Authorization": "Bearer " + PUSH_TOKEN}), timeout=10)
-    print("  -> pushed to lite-agent", flush=True)
+    print("  -> pushed to IM via /api/v1/alert", flush=True)
 except Exception as e:
     print("  push skip: {}".format(e), flush=True)
