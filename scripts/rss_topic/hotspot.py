@@ -71,7 +71,7 @@ if not hot:
 hot.sort(key=lambda x: x[1], reverse=True)
 lines = ["🔥 RSS 热点话题 ({})\n".format(today_str)]
 for topic, c, avg, tag in hot[:5]:
-    lines.append("  {}{}{}{}".format(topic, c, "篇（日常 {:.0f}，".format(avg) if avg else "篇（🆕 ", tag + "）" if avg else "）"))
+    lines.append("  {}{}{}{}".format(topic, c, "篇（日常 {:.0f}，".format(avg) if avg else "篇（🆕 ", tag + "）"))
 msg = "\n".join(lines)
 print(msg, flush=True)
 
