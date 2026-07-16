@@ -8,11 +8,12 @@ DEEPSEEK_API_KEY 从环境变量读。用法:
   ssh vps1 'export DEEPSEEK_API_KEY="$(grep ^DEEPSEEK_API_KEY= /home/liteagent/lite_agent/.env|cut -d= -f2-)"; python3 /tmp/name_topics_v2.py'
 """
 import os, json, time, urllib.request
+from paths import cfg
 
 KEY = os.environ["DEEPSEEK_API_KEY"]
-BASE = "https://api.deepseek.com/v1/chat/completions"
-TL = "/tmp/topic_labels.json"
-CACHE = "/home/liteagent/rss_topic_work/topic_names_cache.json"
+BASE = cfg("deepseek_base_url", "https://api.deepseek.com/v1/chat/completions")
+TL = cfg("vps_tmp_dir", "/tmp") + "/topic_labels.json"
+CACHE = cfg("vps_work_dir", "/home/liteagent/rss_topic_work") + "/topic_names_cache.json"
 
 data = json.load(open(TL, encoding="utf-8"))
 doc_topic = data["doc_topic"]      # {id: "cat::tid"}

@@ -13,10 +13,12 @@ MODE="${1:-daily}"; DEDUP=0
 case "$MODE" in daily|weekly) ;; *) echo "usage: $0 daily|weekly [--dedup]"; exit 1;; esac
 
 SCRIPTS="$(cd "$(dirname "$0")" && pwd)"          # scripts/rss_topic/ (committed 源)
-MAC_WORK="$HOME/projects/rss_topic"               # Mac 数据/venv 目录
-VPS_WORK="/home/liteagent/rss_topic_work"          # vps1 运行/数据目录
-VPS_TMP="/tmp"
-ENV="/home/liteagent/lite_agent/.env"
+# 从 paths.json 读取路径(python3 paths.py <key>)
+_path() { python3 "$SCRIPTS/paths.py" "$1" "${2:-}"; }
+MAC_WORK=$(_path mac_work_dir "~/projects/rss_topic")
+VPS_WORK=$(_path vps_work_dir "/home/liteagent/rss_topic_work")
+VPS_TMP=$(_path vps_tmp_dir "/tmp")
+ENV=$(_path vps_env_file "/home/liteagent/lite_agent/.env")
 ENVV='export MEILI_MASTER_KEY="$(grep ^MEILI_MASTER_KEY= '"$ENV"'|cut -d= -f2-)"; export RSSDB_URI="$(grep ^RSSDB_URI= '"$ENV"'|cut -d= -f2-)"; export DEEPSEEK_API_KEY="$(grep ^DEEPSEEK_API_KEY= '"$ENV"'|cut -d= -f2-)"; export API_AUTH_TOKEN="$(grep ^API_AUTH_TOKEN= '"$ENV"'|cut -d= -f2-)"'
 
 echo "===== RSS pipeline: $MODE ($(date)) ====="
@@ -25,7 +27,9 @@ echo "===== 0. 部署 vps1 脚本 -> $VPS_WORK ====="
 ssh vps1 "mkdir -p $VPS_WORK/history"
 scp "$SCRIPTS"/step2a_export.py "$SCRIPTS"/step2b_mongo_enrich.py "$SCRIPTS"/step2c_backfill.py \
     "$SCRIPTS"/name_topics.py "$SCRIPTS"/push_topics_v2.py "$SCRIPTS"/hotspot.py \
-    "$SCRIPTS"/topic_diff.py "$SCRIPTS"/dedup_meili.py vps1:"$VPS_WORK"/
+    "$SCRIPTS"/topic_diff.py "$SCRIPTS"/dedup_meili.py \
+    "$SCRIPTS"/paths.json "$SCRIPTS"/paths.py \
+    vps1:"$VPS_WORK"/
 
 DAYS=0; [ "$MODE" = "daily" ] && DAYS=1
 echo "===== 1. vps1: 导出 Meili (--days $DAYS) + Mongo 取 excerpt ====="

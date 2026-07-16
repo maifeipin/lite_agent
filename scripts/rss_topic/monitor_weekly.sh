@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # 盯 weekly_run.log: 只在新里程碑出现时通知 + 每5min keep-alive, 命中 DONE 即退出。
-# 用法: bash monitor_weekly.sh [log_path]   (默认 Mac 的 weekly_run.log)
-LOG="${1:-/Users/lilee/projects/rss_topic/weekly_run.log}"
+# 用法: bash monitor_weekly.sh [log_path]   (默认 mac_work_dir/weekly_run.log)
+SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
+MAC_WORK=$(python3 "$SCRIPTS/paths.py" mac_work_dir "~/projects/rss_topic")
+LOG="${1:-$MAC_WORK/weekly_run.log}"
 last=""
 last_ka=$(date +%s)
 while true; do
