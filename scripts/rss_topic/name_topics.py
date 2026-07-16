@@ -12,7 +12,7 @@ import os, json, time, urllib.request
 KEY = os.environ["DEEPSEEK_API_KEY"]
 BASE = "https://api.deepseek.com/v1/chat/completions"
 TL = "/tmp/topic_labels.json"
-CACHE = "/home/lileagent/rss_topic_work/topic_names_cache.json"
+CACHE = "/home/liteagent/rss_topic_work/topic_names_cache.json"
 
 data = json.load(open(TL, encoding="utf-8"))
 doc_topic = data["doc_topic"]      # {id: "cat::tid"}
