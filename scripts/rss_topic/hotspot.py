@@ -38,7 +38,7 @@ print("today topics: {} (total today docs: {})".format(len(topic_counts), d.get(
 
 os.makedirs(HISTORY, exist_ok=True)
 today_file = "{}/{}_topic_counts.json".format(HISTORY, today_str)
-json.dump(topic_counts, open(today_file, "w"), ensure_ascii=False, indent=2)
+json.dump(topic_counts, open(today_file, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 
 # 过去 7 日
 history = defaultdict(list)
@@ -46,7 +46,7 @@ for i in range(1, 8):
     d_ = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
     f = "{}/{}_topic_counts.json".format(HISTORY, d_)
     if os.path.exists(f):
-        for t, c in json.load(open(f)).items():
+        for t, c in json.load(open(f, encoding="utf-8")).items():
             history[t].append(c)
 
 # 热点判定
