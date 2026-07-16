@@ -10,7 +10,7 @@
 
 复用缓存 embeddings.npy(weekly, doc_ids 一致则跳过重嵌); daily 嵌入新文不写缓存。
 """
-import os, json, argparse, random
+import os, json, argparse, random, sys
 from collections import defaultdict, Counter
 import numpy as np
 
@@ -166,6 +166,7 @@ def main():
 
     if MODE == "weekly":
         from bertopic import BERTopic
+        from umap import UMAP
         rng = random.Random(42)
         os.makedirs(MODEL_ROOT, exist_ok=True)
         for cat in sorted(cat_idx, key=lambda c: -len(cat_idx[c])):
@@ -176,6 +177,7 @@ def main():
             mts = max(30, n // 600)
             print("\n##### weekly {} (n={}, min_topic_size={}) #####".format(cat, n, mts), flush=True)
             tm = BERTopic(embedding_model=None, vectorizer_model=make_vectorizer(),
+                          umap_model=UMAP(random_state=42, n_neighbors=15, n_components=5, metric="cosine"),
                           nr_topics="auto", min_topic_size=mts, n_gram_range=(1, 2),
                           calculate_probabilities=False, verbose=True)
             try:
@@ -241,6 +243,16 @@ def main():
                 doc_category[did] = cat
                 doc_topic[did] = "{}::{}".format(cat, int(t))
             del em
+
+    # 后检(weekly): 真实 per-category 离群率, overall > 50% 中止(不存 topic_labels, 不 push, 保上轮)
+    if MODE == "weekly":
+        _tot = sum(s["n"] for s in per_cat_stats.values())
+        _out_n = sum(s.get("outlier", 0) for s in per_cat_stats.values())
+        _overall = _out_n / _tot if _tot else 0
+        print("  postcheck: overall outlier={:.1%}".format(_overall), flush=True)
+        if _overall > 0.5:
+            print("FATAL: 整体离群率 {:.0%}, 保留上轮结果, 中止(不存 topic_labels)".format(_overall), flush=True)
+            sys.exit(1)
 
     out = {
         "mode": MODE,
