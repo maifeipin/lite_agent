@@ -8,7 +8,7 @@ import os, json
 from datetime import datetime
 
 CUR = "/tmp/topic_labels.json"
-PREV = "/home/lileagent/rss_topic_work/topic_labels_prev.json"  # 跨周基线, 必须持久(不放 /tmp)
+PREV = "/home/liteagent/rss_topic_work/topic_labels_prev.json"  # 跨周基线, 必须持久(不放 /tmp)
 
 
 def fingerprint(name, keywords):
