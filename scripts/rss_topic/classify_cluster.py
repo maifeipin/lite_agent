@@ -20,6 +20,8 @@ EMB = WORK + "/embeddings.npy"
 IDS = WORK + "/doc_ids.json"
 OUT = WORK + "/topic_labels.json"
 MODEL_ROOT = WORK + "/topic_model"
+MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"   # 换模型时改这里, dim 不符会让缓存自动失效
+MODEL_DIM = 384
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--mode", choices=["daily", "weekly"], default="weekly")
@@ -76,26 +78,67 @@ def make_vectorizer():
                            stop_words=STOP, token_pattern=None)
 
 
+def _load_cache():
+    """load (emb, ids) 缓存; 维度不符(换模型)/损坏 -> (None, None)。"""
+    if not (os.path.exists(EMB) and os.path.exists(IDS)):
+        return None, None
+    try:
+        emb = np.load(EMB)
+        ids = json.load(open(IDS))
+        if emb.shape[0] != len(ids) or emb.shape[1] != MODEL_DIM:
+            print("  cache dim/size mismatch {} (expected {}d), ignore".format(
+                emb.shape, MODEL_DIM), flush=True)
+            return None, None
+        return emb, ids
+    except Exception as e:
+        print("  cache load failed ({}), ignore".format(e), flush=True)
+        return None, None
+
+
 def get_embeddings(docs, ids):
-    """weekly: 复用缓存(doc_ids 一致则跳过); 否则全量嵌并存缓存。daily: 嵌新文, 不写缓存。"""
-    if MODE == "weekly" and not args.reembed and os.path.exists(EMB) and os.path.exists(IDS):
-        cached_ids = json.load(open(IDS))
-        if cached_ids == ids:
-            print("  using cached embeddings: {}".format(np.load(EMB).shape), flush=True)
-            return np.load(EMB)
-    # 需要嵌入
-    from sentence_transformers import SentenceTransformer
-    print("  embedding on MPS ...", flush=True)
-    model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2", device="mps")
-    texts = [d["text"] for d in docs]
-    emb = model.encode(texts, batch_size=128, show_progress_bar=True, convert_to_numpy=True)
-    if MODE == "weekly":
-        np.save(EMB, emb)
-        json.dump(ids, open(IDS, "w"))
-        print("  saved cache: {} (weekly)".format(emb.shape), flush=True)
+    """weekly: 增量缓存--load 旧缓存, 只嵌 doc_ids 里新增的, 按当前 ids 顺序拼齐, 存对齐缓存。
+    daily: 嵌新文(本就只有新文), 不写缓存(避免与 weekly 抢写)。
+    --reembed: weekly 强制全量重嵌(换模型后用)。"""
+    if MODE == "daily":
+        from sentence_transformers import SentenceTransformer
+        print("  embedding {} new docs on MPS (daily, not cached) ...".format(len(docs)), flush=True)
+        model = SentenceTransformer(MODEL_NAME, device="mps")
+        return model.encode([d["text"] for d in docs], batch_size=128,
+                            show_progress_bar=True, convert_to_numpy=True)
+
+    # weekly: 增量缓存
+    cached_emb, cached_ids = (None, None) if args.reembed else _load_cache()
+    id2row = {cid: i for i, cid in enumerate(cached_ids)} if cached_ids else {}
+    new_idx = [i for i, did in enumerate(ids) if did not in id2row]
+    n_new = len(new_idx)
+
+    if n_new:
+        from sentence_transformers import SentenceTransformer
+        print("  embedding {} new docs on MPS (cached={}, delta embed) ...".format(
+            n_new, len(id2row)), flush=True)
+        model = SentenceTransformer(MODEL_NAME, device="mps")
+        new_emb = model.encode([docs[i]["text"] for i in new_idx], batch_size=128,
+                               show_progress_bar=True, convert_to_numpy=True)
     else:
-        print("  daily: embedded {} new docs (not caching)".format(emb.shape), flush=True)
-    return emb
+        print("  full cache hit: {} docs, 0 new (no embedding)".format(len(id2row)), flush=True)
+        new_emb = None
+
+    # 按当前 ids 顺序拼齐: 命中缓存取缓存行, 否则取新嵌行
+    full = np.empty((len(ids), MODEL_DIM), dtype=np.float32)
+    nc = 0
+    for i, did in enumerate(ids):
+        row = id2row.get(did)
+        if row is not None:
+            full[i] = cached_emb[row]
+        else:
+            full[i] = new_emb[nc]; nc += 1
+
+    # 存对齐缓存(剪孤儿, 与当前 ids 完全对齐; 下次无新文则直接命中)
+    np.save(EMB, full)
+    json.dump(ids, open(IDS, "w"))
+    print("  saved cache: {} (weekly, cached={} new={})".format(
+        full.shape, len(id2row), n_new), flush=True)
+    return full
 
 
 def main():
