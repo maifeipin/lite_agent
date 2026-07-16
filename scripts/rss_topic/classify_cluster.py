@@ -62,11 +62,17 @@ def load_docs():
     return docs
 
 
-def make_vectorizer():
+def jieba_tokenizer(text):
+    """模块级命名函数(非 lambda), 这样 BERTopic 模型才能 pickle save/load。"""
     import jieba
+    return jieba.lcut(text)
+
+
+def make_vectorizer():
     from sklearn.feature_extraction.text import CountVectorizer
+    import jieba
     jieba.setLogLevel("ERROR")
-    return CountVectorizer(tokenizer=lambda t: jieba.lcut(t), max_features=10000,
+    return CountVectorizer(tokenizer=jieba_tokenizer, max_features=10000,
                            stop_words=STOP, token_pattern=None)
 
 
@@ -118,6 +124,7 @@ def main():
     if MODE == "weekly":
         from bertopic import BERTopic
         rng = random.Random(42)
+        os.makedirs(MODEL_ROOT, exist_ok=True)
         for cat in sorted(cat_idx, key=lambda c: -len(cat_idx[c])):
             idxs = cat_idx[cat]
             n = len(idxs)
@@ -138,9 +145,8 @@ def main():
             else:
                 info = tm.get_topic_info()
                 reps = tm.topic_representations_
-                # 保存 per-category 模型供 daily transform
+                # 保存 per-category 模型供 daily transform (pickle 文件, 不预建目录)
                 mdir = "{}/{}".format(MODEL_ROOT, cat)
-                os.makedirs(mdir, exist_ok=True)
                 tm.save(mdir, save_embedding_model=False)
                 print("  saved model -> {}".format(mdir), flush=True)
             n_topics = len(info[info.Topic != -1])
