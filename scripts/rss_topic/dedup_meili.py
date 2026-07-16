@@ -9,9 +9,10 @@ MEILI_MASTER_KEY 从环境变量读。
 """
 import os, json, urllib.request, sys, time
 from collections import defaultdict, Counter
+from paths import cfg
 
 KEY = os.environ["MEILI_MASTER_KEY"]
-URL = "http://127.0.0.1:7700"
+URL = cfg("meili_url", "http://127.0.0.1:7700")
 INDEX = "rss"
 APPLY = "--apply" in sys.argv
 FETCH = 1000

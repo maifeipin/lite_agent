@@ -10,11 +10,12 @@ MEILI_MASTER_KEY 从环境变量读。用法:
   ssh vps1 'export MEILI_MASTER_KEY="$(grep ^MEILI_MASTER_KEY= /home/liteagent/lite_agent/.env|cut -d= -f2-)"; python3 /tmp/push_topics_v2.py'
 """
 import os, json, urllib.request, time
+from paths import cfg
 
 KEY = os.environ["MEILI_MASTER_KEY"]
-URL = "http://127.0.0.1:7700"
-TL = "/tmp/topic_labels.json"
-BF = "/home/liteagent/rss_topic_work/meili_backfill.jsonl"
+URL = cfg("meili_url", "http://127.0.0.1:7700")
+TL = cfg("vps_tmp_dir", "/tmp") + "/topic_labels.json"
+BF = cfg("vps_work_dir", "/home/liteagent/rss_topic_work") + "/meili_backfill.jsonl"
 BATCH = 200
 
 

@@ -11,10 +11,12 @@ from collections import defaultdict
 from datetime import datetime
 from bson import ObjectId
 from pymongo import MongoClient
+from paths import cfg
 
 RSSDB_URI = os.environ["RSSDB_URI"]
-IN = "/home/liteagent/rss_topic_work/meili_docs.jsonl"
-OUT = "/home/liteagent/rss_topic_work/rss_all.jsonl"
+W = cfg("vps_work_dir", "/home/liteagent/rss_topic_work")
+IN = W + "/meili_docs.jsonl"
+OUT = W + "/rss_all.jsonl"
 TRUNC = 1500
 
 mc = MongoClient(RSSDB_URI, serverSelectionTimeoutMS=10000)

@@ -1,0 +1,9 @@
+{
+  "meili_url": "http://127.0.0.1:7700",
+  "deepseek_base_url": "https://api.deepseek.com/v1/chat/completions",
+  "lite_agent_url": "http://127.0.0.1:8887/api/v1/chat",
+  "vps_work_dir": "/home/liteagent/rss_topic_work",
+  "vps_tmp_dir": "/tmp",
+  "vps_env_file": "/home/liteagent/lite_agent/.env",
+  "mac_work_dir": "~/projects/rss_topic"
+}

@@ -13,8 +13,9 @@
 import os, json, argparse, random, sys
 from collections import defaultdict, Counter
 import numpy as np
+from paths import cfg
 
-WORK = os.path.expanduser("~/projects/rss_topic")
+WORK = os.path.expanduser(cfg("mac_work_dir", "~/projects/rss_topic"))
 DATA = WORK + "/rss_all.jsonl"
 EMB = WORK + "/embeddings.npy"
 IDS = WORK + "/doc_ids.json"

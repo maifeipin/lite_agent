@@ -6,10 +6,11 @@ MEILI_MASTER_KEY 从环境变量读。
 """
 import os, json, urllib.request, argparse, time
 from datetime import datetime, timedelta
+from paths import cfg
 
 KEY = os.environ["MEILI_MASTER_KEY"]
-URL = "http://127.0.0.1:7700"
-OUT_DIR = "/home/liteagent/rss_topic_work"
+URL = cfg("meili_url", "http://127.0.0.1:7700")
+OUT_DIR = cfg("vps_work_dir", "/home/liteagent/rss_topic_work")
 OUT = OUT_DIR + "/meili_docs.jsonl"
 os.makedirs(OUT_DIR, exist_ok=True)
 

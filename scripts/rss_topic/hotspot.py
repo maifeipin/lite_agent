@@ -7,12 +7,13 @@ history 存 /home/liteagent/rss_topic_work/history/{YYYYMMDD}_topic_counts.json�
 import os, json, urllib.request, time
 from datetime import datetime, timedelta
 from collections import defaultdict
+from paths import cfg
 
 KEY = os.environ["MEILI_MASTER_KEY"]
-URL = "http://127.0.0.1:7700"
+URL = cfg("meili_url", "http://127.0.0.1:7700")
 INDEX = "rss"
-HISTORY = "/home/liteagent/rss_topic_work/history"
-PUSH_URL = "http://127.0.0.1:8887/api/v1/chat"  # lite-agent (5000 是 RssAdapter; 路径 /api/v1/chat)
+HISTORY = cfg("vps_work_dir", "/home/liteagent/rss_topic_work") + "/history"
+PUSH_URL = cfg("lite_agent_url", "http://127.0.0.1:8887/api/v1/chat")
 PUSH_TOKEN = os.environ.get("API_AUTH_TOKEN", "")
 
 
@@ -75,8 +76,10 @@ msg = "\n".join(lines)
 print(msg, flush=True)
 
 try:
-    urllib.request.urlopen(urllib.request.Request(PUSH_URL, data=json.dumps(
-        {"session_id": "rss_hotspot_bot", "text": msg}).encode(), method="POST",
+    urllib.request.urlopen(urllib.request.Request(
+        PUSH_URL,
+        data=json.dumps({"session_id": "rss_hotspot_bot", "text": msg}).encode(),
+        method="POST",
         headers={"Content-Type": "application/json", "Authorization": "Bearer " + PUSH_TOKEN}), timeout=10)
     print("  -> pushed to lite-agent", flush=True)
 except Exception as e:

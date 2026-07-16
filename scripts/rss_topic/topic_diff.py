@@ -6,9 +6,10 @@
 """
 import os, json, urllib.request
 from datetime import datetime
+from paths import cfg
 
-CUR = "/tmp/topic_labels.json"
-PREV = "/home/liteagent/rss_topic_work/topic_labels_prev.json"  # 跨周基线, 必须持久(不放 /tmp)
+CUR = cfg("vps_tmp_dir", "/tmp") + "/topic_labels.json"
+PREV = cfg("vps_work_dir", "/home/liteagent/rss_topic_work") + "/topic_labels_prev.json"  # 跨周基线, 必须持久(不放 /tmp)
 
 
 def fingerprint(name, keywords):
@@ -85,7 +86,7 @@ def _outlier_rate(path):
 def push_alert(msg):
     try:
         urllib.request.urlopen(urllib.request.Request(
-            "http://127.0.0.1:8887/api/v1/chat",
+            cfg("lite_agent_url", "http://127.0.0.1:8887/api/v1/chat"),
             data=json.dumps({"session_id": "rss_topic_diff_bot", "text": msg}).encode(),
             method="POST", headers={"Content-Type": "application/json",
                                     "Authorization": "Bearer " + os.environ.get("API_AUTH_TOKEN", "")}), timeout=10)
