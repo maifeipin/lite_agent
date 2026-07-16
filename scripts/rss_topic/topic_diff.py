@@ -85,9 +85,10 @@ def _outlier_rate(path):
 def push_alert(msg):
     try:
         urllib.request.urlopen(urllib.request.Request(
-            "http://127.0.0.1:5000/agent/api/v1/chat",
+            "http://127.0.0.1:8887/api/v1/chat",
             data=json.dumps({"session_id": "rss_topic_diff_bot", "text": msg}).encode(),
-            method="POST", headers={"Content-Type": "application/json"}), timeout=10)
+            method="POST", headers={"Content-Type": "application/json",
+                                    "Authorization": "Bearer " + os.environ.get("API_AUTH_TOKEN", "")}), timeout=10)
         print("  -> alerted lite-agent", flush=True)
     except Exception as e:
         print("  alert skip: {}".format(e), flush=True)
