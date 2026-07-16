@@ -17,7 +17,7 @@ MAC_WORK="$HOME/projects/rss_topic"               # Mac 数据/venv 目录
 VPS_WORK="/home/liteagent/rss_topic_work"          # vps1 运行/数据目录
 VPS_TMP="/tmp"
 ENV="/home/liteagent/lite_agent/.env"
-ENVV='export MEILI_MASTER_KEY="$(grep ^MEILI_MASTER_KEY= '"$ENV"'|cut -d= -f2-)"; export RSSDB_URI="$(grep ^RSSDB_URI= '"$ENV"'|cut -d= -f2-)"; export DEEPSEEK_API_KEY="$(grep ^DEEPSEEK_API_KEY= '"$ENV"'|cut -d= -f2-)"'
+ENVV='export MEILI_MASTER_KEY="$(grep ^MEILI_MASTER_KEY= '"$ENV"'|cut -d= -f2-)"; export RSSDB_URI="$(grep ^RSSDB_URI= '"$ENV"'|cut -d= -f2-)"; export DEEPSEEK_API_KEY="$(grep ^DEEPSEEK_API_KEY= '"$ENV"'|cut -d= -f2-)"; export API_AUTH_TOKEN="$(grep ^API_AUTH_TOKEN= '"$ENV"'|cut -d= -f2-)"'
 
 echo "===== RSS pipeline: $MODE ($(date)) ====="
 
