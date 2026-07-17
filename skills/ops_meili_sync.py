@@ -97,15 +97,24 @@ def _classify_email_type(raw_data):
         return 'newsletter'
     return 'mail'
 
-def _parse_to_timestamp(date_val):
+def _parse_to_timestamp(date_val, doc_id_str=""):
     """统一日期→Unix int64: ISO-8601(RSS) / RFC2822(Email)"""
     if not date_val:
         return 0
     if isinstance(date_val, (int, float)):
         return int(date_val)
     date_str = str(date_val).strip()
+    insert_time = None
+    try:
+        insert_time = ObjectId(doc_id_str).generation_time.replace(tzinfo=timezone.utc)
+    except Exception:
+        pass
     try:
         dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)  # naive 串按 UTC (RSS 多为 UTC naive), 避免 .timestamp() 按本地 CST 误算
+        if insert_time and dt - insert_time > timedelta(minutes=5):
+            dt = dt - timedelta(hours=8)
         return int(dt.timestamp())
     except (ValueError, TypeError):
         pass
@@ -262,7 +271,7 @@ def sync_meili() -> str:
                         "fetched_at": item["_id"].generation_time.isoformat(),
                         "source": _extract_source('rss', {"link": item.get("link", "")}),
                         "type": "article",
-                        "date": _parse_to_timestamp(item.get("pubdate", "") or item.get("published", "")),
+                        "date": _parse_to_timestamp(item.get("pubdate", "") or item.get("published", ""), str(item["_id"])),
                         "tags": [],
                     })
         

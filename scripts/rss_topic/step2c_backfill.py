@@ -8,7 +8,7 @@ import re
 import html
 import json
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import email.utils as email_utils
 from bson import ObjectId
 from pymongo import MongoClient
@@ -34,14 +34,25 @@ def strip_html(raw):
     return WS.sub(" ", t).strip()
 
 
-def parse_ts(v):
+def parse_ts(v, doc_id=""):
+    """naive 按 UTC; 启发式: pubdate(按UTC) 晚于入库时间 5min 以上 -> naive-CST(Now兜底), 减 8h。"""
     if not v:
         return 0
     if isinstance(v, (int, float)):
         return int(v)
     s = str(v).strip()
+    insert_time = None
     try:
-        return int(datetime.fromisoformat(s.replace('Z', '+00:00')).timestamp())
+        insert_time = ObjectId(doc_id).generation_time.replace(tzinfo=timezone.utc)
+    except Exception:
+        pass
+    try:
+        dt = datetime.fromisoformat(s.replace('Z', '+00:00'))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)  # naive 串按 UTC, 避免 .timestamp() 按本地 CST 误算
+        if insert_time and dt - insert_time > timedelta(minutes=5):
+            dt = dt - timedelta(hours=8)  # naive-CST(Now兜底)被当UTC -> 减8h
+        return int(dt.timestamp())
     except (ValueError, TypeError):
         pass
     try:
@@ -86,7 +97,7 @@ for gm, items in sorted(by_month.items()):
                     backfill[did] = (
                         strip_html(doc.get("excerpt") or doc.get("content") or doc.get("description") or ""),
                         pub,
-                        parse_ts(pub),
+                        parse_ts(pub, did),
                     )
     print("  {} docs={} backfilled={}".format(gm, len(items), sum(1 for i in items if i[0] in backfill)))
 
