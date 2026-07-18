@@ -57,6 +57,11 @@ def _ensure_schema():
           FOREIGN KEY (recur_parent_id) REFERENCES todos(id) ON DELETE CASCADE
         )
     """)
+    try:
+        conn.execute("ALTER TABLE todos ADD COLUMN remind_interval_mins INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    
     conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_status ON todos(status, updated_at DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_project ON todos(project, status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_wake ON todos(snoozed_until) WHERE status='snoozed'")
@@ -214,10 +219,11 @@ def _update_todo_status(tid: str, status: str, extra_fields: dict = None):
         "project": {"type": "string", "description": "关联项目名称，可选"},
         "description": {"type": "string", "description": "详细描述，可选"},
         "due_at": {"type": "string", "description": "到期时间必须是 ISO8601 且含时区，例如 2026-06-20T12:00:00+08:00，可选"},
-        "recur_cron": {"type": "string", "description": "循环周期配置，如 daily, weekly, 09:00, 可选"}
+        "recur_cron": {"type": "string", "description": "循环周期配置，如 daily, weekly, 09:00, 可选"},
+        "remind_interval_mins": {"type": "integer", "description": "高频重复提醒间隔(分钟)，如 10 表示每10分钟提醒一次，0表示仅提醒一次", "default": 0}
     }
 )
-def todo_add(title: str, kind: str = "misc", project: str = None, description: str = None, due_at: str = None, recur_cron: str = None) -> str:
+def todo_add(title: str, kind: str = "misc", project: str = None, description: str = None, due_at: str = None, recur_cron: str = None, remind_interval_mins: int = 0) -> str:
     if kind == "recurring" and not recur_cron:
         recur_cron = "daily"
     
@@ -227,9 +233,9 @@ def todo_add(title: str, kind: str = "misc", project: str = None, description: s
     conn = _conn()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO todos (id, title, description, status, kind, project, created_at, updated_at, due_at, recur_cron)
-        VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
-    """, (tid, title, description, kind, project, now, now, due_at, recur_cron))
+        INSERT INTO todos (id, title, description, status, kind, project, created_at, updated_at, due_at, recur_cron, remind_interval_mins)
+        VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
+    """, (tid, title, description, kind, project, now, now, due_at, recur_cron, remind_interval_mins))
     conn.commit()
     conn.close()
     
@@ -328,7 +334,11 @@ def todo_get(id: str) -> str:
 
 @skill(name="todo_start", description="开始处理待办事项", params={"id": {"type": "string"}})
 def todo_start(id: str) -> str:
-    return _update_todo_status(id, "active", {"started_at": _now_iso()})
+    return _update_todo_status(id, "active", {
+        "started_at": _now_iso(),
+        "completed_at": None,
+        "notified_due_at": None
+    })
 
 @skill(name="todo_done", description="将待办事项标记为完成", params={"id": {"type": "string"}})
 def todo_done(id: str) -> str:
@@ -352,7 +362,11 @@ def todo_snooze(id: str, until: str) -> str:
         dt = _parse_until(until)
     except ValueError as e:
         return f"❌ {e}"
-    return _update_todo_status(id, "snoozed", {"snoozed_until": dt})
+    return _update_todo_status(id, "snoozed", {
+        "snoozed_until": dt,
+        "completed_at": None,
+        "notified_due_at": None
+    })
 
 @skill(
     name="todo_shelve", 
@@ -390,7 +404,9 @@ def todo_update(id: str, title: str = None, description: str = None, due_at: str
     fields = {"updated_at": _now_iso()}
     if title is not None: fields["title"] = title
     if description is not None: fields["description"] = description
-    if due_at is not None: fields["due_at"] = due_at
+    if due_at is not None:
+        fields["due_at"] = due_at
+        fields["notified_due_at"] = None
     if project is not None: fields["project"] = project
     if recur_cron is not None: fields["recur_cron"] = recur_cron
     if kind is not None: fields["kind"] = kind
@@ -554,42 +570,59 @@ def _todo_tick():
     conn = _conn()
     cursor = conn.cursor()
     
-    # 1. 自动唤醒 Snoozed 任务
+    # 1. 自动唤醒 Snoozed 任务 (同时确保清空 completed_at 与 notified_due_at)
     cursor.execute("""
-        UPDATE todos SET status='pending', snoozed_until=NULL, updated_at=?
+        UPDATE todos SET status='pending', snoozed_until=NULL, completed_at=NULL, notified_due_at=NULL, updated_at=?
         WHERE status='snoozed' AND datetime(snoozed_until) <= datetime(?)
     """, (now, now))
     woken_count = cursor.rowcount
     
-    # 2. 检查 24h 内即到期或已超期的任务并推送到 IM
+    # 2. 检查 24h 内即到期或已超期的任务并推送到 IM (支持高频重复间隔提醒)
     cursor.execute("""
-        SELECT id, title, due_at, created_via, project, kind, description FROM todos
+        SELECT id, title, due_at, created_via, project, kind, description, remind_interval_mins, notified_due_at FROM todos
         WHERE status IN ('pending','active')
           AND due_at IS NOT NULL
-          AND notified_due_at IS NULL
           AND datetime(due_at) <= datetime(?, '+24 hours')
     """, (now,))
-    due_soon = cursor.fetchall()
+    due_tasks = cursor.fetchall()
     
-    for row in due_soon:
-        tid, title, due_at, created_via, project, kind, description = row[0], row[1], row[2], row[3], row[4], row[5], row[6]
-        cursor.execute("UPDATE todos SET notified_due_at=?, updated_at=? WHERE id=?", (now, now, tid))
+    due_soon_count = 0
+    now_dt = datetime.fromisoformat(now)
+    for row in due_tasks:
+        tid, title, due_at, created_via, project, kind, description, interval_mins, last_notified = row
         
-        is_overdue = due_at < now
-        tag = "🔴 已超期" if is_overdue else "⏰ 即将到期 (24h内)"
-        proj_info = f"【{project}】" if project else ""
-        
-        msg = f"{tag} {proj_info}\n**{title}**\n\n- 到期时间: {due_at}\n- 任务类型: {kind}\n- 任务 ID: `{tid}`"
-        if description:
-            msg += f"\n- 说明: {description[:100]}"
+        should_notify = False
+        if not last_notified:
+            should_notify = True
+        elif interval_mins and interval_mins > 0:
+            try:
+                last_dt = datetime.fromisoformat(last_notified)
+                if (now_dt - last_dt).total_seconds() >= (interval_mins * 60 - 5):
+                    should_notify = True
+            except Exception:
+                pass
+                
+        if should_notify:
+            cursor.execute("UPDATE todos SET notified_due_at=?, updated_at=? WHERE id=?", (now, now, tid))
+            due_soon_count += 1
             
-        print(f"[todo_tick] 提醒任务到期推送到 IM: {tid} {title}")
-        _send_im_alert(
-            title=f"⏰ 待办提醒: {title}",
-            text=msg,
-            color="red" if is_overdue else "yellow",
-            dedup_key=f"todo_due:{tid}"
-        )
+            is_overdue = due_at < now
+            tag = "🔴 已超期" if is_overdue else "⏰ 即将到期 (24h内)"
+            proj_info = f"【{project}】" if project else ""
+            
+            msg = f"{tag} {proj_info}\n**{title}**\n\n- 到期时间: {due_at}\n- 任务类型: {kind}\n- 任务 ID: `{tid}`"
+            if interval_mins and interval_mins > 0:
+                msg += f"\n- 提醒频次: 每 {interval_mins} 分钟"
+            if description:
+                msg += f"\n- 说明: {description[:100]}"
+                
+            print(f"[todo_tick] 提醒任务到期推送到 IM (interval={interval_mins}): {tid} {title}")
+            _send_im_alert(
+                title=f"⏰ 待办提醒: {title}",
+                text=msg,
+                color="red" if is_overdue else "yellow",
+                dedup_key=f"todo_due:{tid}:{now[:16]}" if (interval_mins and interval_mins > 0) else f"todo_due:{tid}"
+            )
         
     # 3. 检查循环/周期任务 (kind='recurring') 并自动派生子任务
     cursor.execute("""
@@ -629,7 +662,7 @@ def _todo_tick():
     conn.commit()
     conn.close()
     
-    if woken_count > 0 or due_soon or spawned_count > 0:
+    if woken_count > 0 or due_soon_count > 0 or spawned_count > 0:
         _render_markdown()
 
 @skill(name="todo_push_brief", description="汇总当前待办事项并推送到 IM 聊天频道", params={})
