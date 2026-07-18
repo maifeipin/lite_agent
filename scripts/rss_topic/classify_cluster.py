@@ -32,20 +32,34 @@ MODE = args.mode
 
 # ---- Layer 1: source -> category ----
 SOURCE_MAP = {
+    # 社交短视频
     "xiaohongshu.com": "社交短视频", "bilibili.com": "社交短视频", "douyin.com": "社交短视频",
     "douban.com": "社交短视频", "kuaishou.com": "社交短视频", "weibo.com": "社交短视频",
+    
+    # AI与学术
     "link.baai.ac.cn": "AI与学术", "alphaxiv.org": "AI与学术", "arxiv.org": "AI与学术",
-    "baai.ac.cn": "AI与学术", "openreview.net": "AI与学术",
+    "baai.ac.cn": "AI与学术", "openreview.net": "AI与学术", "qbitai.com": "AI与学术",
+    "jiqizhixin.com": "AI与学术", "aidaily.win": "AI与学术",
+    
+    # 技术社区
     "linux.do": "技术社区", "v2ex.com": "技术社区", "juejin.cn": "技术社区",
     "blog.csdn.net": "技术社区", "oschina.net": "技术社区", "infoq.com": "技术社区",
-    "reddit.com": "技术社区", "github.com": "技术社区",
+    "reddit.com": "技术社区", "github.com": "技术社区", "hnrss.org": "技术社区",
     "segmentfault.com": "技术社区", "cnblogs.com": "技术社区", "jianshu.com": "技术社区",
+    
+    # 科技资讯
     "ithome.com": "科技资讯", "36kr.com": "科技资讯", "huxiu.com": "科技资讯",
-    "tmtpost.com": "科技资讯", "jiqizhixin.com": "科技资讯", "qbitai.com": "科技资讯",
-    "toutiao.com": "科技资讯", "bbc.co.uk": "科技资讯", "bbc.com": "科技资讯",
-    "zaobao.com.sg": "科技资讯", "ifanr.com": "科技资讯", "leiphone.com": "科技资讯",
-    "pingwest.com": "科技资讯", "geekpark.net": "科技资讯", "donews.com": "科技资讯",
-    "xueqiu.com": "财经商业", "oshipm.com": "财经商业", "eastmoney.com": "财经商业",
+    "tmtpost.com": "科技资讯", "toutiao.com": "科技资讯", "bbc.co.uk": "科技资讯",
+    "bbc.com": "科技资讯", "zaobao.com.sg": "科技资讯", "ifanr.com": "科技资讯",
+    "leiphone.com": "科技资讯", "pingwest.com": "科技资讯", "geekpark.net": "科技资讯",
+    "donews.com": "科技资讯", "woshipm.com": "科技资讯", "uisdc.com": "科技资讯",
+    "163.com": "科技资讯", "baidu.com": "科技资讯",
+    
+    # 财经商业
+    "xueqiu.com": "财经商业", "eastmoney.com": "财经商业", "cls.cn": "财经商业",
+    "nytimes.com": "财经商业",
+    
+    # 问答长文
     "zhihu.com": "问答长文", "chongbuluo.com": "问答长文",
 }
 
