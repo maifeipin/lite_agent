@@ -19,7 +19,7 @@ MAC_WORK=$(_path mac_work_dir "~/projects/rss_topic")
 VPS_WORK=$(_path vps_work_dir "/home/liteagent/rss_topic_work")
 VPS_TMP=$(_path vps_tmp_dir "/tmp")
 ENV=$(_path vps_env_file "/home/liteagent/lite_agent/.env")
-ENVV='export MEILI_MASTER_KEY="$(grep ^MEILI_MASTER_KEY= '"$ENV"'|cut -d= -f2-)"; export RSSDB_URI="$(grep ^RSSDB_URI= '"$ENV"'|cut -d= -f2-)"; export DEEPSEEK_API_KEY="$(grep ^DEEPSEEK_API_KEY= '"$ENV"'|cut -d= -f2-)"; export API_AUTH_TOKEN="$(grep ^API_AUTH_TOKEN= '"$ENV"'|cut -d= -f2-)"'
+ENVV='export MEILI_MASTER_KEY="$(grep ^MEILI_MASTER_KEY= '"$ENV"'|cut -d= -f2-)"; export RSSDB_URI="$(grep ^RSSDB_URI= '"$ENV"'|cut -d= -f2-)"; export DEEPSEEK_API_KEY="$(grep ^DEEPSEEK_API_KEY= '"$ENV"'|cut -d= -f2-)"; export API_AUTH_TOKEN="$(grep ^API_AUTH_TOKEN= '"$ENV"'|cut -d= -f2-)"; export ARK_API_KEY="$(grep ^ARK_API_KEY= '"$ENV"'|cut -d= -f2-)"; export LLM_API_KEY="$(grep ^LLM_API_KEY= '"$ENV"'|cut -d= -f2-)"; export LLM_BASE_URL="$(grep ^LLM_BASE_URL= '"$ENV"'|cut -d= -f2-)"; export LLM_MODEL="$(grep ^LLM_MODEL= '"$ENV"'|cut -d= -f2-)"'
 
 echo "===== RSS pipeline: $MODE ($(date)) ====="
 

@@ -433,6 +433,70 @@ async function performSearch(append = false) {
     state.isLoading = false;
     hideSearchSpinner();
     if (state.lastFacets) renderFacetPanel(state.lastFacets);
+    loadRssBrief();
+}
+
+async function loadRssBrief() {
+    const briefPanel = document.getElementById('rss-brief-panel');
+    if (!briefPanel) return;
+
+    if (state.activeSource !== 'rss') {
+        briefPanel.style.display = 'none';
+        return;
+    }
+
+    try {
+        const response = await fetch('/agent/api/v1/rss/brief');
+        if (!response.ok) {
+            briefPanel.style.display = 'none';
+            return;
+        }
+        const data = await response.json();
+        if (data && data.topics && data.topics.length > 0) {
+            document.getElementById('rss-brief-date').textContent = data.date || '';
+            document.getElementById('rss-brief-summary').textContent = data.summary || '';
+            
+            const topicsContainer = document.getElementById('rss-brief-topics');
+            topicsContainer.innerHTML = '';
+            
+            data.topics.forEach(t => {
+                const sentimentClass = t.sentiment === '正' ? 'sentiment-pos' : (t.sentiment === '负' ? 'sentiment-neg' : 'sentiment-neu');
+                const sentimentEmoji = t.sentiment === '正' ? '🟢 正' : (t.sentiment === '负' ? '🔴 负' : '⚪ 中');
+                
+                const card = document.createElement('div');
+                card.className = 'brief-topic-card';
+                
+                const titleRow = document.createElement('div');
+                titleRow.className = 'brief-topic-title-row';
+                
+                const titleSpan = document.createElement('span');
+                titleSpan.textContent = t.topic || '';
+                
+                const sentimentSpan = document.createElement('span');
+                sentimentSpan.className = `brief-topic-sentiment ${sentimentClass}`;
+                sentimentSpan.textContent = sentimentEmoji;
+                
+                titleRow.appendChild(titleSpan);
+                titleRow.appendChild(sentimentSpan);
+                
+                const analysisDiv = document.createElement('div');
+                analysisDiv.className = 'brief-topic-analysis';
+                analysisDiv.textContent = t.analysis || '';
+                
+                card.appendChild(titleRow);
+                card.appendChild(analysisDiv);
+                
+                topicsContainer.appendChild(card);
+            });
+            
+            briefPanel.style.display = 'block';
+        } else {
+            briefPanel.style.display = 'none';
+        }
+    } catch (e) {
+        console.error('Failed to fetch RSS brief:', e);
+        briefPanel.style.display = 'none';
+    }
 }
 
 function showSearchSpinner(reset) {

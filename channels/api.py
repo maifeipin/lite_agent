@@ -88,6 +88,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_dashboard()
         elif parsed_url.path == '/v1/models':
             self._handle_openai_models()
+        elif parsed_url.path == '/api/v1/rss/brief':
+            self._handle_rss_brief()
         else:
             self.send_error(404, "Not Found")
 
@@ -156,6 +158,48 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({"detail": f"OCR Proxy error: {str(e)}"}).encode('utf-8'))
+
+    def _handle_rss_brief(self):
+        import os
+        
+        # Load vps_work_dir dynamically from paths.json if exists to prevent hardcoding
+        vps_work_dir = '/home/liteagent/rss_topic_work'
+        paths_json_path = '/home/liteagent/rss_topic_work/paths.json'
+        
+        env_vps_work = os.environ.get("RSS_VPS_WORK_DIR")
+        if env_vps_work:
+            vps_work_dir = os.path.expanduser(env_vps_work)
+        elif os.path.exists(paths_json_path):
+            try:
+                with open(paths_json_path, 'r', encoding='utf-8') as f:
+                    pcfg = json.load(f)
+                    vps_work_dir = os.path.expanduser(pcfg.get("vps_work_dir", vps_work_dir))
+            except Exception:
+                pass
+                
+        brief_path = os.path.join(vps_work_dir, 'latest_brief.json')
+        if not os.path.exists(brief_path):
+            self.send_response(404)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"detail": "Brief not found"}).encode('utf-8'))
+            return
+            
+        try:
+            with open(brief_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            self.send_response(200)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(content.encode('utf-8'))
+        except Exception as e:
+            self.send_response(500)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"detail": str(e)}).encode('utf-8'))
 
     def _handle_chat_or_task(self):
         content_length = int(self.headers.get('Content-Length', 0))
