@@ -63,6 +63,22 @@ SOURCE_MAP = {
     "zhihu.com": "问答长文", "chongbuluo.com": "问答长文",
 }
 
+# ---- Layer 1.5: rssNodeId -> category override ----
+NODE_MAP = {
+    # V2EX 细粒度节点
+    12: "技术社区",   # V2EX-程序员
+    10: "科技资讯",   # V2EX-创意
+    40: "科技资讯",   # V2EX-发现
+    11: "科技资讯",   # V2EX-分享
+    13: "问答长文",   # V2EX-问答
+    42: "技术社区",   # V2EX-技术
+    43: "社交短视频", # V2EX-好玩
+    
+    # LinuxDo 细粒度节点
+    8: "技术社区",    # LinuxDo-最新话题
+    9: "问答长文",    # LinuxDo-快问快答
+}
+
 STOP = ['的','了','在','是','我','有','和','就','不','人','都','一','一个','上','也','很','到','说','要','去',
         '你','会','着','没有','看','好','自己','这','我们','他们','可以','这个','什么','一下','时候']
 
@@ -75,6 +91,7 @@ def load_docs():
             title = (d.get("title") or "").strip()
             ex = (d.get("excerpt") or "").strip()
             docs.append({"id": d["id"], "title": title, "source": d.get("source", ""),
+                         "rssNodeId": d.get("rssNodeId"),
                          "text": (title + " " + ex).strip() or "无标题"})
     return docs
 
@@ -167,8 +184,15 @@ def main():
     cat_idx = defaultdict(list)   # cat -> [(doc_i, emb_row)]
     unmapped = Counter()
     for i, d in enumerate(docs):
-        cat = SOURCE_MAP.get(d["source"], "其他")
-        if d["source"] not in SOURCE_MAP:
+        node_id = d.get("rssNodeId")
+        try:
+            node_id = int(node_id)
+        except Exception:
+            node_id = None
+        cat = NODE_MAP.get(node_id) if node_id else None
+        if not cat:
+            cat = SOURCE_MAP.get(d["source"], "其他")
+        if not cat or (node_id not in NODE_MAP and d["source"] not in SOURCE_MAP):
             unmapped[d["source"]] += 1
         cat_idx[cat].append(i)
     print("  categories: " + ", ".join("{}={}".format(c, len(v)) for c, v in

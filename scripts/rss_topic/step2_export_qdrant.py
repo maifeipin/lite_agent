@@ -124,13 +124,20 @@ with open(OUT_JSONL, "w", encoding="utf-8") as f:
                     pass
 
             seen.add(doc_id)
+            rss_node_id_val = payload.get("RssNodeId", "")
+            try:
+                rss_node_id_val = int(rss_node_id_val)
+            except Exception:
+                pass
+
             rec = {
                 "id": doc_id,
                 "title": title,
                 "source": source,
                 "link": link,
                 "excerpt": excerpt,
-                "published": pub_date_str
+                "published": pub_date_str,
+                "rssNodeId": rss_node_id_val
             }
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             written += 1
