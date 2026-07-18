@@ -210,15 +210,16 @@ def _update_todo_status(tid: str, status: str, extra_fields: dict = None):
     description="添加一条新的待办事项",
     params={
         "title": {"type": "string", "description": "任务标题"},
-        "kind": {"type": "string", "description": "分类: misc 或者是 code", "default": "misc"},
+        "kind": {"type": "string", "description": "分类: misc, code, 或 recurring (循环任务)", "default": "misc"},
         "project": {"type": "string", "description": "关联项目名称，可选"},
         "description": {"type": "string", "description": "详细描述，可选"},
-        "due_at": {"type": "string", "description": "到期时间必须是 ISO8601 且含时区，例如 2026-06-20T12:00:00+08:00，可选"}
+        "due_at": {"type": "string", "description": "到期时间必须是 ISO8601 且含时区，例如 2026-06-20T12:00:00+08:00，可选"},
+        "recur_cron": {"type": "string", "description": "循环周期配置，如 daily, weekly, 09:00, 可选"}
     }
 )
-def todo_add(title: str, kind: str = "misc", project: str = None, description: str = None, due_at: str = None) -> str:
-    if kind == "recurring":
-        return "❌ 第一版 kind 仅接受 misc|code，传 recurring 直接拒绝；将来集成 cron_engine 时再开放"
+def todo_add(title: str, kind: str = "misc", project: str = None, description: str = None, due_at: str = None, recur_cron: str = None) -> str:
+    if kind == "recurring" and not recur_cron:
+        recur_cron = "daily"
     
     tid = _gen_id(title)
     now = _now_iso()
@@ -226,13 +227,15 @@ def todo_add(title: str, kind: str = "misc", project: str = None, description: s
     conn = _conn()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO todos (id, title, description, status, kind, project, created_at, updated_at, due_at)
-        VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)
-    """, (tid, title, description, kind, project, now, now, due_at))
+        INSERT INTO todos (id, title, description, status, kind, project, created_at, updated_at, due_at, recur_cron)
+        VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+    """, (tid, title, description, kind, project, now, now, due_at, recur_cron))
     conn.commit()
     conn.close()
     
     _render_markdown()
+    if kind == "recurring":
+        return f"✅ 成功添加周期任务模板: {title} (ID: {tid}, 周期: {recur_cron})"
     return f"✅ 成功添加待办事项: {title} (ID: {tid})"
 
 @skill(
@@ -430,21 +433,131 @@ def todo_dispatch(id: str, target: str = "manual") -> str:
     
     return f"❌ 暂不支持的 dispatch target: {target}"
 
+def _send_im_alert(title: str, text: str, color: str = "yellow", dedup_key: str = None):
+    """发送通用 IM 告警/通知到系统的 alert 通道"""
+    try:
+        import json
+        import urllib.request
+        url = os.environ.get("LITE_AGENT_ALERT_URL", "http://127.0.0.1:8887/api/v1/alert")
+        token = os.environ.get("API_AUTH_TOKEN", "")
+        payload = {
+            "title": title,
+            "text": text,
+            "color": color
+        }
+        if dedup_key:
+            payload["dedup_key"] = dedup_key
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            pass
+    except Exception as e:
+        print(f"[_send_im_alert] 推送跳过/异常: {e}")
+
+def _parse_target_hm_and_dow(recur_cron: str):
+    """
+    解析循环周期表达式，支持:
+    - 'daily', 'every_day', 'everyday' -> 每日 09:00
+    - 'weekly', 'every_monday' -> 每周一 09:00
+    - '09:00', '9:00', '14:30' -> 每日指定 HH:MM
+    - 5 字段 Cron 表达式（如 '0 9 * * *', '30 8 * * 1', '0 9 * * mon'）
+    """
+    if not recur_cron:
+        return "09:00", None
+        
+    s = recur_cron.strip().lower()
+    
+    if s in ("daily", "every_day", "everyday"):
+        return "09:00", None
+    elif s in ("weekly", "every_monday"):
+        return "09:00", 0  # 0代表周一
+        
+    # 匹配 HH:MM 格式 (如 9:00 或 09:30)
+    m_hm = re.match(r'^(\d{1,2}):(\d{2})$', s)
+    if m_hm:
+        h_val, m_val = int(m_hm.group(1)), int(m_hm.group(2))
+        return f"{h_val:02d}:{m_val:02d}", None
+        
+    # 匹配 5 字段 Standard Cron (如 "0 9 * * *" 或 "30 8 * * 1" 或 "0 9 * * mon")
+    parts = s.split()
+    if len(parts) == 5:
+        m_str, h_str, dom_str, mon_str, dow_str = parts
+        try:
+            m_val = int(m_str) if m_str != '*' else 0
+            h_val = int(h_str) if h_str != '*' else 9
+            
+            # Standard Cron: 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat, 7/0=Sun
+            dow_map = {
+                "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
+                "1": 0, "2": 1, "3": 2, "4": 3, "5": 4, "6": 5, "7": 6, "0": 6
+            }
+            if dow_str in dow_map:
+                dow_val = dow_map[dow_str]
+            elif dow_str != '*':
+                try:
+                    val = int(dow_str)
+                    dow_val = (val - 1) % 7 if val >= 1 else 6
+                except ValueError:
+                    dow_val = None
+            else:
+                dow_val = None
+                
+            return f"{h_val:02d}:{m_val:02d}", dow_val
+        except ValueError:
+            pass
+            
+    print(f"[_parse_target_hm_and_dow] 警告: 无法完全解析 Cron '{recur_cron}', 降级使用默认 (09:00)")
+    return "09:00", None
+
+def _should_spawn_recurring(recur_cron: str, last_spawned_at: str, now_iso_str: str) -> bool:
+    """判断在当前本地时间下，是否应当派生循环任务（完美对齐本地时区与 CronManager）"""
+    try:
+        local_now = datetime.fromisoformat(now_iso_str).astimezone()
+    except Exception:
+        local_now = datetime.now().astimezone()
+        
+    today_prefix = local_now.strftime("%Y-%m-%d")
+    
+    if last_spawned_at:
+        try:
+            last_dt = datetime.fromisoformat(last_spawned_at).astimezone()
+            last_date_str = last_dt.strftime("%Y-%m-%d")
+        except Exception:
+            last_date_str = last_spawned_at[:10]
+            
+        if today_prefix == last_date_str:
+            return False
+            
+    target_hm, target_dow = _parse_target_hm_and_dow(recur_cron)
+    
+    if target_dow is not None and local_now.weekday() != target_dow:
+        return False
+        
+    current_hm = local_now.strftime("%H:%M")
+    return current_hm >= target_hm
+
 def _todo_tick():
     now = _now_iso()
     conn = _conn()
     cursor = conn.cursor()
     
-    # Bug 1 fix: use datetime() for robust comparison
+    # 1. 自动唤醒 Snoozed 任务
     cursor.execute("""
         UPDATE todos SET status='pending', snoozed_until=NULL, updated_at=?
         WHERE status='snoozed' AND datetime(snoozed_until) <= datetime(?)
     """, (now, now))
     woken_count = cursor.rowcount
     
-    # Bug 1 fix: use datetime()
+    # 2. 检查 24h 内即到期或已超期的任务并推送到 IM
     cursor.execute("""
-        SELECT id, title, due_at, created_via FROM todos
+        SELECT id, title, due_at, created_via, project, kind, description FROM todos
         WHERE status IN ('pending','active')
           AND due_at IS NOT NULL
           AND notified_due_at IS NULL
@@ -453,20 +566,137 @@ def _todo_tick():
     due_soon = cursor.fetchall()
     
     for row in due_soon:
-        tid = row[0]
+        tid, title, due_at, created_via, project, kind, description = row[0], row[1], row[2], row[3], row[4], row[5], row[6]
         cursor.execute("UPDATE todos SET notified_due_at=?, updated_at=? WHERE id=?", (now, now, tid))
-        print(f"[todo_tick] 提醒任务到期 {tid} {row[1]}") # Output to stdout for log tracing (Gap 1)
         
+        is_overdue = due_at < now
+        tag = "🔴 已超期" if is_overdue else "⏰ 即将到期 (24h内)"
+        proj_info = f"【{project}】" if project else ""
+        
+        msg = f"{tag} {proj_info}\n**{title}**\n\n- 到期时间: {due_at}\n- 任务类型: {kind}\n- 任务 ID: `{tid}`"
+        if description:
+            msg += f"\n- 说明: {description[:100]}"
+            
+        print(f"[todo_tick] 提醒任务到期推送到 IM: {tid} {title}")
+        _send_im_alert(
+            title=f"⏰ 待办提醒: {title}",
+            text=msg,
+            color="red" if is_overdue else "yellow",
+            dedup_key=f"todo_due:{tid}"
+        )
+        
+    # 3. 检查循环/周期任务 (kind='recurring') 并自动派生子任务
+    cursor.execute("""
+        SELECT id, title, description, project, recur_cron, recur_last_spawned_at
+        FROM todos
+        WHERE kind = 'recurring' AND status != 'dropped'
+    """)
+    recurring_templates = cursor.fetchall()
+    
+    spawned_count = 0
+    local_now = datetime.now().astimezone()
+    for r in recurring_templates:
+        pid, ptitle, pdesc, pproj, rcron, rlast = r
+        if _should_spawn_recurring(rcron, rlast, now):
+            child_id = _gen_id(f"{ptitle}_{local_now.strftime('%Y-%m-%d')}")
+            due_time = local_now.strftime("%Y-%m-%dT18:00:00%z")
+            cursor.execute("""
+                INSERT INTO todos (id, title, description, status, kind, project, created_at, updated_at, recur_parent_id, due_at)
+                VALUES (?, ?, ?, 'pending', 'todo', ?, ?, ?, ?, ?)
+            """, (child_id, ptitle, pdesc, pproj, now, now, pid, due_time))
+            
+            cursor.execute("""
+                UPDATE todos SET recur_last_spawned_at=?, updated_at=? WHERE id=?
+            """, (now, now, pid))
+            spawned_count += 1
+            print(f"[todo_tick] 周期任务自动派生子任务: {child_id} ({ptitle})")
+            _send_im_alert(
+                title=f"🔄 周期任务自动派发: {ptitle}",
+                text=f"已自动派发今日周期任务：**{ptitle}** (`{child_id}`)\n- 所属项目: {pproj or '默认'}\n- 周期配置: `{rcron}`",
+                color="green",
+                dedup_key=f"todo_spawn:{child_id}"
+            )
+
     if woken_count > 0:
-        print(f"[todo_tick] 成功唤醒 {woken_count} 个任务") # Gap 1
+        print(f"[todo_tick] 成功唤醒 {woken_count} 个任务")
         
     conn.commit()
     conn.close()
     
-    if woken_count > 0 or due_soon:
+    if woken_count > 0 or due_soon or spawned_count > 0:
         _render_markdown()
 
-# Bug 5 fix: prevent duplicate job registration on module reload
+@skill(name="todo_push_brief", description="汇总当前待办事项并推送到 IM 聊天频道", params={})
+def todo_push_brief() -> str:
+    """按分类格式化当前未完成与超期待办并推送到 IM 通道"""
+    now = _now_iso()
+    conn = _conn()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        SELECT id, title, status, kind, project, due_at, description
+        FROM todos
+        WHERE status IN ('pending', 'active', 'snoozed')
+        ORDER BY CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, updated_at DESC
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    
+    today_prefix = now[:10]
+    
+    if not rows:
+        msg = f"📋 **每日待办简报 ({today_prefix})**\n\n🎉 当前没有任何待办事项，保持极佳状态！"
+        _send_im_alert(title=f"📋 每日待办简报 ({today_prefix})", text=msg, color="green", dedup_key=f"todo_brief:{today_prefix}")
+        return "✅ 无待办事项，已发送空简报"
+        
+    overdue = []
+    due_today = []
+    active = []
+    pending = []
+    
+    for r in rows:
+        tid, title, status, kind, project, due_at, desc = r
+        item_str = f"- **{title}** (`{tid}`)"
+        if project:
+            item_str += f" [{project}]"
+        if due_at:
+            item_str += f" *(到期: {due_at[:16]})*"
+            
+        if due_at and due_at < now:
+            overdue.append(item_str)
+        elif due_at and due_at.startswith(today_prefix):
+            due_today.append(item_str)
+        elif status == 'active':
+            active.append(item_str)
+        else:
+            pending.append(item_str)
+            
+    sections = [f"📋 **每日待办简报 ({today_prefix})**\n"]
+    if overdue:
+        sections.append(f"🔴 **已超期任务 ({len(overdue)})**:")
+        sections.extend(overdue)
+        sections.append("")
+    if due_today:
+        sections.append(f"⏰ **今日到期任务 ({len(due_today)})**:")
+        sections.extend(due_today)
+        sections.append("")
+    if active:
+        sections.append(f"🚀 **进行中任务 ({len(active)})**:")
+        sections.extend(active)
+        sections.append("")
+    if pending:
+        sections.append(f"📌 **待处理任务 ({len(pending)})**:")
+        sections.extend(pending)
+        sections.append("")
+        
+    text = "\n".join(sections).strip()
+    _send_im_alert(title=f"📋 每日待办简报 ({today_prefix})", text=text, color="blue", dedup_key=f"todo_brief:{today_prefix}")
+    return f"✅ 已成功推送每日待办简报（包含 {len(rows)} 条任务）"
+
+# 防重复注册 Job
 _mgr = CronManager()
 if not any(j.name == 'todo_tick' for j in _mgr.jobs.values()):
     _mgr.add_job('todo_tick', 'every_minute', _todo_tick)
+
+if not any(j.name == 'todo_brief' for j in _mgr.jobs.values()):
+    _mgr.add_job('todo_brief', '08:30', todo_push_brief)
