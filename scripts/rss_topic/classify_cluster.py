@@ -21,8 +21,8 @@ EMB = WORK + "/embeddings.npy"
 IDS = WORK + "/doc_ids.json"
 OUT = WORK + "/topic_labels.json"
 MODEL_ROOT = WORK + "/topic_model"
-MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"   # 换模型时改这里, dim 不符会让缓存自动失效
-MODEL_DIM = 384
+MODEL_NAME = "BAAI/bge-base-zh-v1.5"   # 换模型时改这里, dim 不符会让缓存自动失效
+MODEL_DIM = 768
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--mode", choices=["daily", "weekly"], default="weekly")
@@ -184,9 +184,10 @@ def main():
             try:
                 topics, _ = tm.fit_transform(texts, embeddings=em)
             except Exception as e:
+                import pandas as pd
                 print("  FAILED {}: {} -> all -1".format(cat, e), flush=True)
                 topics = [-1] * n
-                info = type("I", (), {"Topic": [-1], "Count": [n]})()
+                info = pd.DataFrame({"Topic": [-1], "Count": [n]})
                 reps = {}
             else:
                 info = tm.get_topic_info()
