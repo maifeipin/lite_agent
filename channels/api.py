@@ -979,27 +979,41 @@ class ApiHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(content_length)
         try:
             data = json.loads(body.decode('utf-8'))
-            status = data.get("status")
-            if not status:
-                self.send_error(400, "Bad Request: Missing status")
-                return
+            msg = []
 
-            from skills.ops_todo import todo_done, todo_start, todo_resume
-            if status == 'done':
-                msg = todo_done(tid)
-            elif status == 'active':
-                msg = todo_start(tid)
-            elif status == 'pending':
-                msg = todo_resume(tid)
-            else:
-                self.send_error(400, f"Unsupported status: {status}")
+            from skills.ops_todo import todo_done, todo_start, todo_resume, todo_update
+
+            status = data.get("status")
+            if status:
+                if status == 'done':
+                    msg.append(todo_done(tid))
+                elif status == 'active':
+                    msg.append(todo_start(tid))
+                elif status == 'pending':
+                    msg.append(todo_resume(tid))
+                else:
+                    self.send_error(400, f"Unsupported status: {status}")
+                    return
+
+            title = data.get("title")
+            description = data.get("description")
+            due_at = data.get("due_at")
+            project = data.get("project")
+            recur_cron = data.get("recur_cron")
+            kind = data.get("kind")
+
+            if any(x is not None for x in [title, description, due_at, project, recur_cron, kind]):
+                msg.append(todo_update(tid, title=title, description=description, due_at=due_at, project=project, recur_cron=recur_cron, kind=kind))
+
+            if not msg:
+                self.send_error(400, "Bad Request: No fields to update")
                 return
 
             self.send_response(200)
             self._send_cors_headers()
             self.send_header('Content-Type', 'application/json; charset=utf-8')
             self.end_headers()
-            self.wfile.write(json.dumps({"success": True, "message": msg}).encode('utf-8'))
+            self.wfile.write(json.dumps({"success": True, "message": " | ".join(msg)}).encode('utf-8'))
         except Exception as e:
             self.send_error(500, str(e))
 
