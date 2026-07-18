@@ -48,285 +48,11 @@ function registerTabModule(config) {
 }
 
 // ============================================================
-//  Module: emails (Meilisearch)
+//  Modules are loaded from web_dashboard/modules/*.js
+//  (emails.js, rss.js, todos.js, sessions.js)
 // ============================================================
-registerTabModule({
-    id: 'emails',
-    label: '邮件',
-    icon: '📧',
-    badgeId: 'badge-emails',
 
-    async fetchCount() {
-        try {
-            const r = await fetch('/agent/meili/indexes/emails/stats');
-            const d = await r.json();
-            return d.numberOfDocuments || 0;
-        } catch { return 0; }
-    },
 
-    async search(query, offset, limit, filter) {
-        const payload = {
-            q: query || '',
-            sort: ['date:desc'],
-            filter,
-            offset, limit,
-            facets: this.id === 'rss' ? ['category', 'topics', 'source'] : (FACET_SOURCES.has(this.id) ? ['source', 'type'] : undefined),
-            attributesToHighlight: ['subject', 'sender', 'plain_text', 'summary'],
-            highlightPreTag: '<mark>', highlightPostTag: '</mark>',
-        };
-        if (!payload.filter) delete payload.filter;
-        if (!payload.facets) delete payload.facets;
-        const r = await fetch('/agent/meili/indexes/emails/search', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
-        if (!r.ok) return { hits: [], total: 0, facets: {} };
-        const d = await r.json();
-        return {
-            hits: (d.hits || []).map(h => { h._module = 'emails'; return h; }),
-            total: d.estimatedTotalHits || d.totalHits || 0,
-            facets: d.facetDistribution || {},
-        };
-    },
-
-    renderCard(doc) {
-        const fmt = doc._formatted || {};
-        const subj = fmt.subject || doc.subject || '(无主题)';
-        const sender = fmt.sender || doc.sender || '';
-        const category = doc.category || '';
-        const imp = doc.importance || '';
-        const account = doc.account_name || '';
-        const date = (doc.email_date || '').slice(0, 16);
-        const summary = doc.summary || '';
-        const snippet = safeSnippet(fmt.plain_text || doc.plain_text || '', 120);
-        const uid = doc.uid || '';
-        const acc = doc.account_name || '';
-
-        let html = '<div class="card email-card">';
-        html += `<div class="card-meta"><span class="tag">${h(category)} / ${h(imp)}</span>`;
-        html += `<span class="sender">${h(sender)}</span>`;
-        html += `<span class="date">${date}</span>`;
-        if (account) html += `<span class="account-badge">${h(account)}</span>`;
-        html += '</div>';
-        html += `<h3 class="card-title">${subj}</h3>`;
-        if (summary) html += `<div class="ai-summary"><p>📝 ${h(summary)}</p></div>`;
-        html += `<div class="card-snippet">${snippet}</div>`;
-        html += `<div class="card-actions">`;
-        html += `<button class="btn-reprocess" data-account="${h(acc)}" data-uid="${h(uid)}">🔄 重新处理</button>`;
-        html += `<button class="btn-view-original" data-account="${h(acc)}" data-uid="${h(uid)}">📄 查看原文</button>`;
-        html += '</div></div>';
-        return html;
-    },
-
-    renderBadge(el, count) {
-        el.textContent = count;
-        el.style.display = '';
-    },
-});
-
-// ============================================================
-//  Module: rss (Meilisearch)
-// ============================================================
-registerTabModule({
-    id: 'rss',
-    label: 'RSS',
-    icon: '📰',
-    badgeId: 'badge-rss',
-
-    async fetchCount() {
-        try {
-            const r = await fetch('/agent/meili/indexes/rss/stats');
-            const d = await r.json();
-            return d.numberOfDocuments || 0;
-        } catch { return 0; }
-    },
-
-    async search(query, offset, limit, filter) {
-        const payload = {
-            q: query || '',
-            sort: ['date:desc'],
-            filter,
-            offset, limit,
-            facets: this.id === 'rss' ? ['category', 'topics', 'source'] : (FACET_SOURCES.has(this.id) ? ['source', 'type'] : undefined),
-            attributesToHighlight: ['title', 'content'],
-            highlightPreTag: '<mark>', highlightPostTag: '</mark>',
-        };
-        if (!payload.filter) delete payload.filter;
-        if (!payload.facets) delete payload.facets;
-        const r = await fetch('/agent/meili/indexes/rss/search', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
-        if (!r.ok) return { hits: [], total: 0, facets: {} };
-        const d = await r.json();
-        return {
-            hits: (d.hits || []).map(h => { h._module = 'rss'; return h; }),
-            total: d.estimatedTotalHits || d.totalHits || 0,
-            facets: d.facetDistribution || {},
-        };
-    },
-
-    renderCard(doc) {
-        const fmt = doc._formatted || {};
-        const title = fmt.title || doc.title || '(无标题)';
-        const link = doc.link || '';
-        const node = doc.node_name || '';
-        const published = (doc.published || '').slice(0, 16);
-        const content = safeSnippet(fmt.content || doc.content || '', 150);
-
-        let html = '<div class="card rss-card">';
-        html += `<div class="card-meta"><span class="tag">${h(node)}</span>`;
-        html += `<span class="date">${published}</span></div>`;
-        html += `<h3 class="card-title">`;
-        if (link) html += `<a href="${h(link)}" target="_blank" rel="noopener">${title}</a>`;
-        else html += title;
-        html += '</h3>';
-        html += `<div class="card-snippet">${content}</div></div>`;
-        return html;
-    },
-
-    renderBadge(el, count) {
-        el.textContent = count;
-        el.style.display = '';
-    },
-});
-
-// ============================================================
-//  Module: todos (HTTP API)
-// ============================================================
-registerTabModule({
-    id: 'todos',
-    label: '待办',
-    icon: '✅',
-    badgeId: 'badge-todos',
-
-    async fetchCount() {
-        try {
-            const r = await fetch('/agent/api/v1/todos?status=pending,active');
-            const d = await r.json();
-            return (d.data || []).length;
-        } catch { return 0; }
-    },
-
-    async _fetchAll() {
-        const r = await fetch('/agent/api/v1/todos?status=pending,active');
-        const d = await r.json();
-        return (d.data || []).map(t => { t._module = 'todos'; return t; });
-    },
-
-    async search(query, offset, limit) {
-        const all = await this._fetchAll();
-        let filtered = all;
-        if (query) {
-            const q = query.toLowerCase();
-            filtered = all.filter(t =>
-                (t.title || '').toLowerCase().includes(q) ||
-                (t.description || '').toLowerCase().includes(q)
-            );
-        }
-        return { hits: filtered.slice(offset, offset + limit), total: filtered.length };
-    },
-
-    renderCard(doc) {
-        const kind = doc.kind || 'todo';
-        const kindIcons = { code: '💻', note: '📝', todo: '📋', review: '👀' };
-        const icon = kindIcons[kind] || '📌';
-        const project = doc.project || '';
-        const title = doc.title || '(无标题)';
-        const updated = (doc.updated_at || '').slice(0, 16);
-        const status = doc.status || 'pending';
-        const statusText = { pending: '待处理', active: '进行中', done: '已完成' }[status] || status;
-
-        let html = '<div class="card todo-card">';
-        html += `<div class="card-meta"><span class="tag">${icon} ${h(kind)}</span>`;
-        if (project) html += `<span class="tag">${h(project)}</span>`;
-        html += `<span class="date">${updated}</span>`;
-        html += `<span class="tag status-tag">${statusText}</span></div>`;
-        html += `<h3 class="card-title">${h(title)}</h3>`;
-        if (doc.description) html += `<div class="card-snippet">${h(doc.description.slice(0, 200))}</div>`;
-        html += '</div>';
-        return html;
-    },
-
-    renderBadge(el, count) {
-        el.textContent = count;
-        el.style.display = '';
-    },
-});
-
-// ============================================================
-//  Module: sessions (NEW — SQLite via API)
-// ============================================================
-registerTabModule({
-    id: 'sessions',
-    label: '会话',
-    icon: '💬',
-    badgeId: 'badge-sessions',
-
-    async fetchCount() {
-        try {
-            const r = await fetch('/agent/api/v1/sessions?limit=1');
-            const d = await r.json();
-            return d.total || 0;
-        } catch { return 0; }
-    },
-
-    async search(query, offset, limit) {
-        try {
-            const r = await fetch(`/agent/api/v1/sessions?limit=${limit}`);
-            const d = await r.json();
-            let items = (d.sessions || []).map(s => { s._module = 'sessions'; return s; });
-            if (query) {
-                const q = query.toLowerCase();
-                items = items.filter(s =>
-                    (s.channel || '').toLowerCase().includes(q) ||
-                    (s.model || '').toLowerCase().includes(q) ||
-                    (s.goal || '').toLowerCase().includes(q)
-                );
-            }
-            return { hits: items.slice(offset, offset + limit), total: d.total || 0 };
-        } catch {
-            return { hits: [], total: 0 };
-        }
-    },
-
-    renderCard(doc) {
-        const icon = doc.channel_icon || '🔌';
-        const channel = doc.channel || '?';
-        const status = doc.status || 'chatting';
-        const statusMap = { chatting: '闲聊', working: '执行中', archived: '已归档' };
-        const statusText = statusMap[status] || status;
-        const statusColor = status === 'working' ? 'var(--warning)' : (status === 'archived' ? 'var(--text-muted)' : 'var(--success)');
-        const model = doc.model || '—';
-        const tokenUsage = formatTokens(doc.token_usage || 0);
-        const toolCalls = doc.tool_calls || 0;
-        const goal = doc.goal || '';
-        const updated = doc.updated_at ? new Date(doc.updated_at * 1000).toLocaleString('zh-CN') : '—';
-
-        let html = '<div class="card session-card">';
-        html += '<div class="card-meta">';
-        html += `<span class="tag">${icon} ${h(channel)}</span>`;
-        html += `<span class="tag status-tag" style="color:${statusColor}">● ${statusText}</span>`;
-        html += `<span class="date">${updated}</span>`;
-        html += '</div>';
-        if (goal) html += `<div class="ai-summary"><p>🎯 ${h(goal)}</p></div>`;
-        html += '<div class="session-stats">';
-        html += `<span title="Token 消耗">🪙 ${tokenUsage}</span>`;
-        html += `<span title="工具调用次数">🔧 ${toolCalls} 次</span>`;
-        html += `<span title="LLM 模型">🧠 ${h(model)}</span>`;
-        html += '</div>';
-        html += '<div class="card-actions">';
-        html += `<button class="card-btn btn-view-session" data-session="${h(doc.session_key)}">📋 查看对话</button>`;
-        html += '</div>';
-        html += '</div>';
-        return html;
-    },
-
-    renderBadge(el, count) {
-        el.textContent = count;
-        el.style.display = '';
-    },
-});
 
 // ============================================================
 //  Helpers
@@ -633,9 +359,20 @@ function initIntersectionObserver() {
 // ============================================================
 //  Filter Button Events
 // ============================================================
+function _callLifecycle(hook, container) {
+    const mod = tabModules[state.activeSource];
+    if (mod && typeof mod[hook] === 'function') {
+        try { mod[hook](container); } catch(e) { console.warn('[lifecycle]', hook, e); }
+    }
+}
+
 function initFilterButtons() {
+    const container = document.querySelector('.main-container') || document.body;
     document.querySelectorAll('.filter-btn').forEach(btn => {
         btn.addEventListener('click', () => {
+            // Unmount current tab
+            _callLifecycle('onUnmount', container);
+
             document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
             state.activeSource = btn.getAttribute('data-source');
@@ -643,6 +380,9 @@ function initFilterButtons() {
             state.activeFilters = {};
             performSearch(false);
             updateFacetPanelVisibility();
+
+            // Mount new tab (deferred so render completes first)
+            setTimeout(() => _callLifecycle('onMount', container), 50);
         });
     });
 }
@@ -1172,4 +912,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Load initial data
     fetchAllStats();
     performSearch(false);
+
+    // Mount the default active tab
+    const container = document.querySelector('.main-container') || document.body;
+    setTimeout(() => _callLifecycle('onMount', container), 100);
 });

@@ -16,7 +16,7 @@ class ApiHandler(BaseHTTPRequestHandler):
     
     def _send_cors_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type')
 
     def do_OPTIONS(self):
@@ -127,6 +127,32 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_edge_task()
         elif parsed_url.path == '/api/v1/ocr':
             self._handle_ocr_proxy()
+        elif parsed_url.path == '/api/v1/todos':
+            self._handle_post_todo()
+        else:
+            self.send_error(404, "Not Found")
+
+    def do_PATCH(self):
+        parsed_url = urlparse(self.path)
+        if getattr(self, 'is_edge', False):
+            self.send_error(403, "Forbidden")
+            return
+        if not self._auth():
+            return
+        if parsed_url.path.startswith('/api/v1/todos/'):
+            self._handle_patch_todo(parsed_url.path)
+        else:
+            self.send_error(404, "Not Found")
+
+    def do_DELETE(self):
+        parsed_url = urlparse(self.path)
+        if getattr(self, 'is_edge', False):
+            self.send_error(403, "Forbidden")
+            return
+        if not self._auth():
+            return
+        if parsed_url.path.startswith('/api/v1/todos/'):
+            self._handle_delete_todo(parsed_url.path)
         else:
             self.send_error(404, "Not Found")
 
@@ -899,6 +925,98 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json; charset=utf-8')
             self.end_headers()
             self.wfile.write(json.dumps({"success": True, "data": todos}).encode('utf-8'))
+        except Exception as e:
+            self.send_error(500, str(e))
+
+    def _handle_post_todo(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length == 0:
+            self.send_error(400, "Bad Request: Empty body")
+            return
+        body = self.rfile.read(content_length)
+        try:
+            data = json.loads(body.decode('utf-8'))
+            title = data.get("title")
+            if not title:
+                self.send_error(400, "Bad Request: Missing title")
+                return
+            kind = data.get("kind", "misc")
+            project = data.get("project")
+            description = data.get("description")
+            due_at = data.get("due_at")
+
+            from skills.ops_todo import todo_add
+            msg = todo_add(title=title, kind=kind, project=project, description=description, due_at=due_at)
+            
+            self.send_response(200)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "message": msg}).encode('utf-8'))
+        except Exception as e:
+            self.send_error(500, str(e))
+
+    def _handle_patch_todo(self, path: str):
+        tid = path.split('/')[-1]
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length == 0:
+            self.send_error(400, "Bad Request: Empty body")
+            return
+        body = self.rfile.read(content_length)
+        try:
+            data = json.loads(body.decode('utf-8'))
+            status = data.get("status")
+            if not status:
+                self.send_error(400, "Bad Request: Missing status")
+                return
+
+            from skills.ops_todo import todo_done, todo_start, todo_resume
+            if status == 'done':
+                msg = todo_done(tid)
+            elif status == 'active':
+                msg = todo_start(tid)
+            elif status == 'pending':
+                msg = todo_resume(tid)
+            else:
+                self.send_error(400, f"Unsupported status: {status}")
+                return
+
+            self.send_response(200)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "message": msg}).encode('utf-8'))
+        except Exception as e:
+            self.send_error(500, str(e))
+
+    def _handle_delete_todo(self, path: str):
+        tid = path.split('/')[-1]
+        try:
+            from skills.ops_todo import _conn, _render_markdown
+            import sqlite3
+            conn = _conn()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM todos WHERE id=?", (tid,))
+            rowcount = cursor.rowcount
+            conn.commit()
+            conn.close()
+
+            if rowcount > 0:
+                _render_markdown()
+                msg = f"✅ 任务 {tid} 已被永久删除"
+            else:
+                self.send_response(404)
+                self._send_cors_headers()
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": False, "detail": f"Todo {tid} not found"}).encode('utf-8'))
+                return
+
+            self.send_response(200)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "message": msg}).encode('utf-8'))
         except Exception as e:
             self.send_error(500, str(e))
 

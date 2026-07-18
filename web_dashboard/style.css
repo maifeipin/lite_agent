@@ -1221,3 +1221,69 @@ body {
     color: var(--text-muted);
     line-height: 1.5;
 }
+
+/* ============================================================
+   Todo Management UI
+   ============================================================ */
+.todo-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.todo-btn {
+    padding: 0.3rem 0.8rem;
+    border-radius: 6px;
+    border: none;
+    font-size: 0.78rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.15s, transform 0.1s;
+}
+.todo-btn:hover { opacity: 0.85; transform: translateY(-1px); }
+.todo-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+.todo-btn-start  { background: hsl(210, 80%, 55%); color: #fff; }
+.todo-btn-done   { background: hsl(145, 60%, 45%); color: #fff; }
+.todo-btn-del    { background: transparent; color: var(--danger, #e55); border: 1px solid currentColor; }
+.todo-btn-del:hover { background: hsl(0, 70%, 20%); }
+
+/* Quick-add form injected by todos.js onMount */
+.todo-create-form {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    margin-top: 0.75rem;
+    flex: 1 0 100%;
+}
+.todo-create-form input[type="text"] {
+    flex: 1;
+    padding: 0.45rem 0.8rem;
+    border-radius: 8px;
+    border: 1px solid var(--border, rgba(255,255,255,0.15));
+    background: var(--surface2, rgba(255,255,255,0.06));
+    color: var(--text, #e8e8e8);
+    font-size: 0.88rem;
+    outline: none;
+    transition: border-color 0.2s;
+}
+.todo-create-form input[type="text"]:focus {
+    border-color: hsl(210, 80%, 55%);
+}
+.todo-create-form button {
+    padding: 0.45rem 1rem;
+    background: hsl(210, 80%, 55%);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: opacity 0.15s;
+}
+.todo-create-form button:hover { opacity: 0.85; }
+.todo-create-form button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.due-tag    { background: hsl(200, 60%, 30%); color: #aef; }
+.due-overdue { background: hsl(0, 60%, 30%); color: #faa; }
