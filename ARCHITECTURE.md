@@ -463,7 +463,7 @@ scp file.py vps1:/root/lite_agent/   # 部署单文件
 | 多模型路由 | ✅ (ModelRouter 支持跨模型调度与降级) |
 | Web 管理面板 | ❌ |
 | Web 控制台通道 / API | ✅ (完美兼容 OpenAI 接口与 Guest 模式) |
-| OCR / TTS / STT | ❌ |
+| OCR / TTS / STT | ⚠️ OCR ✅ (dashboard集成 + 渠道调外置 OCR_ENDPOINT) / TTS·STT ✅ (实现于 C# RssAdapter 项目) |
 | 多 Agent 长任务 | ✅ (TaskOrchestrator 编排子任务) |
 | 文件识别 | ❌ |
 | 支付集成 | ❌ (计划中) |
@@ -473,7 +473,7 @@ scp file.py vps1:/root/lite_agent/   # 部署单文件
 ## 15. Roadmap / 预留扩展点
 
 1. **Web 管理面板**：Flask/FastAPI 独立进程，读 sessions.db，展示状态
-2. **OCR/TTS/STT**：新增 `skills/ops_ocr.py` 等，调外部 API
+2. **OCR** ✅ (已通过 web dashboard 整合 + 外置 `OCR_ENDPOINT` 视觉模型实现)；**TTS/STT** ✅ (已由 C# `RssAdapter` 原生实现)；未来可在此新增对应 `skills/` 直接接入
 3. **支付集成**：支付宝 SDK，`skills/ops_pay.py`
 
 ---
