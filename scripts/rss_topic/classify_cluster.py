@@ -38,7 +38,7 @@ SOURCE_MAP = {
     "baai.ac.cn": "AI与学术", "openreview.net": "AI与学术",
     "linux.do": "技术社区", "v2ex.com": "技术社区", "juejin.cn": "技术社区",
     "blog.csdn.net": "技术社区", "oschina.net": "技术社区", "infoq.com": "技术社区",
-    "reddit.com": "技术社区", "eibo.com": "技术社区", "github.com": "技术社区",
+    "reddit.com": "技术社区", "github.com": "技术社区",
     "segmentfault.com": "技术社区", "cnblogs.com": "技术社区", "jianshu.com": "技术社区",
     "ithome.com": "科技资讯", "36kr.com": "科技资讯", "huxiu.com": "科技资讯",
     "tmtpost.com": "科技资讯", "jiqizhixin.com": "科技资讯", "qbitai.com": "科技资讯",
