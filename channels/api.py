@@ -129,6 +129,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_ocr_proxy()
         elif parsed_url.path == '/api/v1/todos':
             self._handle_post_todo()
+        elif parsed_url.path == '/api/v1/todos/brief/push':
+            self._handle_post_todo_brief_push()
         else:
             self.send_error(404, "Not Found")
 
@@ -948,6 +950,18 @@ class ApiHandler(BaseHTTPRequestHandler):
             from skills.ops_todo import todo_add
             msg = todo_add(title=title, kind=kind, project=project, description=description, due_at=due_at)
             
+            self.send_response(200)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "message": msg}).encode('utf-8'))
+        except Exception as e:
+            self.send_error(500, str(e))
+
+    def _handle_post_todo_brief_push(self):
+        try:
+            from skills.ops_todo import todo_push_brief
+            msg = todo_push_brief()
             self.send_response(200)
             self._send_cors_headers()
             self.send_header('Content-Type', 'application/json; charset=utf-8')
