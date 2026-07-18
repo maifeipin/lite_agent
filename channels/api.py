@@ -123,8 +123,39 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_task_result()
         elif parsed_url.path == '/api/edge_task':
             self._handle_edge_task()
+        elif parsed_url.path == '/api/v1/ocr':
+            self._handle_ocr_proxy()
         else:
             self.send_error(404, "Not Found")
+
+    def _handle_ocr_proxy(self):
+        import os
+        import requests
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length == 0:
+            self.send_error(400, "Bad Request: Empty body")
+            return
+            
+        body = self.rfile.read(content_length)
+        ocr_url = os.environ.get('OCR_ENDPOINT', 'http://127.0.0.1:8000/api/ocr')
+        
+        headers = {
+            'Content-Type': self.headers.get('Content-Type')
+        }
+        
+        try:
+            res = requests.post(ocr_url, data=body, headers=headers, timeout=30)
+            self.send_response(res.status_code)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(res.content)
+        except Exception as e:
+            self.send_response(500)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"detail": f"OCR Proxy error: {str(e)}"}).encode('utf-8'))
 
     def _handle_chat_or_task(self):
         content_length = int(self.headers.get('Content-Length', 0))

@@ -777,9 +777,24 @@ function initChatDrawer() {
     const closeBtn = document.getElementById('close-drawer-btn');
     const input = document.getElementById('chat-input');
     const sendBtn = document.getElementById('chat-send-btn');
+    const ocrBtn = document.getElementById('chat-ocr-btn');
+    const ocrFileInput = document.getElementById('chat-ocr-file-input');
+
+    const fullscreenBtn = document.getElementById('fullscreen-drawer-btn');
 
     fab.addEventListener('click', () => drawer.classList.add('open'));
-    closeBtn.addEventListener('click', () => drawer.classList.remove('open'));
+    closeBtn.addEventListener('click', () => {
+        drawer.classList.remove('open');
+        drawer.classList.remove('fullscreen');
+    });
+
+    if (fullscreenBtn) {
+        fullscreenBtn.addEventListener('click', () => {
+            drawer.classList.toggle('fullscreen');
+            const isFullscreen = drawer.classList.contains('fullscreen');
+            fullscreenBtn.title = isFullscreen ? '退出全屏' : '全屏';
+        });
+    }
 
     function doSend() {
         const text = input.value.trim();
@@ -796,6 +811,75 @@ function initChatDrawer() {
             doSend();
         }
     });
+
+    // Handle OCR Upload Button
+    if (ocrBtn && ocrFileInput) {
+        ocrBtn.addEventListener('click', () => ocrFileInput.click());
+        ocrFileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                handleOcrUpload(file);
+            }
+            ocrFileInput.value = ''; // Reset to allow uploading same file
+        });
+    }
+
+    // Intercept Paste events for clipboard image OCR
+    input.addEventListener('paste', (e) => {
+        const items = (e.clipboardData || e.originalEvent.clipboardData).items;
+        for (const item of items) {
+            if (item.type.indexOf('image') === 0) {
+                e.preventDefault();
+                const file = item.getAsFile();
+                handleOcrUpload(file);
+                break;
+            }
+        }
+    });
+
+    async function handleOcrUpload(file) {
+        const originalPlaceholder = input.placeholder;
+        input.value = '';
+        input.placeholder = '📷 OCR 正在解析图片，请稍候...';
+        input.disabled = true;
+        sendBtn.disabled = true;
+        if (ocrBtn) {
+            ocrBtn.disabled = true;
+            ocrBtn.style.opacity = 0.5;
+        }
+
+        const formData = new FormData();
+        formData.append('file', file);
+
+        try {
+            const response = await fetch('/agent/api/v1/ocr', {
+                method: 'POST',
+                body: formData
+            });
+
+            const data = await response.json();
+            const textToInsert = data.markdown || data.text;
+            if (response.ok && textToInsert) {
+                const startPos = input.selectionStart;
+                const endPos = input.selectionEnd;
+                input.value = input.value.substring(0, startPos) + textToInsert + input.value.substring(endPos);
+                input.selectionStart = input.selectionEnd = startPos + textToInsert.length;
+            } else {
+                alert('OCR 解析失败: ' + (data.detail || '未知错误'));
+            }
+        } catch (error) {
+            alert('OCR 请求出错: ' + error.message);
+        } finally {
+            input.placeholder = originalPlaceholder;
+            input.disabled = false;
+            sendBtn.disabled = false;
+            if (ocrBtn) {
+                ocrBtn.disabled = false;
+                ocrBtn.style.opacity = 1;
+            }
+            input.focus();
+        }
+    }
 }
 
 function appendChatBubble(role, html) {
