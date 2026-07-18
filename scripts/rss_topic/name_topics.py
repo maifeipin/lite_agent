@@ -10,8 +10,6 @@ DEEPSEEK_API_KEY 从环境变量读。用法:
 import os, json, time, urllib.request
 from paths import cfg
 
-KEY = os.environ["DEEPSEEK_API_KEY"]
-BASE = cfg("deepseek_base_url", "https://api.deepseek.com/v1/chat/completions")
 TL = cfg("vps_tmp_dir", "/tmp") + "/topic_labels.json"
 CACHE = cfg("vps_work_dir", "/home/liteagent/rss_topic_work") + "/topic_names_cache.json"
 
@@ -29,16 +27,39 @@ PROMPT = ("以下是一组 RSS 文章的标题样本(可能含少量噪声):\n{t
           "(如「大模型应用」「前端开发」「融资动态」「科技资讯」),"
           "只返回主题名本身,不要引号、解释、标点。")
 
-def deepseek_name(titles):
+def llm_name(titles):
+    # Try Doubao (Ark) first
+    key = os.environ.get("ARK_API_KEY") or os.environ.get("LLM_API_KEY")
+    base_url = os.environ.get("LLM_BASE_URL")
+    model = os.environ.get("LLM_MODEL", "doubao-seed-2.0-mini")
+    
+    if not key:
+        # Fallback to DeepSeek
+        key = os.environ.get("DEEPSEEK_API_KEY")
+        base_url = "https://api.deepseek.com/v1/chat/completions"
+        model = "deepseek-chat"
+        
+    if not key:
+        raise ValueError("No LLM API Key found (ARK_API_KEY or DEEPSEEK_API_KEY)")
+        
+    if not base_url:
+        base_url = "https://ark.cn-beijing.volces.com/api/v3"
+        
+    if not base_url.endswith("/chat/completions"):
+        endpoint = base_url.rstrip("/") + "/chat/completions"
+    else:
+        endpoint = base_url
+        
     body = json.dumps({
-        "model": "deepseek-chat",
+        "model": model,
         "messages": [{"role": "user", "content": PROMPT.format(titles="\n".join(titles))}],
         "max_tokens": 20, "temperature": 0.1,
     }).encode()
-    r = urllib.request.Request(BASE, data=body, method="POST",
-                               headers={"Authorization": "Bearer " + KEY, "Content-Type": "application/json"})
+    
+    r = urllib.request.Request(endpoint, data=body, method="POST",
+                               headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
     with urllib.request.urlopen(r, timeout=30) as resp:
-        d = json.loads(resp.read())
+        d = json.loads(resp.read().decode("utf-8"))
     return d["choices"][0]["message"]["content"].strip().strip("\"'""''。., ").replace("\n", "")
 
 # 按文档数降序命名
@@ -55,7 +76,7 @@ for key in order:
         continue
     for attempt in range(3):
         try:
-            name = deepseek_name(titles[:12])
+            name = llm_name(titles[:12])
             if len(name) > 12:
                 name = name[:12]
             names[key] = name or "未分类"
