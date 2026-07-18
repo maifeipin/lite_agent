@@ -150,9 +150,48 @@ def _handle_large_content(text: str, title: str) -> str:
     return text[:2400] + "\n\n...(内容超长已自动截断)"
 
 
-def _parse_high_importance(res: str) -> str:
-    """从 mail_client.py fetch_summaries 输出中解析高优邮件并格式化推送卡片。"""
+def _parse_email_datetime(date_str: str):
+    """解析各种格式的邮件时间字符串，返回 UTC datetime（解析失败返回 None）"""
+    if not date_str:
+        return None
+    from datetime import datetime, timezone
+    from email.utils import parsedate_to_datetime
+    
+    # 1. 尝试 email.utils (标准 RFC 2822 邮件时间格式)
+    try:
+        dt = parsedate_to_datetime(date_str)
+        if dt:
+            return dt.astimezone(timezone.utc)
+    except Exception:
+        pass
+
+    # 2. 尝试 ISO 格式
+    try:
+        clean_str = date_str.split('(')[0].strip()
+        dt = datetime.fromisoformat(clean_str.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        pass
+
+    # 3. 尝试常用日期时间格式
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(date_str[:19], fmt)
+            return dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+
+    return None
+
+
+def _parse_high_importance(res: str, max_days: int = 3) -> str:
+    """从 mail_client.py fetch_summaries 输出中解析高优邮件并格式化推送卡片。
+    加入 3 天 (max_days) 超时过滤：超过 3 天的历史高优邮件自动过滤跳过推送。
+    """
     import re, json
+    from datetime import datetime, timezone, timedelta
     match = re.search(r'--- JSON_PUSH_START ---\n(.*?)\n--- JSON_PUSH_END ---', res, re.DOTALL)
     if not match:
         return ""
@@ -163,8 +202,17 @@ def _parse_high_importance(res: str) -> str:
     if not summaries:
         return ""
 
+    now_utc = datetime.now(timezone.utc)
+    cutoff_dt = now_utc - timedelta(days=max_days)
+
     card_lines = []
     for s in summaries:
+        ed_str = s.get('email_date') or ""
+        dt = _parse_email_datetime(ed_str)
+        if dt and dt < cutoff_dt:
+            print(f"  ⏭️ [WeCom Push] 过滤超过 {max_days} 天的历史高优邮件: {s.get('subject')} ({ed_str})")
+            continue
+
         card_text = (
             f"✉️ **[ID: {s.get('id')}] [账户: {s.get('account_name', 'default')}] 邮件提炼：{s.get('subject', '无主题')}**\n"
             f"👤 **发件人**：{s.get('sender')}\n"
