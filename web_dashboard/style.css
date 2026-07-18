@@ -1287,3 +1287,96 @@ body {
 
 .due-tag    { background: hsl(200, 60%, 30%); color: #aef; }
 .due-overdue { background: hsl(0, 60%, 30%); color: #faa; }
+
+/* Extended Todo Creation & Inline Edit Panel */
+.todo-create-bar {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    width: 100%;
+    margin-top: 0.75rem;
+    background: var(--surface2, rgba(255,255,255,0.04));
+    padding: 0.75rem;
+    border-radius: 10px;
+    border: 1px solid var(--border, rgba(255,255,255,0.1));
+}
+
+.create-primary-row, .create-more-row, .edit-row {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.todo-create-bar input[type="text"],
+.todo-create-bar input[type="datetime-local"],
+.todo-create-bar select,
+.todo-edit-panel input[type="text"],
+.todo-edit-panel input[type="datetime-local"],
+.todo-edit-panel select {
+    padding: 0.45rem 0.75rem;
+    border-radius: 8px;
+    border: 1px solid var(--border, rgba(255,255,255,0.15));
+    background: var(--surface, rgba(15,23,42,0.6));
+    color: var(--text, #e8e8e8);
+    font-size: 0.85rem;
+    outline: none;
+    transition: border-color 0.2s;
+}
+
+.create-primary-row #todo-new-title { flex: 2; min-width: 180px; }
+.create-primary-row #todo-new-kind { min-width: 110px; }
+.create-more-row #todo-new-due { flex: 1; min-width: 160px; }
+.create-more-row #todo-new-cron { flex: 1; min-width: 160px; }
+.create-more-row #todo-new-project { flex: 1; min-width: 130px; }
+
+#todo-toggle-more {
+    padding: 0.45rem 0.8rem;
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.2);
+    color: var(--text-muted, #aaa);
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.82rem;
+}
+#todo-toggle-more.active {
+    border-color: hsl(210, 80%, 55%);
+    color: hsl(210, 80%, 65%);
+}
+
+#todo-new-submit {
+    padding: 0.45rem 1.2rem;
+    background: hsl(210, 80%, 55%);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+
+.todo-btn-reset { background: hsl(35, 80%, 50%); color: #fff; }
+.todo-btn-toggle-edit { background: rgba(255,255,255,0.1); color: var(--text, #e8e8e8); border: 1px solid rgba(255,255,255,0.2); }
+.todo-btn-save-edit { background: hsl(145, 60%, 45%); color: #fff; }
+.todo-btn-cancel-edit { background: transparent; color: var(--text-muted); border: 1px solid rgba(255,255,255,0.2); }
+
+.todo-edit-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+    padding: 0.75rem;
+    background: rgba(0,0,0,0.25);
+    border-radius: 8px;
+    border: 1px dashed rgba(255,255,255,0.2);
+}
+
+.edit-row .edit-title { flex: 3; min-width: 160px; }
+.edit-row .edit-kind { flex: 1; min-width: 110px; }
+.edit-row .edit-project { flex: 1; min-width: 120px; }
+.edit-row .edit-due { flex: 1; min-width: 150px; }
+.edit-row .edit-cron { flex: 1; min-width: 150px; }
+.edit-row .edit-desc { flex: 3; min-width: 200px; }
+
+.cron-tag { background: hsl(270, 50%, 30%); color: #dcd; }
+.tag-project { background: hsl(180, 50%, 25%); color: #adf; }

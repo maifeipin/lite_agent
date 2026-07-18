@@ -367,7 +367,9 @@ def todo_resume(id: str) -> str:
     return _update_todo_status(id, "pending", {
         "snoozed_until": None,
         "shelved_at": None,
-        "shelved_reason": None
+        "shelved_reason": None,
+        "notified_due_at": None,
+        "completed_at": None
     })
 
 @skill(
@@ -378,16 +380,20 @@ def todo_resume(id: str) -> str:
         "title": {"type": "string", "description": "新标题"},
         "description": {"type": "string", "description": "新详情"},
         "due_at": {"type": "string", "description": "新到期时间 ISO8601"},
-        "project": {"type": "string", "description": "新项目"}
+        "project": {"type": "string", "description": "新项目"},
+        "recur_cron": {"type": "string", "description": "新循环周期"},
+        "kind": {"type": "string", "description": "新任务分类"}
     }
 )
-def todo_update(id: str, title: str = None, description: str = None, due_at: str = None, project: str = None) -> str:
+def todo_update(id: str, title: str = None, description: str = None, due_at: str = None, project: str = None, recur_cron: str = None, kind: str = None) -> str:
     conn = _conn()
     fields = {"updated_at": _now_iso()}
     if title is not None: fields["title"] = title
     if description is not None: fields["description"] = description
     if due_at is not None: fields["due_at"] = due_at
     if project is not None: fields["project"] = project
+    if recur_cron is not None: fields["recur_cron"] = recur_cron
+    if kind is not None: fields["kind"] = kind
     
     set_clause = ", ".join([f"{k}=?" for k in fields.keys()])
     values = list(fields.values()) + [id]
