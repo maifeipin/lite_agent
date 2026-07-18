@@ -81,9 +81,10 @@ ssh vps1 "grep RSSDB_URI <vps_env_file> | head -1"
 ```
 scripts/rss_topic/                    (仓库, committed - 脚本源头)
 ├── run_rss2meili.sh                  ← 主调度 (Mac)
-├── step2a_export.py                  ← Meili 导出 (--days N, vps1)
-├── step2b_mongo_enrich.py            ← Mongo 取 excerpt -> rss_all.jsonl (vps1)
-├── step2c_backfill.py                ← Mongo 回补 content/published/date (vps1)
+├── step2_export_qdrant.py            ← 推荐: Qdrant 导出正文与向量 (--days N, vps1/local)
+├── step2a_export.py                  ← [历史/备用] Meili 导出 (--days N, vps1)
+├── step2b_mongo_enrich.py            ← [历史/备用] Mongo 取 excerpt -> rss_all.jsonl (vps1)
+├── step2c_backfill.py                ← [历史/备用] Mongo 回补 content/published/date (vps1)
 ├── classify_cluster.py               ← BERTopic --mode daily/weekly (Mac)
 ├── name_topics.py                    ← DeepSeek 标题样本命名 (vps1)
 ├── push_topics_v2.py                 ← upsert category/topics/content (vps1)
@@ -107,19 +108,15 @@ vps1:<vps_work_dir>/                   (vps1, 数据 + 部署的脚本)
 
 ## 各 Stage 详解
 
-### Stage 2: Meili 导出 + Mongo 取 excerpt (vps1)
-**修正**: 不用 mongoexport 扫全 Mongo(2M 篇, 取 content=None 正文空)。改从 **Meili 导 id** + 回 Mongo 取 **excerpt**(真正正文)。
+### Stage 2: Qdrant 导出文本与向量 (vps1 / local)
+**优化**: 直接从 Qdrant Payload 提取清洗后的文章摘要 (`Excerpt`) 与预计算 768 维向量，完全跳过与 MongoDB 的低效查询。
 ```bash
-# run_rss2meili.sh 内部已串好; 手动:
-ssh vps1 'export MEILI_MASTER_KEY="$(grep ^MEILI_MASTER_KEY= <vps_env_file>|cut -d= -f2-)";
-         export RSSDB_URI="$(grep ^RSSDB_URI= <vps_env_file>|cut -d= -f2-)";
-         cd <vps_work_dir> &&
-         python3 step2a_export.py --days 1 &&    # daily: 只近24h; weekly: 不带 --days 全量
-         python3 step2b_mongo_enrich.py &&       # ObjectId gen_month±1 回 Mongo 取 excerpt(strip HTML)
-         python3 step2c_backfill.py'             # 回补 content/published/date
-scp vps1:<vps_work_dir>/rss_all.jsonl <mac_work_dir>/rss_all.jsonl
+# 推荐新链路 (单脚本一步完成导出):
+python3 step2_export_qdrant.py --days 1 --with-vectors
+
+# 兼容历史链路 (Meili + Mongo):
+# python3 step2a_export.py --days 1 && python3 step2b_mongo_enrich.py && python3 step2c_backfill.py
 ```
-- ObjectId 前 4 字节=时间戳, 推断月份, 查 gen_month-1/0/+1 三个候选集合($in 批量), 100% 命中。
 
 ### Stage 3: 分类内 BERTopic (Mac, classify_cluster.py --mode)
 **修正**: 原 doc 的 stage3_cluster.py 有 bug(只取1个category、O(n²)重读文件、daily是stub)。用 `classify_cluster.py`。

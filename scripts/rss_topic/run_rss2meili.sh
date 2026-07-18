@@ -25,7 +25,8 @@ echo "===== RSS pipeline: $MODE ($(date)) ====="
 
 echo "===== 0. 部署 vps1 脚本 -> $VPS_WORK ====="
 ssh vps1 "mkdir -p $VPS_WORK/history"
-scp "$SCRIPTS"/step2a_export.py "$SCRIPTS"/step2b_mongo_enrich.py "$SCRIPTS"/step2c_backfill.py \
+scp "$SCRIPTS"/step2_export_qdrant.py \
+    "$SCRIPTS"/step2a_export.py "$SCRIPTS"/step2b_mongo_enrich.py "$SCRIPTS"/step2c_backfill.py \
     "$SCRIPTS"/name_topics.py "$SCRIPTS"/push_topics_v2.py "$SCRIPTS"/hotspot.py \
     "$SCRIPTS"/topic_diff.py "$SCRIPTS"/dedup_meili.py \
     "$SCRIPTS"/paths.json "$SCRIPTS"/paths.py \
