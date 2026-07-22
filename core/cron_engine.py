@@ -2,7 +2,8 @@ import time
 import threading
 import traceback
 from datetime import datetime
-from typing import Callable, Dict, List
+from typing import Callable, Dict
+from concurrent.futures import ThreadPoolExecutor
 
 class CronJob:
     def __init__(self, job_id: int, name: str, cron_expr: str, func: Callable, enabled: bool = True):
@@ -12,6 +13,8 @@ class CronJob:
         self.func = func
         self.enabled = enabled
         self.last_run_date = ""
+        self._job_lock = threading.Lock()
+        self.is_running = False
 
     def should_run(self, current_time: datetime) -> bool:
         if not self.enabled:
@@ -58,6 +61,8 @@ class CronManager:
         self._next_id = 1
         self.running = False
         self._thread = None
+        self.executor = None
+        self._log_lock = threading.Lock()
         self._log_callback = print  # 可以被替换为往通道发消息的 callback
 
     def set_log_callback(self, callback: Callable):
@@ -97,13 +102,14 @@ class CronManager:
             result = job.func()
             return f"🚀 手动执行 [{job.name}] 成功:\n{result}"
         except Exception as e:
-            traceback.print_exc()
-            return f"❌ 手动执行 [{job.name}] 失败: {e}"
+            err_msg = traceback.format_exc()
+            return f"❌ 手动执行 [{job.name}] 失败: {e}\n{err_msg}"
 
     def start(self):
         if self.running:
             return
         self.running = True
+        self.executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="CronWorker")
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="CronEngine")
         self._thread.start()
         print("🕒 定时任务引擎已启动。")
@@ -111,7 +117,30 @@ class CronManager:
     def stop(self):
         self.running = False
         if self._thread:
-            self._thread.join(timeout=2)
+            self._thread.join(timeout=5)
+        if self.executor:
+            self.executor.shutdown(wait=False)
+
+    def _execute_job_task(self, job: CronJob):
+        with job._job_lock:
+            if job.is_running:
+                return
+            job.is_running = True
+            
+        try:
+            with self._log_lock:
+                self._log_callback(f"🕒 正在自动执行定时任务: {job.name}...")
+            res = job.func()
+            if res:
+                with self._log_lock:
+                    self._log_callback(f"✅ 定时任务 [{job.name}] 执行完毕:\n{res}")
+        except Exception as e:
+            err_msg = traceback.format_exc()
+            with self._log_lock:
+                self._log_callback(f"❌ 定时任务 [{job.name}] 执行失败: {e}\n{err_msg}")
+        finally:
+            with job._job_lock:
+                job.is_running = False
 
     def _run_loop(self):
         while self.running:
@@ -119,13 +148,9 @@ class CronManager:
             for job in self.jobs.values():
                 if job.should_run(now):
                     try:
-                        self._log_callback(f"🕒 正在自动执行定时任务: {job.name}...")
-                        res = job.func()
-                        if res:
-                            self._log_callback(f"✅ 定时任务 [{job.name}] 执行完毕:\n{res}")
-                    except Exception as e:
-                        traceback.print_exc()
-                        self._log_callback(f"❌ 定时任务 [{job.name}] 执行失败: {e}")
+                        self.executor.submit(self._execute_job_task, job)
+                    except RuntimeError:
+                        pass
             
             # 休眠到下一分钟的开始
             time.sleep(60 - datetime.now().second)
