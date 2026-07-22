@@ -24,6 +24,8 @@ const state = {
     eventSource: null,
     activeFilters: {},       // { source: ['v2ex.com'], type: ['bill'] }
     lastFacets: null,         // Meilisearch facetDistribution from last response
+    isFacetPanelVisible: false,
+    expandedFacetGroups: new Set(),
 };
 
 // Meili-backed sources (support facets)
@@ -392,14 +394,59 @@ function initFilterButtons() {
 // ============================================================
 function updateFacetPanelVisibility() {
     const panel = document.getElementById('facet-panel');
+    const toggleBtn = document.getElementById('global-filter-toggle');
+    const isSupported = FACET_SOURCES.has(state.activeSource);
+    
+    if (toggleBtn) {
+        toggleBtn.style.display = isSupported ? 'flex' : 'none';
+        
+        // Update active filter badge
+        let activeCount = 0;
+        for (const vals of Object.values(state.activeFilters)) {
+            if (vals && vals.length > 0) activeCount += vals.length;
+        }
+        const badge = document.getElementById('active-filter-count');
+        if (badge) {
+            badge.style.display = activeCount > 0 ? 'inline-block' : 'none';
+            badge.textContent = activeCount;
+        }
+    }
+
     if (!panel) return;
-    panel.style.display = FACET_SOURCES.has(state.activeSource) ? '' : 'none';
+    panel.style.display = (isSupported && state.isFacetPanelVisible) ? 'flex' : 'none';
+}
+
+function initFacetPanelEvents() {
+    // Global Toggle
+    const toggleBtn = document.getElementById('global-filter-toggle');
+    if (toggleBtn) {
+        toggleBtn.addEventListener('click', () => {
+            state.isFacetPanelVisible = !state.isFacetPanelVisible;
+            updateFacetPanelVisibility();
+        });
+    }
+
+    // Expand/Collapse Group
+    const panel = document.getElementById('facet-panel');
+    if (panel) {
+        panel.addEventListener('click', (e) => {
+            if (e.target.classList.contains('facet-expand-btn')) {
+                const groupKey = e.target.getAttribute('data-group');
+                if (state.expandedFacetGroups.has(groupKey)) {
+                    state.expandedFacetGroups.delete(groupKey);
+                } else {
+                    state.expandedFacetGroups.add(groupKey);
+                }
+                renderFacetPanel(state.lastFacets); // re-render panel
+            }
+        });
+    }
 }
 
 function renderFacetPanel(facetDist) {
     if (!facetDist || !FACET_SOURCES.has(state.activeSource)) return;
     const panel = document.getElementById('facet-panel');
-    if (!panel || panel.style.display === 'none') return;
+    if (!panel) return;
 
     const groups = [];
     // Build merged value set per group (server values + currently checked)
@@ -423,18 +470,32 @@ function renderFacetPanel(facetDist) {
 
     let html = '';
     for (const g of groups) {
+        const isExpanded = state.expandedFacetGroups.has(g.key);
         html += `<div class="facet-group"><div class="facet-group-title">${({category:'🗂 分类',topics:'🏷 主题',source:'📂 来源',type:'📄 类型'})[g.key] || g.key}</div>`;
-        for (const item of g.items) {
+        html += `<div class="facet-items-container">`;
+        
+        let hiddenCount = 0;
+        for (let i = 0; i < g.items.length; i++) {
+            const item = g.items[i];
+            const shouldHide = i >= 6 && !item.checked;
+            if (shouldHide) hiddenCount++;
+            
             const id = `facet-${g.key}-${item.val.replace(/[^a-zA-Z0-9]/g, '_')}`;
-            html += `<label class="facet-item" for="${id}">`;
+            const hiddenStyle = (shouldHide && !isExpanded) ? ' style="display:none;"' : '';
+            html += `<label class="facet-item"${hiddenStyle} for="${id}">`;
             html += `<input type="checkbox" id="${id}" data-facet="${g.key}" data-value="${item.val}" ${item.checked ? 'checked' : ''}>`;
             html += `<span>${h(item.val)}<b class="count">${item.count}</b></span>`;
-            html += '</label>';
+            html += `</label>`;
         }
-        html += '</div>';
+        html += `</div>`;
+        
+        if (hiddenCount > 0 || isExpanded) {
+            const btnText = isExpanded ? '- 收起' : `+ 展开 (${hiddenCount})`;
+            html += `<button class="facet-expand-btn" data-group="${g.key}">${btnText}</button>`;
+        }
+        html += `</div>`;
     }
     panel.innerHTML = html || '';
-
     // Bind events
     panel.querySelectorAll('input[type="checkbox"]').forEach(cb => {
         cb.addEventListener('change', () => {
@@ -907,6 +968,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initChatDrawer();
     initKeyboard();
     initModalClose();
+    initFacetPanelEvents();
     updateFacetPanelVisibility();
 
     // Load initial data
