@@ -407,18 +407,23 @@ class Sentinel:
 def sentinel_scan(mode='quick') -> str:
     s = Sentinel()
     is_base = s.is_baseline_run
+    import socket
+    from datetime import datetime
+    hostname = socket.gethostname()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     findings = s.run_all()
     
     if is_base:
-        return "🛡️ Sentinel 首次运行：已成功建立安全基线 (Baseline)。未触发告警检测。"
+        return f"🛡️ Sentinel 首次运行：已成功建立安全基线 (Baseline)。未触发告警检测。\n(Host: {hostname} | Time: {now_str})"
     
     if not findings:
-        return "✅ Sentinel 扫描完成：未发现异常漂移或入侵迹象。"
+        return f"✅ Sentinel 扫描完成：未发现异常漂移或入侵迹象。\n(Host: {hostname} | Time: {now_str})"
         
     high_count = sum(1 for f in findings if f['severity'] == 'high')
     med_count = sum(1 for f in findings if f['severity'] == 'medium')
     
-    msg = f"⚠️ Sentinel 扫描完成：发现 {len(findings)} 个异常！(High: {high_count}, Medium: {med_count})\n"
+    msg = f"⚠️ Sentinel 扫描完成：发现 {len(findings)} 个异常！(High: {high_count}, Medium: {med_count})\n(Host: {hostname} | Time: {now_str})\n\n"
     for f in findings:
         msg += f"- [{f['severity'].upper()}] [{f['module']}] {f['message']}\n"
     
