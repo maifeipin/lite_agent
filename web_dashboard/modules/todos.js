@@ -147,20 +147,24 @@ registerTabModule({
                 </div>
                 <div class="create-more-row" id="todo-more-fields" style="display:none;">
                     <input type="datetime-local" id="todo-new-due" title="到期时间 (可选)" />
-                    <input type="text" id="todo-new-cron" placeholder="周期配置 (如 09:00, daily, weekly, 0 9 * * 1)" />
+                    <input type="number" id="todo-new-before-mins" placeholder="提前(分)" value="30" title="到期前多少分钟开始提醒 (默认 30)" style="width: 90px;" />
+                    <input type="number" id="todo-new-interval-mins" placeholder="间隔(分)" value="10" title="提醒重复频次间隔(分钟)，如 10 分钟" style="width: 90px;" />
+                    <input type="text" id="todo-new-cron" placeholder="周期配置 (如 09:00, daily)" />
                     <input type="text" id="todo-new-project" placeholder="关联项目 (可选)" />
                 </div>
             `;
             header.appendChild(form);
 
-            const titleInput = form.querySelector('#todo-new-title');
-            const kindSelect = form.querySelector('#todo-new-kind');
-            const dueInput   = form.querySelector('#todo-new-due');
-            const cronInput  = form.querySelector('#todo-new-cron');
-            const projInput  = form.querySelector('#todo-new-project');
-            const moreBtn    = form.querySelector('#todo-toggle-more');
-            const moreFields = form.querySelector('#todo-more-fields');
-            const submitBtn  = form.querySelector('#todo-new-submit');
+            const titleInput    = form.querySelector('#todo-new-title');
+            const kindSelect    = form.querySelector('#todo-new-kind');
+            const dueInput      = form.querySelector('#todo-new-due');
+            const beforeInput   = form.querySelector('#todo-new-before-mins');
+            const intervalInput = form.querySelector('#todo-new-interval-mins');
+            const cronInput     = form.querySelector('#todo-new-cron');
+            const projInput     = form.querySelector('#todo-new-project');
+            const moreBtn       = form.querySelector('#todo-toggle-more');
+            const moreFields    = form.querySelector('#todo-more-fields');
+            const submitBtn     = form.querySelector('#todo-new-submit');
 
             moreBtn.addEventListener('click', () => {
                 const isHidden = moreFields.style.display === 'none';
@@ -188,6 +192,8 @@ registerTabModule({
                     };
                     if (dueInput.value) {
                         payload.due_at = new Date(dueInput.value).toISOString();
+                        payload.remind_before_mins = parseInt(beforeInput.value) || 30;
+                        payload.remind_interval_mins = parseInt(intervalInput.value) || 0;
                     }
 
                     await fetch('/agent/api/v1/todos', {
