@@ -388,6 +388,66 @@ class Sentinel:
             
         self.state['log_states'] = log_states
 
+    # ---------------------------------------------------------
+    # Module 8: Secret & Environment Leaks
+    # ---------------------------------------------------------
+    def scan_secret_leaks(self):
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        
+        # 1. Check .env, config.json permissions and Git tracking
+        secret_files = ['.env', 'config.json', 'secrets.json']
+        for s_file in secret_files:
+            file_path = os.path.join(project_root, s_file)
+            if os.path.exists(file_path):
+                # Check permissions (group or other readable)
+                st = os.stat(file_path)
+                if bool(st.st_mode & 0o044):
+                    self._add_finding("secret_leak", "medium", f"Sensitive file '{s_file}' is readable by group/others (Mode: {oct(st.st_mode)[-3:]})")
+                
+                # Check if file is mistakenly tracked by Git
+                try:
+                    import subprocess
+                    res = subprocess.run(
+                        ['git', 'ls-files', '--error-unmatch', s_file],
+                        cwd=project_root,
+                        capture_output=True,
+                        text=True
+                    )
+                    if res.returncode == 0:
+                        self._add_finding("secret_leak", "high", f"CRITICAL: Secret file '{s_file}' is tracked by Git repository!")
+                except Exception:
+                    pass
+
+        # 2. Hardcoded secret patterns scanning in code files
+        patterns = [
+            (r'sk-[a-zA-Z0-9]{32,}', "OpenAI/DeepSeek API Key"),
+            (r'AIzaSy[a-zA-Z0-9_-]{33}', "Google API Key"),
+            (r'ghp_[a-zA-Z0-9]{36}', "GitHub Personal Access Token"),
+            (r'xox[baprs]-[a-zA-Z0-9_-]{10,}', "Slack Token"),
+        ]
+        
+        exclude_dirs = {'.git', '__pycache__', 'venv', '.venv', 'data', 'node_modules', '.gemini'}
+        
+        for root, dirs, files in os.walk(project_root):
+            dirs[:] = [d for d in dirs if d not in exclude_dirs]
+            for file in files:
+                if file in secret_files or file.endswith(('.example.json', '.example.env', '.pyc')):
+                    continue
+                if file.endswith(('.py', '.sh', '.cs', '.js', '.ts', '.yml', '.yaml')):
+                    full_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(full_path, project_root)
+                    
+                    lines = self._read_lines(full_path)
+                    for line_idx, line in enumerate(lines, 1):
+                        for pat, desc in patterns:
+                            if re.search(pat, line):
+                                self._add_finding(
+                                    "secret_leak",
+                                    "high",
+                                    f"Possible hardcoded secret ({desc}) in {rel_path}:{line_idx}"
+                                )
+                                break
+
     def run_all(self, update_baseline=False):
         self.update_baseline_mode = update_baseline
         self.scan_ssh_logs()
@@ -397,6 +457,7 @@ class Sentinel:
         self.scan_ports()
         self.scan_processes()
         self.scan_log_tampering()
+        self.scan_secret_leaks()
         
         if self._should_update_baseline():
             self._save_baseline()
