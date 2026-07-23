@@ -9,6 +9,7 @@ import threading
 import traceback
 import collections
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from openai import OpenAI
 import openai
 from session import SessionManager
@@ -328,11 +329,13 @@ class Agent:
 
     def _build_system_prompt(self, is_guest: bool = False) -> str:
         """构建系统提示词 (包含技能列表)"""
+        now_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (UTC%z)")
         skills_summary = self.skill_engine.list_skills(is_guest=is_guest)
         project_root = self._config.get("project_root", "/root/lite_agent")
 
         if is_guest:
             return f"""你是 {self.bot_name}，一个运行在 Linux VPS 上的私人智能助手。
+【当前系统时间】: `{now_str}`
 目前你正在与普通访客（非管理员）对话。
 
 你的职责:
@@ -352,6 +355,7 @@ class Agent:
             return f"""你是 {self.bot_name}，一个运行在 Linux VPS 上的私人智能助手。
 
 【系统环境自知】:
+- 当前系统精确绝对时间: `{now_str}`
 - 你的源代码工作区位于: `{project_root}`
 - 你的 Systemd 后台守护进程名为: `{self.svc_name}`
 - 当用户要求你拉取代码、Review 本地代码或重启系统时，请直接在上述路径和进程名上进行操作。
