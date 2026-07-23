@@ -59,6 +59,23 @@ class Sentinel:
 
     def _add_finding(self, module, severity, message, details=None):
         if not self.is_baseline_run and not getattr(self, 'update_baseline_mode', False):
+            # 引入静默期 (Throttling)，4小时内同 module+severity 不重复推送
+            # 签名只用稳定维度，不含动态 message（如计数值），否则 SSH 暴力破解等
+            # 计数递增场景每次都会生成新签名，导致静默失效
+            alert_signature = hashlib.md5((module + severity).encode('utf-8')).hexdigest()
+            throttles = self.state.get("throttles", {})
+            last_time = throttles.get(alert_signature, 0)
+            now = time.time()
+            
+            if now - last_time < 4 * 3600:
+                return  # 静默期内，跳过此告警
+
+            # 清理过期条目，防止 throttles 字典无限增长
+            throttles = {k: v for k, v in throttles.items() if now - v < 4 * 3600}
+
+            throttles[alert_signature] = now
+            self.state["throttles"] = throttles
+
             self.findings.append({
                 "timestamp": datetime.now().isoformat(),
                 "module": module,
