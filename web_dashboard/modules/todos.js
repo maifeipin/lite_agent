@@ -75,6 +75,13 @@ registerTabModule({
         html += `<span class="date">${updated}</span>`;
         html += `<span class="tag status-tag status-${status}">${statusText}</span>`;
         if (due) html += `<span class="tag ${isOverdue ? 'due-overdue' : 'due-tag'}">⏰ ${h(due)}</span>`;
+        if (due) {
+            const beforeMins = doc.remind_before_mins !== undefined ? doc.remind_before_mins : 30;
+            const intervalMins = doc.remind_interval_mins || 0;
+            let remindStr = `提前: ${beforeMins}分`;
+            if (intervalMins > 0) remindStr += ` / 间隔: ${intervalMins}分`;
+            html += `<span class="tag remind-tag" style="background: hsl(200, 60%, 25%); color: #8df;">🔔 ${remindStr}</span>`;
+        }
         if (cron) html += `<span class="tag cron-tag">🔄 周期: ${h(cron)}</span>`;
         html += `</div>`;
 
@@ -110,7 +117,9 @@ registerTabModule({
         html += `<div class="edit-row">`;
         html += `<input type="text" class="edit-project" value="${h(project)}" placeholder="关联项目 (可选)" />`;
         html += `<input type="datetime-local" class="edit-due" value="${dueForInput}" title="到期时间" />`;
-        html += `<input type="text" class="edit-cron" value="${h(cron)}" placeholder="周期配置 (如 09:00 / daily / weekly)" />`;
+        html += `<input type="number" class="edit-before-mins" value="${doc.remind_before_mins !== undefined ? doc.remind_before_mins : 30}" placeholder="提前(分)" title="到期前多少分钟开始提醒" style="width: 90px;" />`;
+        html += `<input type="number" class="edit-interval-mins" value="${doc.remind_interval_mins || 0}" placeholder="间隔(分)" title="提醒重复间隔(分钟)" style="width: 90px;" />`;
+        html += `<input type="text" class="edit-cron" value="${h(cron)}" placeholder="周期配置 (如 09:00 / daily)" />`;
         html += `</div>`;
         html += `<div class="edit-row">`;
         html += `<input type="text" class="edit-desc" value="${h(doc.description || '')}" placeholder="任务详细描述 (可选)" />`;
@@ -250,12 +259,14 @@ registerTabModule({
                     const panel = document.getElementById(`todo-edit-${id}`);
                     if (!panel) return;
 
-                    const newTitle = panel.querySelector('.edit-title').value.trim();
-                    const newKind  = panel.querySelector('.edit-kind').value;
-                    const newProj  = panel.querySelector('.edit-project').value.trim();
-                    const newDue   = panel.querySelector('.edit-due').value;
-                    const newCron  = panel.querySelector('.edit-cron').value.trim();
-                    const newDesc  = panel.querySelector('.edit-desc').value.trim();
+                    const newTitle    = panel.querySelector('.edit-title').value.trim();
+                    const newKind     = panel.querySelector('.edit-kind').value;
+                    const newProj     = panel.querySelector('.edit-project').value.trim();
+                    const newDue      = panel.querySelector('.edit-due').value;
+                    const newBefore   = panel.querySelector('.edit-before-mins')?.value;
+                    const newInterval = panel.querySelector('.edit-interval-mins')?.value;
+                    const newCron     = panel.querySelector('.edit-cron').value.trim();
+                    const newDesc     = panel.querySelector('.edit-desc').value.trim();
 
                     saveEdit.disabled = true;
                     try {
@@ -265,6 +276,8 @@ registerTabModule({
                             project: newProj,
                             recur_cron: newCron,
                             description: newDesc,
+                            remind_before_mins: newBefore !== undefined && newBefore !== '' ? parseInt(newBefore) : 30,
+                            remind_interval_mins: newInterval !== undefined && newInterval !== '' ? parseInt(newInterval) : 0,
                         };
                         payload.due_at = newDue ? new Date(newDue).toISOString() : '';
 

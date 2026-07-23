@@ -302,7 +302,7 @@ def todo_list(status: str = "pending,active", project: str = None, kind: str = N
 def get_todos_json(status: str = "pending,active", limit: int = 50) -> list:
     conn = _conn()
     cursor = conn.cursor()
-    query = "SELECT id, title, description, status, kind, project, created_at, updated_at, due_at, snoozed_until, shelved_reason FROM todos WHERE 1=1"
+    query = "SELECT id, title, description, status, kind, project, created_at, updated_at, due_at, recur_cron, remind_interval_mins, remind_before_mins, snoozed_until, shelved_reason FROM todos WHERE 1=1"
     params = []
     if status and status != 'all':
         statuses = status.split(',')
