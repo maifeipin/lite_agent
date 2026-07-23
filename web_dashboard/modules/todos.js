@@ -34,6 +34,13 @@ registerTabModule({
                 (t.project || '').toLowerCase().includes(q)
             );
         }
+        // Place completed (status === 'done') tasks at the end
+        filtered.sort((a, b) => {
+            const aDone = (a.status === 'done') ? 1 : 0;
+            const bDone = (b.status === 'done') ? 1 : 0;
+            if (aDone !== bDone) return aDone - bDone;
+            return (b.updated_at || '').localeCompare(a.updated_at || '');
+        });
         return { hits: filtered.slice(offset, offset + limit), total: filtered.length };
     },
 
@@ -45,6 +52,7 @@ registerTabModule({
         const title = doc.title || '(无标题)';
         const updated = (doc.updated_at || '').slice(0, 16);
         const status = doc.status || 'pending';
+        const isDone = status === 'done';
         const statusText = { pending: '待处理', active: '进行中', done: '已完成' }[status] || status;
         const due = doc.due_at ? doc.due_at.slice(0, 16).replace('T', ' ') : '';
         const isOverdue = doc.due_at && new Date(doc.due_at) < new Date() && status !== 'done';
@@ -60,7 +68,7 @@ registerTabModule({
             } catch (e) {}
         }
 
-        let html = `<div class="card todo-card" data-id="${h(doc.id)}">`;
+        let html = `<div class="card todo-card ${isDone ? 'todo-card-done' : ''}" data-id="${h(doc.id)}">`;
         html += `<div class="card-meta">`;
         html += `<span class="tag">${icon} ${h(kind)}</span>`;
         if (project) html += `<span class="tag tag-project">📁 ${h(project)}</span>`;
@@ -287,5 +295,54 @@ registerTabModule({
             grid.removeEventListener('click', this._clickHandler);
             this._clickHandler = null;
         }
+    },
+
+    _isDoneExpanded: false,
+
+    onPostRender(grid) {
+        if (!grid) return;
+        // Remove existing toggle bars to avoid duplicates on infinite scroll (append)
+        grid.querySelectorAll('.todo-completed-toggle-bar').forEach(el => el.remove());
+
+        const doneCards = grid.querySelectorAll('.todo-card-done');
+        if (!doneCards || doneCards.length === 0) return;
+
+        // Create or refresh toggle bar
+        const toggleBar = document.createElement('div');
+        toggleBar.className = 'todo-completed-toggle-bar' + (this._isDoneExpanded ? ' expanded' : '');
+        toggleBar.innerHTML = `
+            <span>✅ 已完成事项 (${doneCards.length})</span>
+            <span class="arrow">${this._isDoneExpanded ? '▼ 点击收起' : '▶ 点击展开'}</span>
+        `;
+
+        // Apply initial collapsed/expanded state
+        doneCards.forEach(card => {
+            if (this._isDoneExpanded) {
+                card.classList.remove('is-collapsed');
+            } else {
+                card.classList.add('is-collapsed');
+            }
+        });
+
+        // Insert toggleBar right before the first doneCard
+        const firstDone = doneCards[0];
+        if (firstDone && firstDone.parentNode) {
+            firstDone.parentNode.insertBefore(toggleBar, firstDone);
+        }
+
+        // Bind toggle click event
+        toggleBar.addEventListener('click', () => {
+            this._isDoneExpanded = !this._isDoneExpanded;
+            const arrow = toggleBar.querySelector('.arrow');
+            if (this._isDoneExpanded) {
+                toggleBar.classList.add('expanded');
+                if (arrow) arrow.textContent = '▼ 点击收起';
+                doneCards.forEach(card => card.classList.remove('is-collapsed'));
+            } else {
+                toggleBar.classList.remove('expanded');
+                if (arrow) arrow.textContent = '▶ 点击展开';
+                doneCards.forEach(card => card.classList.add('is-collapsed'));
+            }
+        });
     },
 });

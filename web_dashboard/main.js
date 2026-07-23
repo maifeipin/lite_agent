@@ -292,6 +292,16 @@ function renderResults() {
             btn.disabled = false;
         });
     });
+
+    // Call module-specific post-render hooks
+    const activeMod = tabModules[state.activeSource];
+    if (activeMod && typeof activeMod.onPostRender === 'function') {
+        activeMod.onPostRender(grid);
+    } else if (state.activeSource === 'all') {
+        if (tabModules['todos'] && typeof tabModules['todos'].onPostRender === 'function') {
+            tabModules['todos'].onPostRender(grid);
+        }
+    }
 }
 
 function updateResultsCount() {
