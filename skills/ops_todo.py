@@ -60,6 +60,10 @@ def _ensure_schema():
     try:
         conn.execute("ALTER TABLE todos ADD COLUMN remind_interval_mins INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE todos ADD COLUMN remind_before_mins INTEGER DEFAULT 30")
+    except sqlite3.OperationalError:
         pass  # Column already exists
     
     conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_status ON todos(status, updated_at DESC)")
@@ -220,10 +224,11 @@ def _update_todo_status(tid: str, status: str, extra_fields: dict = None):
         "description": {"type": "string", "description": "详细描述，可选"},
         "due_at": {"type": "string", "description": "到期时间必须是 ISO8601 且含时区，例如 2026-06-20T12:00:00+08:00，可选"},
         "recur_cron": {"type": "string", "description": "循环周期配置，如 daily, weekly, 09:00, 可选"},
-        "remind_interval_mins": {"type": "integer", "description": "高频重复提醒间隔(分钟)，如 10 表示每10分钟提醒一次，0表示仅提醒一次", "default": 0}
+        "remind_interval_mins": {"type": "integer", "description": "高频重复提醒间隔(分钟)，如 10 表示每10分钟提醒一次，0表示仅提醒一次", "default": 0},
+        "remind_before_mins": {"type": "integer", "description": "提前多少分钟开始首推提醒，默认 30 分钟", "default": 30}
     }
 )
-def todo_add(title: str, kind: str = "misc", project: str = None, description: str = None, due_at: str = None, recur_cron: str = None, remind_interval_mins: int = 0) -> str:
+def todo_add(title: str, kind: str = "misc", project: str = None, description: str = None, due_at: str = None, recur_cron: str = None, remind_interval_mins: int = 0, remind_before_mins: int = 30) -> str:
     if kind == "recurring" and not recur_cron:
         recur_cron = "daily"
     
@@ -233,9 +238,9 @@ def todo_add(title: str, kind: str = "misc", project: str = None, description: s
     conn = _conn()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO todos (id, title, description, status, kind, project, created_at, updated_at, due_at, recur_cron, remind_interval_mins)
-        VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
-    """, (tid, title, description, kind, project, now, now, due_at, recur_cron, remind_interval_mins))
+        INSERT INTO todos (id, title, description, status, kind, project, created_at, updated_at, due_at, recur_cron, remind_interval_mins, remind_before_mins)
+        VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (tid, title, description, kind, project, now, now, due_at, recur_cron, remind_interval_mins, remind_before_mins))
     conn.commit()
     conn.close()
     
@@ -396,10 +401,12 @@ def todo_resume(id: str) -> str:
         "due_at": {"type": "string", "description": "新到期时间 ISO8601"},
         "project": {"type": "string", "description": "新项目"},
         "recur_cron": {"type": "string", "description": "新循环周期"},
-        "kind": {"type": "string", "description": "新任务分类"}
+        "kind": {"type": "string", "description": "新任务分类"},
+        "remind_interval_mins": {"type": "integer", "description": "新重复提醒间隔(分钟)"},
+        "remind_before_mins": {"type": "integer", "description": "新提前提醒时间(分钟)"}
     }
 )
-def todo_update(id: str, title: str = None, description: str = None, due_at: str = None, project: str = None, recur_cron: str = None, kind: str = None) -> str:
+def todo_update(id: str, title: str = None, description: str = None, due_at: str = None, project: str = None, recur_cron: str = None, kind: str = None, remind_interval_mins: int = None, remind_before_mins: int = None) -> str:
     conn = _conn()
     fields = {"updated_at": _now_iso()}
     if title is not None: fields["title"] = title
@@ -410,6 +417,8 @@ def todo_update(id: str, title: str = None, description: str = None, due_at: str
     if project is not None: fields["project"] = project
     if recur_cron is not None: fields["recur_cron"] = recur_cron
     if kind is not None: fields["kind"] = kind
+    if remind_interval_mins is not None: fields["remind_interval_mins"] = remind_interval_mins
+    if remind_before_mins is not None: fields["remind_before_mins"] = remind_before_mins
     
     set_clause = ", ".join([f"{k}=?" for k in fields.keys()])
     values = list(fields.values()) + [id]
@@ -577,19 +586,30 @@ def _todo_tick():
     """, (now, now))
     woken_count = cursor.rowcount
     
-    # 2. 检查 24h 内即到期或已超期的任务并推送到 IM (支持高频重复间隔提醒)
+    # 2. 检查到期或已超期的任务并推送到 IM (支持提前时间窗口 + 高频重复间隔提醒)
     cursor.execute("""
-        SELECT id, title, due_at, created_via, project, kind, description, remind_interval_mins, notified_due_at FROM todos
+        SELECT id, title, due_at, created_via, project, kind, description, remind_interval_mins, remind_before_mins, notified_due_at FROM todos
         WHERE status IN ('pending','active')
           AND due_at IS NOT NULL
-          AND datetime(due_at) <= datetime(?, '+24 hours')
-    """, (now,))
+    """)
     due_tasks = cursor.fetchall()
     
     due_soon_count = 0
     now_dt = datetime.fromisoformat(now)
     for row in due_tasks:
-        tid, title, due_at, created_via, project, kind, description, interval_mins, last_notified = row
+        tid, title, due_at, created_via, project, kind, description, interval_mins, before_mins, last_notified = row
+        
+        try:
+            due_dt = datetime.fromisoformat(due_at)
+        except Exception:
+            continue
+
+        # 如果在未来且尚未进入提醒时间窗口 (now < due_at - before_mins) -> 跳过
+        window_mins = before_mins if (before_mins is not None and before_mins > 0) else 30
+        start_notify_dt = due_dt - timedelta(minutes=window_mins)
+        
+        if now_dt < start_notify_dt:
+            continue
         
         should_notify = False
         if not last_notified:
@@ -606,8 +626,8 @@ def _todo_tick():
             cursor.execute("UPDATE todos SET notified_due_at=?, updated_at=? WHERE id=?", (now, now, tid))
             due_soon_count += 1
             
-            is_overdue = due_at < now
-            tag = "🔴 已超期" if is_overdue else "⏰ 即将到期 (24h内)"
+            is_overdue = due_dt < now_dt
+            tag = "🔴 已超期" if is_overdue else f"⏰ 即将到期 ({window_mins}分钟内)"
             proj_info = f"【{project}】" if project else ""
             
             msg = f"{tag} {proj_info}\n**{title}**\n\n- 到期时间: {due_at}\n- 任务类型: {kind}\n- 任务 ID: `{tid}`"
@@ -616,7 +636,7 @@ def _todo_tick():
             if description:
                 msg += f"\n- 说明: {description[:100]}"
                 
-            print(f"[todo_tick] 提醒任务到期推送到 IM (interval={interval_mins}): {tid} {title}")
+            print(f"[todo_tick] 提醒任务到期推送到 IM (before={window_mins}m, interval={interval_mins}m): {tid} {title}")
             _send_im_alert(
                 title=f"⏰ 待办提醒: {title}",
                 text=msg,

@@ -946,9 +946,11 @@ class ApiHandler(BaseHTTPRequestHandler):
             project = data.get("project")
             description = data.get("description")
             due_at = data.get("due_at")
+            remind_interval_mins = data.get("remind_interval_mins", 0)
+            remind_before_mins = data.get("remind_before_mins", 30)
 
             from skills.ops_todo import todo_add
-            msg = todo_add(title=title, kind=kind, project=project, description=description, due_at=due_at)
+            msg = todo_add(title=title, kind=kind, project=project, description=description, due_at=due_at, remind_interval_mins=remind_interval_mins, remind_before_mins=remind_before_mins)
             
             self.send_response(200)
             self._send_cors_headers()
@@ -1001,9 +1003,11 @@ class ApiHandler(BaseHTTPRequestHandler):
             project = data.get("project")
             recur_cron = data.get("recur_cron")
             kind = data.get("kind")
+            remind_interval_mins = data.get("remind_interval_mins")
+            remind_before_mins = data.get("remind_before_mins")
 
-            if any(x is not None for x in [title, description, due_at, project, recur_cron, kind]):
-                msg.append(todo_update(tid, title=title, description=description, due_at=due_at, project=project, recur_cron=recur_cron, kind=kind))
+            if any(x is not None for x in [title, description, due_at, project, recur_cron, kind, remind_interval_mins, remind_before_mins]):
+                msg.append(todo_update(tid, title=title, description=description, due_at=due_at, project=project, recur_cron=recur_cron, kind=kind, remind_interval_mins=remind_interval_mins, remind_before_mins=remind_before_mins))
 
             if not msg:
                 self.send_error(400, "Bad Request: No fields to update")
