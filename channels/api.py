@@ -449,7 +449,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             conn = sqlite3.connect(db_path)
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                "SELECT role, content, created_at FROM messages "
+                "SELECT role, content, reasoning_content, tool_call_id, name, tool_calls_json, created_at FROM messages "
                 "WHERE session_key = ? ORDER BY created_at DESC LIMIT ?",
                 (session_key, limit)
             ).fetchall()
@@ -458,13 +458,23 @@ class ApiHandler(BaseHTTPRequestHandler):
             messages = []
             for r in reversed(rows):
                 content = (r["content"] or "")
-                if len(content) > 500:
-                    content = content[:500] + "..."
-                messages.append({
+                msg_item = {
                     "role": r["role"],
                     "content": content,
                     "time": r["created_at"] or 0,
-                })
+                }
+                if r["reasoning_content"]:
+                    msg_item["reasoning_content"] = r["reasoning_content"]
+                if r["name"]:
+                    msg_item["name"] = r["name"]
+                if r["tool_call_id"]:
+                    msg_item["tool_call_id"] = r["tool_call_id"]
+                if r["tool_calls_json"]:
+                    try:
+                        msg_item["tool_calls"] = json.loads(r["tool_calls_json"])
+                    except Exception:
+                        pass
+                messages.append(msg_item)
 
             self._send_json({"messages": messages})
         except Exception as e:
@@ -826,10 +836,9 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         import time
         max_retries = 300 # 5 minutes max polling
+        last_sent_log_idx = 0
         
         for _ in range(max_retries):
-            # Check if client disconnected
-            # In python http.server, there's no native non-blocking check, but write will fail if broken pipe
             try:
                 progress = session_mgr.load_subtask_dag(session_key, task_id)
                 if progress:
@@ -839,9 +848,15 @@ class ApiHandler(BaseHTTPRequestHandler):
                     except:
                         dag_data = {}
                         
+                    all_logs = dag_data.get("logs", []) if isinstance(dag_data, dict) else []
+                    new_logs = all_logs[last_sent_log_idx:]
+                    last_sent_log_idx = len(all_logs)
+
                     data_obj = {
                         "status": status,
-                        "progress": dag_data
+                        "progress": dag_data,
+                        "logs": new_logs,
+                        "total_logs": len(all_logs)
                     }
                     self.wfile.write(f"data: {json.dumps(data_obj, ensure_ascii=False)}\n\n".encode('utf-8'))
                     self.wfile.flush()

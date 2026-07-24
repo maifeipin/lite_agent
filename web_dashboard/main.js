@@ -26,6 +26,7 @@ const state = {
     lastFacets: null,         // Meilisearch facetDistribution from last response
     isFacetPanelVisible: false,
     expandedFacetGroups: new Set(),
+    activeChatSessionKey: 'api:dashboard_default',
 };
 
 // Meili-backed sources (support facets)
@@ -274,22 +275,12 @@ function renderResults() {
             if (acc && uid) window.open(`/agent/api/v1/email/html?account=${encodeURIComponent(acc)}&uid=${encodeURIComponent(uid)}`, '_blank');
         });
     });
-    // Session: view messages
+    // Session: view messages -> switch to Chat Assistant drawer
     document.querySelectorAll('.btn-view-session').forEach(btn => {
         btn.addEventListener('click', async () => {
             const sessionKey = btn.getAttribute('data-session');
             if (!sessionKey) return;
-            btn.textContent = '加载中...';
-            btn.disabled = true;
-            try {
-                const r = await fetch(`/agent/api/v1/sessions/messages?session_key=${encodeURIComponent(sessionKey)}&limit=15`);
-                const d = await r.json();
-                showSessionMessagesModal(sessionKey, d.messages || []);
-            } catch(e) {
-                alert('加载失败: ' + e.message);
-            }
-            btn.textContent = '📋 查看对话';
-            btn.disabled = false;
+            switchChatSession(sessionKey);
         });
     });
 
@@ -646,6 +637,81 @@ function jsonParseSafe(s) {
 // ============================================================
 let chatEventSource = null;
 
+async function switchChatSession(sessionKey, isNew = false) {
+    if (chatEventSource) {
+        chatEventSource.close();
+        chatEventSource = null;
+    }
+    state.activeChatSessionKey = sessionKey;
+
+    const tagEl = document.getElementById('chat-session-key-tag');
+    if (tagEl) {
+        tagEl.textContent = `#${sessionKey.replace(/^api:/, '')}`;
+    }
+
+    const history = document.getElementById('chat-history');
+    if (history) history.innerHTML = '';
+
+    const drawer = document.getElementById('chat-drawer');
+    if (drawer) drawer.classList.add('open');
+
+    if (isNew) {
+        appendChatBubble('agent', '你好！我是你的智能中枢助理。已为你开启全新会话，请问有什么可以帮你的？');
+    } else {
+        await loadSessionMessagesIntoDrawer(sessionKey);
+    }
+}
+
+async function loadSessionMessagesIntoDrawer(sessionKey) {
+    const history = document.getElementById('chat-history');
+    if (!history) return;
+    history.innerHTML = '<div class="session-loading" style="text-align:center;padding:20px;color:var(--text-muted)">正在载入历史对话...</div>';
+
+    try {
+        const r = await fetch(`/agent/api/v1/sessions/messages?session_key=${encodeURIComponent(sessionKey)}&limit=100`);
+        const d = await r.json();
+        history.innerHTML = '';
+        const msgs = d.messages || [];
+
+        if (msgs.length === 0) {
+            appendChatBubble('agent', '该会话暂无历史消息。可以开始向我提问！');
+            return;
+        }
+
+        for (const m of msgs) {
+            const role = m.role || 'assistant';
+            let bubbleContent = '';
+
+            if (m.reasoning_content) {
+                bubbleContent += `<details class="chat-reasoning"><summary>🧠 深度思考过程</summary><div class="reasoning-text">${marked.parse(m.reasoning_content)}</div></details>`;
+            }
+
+            if (m.tool_calls && Array.isArray(m.tool_calls)) {
+                for (const tc of m.tool_calls) {
+                    const name = (tc.function && tc.function.name) || tc.name || 'tool';
+                    const args = (tc.function && tc.function.arguments) || tc.arguments || '';
+                    const argsStr = typeof args === 'object' ? JSON.stringify(args, null, 2) : args;
+                    bubbleContent += `<details class="chat-tool-call"><summary>🔧 调用技能/工具: ${h(name)}</summary><pre><code>${h(argsStr)}</code></pre></details>`;
+                }
+            }
+
+            if (m.content) {
+                if (role === 'user' || role === 'system') {
+                    bubbleContent += h(m.content);
+                } else {
+                    bubbleContent += marked.parse(m.content);
+                }
+            } else if (!bubbleContent) {
+                bubbleContent = '(无内容)';
+            }
+
+            appendChatBubble(role, bubbleContent);
+        }
+    } catch(e) {
+        history.innerHTML = `<div style="color:var(--danger);padding:20px;text-align:center">载入失败: ${h(e.message)}</div>`;
+    }
+}
+
 function initChatDrawer() {
     const fab = document.getElementById('chat-fab');
     const drawer = document.getElementById('chat-drawer');
@@ -656,12 +722,20 @@ function initChatDrawer() {
     const ocrFileInput = document.getElementById('chat-ocr-file-input');
 
     const fullscreenBtn = document.getElementById('fullscreen-drawer-btn');
+    const newSessionBtn = document.getElementById('new-session-btn');
 
     fab.addEventListener('click', () => drawer.classList.add('open'));
     closeBtn.addEventListener('click', () => {
         drawer.classList.remove('open');
         drawer.classList.remove('fullscreen');
     });
+
+    if (newSessionBtn) {
+        newSessionBtn.addEventListener('click', () => {
+            const newKey = `api:dashboard_${Date.now()}`;
+            switchChatSession(newKey, true);
+        });
+    }
 
     if (fullscreenBtn) {
         fullscreenBtn.addEventListener('click', () => {
@@ -687,7 +761,6 @@ function initChatDrawer() {
         }
     });
 
-    // Handle OCR Upload Button
     if (ocrBtn && ocrFileInput) {
         ocrBtn.addEventListener('click', () => ocrFileInput.click());
         ocrFileInput.addEventListener('change', (e) => {
@@ -695,11 +768,10 @@ function initChatDrawer() {
             if (file) {
                 handleOcrUpload(file);
             }
-            ocrFileInput.value = ''; // Reset to allow uploading same file
+            ocrFileInput.value = '';
         });
     }
 
-    // Intercept Paste events for clipboard image OCR
     input.addEventListener('paste', (e) => {
         const items = (e.clipboardData || e.originalEvent.clipboardData).items;
         for (const item of items) {
@@ -759,6 +831,7 @@ function initChatDrawer() {
 
 function appendChatBubble(role, html) {
     const history = document.getElementById('chat-history');
+    if (!history) return;
     const div = document.createElement('div');
     div.className = `chat-message ${role}`;
     div.innerHTML = `<div class="bubble">${html}</div>`;
@@ -766,79 +839,160 @@ function appendChatBubble(role, html) {
     history.scrollTop = history.scrollHeight;
 }
 
-function sendChatMessage(text) {
-    if (chatEventSource) chatEventSource.close();
+function formatLogLineHtml(text) {
+    let safe = h(text);
+    safe = safe.replace(/(\[ORCH:[A-Z]+\])/g, '<span style="color:#a855f7;font-weight:bold">$1</span>');
+    safe = safe.replace(/(\[WORKER:[^\]]+\])/g, '<span style="color:#f59e0b;font-weight:bold">$1</span>');
+    safe = safe.replace(/(🔧 [^:]+:)/g, '<span style="color:#06b6d4">$1</span>');
+    safe = safe.replace(/(🧠 \[LLM Request\])/g, '<span style="color:#ec4899">$1</span>');
+    safe = safe.replace(/(✅ \[LLM Response\])/g, '<span style="color:#10b981">$1</span>');
+    safe = safe.replace(/(⚠️ [^:]+:)/g, '<span style="color:#f97316">$1</span>');
+    return safe;
+}
 
-    // Show typing indicator
+function appendLiveLogLines(lines) {
+    const logBody = document.getElementById('live-log-body');
+    const logCount = document.getElementById('live-log-count');
+    if (!logBody) return;
+    for (const line of lines) {
+        const div = document.createElement('div');
+        div.className = 'live-log-line';
+        div.innerHTML = formatLogLineHtml(line);
+        logBody.appendChild(div);
+    }
+    logBody.scrollTop = logBody.scrollHeight;
+    if (logCount) {
+        logCount.textContent = logBody.children.length;
+    }
+}
+
+function finishAgentResponse(finalMarkdownHtml, isError = false) {
+    const indicator = document.getElementById('chat-typing-indicator');
+    if (!indicator) {
+        if (isError) {
+            appendChatBubble('system', finalMarkdownHtml || '任务失败');
+        } else {
+            appendChatBubble('agent', finalMarkdownHtml || '任务完成 (无返回内容)');
+        }
+        return;
+    }
+
+    // 1. Remove typing dots & status header line
+    const typingHeader = indicator.querySelector('.typing-dots')?.parentElement;
+    if (typingHeader) typingHeader.remove();
+
+    // 2. Collapse live execution log details and update summary
+    const logDetails = indicator.querySelector('.live-execution-log');
+    if (logDetails) {
+        logDetails.open = false;
+        const summary = logDetails.querySelector('summary');
+        const countEl = logDetails.querySelector('#live-log-count');
+        const count = countEl ? countEl.textContent : '0';
+        if (summary) {
+            summary.innerHTML = isError ? `⚠️ 执行产生异常日志 (${count} 条)` : `📋 详细执行过程日志 (${count} 条)`;
+        }
+    }
+
+    // 3. Append response content below the log details inside bubble
+    const bubble = indicator.querySelector('.bubble');
+    if (bubble) {
+        const responseDiv = document.createElement('div');
+        responseDiv.className = 'chat-response-content';
+        responseDiv.style.marginTop = '8px';
+        responseDiv.innerHTML = finalMarkdownHtml || (isError ? '任务失败' : '任务完成 (无返回内容)');
+        bubble.appendChild(responseDiv);
+    }
+
+    // 4. Remove typing indicator ID so it becomes a permanent chat message
+    indicator.removeAttribute('id');
+
+    const history = document.getElementById('chat-history');
+    if (history) history.scrollTop = history.scrollHeight;
+}
+
+function sendChatMessage(text) {
+    if (chatEventSource) {
+        chatEventSource.close();
+        chatEventSource = null;
+    }
+
+    const rawSessionId = state.activeChatSessionKey.replace(/^api:/, '');
+
     const typingEl = document.createElement('div');
     typingEl.className = 'chat-message agent';
-    typingEl.innerHTML = '<div class="bubble"><div class="typing-dots"><span></span><span></span><span></span></div></div>';
     typingEl.id = 'chat-typing-indicator';
-    const history = document.getElementById('chat-history');
-    history.appendChild(typingEl);
-    history.scrollTop = history.scrollHeight;
+    typingEl.innerHTML = `
+        <div class="bubble">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                <div class="typing-dots"><span></span><span></span><span></span></div>
+                <span style="font-size:0.85rem;color:var(--text-muted)" id="typing-status-text">Agent 正在处理任务...</span>
+            </div>
+            <details class="live-execution-log" open>
+                <summary>⚡ 实时执行日志与调度过程 (<span id="live-log-count">0</span> 条)</summary>
+                <div class="live-log-body" id="live-log-body">
+                    <div class="live-log-line" style="color:var(--text-muted)">[*] 任务初始化，连通 Agent 路由中...</div>
+                </div>
+            </details>
+        </div>`;
 
-    function removeTyping() {
-        const el = document.getElementById('chat-typing-indicator');
-        if (el) el.remove();
+    const history = document.getElementById('chat-history');
+    if (history) {
+        history.appendChild(typingEl);
+        history.scrollTop = history.scrollHeight;
     }
 
     fetch('/agent/api/v1/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: 'dashboard_chat', text }),
+        body: JSON.stringify({ session_id: rawSessionId, text }),
     })
     .then(r => r.json())
     .then(data => {
-        removeTyping();
         if (data.type === 'sync') {
             const md = marked.parse(data.response || '(空)');
-            appendChatBubble('agent', md);
+            finishAgentResponse(md);
         } else if (data.type === 'async') {
-            subscribeChatStream(data.task_id);
+            subscribeChatStream(data.task_id, rawSessionId);
         }
     })
     .catch(e => {
-        removeTyping();
-        appendChatBubble('system', `请求失败: ${e.message}`);
+        finishAgentResponse(`请求失败: ${e.message}`, true);
     });
 }
 
-function subscribeChatStream(taskId) {
-    const es = new EventSource(`/agent/api/v1/task/stream?task_id=${taskId}&session_id=dashboard_chat`);
+function subscribeChatStream(taskId, rawSessionId) {
+    const es = new EventSource(`/agent/api/v1/task/stream?task_id=${taskId}&session_id=${encodeURIComponent(rawSessionId)}`);
     chatEventSource = es;
     let bubbleHtml = '';
-    const systemLines = [];
 
     es.onmessage = (e) => {
         if (e.data === '[DONE]') {
             es.close();
             chatEventSource = null;
-            if (bubbleHtml) appendChatBubble('agent', bubbleHtml);
-            else if (systemLines.length) appendChatBubble('system', systemLines.join('<br>'));
-            else appendChatBubble('agent', '任务完成 (无返回内容)');
+            finishAgentResponse(bubbleHtml);
             return;
         }
         const d = jsonParseSafe(e.data);
         if (!d) return;
 
+        if (d.logs && Array.isArray(d.logs) && d.logs.length > 0) {
+            appendLiveLogLines(d.logs);
+        }
+
         if (d.status === 'done' || d.status === 'completed') {
-            if (d.response) {
-                bubbleHtml += marked.parse(d.response);
+            if (d.response || (d.progress && d.progress.result)) {
+                bubbleHtml += marked.parse(d.response || d.progress.result);
             }
             es.close();
             chatEventSource = null;
-            appendChatBubble('agent', bubbleHtml || d.message || '任务完成');
+            finishAgentResponse(bubbleHtml || d.message);
             return;
         }
         if (d.status === 'failed' || d.status === 'error') {
-            appendChatBubble('system', d.message || d.error || '任务失败');
             es.close();
             chatEventSource = null;
+            finishAgentResponse(d.message || d.error || '任务失败', true);
             return;
-        }
-        if (d.message && d.status === 'running') {
-            systemLines.push(d.message);
         }
     };
     es.onerror = () => {

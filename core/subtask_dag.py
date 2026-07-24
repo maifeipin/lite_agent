@@ -41,12 +41,17 @@ class Subtask:
 class SubtaskDAG:
 
     def __init__(self, subtasks: list[Subtask], global_strategy: str = "",
-                 max_depth: int = None):
+                 max_depth: int = None, logs: list = None):
         self.subtasks: dict[str, Subtask] = {s.id: s for s in subtasks}
         self.global_strategy = global_strategy
+        self.logs: list[str] = logs if logs is not None else []
         self._validate_no_cycle()
         if max_depth is not None:
             self._validate_max_depth(max_depth)
+
+    def add_log(self, text: str):
+        if text:
+            self.logs.append(str(text))
 
     def _validate_max_depth(self, max_depth: int):
         memo = {}
@@ -158,6 +163,7 @@ class SubtaskDAG:
         return {
             "global_strategy": self.global_strategy,
             "subtasks": result,
+            "logs": self.logs,
         }
 
     @classmethod
@@ -167,12 +173,15 @@ class SubtaskDAG:
         if isinstance(data, list):
             subtask_list = data
             global_strategy = ""
+            logs = []
         elif isinstance(data, dict):
             subtask_list = data.get("subtasks", [])
             global_strategy = data.get("global_strategy", "")
+            logs = data.get("logs", [])
         else:
             subtask_list = []
             global_strategy = ""
+            logs = []
 
         subtasks = []
         for item in subtask_list:
@@ -191,4 +200,4 @@ class SubtaskDAG:
                 token_usage=item.get("token_usage", 0),
                 steps_used=item.get("steps_used", 0),
             ))
-        return cls(subtasks, global_strategy=global_strategy)
+        return cls(subtasks, global_strategy=global_strategy, logs=logs)

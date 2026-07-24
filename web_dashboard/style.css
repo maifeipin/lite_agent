@@ -1132,27 +1132,117 @@ body {
     color: rgba(255,255,255,0.5);
 }
 
-/* Loading dots for thinking state */
+/* Loading dots for thinking state (Enhanced) */
 .typing-dots {
-    display: flex;
-    gap: 4px;
+    display: inline-flex;
+    gap: 6px;
     align-items: center;
-    padding: 8px 4px;
+    padding: 6px 4px;
 }
 .typing-dots span {
-    width: 6px;
-    height: 6px;
-    background: var(--text-muted);
+    width: 8px;
+    height: 8px;
+    background: var(--accent);
     border-radius: 50%;
-    animation: typing 1.4s infinite both;
+    animation: typing-bounce 1.4s infinite ease-in-out both;
 }
 .typing-dots span:nth-child(1) { animation-delay: 0s; }
 .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
 .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
 
-@keyframes typing {
-    0%, 80%, 100% { transform: scale(0); opacity: 0.5; }
-    40% { transform: scale(1); opacity: 1; }
+@keyframes typing-bounce {
+    0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+    40% { transform: scale(1.1); opacity: 1; }
+}
+
+/* Session key tag in Header */
+.session-key-tag {
+    font-size: 0.72rem;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+    background: rgba(255, 255, 255, 0.06);
+    padding: 2px 8px;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Live Execution Log Console in Chat Bubble */
+.live-execution-log {
+    margin: 8px 0;
+    background: rgba(15, 23, 42, 0.65);
+    border: 1px solid var(--border-light);
+    border-radius: 8px;
+    font-size: 0.82rem;
+    font-family: var(--font-mono);
+    overflow: hidden;
+}
+.live-execution-log summary {
+    padding: 8px 12px;
+    cursor: pointer;
+    color: #94a3b8;
+    background: rgba(255, 255, 255, 0.03);
+    user-select: none;
+    font-weight: 500;
+}
+.live-execution-log summary:hover {
+    color: var(--text-primary);
+}
+.live-log-body {
+    padding: 10px 12px;
+    max-height: 240px;
+    overflow-y: auto;
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    line-height: 1.6;
+    white-space: pre-wrap;
+    color: #cbd5e1;
+    font-size: 0.78rem;
+}
+.live-log-line {
+    margin-bottom: 4px;
+    word-break: break-all;
+}
+
+/* Reasoning & Tool Call collapsible blocks */
+.chat-reasoning {
+    margin: 8px 0;
+    background: rgba(139, 92, 246, 0.08);
+    border-left: 3px solid #8b5cf6;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 0.85rem;
+}
+.chat-reasoning summary {
+    cursor: pointer;
+    color: #c4b5fd;
+    font-weight: 500;
+}
+.chat-reasoning .reasoning-text {
+    margin-top: 8px;
+    color: #e2e8f0;
+    line-height: 1.5;
+}
+
+.chat-tool-call {
+    margin: 6px 0;
+    background: rgba(6, 182, 212, 0.08);
+    border-left: 3px solid var(--accent);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 0.82rem;
+}
+.chat-tool-call summary {
+    cursor: pointer;
+    color: #67e8f9;
+    font-weight: 500;
+}
+.chat-tool-call pre {
+    margin-top: 6px;
+    background: rgba(0, 0, 0, 0.4);
+    padding: 8px;
+    border-radius: 4px;
+    overflow-x: auto;
+    font-size: 0.78rem;
+    color: #a5f3fc;
 }
 
 @keyframes pulse {
