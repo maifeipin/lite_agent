@@ -881,15 +881,19 @@ function finishAgentResponse(finalMarkdownHtml, isError = false) {
     const typingHeader = indicator.querySelector('.typing-dots')?.parentElement;
     if (typingHeader) typingHeader.remove();
 
-    // 2. Collapse live execution log details and update summary
+    // 2. Collapse live execution log details and update summary (or remove if 0 logs)
     const logDetails = indicator.querySelector('.live-execution-log');
     if (logDetails) {
-        logDetails.open = false;
-        const summary = logDetails.querySelector('summary');
         const countEl = logDetails.querySelector('#live-log-count');
-        const count = countEl ? countEl.textContent : '0';
-        if (summary) {
-            summary.innerHTML = isError ? `⚠️ 执行产生异常日志 (${count} 条)` : `📋 详细执行过程日志 (${count} 条)`;
+        const count = countEl ? parseInt(countEl.textContent || '0', 10) : 0;
+        if (count === 0) {
+            logDetails.remove();
+        } else {
+            logDetails.open = false;
+            const summary = logDetails.querySelector('summary');
+            if (summary) {
+                summary.innerHTML = isError ? `⚠️ 执行产生异常日志 (${count} 条)` : `📋 详细执行过程日志 (${count} 条)`;
+            }
         }
     }
 
