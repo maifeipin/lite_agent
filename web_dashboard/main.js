@@ -884,6 +884,24 @@ function initChatDrawer() {
     }
 }
 
+function renderMath(element) {
+    if (typeof renderMathInElement === 'function' && element) {
+        try {
+            renderMathInElement(element, {
+                delimiters: [
+                    {left: '$$', right: '$$', display: true},
+                    {left: '$', right: '$', display: false},
+                    {left: '\\(', right: '\\)', display: false},
+                    {left: '\\[', right: '\\]', display: true}
+                ],
+                throwOnError: false
+            });
+        } catch(e) {
+            console.error('KaTeX render error:', e);
+        }
+    }
+}
+
 function appendChatBubble(role, html) {
     const history = document.getElementById('chat-history');
     if (!history) return;
@@ -891,6 +909,7 @@ function appendChatBubble(role, html) {
     div.className = `chat-message ${role}`;
     div.innerHTML = `<div class="bubble">${html}</div>`;
     history.appendChild(div);
+    renderMath(div);
     history.scrollTop = history.scrollHeight;
 }
 
@@ -965,6 +984,7 @@ function finishAgentResponse(finalMarkdownHtml, isError = false) {
             responseDiv.style.marginTop = '8px';
             responseDiv.innerHTML = finalMarkdownHtml || (isError ? '任务失败' : '任务完成 (无返回内容)');
             bubble.appendChild(responseDiv);
+            renderMath(responseDiv);
         }
     } catch(e) {
         console.error('finishAgentResponse error:', e);
@@ -1231,6 +1251,7 @@ function showModal(options = {}) {
 
     overlay.innerHTML = modalHtml;
     document.body.appendChild(overlay);
+    renderMath(overlay.querySelector('.universal-modal-body'));
 
     const closeModal = () => overlay.remove();
 
