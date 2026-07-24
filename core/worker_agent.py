@@ -41,7 +41,8 @@ class WorkerAgent:
 
     def __init__(self, name: str, client, model_name: str,
                  model_cfg: dict, skill_engine: SkillEngine,
-                 tools_allowlist: list = None, provider: str = "openai"):
+                 tools_allowlist: list = None, provider: str = "openai",
+                 log_callback: Callable = None):
         self.name = name
         self.client = client
         self.model_name = model_name
@@ -49,10 +50,19 @@ class WorkerAgent:
         self.skill_engine = skill_engine
         self.tools_allowlist = tools_allowlist
         self.provider = provider
+        self.log_callback = log_callback
         self.max_steps = model_cfg.get("max_steps", 8)
         self.max_tokens = model_cfg.get("max_tokens", 2048)
         self.temperature = model_cfg.get("temperature", 0.3)
         self._dead_loop_counter = LRUCache(maxsize=200)
+
+    def _log(self, msg: str):
+        print(msg)
+        if self.log_callback:
+            try:
+                self.log_callback(str(msg))
+            except Exception:
+                pass
 
     def _get_tools(self):
         all_tools = self.skill_engine.get_all_schemas()
@@ -182,9 +192,9 @@ class WorkerAgent:
                 kwargs["timeout"] = 60.0
                 
                 start_t = time.time()
-                print(f"  🧠 [LLM Request] 角色: {self.name}, 模型: {actual_model}")
+                self._log(f"  🧠 [LLM Request] 角色: {self.name}, 模型: {actual_model}")
                 response = self.client.chat.completions.create(**kwargs)
-                print(f"  ✅ [LLM Response] 耗时: {time.time()-start_t:.2f}s, Tokens: {response.usage.total_tokens if response.usage else 0}")
+                self._log(f"  ✅ [LLM Response] 耗时: {time.time()-start_t:.2f}s, Tokens: {response.usage.total_tokens if response.usage else 0}")
                 
                 choice = response.choices[0]
 
@@ -219,7 +229,7 @@ class WorkerAgent:
                     ):
                         return self._dead_loop_msg(tc.function.name), extracted_tools
 
-                    print(
+                    self._log(
                         f"  🔧 [{self.name}] [{step + 1}/{self.max_steps}] "
                         f"{tc.function.name}({tc.function.arguments[:80]})"
                     )
