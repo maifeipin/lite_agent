@@ -23,9 +23,11 @@ registerTabModule({
             if (query) {
                 const q = query.toLowerCase();
                 items = items.filter(s =>
+                    (s.title || '').toLowerCase().includes(q) ||
                     (s.channel || '').toLowerCase().includes(q) ||
                     (s.model || '').toLowerCase().includes(q) ||
-                    (s.goal || '').toLowerCase().includes(q)
+                    (s.goal || '').toLowerCase().includes(q) ||
+                    (s.status || '').toLowerCase().includes(q)
                 );
             }
             return { hits: items.slice(offset, offset + limit), total: d.total || 0 };
@@ -45,6 +47,7 @@ registerTabModule({
         const tokenUsage = formatTokens(doc.token_usage || 0);
         const toolCalls = doc.tool_calls || 0;
         const goal = doc.goal || '';
+        const title = doc.title || (goal ? `🎯 ${goal}` : '未命名会话');
         const updated = doc.updated_at ? new Date(doc.updated_at * 1000).toLocaleString('zh-CN') : '—';
 
         let html = '<div class="card session-card">';
@@ -53,14 +56,16 @@ registerTabModule({
         html += `<span class="tag status-tag" style="color:${statusColor}">● ${statusText}</span>`;
         html += `<span class="date">${updated}</span>`;
         html += '</div>';
-        if (goal) html += `<div class="ai-summary"><p>🎯 ${h(goal)}</p></div>`;
+        html += `<div class="card-title" style="font-weight:600;font-size:1rem;margin:8px 0;color:var(--text-primary);">💬 ${h(title)}</div>`;
+        if (goal && doc.title) html += `<div class="ai-summary"><p>🎯 目标: ${h(goal)}</p></div>`;
         html += '<div class="session-stats">';
         html += `<span title="Token 消耗">🪙 ${tokenUsage}</span>`;
         html += `<span title="工具调用次数">🔧 ${toolCalls} 次</span>`;
         html += `<span title="LLM 模型">🧠 ${h(model)}</span>`;
         html += '</div>';
         html += '<div class="card-actions">';
-        html += `<button class="card-btn btn-view-session" data-session="${h(doc.session_key)}">📋 查看对话</button>`;
+        html += `<button class="card-btn btn-view-session" data-session="${h(doc.session_key)}" data-title="${h(doc.title || '')}">📋 查看对话</button>`;
+        html += `<button class="card-btn btn-open-session" data-session="${h(doc.session_key)}" data-title="${h(doc.title || '')}">💬 进入对话</button>`;
         html += '</div>';
         html += '</div>';
         return html;

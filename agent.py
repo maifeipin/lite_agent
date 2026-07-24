@@ -417,6 +417,14 @@ class Agent:
         """实际处理逻辑, 调用方必须已持有 session 锁"""
         text = msg.text.strip()
 
+        session = self.session_mgr.get_or_create(msg.session_key)
+
+        # 标题自动生成 (两阶段：阶段1即时截取，阶段2后台LLM精炼)
+        if not session.title and text and not text.startswith("/") and not text.startswith("::"):
+            initial_title = text.replace("\n", " ").strip()[:20]
+            self.session_mgr.set_title(msg.session_key, initial_title)
+            self._async_refine_title(msg.session_key, text)
+
         if text.startswith("::"):
             response = self._handle_double_colon(msg)
         elif msg.text.startswith("/"):
@@ -432,6 +440,32 @@ class Agent:
             response = self._run_ai_loop(msg)
 
         return response
+
+    def _async_refine_title(self, session_key: str, text: str):
+        def _task():
+            try:
+                fast_model = self._config.get("llm", {}).get("fast", self.model)
+                client = self.client
+                if hasattr(self, 'skill_engine') and hasattr(self.skill_engine, 'router'):
+                    c = self.skill_engine.router.get_client(fast_model)
+                    if c:
+                        client = c
+                prompt = f"请用 10 个字以内精炼概括用户的这句提问，不要包含标点符号、引号或多余前缀。提问内容：{text[:200]}"
+                res = client.chat.completions.create(
+                    model=fast_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                    max_tokens=30,
+                    timeout=5.0,
+                )
+                if res and res.choices and res.choices[0].message.content:
+                    cleaned = res.choices[0].message.content.strip().strip('"\'“”')
+                    if cleaned:
+                        self.session_mgr.set_title(session_key, cleaned[:20])
+            except Exception as e:
+                import sys
+                print(f"  ⚠️ [TitleRefine] 标题精炼异常: {e}", file=sys.stderr)
+        threading.Thread(target=_task, daemon=True, name=f"TitleRefinement-{session_key[:8]}").start()
 
     def _truncate_long_message_if_needed(self, text: str, channel: str) -> str:
         # API 渠道（Web/SSE 端）直接放行，不做任何截断

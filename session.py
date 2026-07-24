@@ -16,6 +16,7 @@ from typing import Optional, List, Dict
 class Session:
     """单个会话的状态"""
     key: str                                     # "feishu:ou_xxx"
+    title: str = ""                              # 简短会话标题 (如: "VPS1 磁盘巡检")
     goal: str = ""                               # AI 提取的当前目标
     status: str = "chatting"                     # chatting | working | archived
     messages: List[Dict] = field(default_factory=list)  # [{role, content, ...}]
@@ -86,6 +87,12 @@ class SessionManager:
                 conn.execute("ALTER TABLE sessions ADD COLUMN kv_state TEXT DEFAULT '{}'")
             except Exception:
                 pass
+            # title: 简短会话标题 (ChatGPT 风格)
+            try:
+                conn.execute("ALTER TABLE sessions ADD COLUMN title TEXT DEFAULT ''")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower() and "already exists" not in str(e).lower():
+                    raise
             conn.execute("CREATE INDEX IF NOT EXISTS idx_msg_session ON messages(session_key, created_at)")
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS goal_archive (
@@ -161,7 +168,7 @@ class SessionManager:
         """从 SQLite 恢复会话"""
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT goal, status, created_at, updated_at, tool_calls, token_usage, kv_state "
+                "SELECT goal, status, created_at, updated_at, tool_calls, token_usage, kv_state, title "
                 "FROM sessions WHERE session_key = ?", (session_key,)
             ).fetchone()
             if not row:
@@ -175,6 +182,7 @@ class SessionManager:
                 updated_at=row[3],
                 tool_calls=row[4] or 0,
                 token_usage=row[5] or 0,
+                title=row[7] if len(row) > 7 and row[7] else "",
             )
             # 恢复 kv_state (JSON)
             try:
@@ -213,12 +221,13 @@ class SessionManager:
                     with self._connect() as conn:
                         conn.execute(
                             "INSERT OR REPLACE INTO sessions "
-                            "(session_key, goal, status, created_at, updated_at, tool_calls, token_usage, kv_state) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            "(session_key, goal, status, created_at, updated_at, tool_calls, token_usage, kv_state, title) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             (session.key, session.goal, session.status,
                              session.created_at, session.updated_at,
                              session.tool_calls, session.token_usage,
-                             json.dumps(session.kv_state, ensure_ascii=False))
+                             json.dumps(session.kv_state, ensure_ascii=False),
+                             session.title or "")
                         )
                     return
                 except sqlite3.OperationalError as e:
@@ -439,6 +448,14 @@ class SessionManager:
 
 
 
+    def set_title(self, session_key: str, title: str):
+        """设置会话标题 (线程安全)"""
+        with self._lock:
+            session = self.get_or_create(session_key)
+            session.title = title
+            session.updated_at = time.time()
+            self._persist_session(session)
+
     # ------------------------------------------------------------------
     #  目标管理
     # ------------------------------------------------------------------
@@ -635,6 +652,7 @@ class SessionManager:
         session = self.get_or_create(session_key)
         return {
             "status": session.status,
+            "title": session.title,
             "goal": session.goal,
             "message_count": len(session.messages),
             "tool_calls": session.tool_calls,
