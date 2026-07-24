@@ -351,9 +351,14 @@ class TaskOrchestrator:
 
             log_event(f"  📊 进度: {dag.progress()}")
 
-        log_event(f"  ✅ 编排任务 [{task_id}] 完成")
+        log_event(f"  ✅ 编排任务 [{task_id}] 所有子任务执行完毕")
+        log_event(f"  [ORCH:AGGR] 正在生成最终总结报告...")
+        final_result = self._aggregate(dag, goal)
+        dag.final_result = final_result or "(总结完成，无额外返回内容)"
+        dag.is_aggregated = True
         self._persist_dag(session_key, task_id, dag, force=True)
-        return self._aggregate(dag, goal)
+        log_event(f"  ✅ 总结报告生成完毕")
+        return dag.final_result
 
     def _run_single_subtask(self, subtask: Subtask, upstream: dict,
                             results: dict, lock: threading.Lock,
@@ -513,7 +518,12 @@ class TaskOrchestrator:
         self._last_persist_time = now
         try:
             dag_json = json.dumps(dag.to_dict(), ensure_ascii=False)
-            status = "running" if not dag.is_all_done() else "done"
+            if not dag.is_all_done():
+                status = "running"
+            elif not dag.is_aggregated:
+                status = "summarizing"
+            else:
+                status = "done"
             self.session_mgr.save_subtask_dag(session_key, task_id, dag_json, status)
         except Exception as e:
             import sys

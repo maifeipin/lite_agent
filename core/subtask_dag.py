@@ -41,10 +41,13 @@ class Subtask:
 class SubtaskDAG:
 
     def __init__(self, subtasks: list[Subtask], global_strategy: str = "",
-                 max_depth: int = None, logs: list = None):
+                 max_depth: int = None, logs: list = None, final_result: str = "",
+                 is_aggregated: bool = False):
         self.subtasks: dict[str, Subtask] = {s.id: s for s in subtasks}
         self.global_strategy = global_strategy
         self.logs: list[str] = logs if logs is not None else []
+        self.final_result: str = final_result
+        self.is_aggregated: bool = is_aggregated
         self._validate_no_cycle()
         if max_depth is not None:
             self._validate_max_depth(max_depth)
@@ -164,6 +167,8 @@ class SubtaskDAG:
             "global_strategy": self.global_strategy,
             "subtasks": result,
             "logs": self.logs,
+            "final_result": self.final_result,
+            "is_aggregated": self.is_aggregated,
         }
 
     @classmethod
@@ -174,14 +179,20 @@ class SubtaskDAG:
             subtask_list = data
             global_strategy = ""
             logs = []
+            final_result = ""
+            is_aggregated = False
         elif isinstance(data, dict):
             subtask_list = data.get("subtasks", [])
             global_strategy = data.get("global_strategy", "")
             logs = data.get("logs", [])
+            final_result = data.get("final_result", "")
+            is_aggregated = data.get("is_aggregated", False)
         else:
             subtask_list = []
             global_strategy = ""
             logs = []
+            final_result = ""
+            is_aggregated = False
 
         subtasks = []
         for item in subtask_list:
@@ -200,4 +211,4 @@ class SubtaskDAG:
                 token_usage=item.get("token_usage", 0),
                 steps_used=item.get("steps_used", 0),
             ))
-        return cls(subtasks, global_strategy=global_strategy, logs=logs)
+        return cls(subtasks, global_strategy=global_strategy, logs=logs, final_result=final_result, is_aggregated=is_aggregated)

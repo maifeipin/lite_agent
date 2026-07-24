@@ -852,8 +852,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                     new_logs = all_logs[last_sent_log_idx:]
                     last_sent_log_idx = len(all_logs)
 
+                    final_resp = dag_data.get("final_result", "") if isinstance(dag_data, dict) else ""
                     data_obj = {
                         "status": status,
+                        "response": final_resp,
                         "progress": dag_data,
                         "logs": new_logs,
                         "total_logs": len(all_logs)
