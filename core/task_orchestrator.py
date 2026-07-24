@@ -247,7 +247,7 @@ class TaskOrchestrator:
         def log_event(msg: str):
             print(msg)
             dag.add_log(msg)
-            self._persist_dag(session_key, task_id, dag)
+            self._persist_dag(session_key, task_id, dag, force=False)
 
         log_event(f"  [ORCH:PLAN] 拆解完成: {len(subtasks)} 个子任务, strategy={len(global_strategy)} chars")
         if global_strategy:
@@ -258,7 +258,7 @@ class TaskOrchestrator:
             log_event(f"  [ORCH:ROUTE] {s.id} type={s.type.value} → model={s.assigned_model}{tools_str}")
             log_event(f"  📋 {s.id} [{s.type.value}] → {s.assigned_model} : {s.name}")
 
-        self._persist_dag(session_key, task_id, dag)
+        self._persist_dag(session_key, task_id, dag, force=True)
 
         while not dag.is_all_done():
             # 全局预算限制检查
@@ -305,7 +305,7 @@ class TaskOrchestrator:
                 subtask.started_at = time.time()
                 log_event(f"  ▶ {subtask.id} [{subtask.type.value}] 开始执行")
 
-            self._persist_dag(session_key, task_id, dag)
+            self._persist_dag(session_key, task_id, dag, force=True)
 
             for subtask in batch:
                 upstream = {}
@@ -341,7 +341,7 @@ class TaskOrchestrator:
                 for fid in failed:
                     dag.mark_downstream_skipped(fid)
 
-            self._persist_dag(session_key, task_id, dag)
+            self._persist_dag(session_key, task_id, dag, force=True)
 
             if progress_callback:
                 try:
@@ -352,6 +352,7 @@ class TaskOrchestrator:
             log_event(f"  📊 进度: {dag.progress()}")
 
         log_event(f"  ✅ 编排任务 [{task_id}] 完成")
+        self._persist_dag(session_key, task_id, dag, force=True)
         return self._aggregate(dag, goal)
 
     def _run_single_subtask(self, subtask: Subtask, upstream: dict,
@@ -359,11 +360,7 @@ class TaskOrchestrator:
                             goal: str = "", global_strategy: str = "",
                             log_callback: Callable = None):
         try:
-            log_msg = f"  [WORKER:{subtask.id}] 启动 model={subtask.assigned_model} allowlist={subtask.tools[:3] if subtask.tools else 'all'}..."
-            if log_callback:
-                log_callback(log_msg)
-            else:
-                print(log_msg)
+            self._log_and_persist(f"  [WORKER:{subtask.id}] 启动 model={subtask.assigned_model} allowlist={subtask.tools[:3] if subtask.tools else 'all'}...", log_callback)
 
             client = self.router.get_client(subtask.assigned_model)
             if not client:
@@ -400,16 +397,16 @@ class TaskOrchestrator:
                     "token_usage": subtask.token_usage,
                     "steps_used": subtask.steps_used,
                 }
-            print(f"  [WORKER:{subtask.id}] 完成 steps={subtask.steps_used} tokens={subtask.token_usage} result_len={len(result_text)}")
+            self._log_and_persist(f"  [WORKER:{subtask.id}] 完成 steps={subtask.steps_used} tokens={subtask.token_usage} result_len={len(result_text)}", log_callback)
         except Exception as e:
             traceback.print_exc()
             error_text = str(e)
-            print(f"  ❌ {subtask.id} 失败: {error_text}")
+            self._log_and_persist(f"  ❌ {subtask.id} 失败: {error_text}", log_callback)
 
             fb = self.router.get_fallback(subtask.assigned_model)
             if fb and fb[0] != subtask.assigned_model:
                 fb_name, fb_client = fb
-                print(f"  🔄 {subtask.id} fallback → {fb_name}")
+                self._log_and_persist(f"  🔄 {subtask.id} fallback → {fb_name}", log_callback)
                 try:
                     fb_cfg = self.router.models_cfg.get(fb_name, {})
                     worker_fb = WorkerAgent(
@@ -420,6 +417,7 @@ class TaskOrchestrator:
                         skill_engine=self.skill_engine,
                         tools_allowlist=subtask.tools if subtask.tools else None,
                         provider=self.router.get_provider(fb_name),
+                        log_callback=log_callback,
                     )
                     result_text, tool_results = worker_fb.run(subtask, upstream,
                                                 goal=goal, global_strategy=global_strategy)
@@ -433,10 +431,10 @@ class TaskOrchestrator:
                             "steps_used": subtask.steps_used,
                         }
                     return
-                except Exception:
+                except Exception as e_fb:
                     traceback.print_exc()
+                    self._log_and_persist(f"  ❌ Fallback 也失败: {e_fb}", log_callback)
 
-            subtask.finished_at = time.time()
             with lock:
                 results[subtask.id] = {
                     "result": "",
@@ -446,6 +444,12 @@ class TaskOrchestrator:
                     "token_usage": subtask.token_usage,
                     "steps_used": subtask.steps_used,
                 }
+
+    def _log_and_persist(self, msg: str, log_callback: Callable = None):
+        if log_callback:
+            log_callback(msg)
+        else:
+            print(msg)
 
     # ==================================================================
     #  Phase 4: 聚合
@@ -501,10 +505,16 @@ class TaskOrchestrator:
     # ==================================================================
     #  持久化
     # ==================================================================
-    def _persist_dag(self, session_key: str, task_id: str, dag: SubtaskDAG):
+    def _persist_dag(self, session_key: str, task_id: str, dag: SubtaskDAG, force: bool = False):
+        now = time.time()
+        # 节流逻辑：若非强制落盘(force=True)且距离上次落盘小于 0.3 秒，则仅在内存中追加日志，跳过本次 SQLite 全量序列化
+        if not force and hasattr(self, '_last_persist_time') and (now - getattr(self, '_last_persist_time', 0) < 0.3):
+            return
+        self._last_persist_time = now
         try:
             dag_json = json.dumps(dag.to_dict(), ensure_ascii=False)
             status = "running" if not dag.is_all_done() else "done"
             self.session_mgr.save_subtask_dag(session_key, task_id, dag_json, status)
-        except Exception:
-            pass
+        except Exception as e:
+            import sys
+            print(f"⚠️ [_persist_dag] 持久化失败: {e}", file=sys.stderr)
