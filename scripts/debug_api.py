@@ -150,6 +150,10 @@ def main():
     
     if resp.get('type') == 'sync':
         print(f"\n[*] Sync Response:\n{resp.get('response')}")
+        if resp.get('logs'):
+            print(f"\n[*] Sync Execution Logs ({len(resp['logs'])} items):")
+            for line in resp['logs']:
+                print(f"  {line}")
     elif resp.get('type') == 'async':
         task_id = resp.get('task_id')
         print(f"\n[*] Async Task created: {task_id}")
