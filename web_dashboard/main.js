@@ -276,11 +276,12 @@ function renderResults() {
         });
     });
     // Session: view messages -> switch to Chat Assistant drawer
-    document.querySelectorAll('.btn-view-session').forEach(btn => {
+    document.querySelectorAll('.btn-view-session, .btn-open-session').forEach(btn => {
         btn.addEventListener('click', async () => {
             const sessionKey = btn.getAttribute('data-session');
+            const title = btn.getAttribute('data-title') || '';
             if (!sessionKey) return;
-            switchChatSession(sessionKey);
+            switchChatSession(sessionKey, false, title);
         });
     });
 
@@ -637,7 +638,7 @@ function jsonParseSafe(s) {
 // ============================================================
 let chatEventSource = null;
 
-async function switchChatSession(sessionKey, isNew = false) {
+async function switchChatSession(sessionKey, isNew = false, title = '') {
     if (chatEventSource) {
         chatEventSource.close();
         chatEventSource = null;
@@ -647,6 +648,24 @@ async function switchChatSession(sessionKey, isNew = false) {
     const tagEl = document.getElementById('chat-session-key-tag');
     if (tagEl) {
         tagEl.textContent = `#${sessionKey.replace(/^api:/, '')}`;
+    }
+
+    const headerTitleEl = document.getElementById('chat-header-title');
+    if (headerTitleEl) {
+        if (title) {
+            headerTitleEl.textContent = title;
+        } else {
+            headerTitleEl.textContent = '智能助理';
+            fetch('/agent/api/v1/sessions?limit=50')
+                .then(r => r.json())
+                .then(d => {
+                    const match = (d.sessions || []).find(s => s.session_key === sessionKey);
+                    if (match && match.title) {
+                        headerTitleEl.textContent = match.title;
+                    }
+                })
+                .catch(() => {});
+        }
     }
 
     const history = document.getElementById('chat-history');
@@ -742,6 +761,42 @@ function initChatDrawer() {
             drawer.classList.toggle('fullscreen');
             const isFullscreen = drawer.classList.contains('fullscreen');
             fullscreenBtn.title = isFullscreen ? '退出全屏' : '全屏';
+        });
+    }
+
+    const headerTitleEl = document.getElementById('chat-header-title');
+    if (headerTitleEl) {
+        headerTitleEl.addEventListener('dblclick', () => {
+            const currentTitle = headerTitleEl.innerText === '智能助理' ? '' : headerTitleEl.innerText;
+            const sessionKey = state.activeChatSessionKey || 'api:dashboard_default';
+            showModal({
+                title: '修改会话标题',
+                icon: '✏️',
+                input: { value: currentTitle, placeholder: '请输入新的会话标题...' },
+                buttons: [
+                    { text: '取消', class: 'modal-btn-secondary', onClick: (m) => m.close() },
+                    {
+                        text: '保存',
+                        class: 'modal-btn-primary',
+                        onClick: (m, newVal) => {
+                            if (!newVal) return;
+                            fetch('/agent/api/v1/session/title', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ session_key: sessionKey, title: newVal })
+                            })
+                            .then(r => r.json())
+                            .then(res => {
+                                if (res.status === 'ok') {
+                                    headerTitleEl.innerText = newVal;
+                                    m.close();
+                                    if (typeof performSearch === 'function') performSearch(false);
+                                }
+                            });
+                        }
+                    }
+                ]
+            });
         });
     }
 
@@ -916,6 +971,23 @@ function finishAgentResponse(finalMarkdownHtml, isError = false) {
     } finally {
         // 4. Always remove typing indicator ID so it becomes a permanent chat message
         indicator.removeAttribute('id');
+
+        // 5. Schedule a 1.5s delayed check to update Header title if refined by stage 2 LLM
+        setTimeout(() => {
+            const currentSession = state.activeChatSessionKey;
+            if (currentSession) {
+                fetch('/agent/api/v1/sessions?limit=50')
+                    .then(r => r.json())
+                    .then(d => {
+                        const match = (d.sessions || []).find(s => s.session_key === currentSession);
+                        if (match && match.title) {
+                            const headerTitleEl = document.getElementById('chat-header-title');
+                            if (headerTitleEl) headerTitleEl.textContent = match.title;
+                        }
+                    })
+                    .catch(() => {});
+            }
+        }, 1500);
     }
 
     const history = document.getElementById('chat-history');
@@ -964,6 +1036,10 @@ function sendChatMessage(text) {
     })
     .then(r => r.json())
     .then(data => {
+        if (data.title) {
+            const headerTitleEl = document.getElementById('chat-header-title');
+            if (headerTitleEl) headerTitleEl.textContent = data.title;
+        }
         if (data.type === 'sync') {
             if (data.logs && Array.isArray(data.logs) && data.logs.length > 0) {
                 appendLiveLogLines(data.logs);
@@ -1109,40 +1185,125 @@ function initModalClose() {
 }
 
 // ============================================================
-//  Session Messages Modal
+//  Universal Modal Component (通用 UI 对话框组件)
 // ============================================================
-function showSessionMessagesModal(sessionKey, messages) {
-    // Remove existing modal if any
-    document.querySelectorAll('.session-modal-overlay').forEach(el => el.remove());
-
-    const roleIcons = { user: '👤', assistant: '🤖', system: '⚙️', tool: '🔧' };
-    const rows = messages.map(m => {
-        const icon = roleIcons[m.role] || '💬';
-        const time = m.time ? new Date(m.time * 1000).toLocaleTimeString('zh-CN') : '';
-        const content = h(m.content || '(空)');
-        return `<div class="session-msg"><span class="msg-role">${icon} ${m.role}</span><span class="msg-time">${time}</span><div class="msg-content">${content}</div></div>`;
-    }).join('') || '<p style="color:var(--text-muted);text-align:center">暂无消息记录</p>';
+function showModal(options = {}) {
+    document.querySelectorAll('.universal-modal-overlay, .session-modal-overlay').forEach(el => el.remove());
 
     const overlay = document.createElement('div');
-    overlay.className = 'session-modal-overlay';
-    overlay.innerHTML = `
-        <div class="session-modal">
-            <div class="session-modal-header">
-                <span>📋 会话对话记录</span>
-                <span style="font-size:0.78rem;color:var(--text-muted)">${h(sessionKey)}</span>
-                <button class="icon-btn session-modal-close">&times;</button>
+    overlay.className = 'universal-modal-overlay';
+
+    let bodyContent = '';
+    if (options.contentType === 'markdown' && options.content) {
+        bodyContent = typeof marked !== 'undefined' ? marked.parse(options.content) : options.content;
+    } else if (options.content) {
+        bodyContent = options.content;
+    }
+
+    let inputHtml = '';
+    if (options.input) {
+        const val = (options.input.value || '').replace(/"/g, '&quot;');
+        const ph = options.input.placeholder || '';
+        inputHtml = `<input type="text" class="universal-modal-input" value="${val}" placeholder="${ph}" id="universal-modal-input-field" />`;
+    }
+
+    let buttonsHtml = '';
+    if (options.buttons && options.buttons.length > 0) {
+        buttonsHtml = `<div class="universal-modal-footer">` +
+            options.buttons.map((btn, idx) => `<button class="modal-btn ${btn.class || 'modal-btn-secondary'}" data-btn-idx="${idx}">${btn.text}</button>`).join('') +
+            `</div>`;
+    }
+
+    const modalHtml = `
+        <div class="universal-modal" style="${options.width ? 'width:' + options.width : ''}">
+            <div class="universal-modal-header">
+                ${options.icon ? `<span class="universal-modal-icon">${options.icon}</span>` : ''}
+                <span class="universal-modal-title">${options.title || '提示'}</span>
+                <button class="universal-modal-close">&times;</button>
             </div>
-            <div class="session-modal-body">${rows}</div>
-        </div>`;
+            <div class="universal-modal-body">
+                ${bodyContent}
+                ${inputHtml}
+            </div>
+            ${buttonsHtml}
+        </div>
+    `;
+
+    overlay.innerHTML = modalHtml;
     document.body.appendChild(overlay);
 
+    const closeModal = () => overlay.remove();
+
+    const closeBtn = overlay.querySelector('.universal-modal-close');
+    if (closeBtn) closeBtn.addEventListener('click', closeModal);
     overlay.addEventListener('click', (e) => {
-        if (e.target === overlay || e.target.classList.contains('session-modal-close')) {
-            overlay.remove();
-        }
+        if (e.target === overlay) closeModal();
     });
-    document.addEventListener('keydown', function escHandler(e) {
-        if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', escHandler); }
+
+    const handleKeyDown = (e) => {
+        if (e.key === 'Escape') {
+            closeModal();
+            document.removeEventListener('keydown', handleKeyDown);
+        }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+
+    const inputEl = overlay.querySelector('#universal-modal-input-field');
+    if (inputEl) {
+        inputEl.focus();
+        inputEl.select();
+        inputEl.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                const primaryBtn = options.buttons ? options.buttons.find(b => b.class && b.class.includes('primary')) : null;
+                if (primaryBtn && primaryBtn.onClick) {
+                    primaryBtn.onClick({ close: closeModal }, inputEl.value.trim());
+                }
+            }
+        });
+    }
+
+    if (options.buttons) {
+        options.buttons.forEach((btn, idx) => {
+            const btnEl = overlay.querySelector(`[data-btn-idx="${idx}"]`);
+            if (btnEl) {
+                btnEl.addEventListener('click', () => {
+                    const inputVal = inputEl ? inputEl.value.trim() : '';
+                    if (btn.onClick) {
+                        btn.onClick({ close: closeModal }, inputVal);
+                    } else {
+                        closeModal();
+                    }
+                });
+            }
+        });
+    }
+}
+
+function showSessionMessagesModal(sessionKey, messages) {
+    if (!messages || messages.length === 0) {
+        showModal({
+            title: `会话消息历史 (${sessionKey})`,
+            icon: '💬',
+            content: '*（暂无历史消息）*',
+            contentType: 'markdown'
+        });
+        return;
+    }
+
+    const roleIcons = { user: '👤 **用户**', assistant: '🤖 **AI**', system: '⚙️ **System**', tool: '🔧 **Tool**' };
+    const mdText = messages.map(m => {
+        const iconStr = roleIcons[m.role] || `💬 **${m.role}**`;
+        const timeStr = m.time ? ` *(${new Date(m.time * 1000).toLocaleTimeString('zh-CN')})*` : '';
+        const safeContent = h(m.content || '(空)');
+        return `### ${iconStr}${timeStr}\n${safeContent}`;
+    }).join('\n\n---\n\n');
+
+    showModal({
+        title: `会话消息历史`,
+        icon: '📜',
+        content: mdText,
+        contentType: 'markdown',
+        width: '680px'
     });
 }
 

@@ -131,6 +131,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_post_todo()
         elif parsed_url.path == '/api/v1/todos/brief/push':
             self._handle_post_todo_brief_push()
+        elif parsed_url.path == '/api/v1/session/title':
+            self._handle_post_session_title()
         else:
             self.send_error(404, "Not Found")
 
@@ -277,12 +279,15 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
 
+        session_obj = agent.session_mgr.get_or_create(msg.session_key)
+
         if resp.task_id:
             # 这是一个异步长任务
             out_data = {
                 "type": "async",
                 "task_id": resp.task_id,
-                "message": resp.text
+                "message": resp.text,
+                "title": session_obj.title
             }
         else:
             # 同步返回
@@ -290,7 +295,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "type": "sync",
                 "status": "completed",
                 "response": resp.text,
-                "logs": getattr(resp, "logs", [])
+                "logs": getattr(resp, "logs", []),
+                "title": session_obj.title
             }
 
         self.wfile.write(json.dumps(out_data, ensure_ascii=False).encode('utf-8'))
@@ -378,7 +384,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             # 查询会话，关联最新使用的模型
             sql = """
                 SELECT s.session_key, s.status, s.tool_calls,
-                       s.token_usage, s.updated_at, s.goal,
+                       s.token_usage, s.updated_at, s.goal, s.title,
                        (SELECT a.model FROM api_usage_log a
                         WHERE a.session_key = s.session_key
                         ORDER BY a.created_at DESC LIMIT 1) as model
@@ -411,6 +417,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "session_key": key,
                     "channel": channel,
                     "channel_icon": channel_icon,
+                    "title": r["title"] or "",
                     "status": r["status"] or "chatting",
                     "tool_calls": r["tool_calls"] or 0,
                     "token_usage": r["token_usage"] or 0,
@@ -427,6 +434,31 @@ class ApiHandler(BaseHTTPRequestHandler):
                                         ensure_ascii=False).encode('utf-8'))
         except Exception as e:
             self.send_error(500, str(e))
+
+    def _handle_post_session_title(self):
+        """手动修改会话标题: POST /agent/api/v1/session/title"""
+        body = self._read_json()
+        if not body:
+            return
+        session_key = body.get("session_key")
+        title = (body.get("title") or "").strip()
+        if not session_key:
+            self.send_error(400, "Missing session_key")
+            return
+        session_mgr = self.server.api_server.agent.session_mgr
+        if session_key not in session_mgr._cache:
+            import sqlite3
+            with sqlite3.connect(session_mgr.db_path) as conn:
+                row = conn.execute("SELECT 1 FROM sessions WHERE session_key=?", (session_key,)).fetchone()
+                if not row:
+                    self.send_error(404, f"Session {session_key} not found")
+                    return
+        session_mgr.set_title(session_key, title)
+        self.send_response(200)
+        self._send_cors_headers()
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(json.dumps({"status": "ok", "session_key": session_key, "title": title}, ensure_ascii=False).encode('utf-8'))
 
     def _handle_session_messages(self, query: str):
         """返回指定会话的最近消息列表。"""
