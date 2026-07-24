@@ -2,6 +2,7 @@ import json
 import time
 import traceback
 import collections
+from typing import Callable, Optional
 from openai import OpenAI
 from core.skill_engine import SkillEngine
 from core.subtask_dag import Subtask
