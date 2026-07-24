@@ -851,8 +851,10 @@ function formatLogLineHtml(text) {
 }
 
 function appendLiveLogLines(lines) {
-    const logBody = document.getElementById('live-log-body');
-    const logCount = document.getElementById('live-log-count');
+    const indicator = document.getElementById('chat-typing-indicator');
+    if (!indicator) return;
+    const logBody = indicator.querySelector('.live-log-body');
+    const logCount = indicator.querySelector('.live-log-count');
     if (!logBody) return;
     for (const line of lines) {
         const div = document.createElement('div');
@@ -862,7 +864,8 @@ function appendLiveLogLines(lines) {
     }
     logBody.scrollTop = logBody.scrollHeight;
     if (logCount) {
-        logCount.textContent = logBody.children.length;
+        const realCount = logBody.querySelectorAll('.live-log-line:not(.placeholder-line)').length;
+        logCount.textContent = realCount;
     }
 }
 
@@ -877,38 +880,43 @@ function finishAgentResponse(finalMarkdownHtml, isError = false) {
         return;
     }
 
-    // 1. Remove typing dots & status header line
-    const typingHeader = indicator.querySelector('.typing-dots')?.parentElement;
-    if (typingHeader) typingHeader.remove();
+    try {
+        // 1. Remove typing dots & status header line
+        const typingHeader = indicator.querySelector('.typing-dots')?.parentElement;
+        if (typingHeader) typingHeader.remove();
 
-    // 2. Collapse live execution log details and update summary (or remove if 0 logs)
-    const logDetails = indicator.querySelector('.live-execution-log');
-    if (logDetails) {
-        const countEl = logDetails.querySelector('#live-log-count');
-        const count = countEl ? parseInt(countEl.textContent || '0', 10) : 0;
-        if (count === 0) {
-            logDetails.remove();
-        } else {
-            logDetails.open = false;
-            const summary = logDetails.querySelector('summary');
-            if (summary) {
-                summary.innerHTML = isError ? `⚠️ 执行产生异常日志 (${count} 条)` : `📋 详细执行过程日志 (${count} 条)`;
+        // 2. Collapse live execution log details and update summary (or remove if 0 logs)
+        const logDetails = indicator.querySelector('.live-execution-log');
+        if (logDetails) {
+            const countEl = logDetails.querySelector('.live-log-count');
+            const count = countEl ? parseInt(countEl.textContent || '0', 10) : 0;
+            const realLogLines = logDetails.querySelectorAll('.live-log-line:not(.placeholder-line)');
+            if (count === 0 && realLogLines.length === 0) {
+                logDetails.remove();
+            } else {
+                logDetails.open = false;
+                const summary = logDetails.querySelector('summary');
+                if (summary) {
+                    summary.innerHTML = isError ? `⚠️ 执行产生异常日志 (${count} 条)` : `📋 详细执行过程日志 (${count} 条)`;
+                }
             }
         }
-    }
 
-    // 3. Append response content below the log details inside bubble
-    const bubble = indicator.querySelector('.bubble');
-    if (bubble) {
-        const responseDiv = document.createElement('div');
-        responseDiv.className = 'chat-response-content';
-        responseDiv.style.marginTop = '8px';
-        responseDiv.innerHTML = finalMarkdownHtml || (isError ? '任务失败' : '任务完成 (无返回内容)');
-        bubble.appendChild(responseDiv);
+        // 3. Append response content below the log details inside bubble
+        const bubble = indicator.querySelector('.bubble');
+        if (bubble) {
+            const responseDiv = document.createElement('div');
+            responseDiv.className = 'chat-response-content';
+            responseDiv.style.marginTop = '8px';
+            responseDiv.innerHTML = finalMarkdownHtml || (isError ? '任务失败' : '任务完成 (无返回内容)');
+            bubble.appendChild(responseDiv);
+        }
+    } catch(e) {
+        console.error('finishAgentResponse error:', e);
+    } finally {
+        // 4. Always remove typing indicator ID so it becomes a permanent chat message
+        indicator.removeAttribute('id');
     }
-
-    // 4. Remove typing indicator ID so it becomes a permanent chat message
-    indicator.removeAttribute('id');
 
     const history = document.getElementById('chat-history');
     if (history) history.scrollTop = history.scrollHeight;
@@ -919,6 +927,10 @@ function sendChatMessage(text) {
         chatEventSource.close();
         chatEventSource = null;
     }
+
+    // Clean up any stale typing indicator element ID to prevent ID collisions
+    const staleIndicator = document.getElementById('chat-typing-indicator');
+    if (staleIndicator) staleIndicator.removeAttribute('id');
 
     const rawSessionId = state.activeChatSessionKey.replace(/^api:/, '');
 
@@ -932,9 +944,9 @@ function sendChatMessage(text) {
                 <span style="font-size:0.85rem;color:var(--text-muted)" id="typing-status-text">Agent 正在处理任务...</span>
             </div>
             <details class="live-execution-log" open>
-                <summary>⚡ 实时执行日志与调度过程 (<span id="live-log-count">0</span> 条)</summary>
-                <div class="live-log-body" id="live-log-body">
-                    <div class="live-log-line" style="color:var(--text-muted)">[*] 任务初始化，连通 Agent 路由中...</div>
+                <summary>⚡ 实时执行日志与调度过程 (<span class="live-log-count">0</span> 条)</summary>
+                <div class="live-log-body">
+                    <div class="live-log-line placeholder-line" style="color:var(--text-muted)">[*] 任务初始化，连通 Agent 路由中...</div>
                 </div>
             </details>
         </div>`;
@@ -981,6 +993,12 @@ function subscribeChatStream(taskId, rawSessionId) {
 
         if (d.logs && Array.isArray(d.logs) && d.logs.length > 0) {
             appendLiveLogLines(d.logs);
+        }
+
+        if (d.status === 'summarizing') {
+            const indicator = document.getElementById('chat-typing-indicator');
+            const typingText = indicator?.querySelector('#typing-status-text');
+            if (typingText) typingText.textContent = '正在生成总结报告...';
         }
 
         if (d.status === 'done' || d.status === 'completed') {
