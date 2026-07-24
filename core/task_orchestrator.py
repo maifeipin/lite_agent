@@ -243,6 +243,21 @@ class TaskOrchestrator:
             print(f"  📋 {s.id} [{s.type.value}] → {s.assigned_model} : {s.name}")
 
         dag = SubtaskDAG(subtasks, global_strategy=global_strategy, max_depth=self.max_depth)
+        
+        def log_event(msg: str):
+            print(msg)
+            dag.add_log(msg)
+            self._persist_dag(session_key, task_id, dag)
+
+        log_event(f"  [ORCH:PLAN] 拆解完成: {len(subtasks)} 个子任务, strategy={len(global_strategy)} chars")
+        if global_strategy:
+            log_event(f"  🧭 全局战略: {global_strategy}")
+
+        for s in subtasks:
+            tools_str = f" tools={s.tools}" if s.tools else ""
+            log_event(f"  [ORCH:ROUTE] {s.id} type={s.type.value} → model={s.assigned_model}{tools_str}")
+            log_event(f"  📋 {s.id} [{s.type.value}] → {s.assigned_model} : {s.name}")
+
         self._persist_dag(session_key, task_id, dag)
 
         while not dag.is_all_done():
@@ -251,7 +266,7 @@ class TaskOrchestrator:
             total_tokens = sum(s.token_usage for s in dag.subtasks.values())
 
             if total_steps >= effective_max_steps:
-                print(f"  ⚠️ DAG 全局步数预算耗尽 ({total_steps}/{effective_max_steps})")
+                log_event(f"  ⚠️ DAG 全局步数预算耗尽 ({total_steps}/{effective_max_steps})")
                 for s in dag.subtasks.values():
                     if s.status == SubtaskStatus.PENDING:
                         s.status = SubtaskStatus.SKIPPED
@@ -259,7 +274,7 @@ class TaskOrchestrator:
                 break
 
             if total_tokens >= self.dag_max_tokens:
-                print(f"  ⚠️ DAG 全局 Token 预算耗尽 ({total_tokens}/{self.dag_max_tokens})")
+                log_event(f"  ⚠️ DAG 全局 Token 预算耗尽 ({total_tokens}/{self.dag_max_tokens})")
                 for s in dag.subtasks.values():
                     if s.status == SubtaskStatus.PENDING:
                         s.status = SubtaskStatus.SKIPPED
@@ -274,7 +289,7 @@ class TaskOrchestrator:
                         unmet = [d for d in s.depends_on
                                  if dag.subtasks[d].status not in
                                  (SubtaskStatus.DONE, SubtaskStatus.SKIPPED)]
-                        print(f"  ⏳ {sid} 等待依赖: {unmet}")
+                        log_event(f"  ⏳ {sid} 等待依赖: {unmet}")
                 break
 
             if not ready:
@@ -288,7 +303,7 @@ class TaskOrchestrator:
             for subtask in batch:
                 subtask.status = SubtaskStatus.RUNNING
                 subtask.started_at = time.time()
-                print(f"  ▶ {subtask.id} [{subtask.type.value}] 开始执行")
+                log_event(f"  ▶ {subtask.id} [{subtask.type.value}] 开始执行")
 
             self._persist_dag(session_key, task_id, dag)
 
@@ -304,7 +319,7 @@ class TaskOrchestrator:
 
                 future = self.executor.submit(
                     self._run_single_subtask,
-                    subtask, upstream, results, results_lock, goal, global_strategy
+                    subtask, upstream, results, results_lock, goal, global_strategy, log_event
                 )
                 futures.append(future)
 
@@ -334,16 +349,22 @@ class TaskOrchestrator:
                 except Exception:
                     pass
 
-            print(f"  📊 进度: {dag.progress()}")
+            log_event(f"  📊 进度: {dag.progress()}")
 
-        print(f"  ✅ 编排任务 [{task_id}] 完成")
+        log_event(f"  ✅ 编排任务 [{task_id}] 完成")
         return self._aggregate(dag, goal)
 
     def _run_single_subtask(self, subtask: Subtask, upstream: dict,
                             results: dict, lock: threading.Lock,
-                            goal: str = "", global_strategy: str = ""):
+                            goal: str = "", global_strategy: str = "",
+                            log_callback: Callable = None):
         try:
-            print(f"  [WORKER:{subtask.id}] 启动 model={subtask.assigned_model} allowlist={subtask.tools[:3] if subtask.tools else 'all'}...")
+            log_msg = f"  [WORKER:{subtask.id}] 启动 model={subtask.assigned_model} allowlist={subtask.tools[:3] if subtask.tools else 'all'}..."
+            if log_callback:
+                log_callback(log_msg)
+            else:
+                print(log_msg)
+
             client = self.router.get_client(subtask.assigned_model)
             if not client:
                 client = self.router.get_client(
@@ -365,6 +386,7 @@ class TaskOrchestrator:
                 skill_engine=self.skill_engine,
                 tools_allowlist=subtask.tools if subtask.tools else None,
                 provider=self.router.get_provider(subtask.assigned_model),
+                log_callback=log_callback,
             )
             result_text, tool_results = worker.run(subtask, upstream,
                                      goal=goal, global_strategy=global_strategy)
