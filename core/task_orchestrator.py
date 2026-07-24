@@ -440,6 +440,7 @@ class TaskOrchestrator:
                     traceback.print_exc()
                     self._log_and_persist(f"  ❌ Fallback 也失败: {e_fb}", log_callback)
 
+            subtask.finished_at = time.time()
             with lock:
                 results[subtask.id] = {
                     "result": "",

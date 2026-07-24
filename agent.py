@@ -106,11 +106,12 @@ class IncomingMessage:
 class AgentResponse:
     """Agent 返回给通道层的标准化回复"""
 
-    def __init__(self, text: str, title: str = "", color: str = "blue", task_id: str = ""):
+    def __init__(self, text: str, title: str = "", color: str = "blue", task_id: str = "", logs: list = None):
         self.text = text
         self.title = title
         self.color = color
         self.task_id = task_id
+        self.logs = logs if logs is not None else []
 
 
 def _estimate_tokens(messages: list, completion_text: str) -> dict:
@@ -1134,15 +1135,21 @@ class Agent:
 
     def _run_ai_loop(self, msg: IncomingMessage) -> AgentResponse:
         """Tool Call Loop (兼容老接口): 消费 _stream_ai_loop 事件, 拼回 AgentResponse。
-        对 api.py / IM 通道零感知。中间的 tool_start/tool_result 事件被丢弃, 只保留最终文本。"""
+        对 api.py / IM 通道零感知。收集技能调用事件为 logs。"""
         final_text = ""
+        logs = []
         for event in self._stream_ai_loop(msg):
             t = event.get("type")
             if t == "token":
                 final_text += event["delta"]
+            elif t == "tool_start":
+                logs.append(f"🔧 调用技能: {event.get('name')}({str(event.get('args', ''))[:100]})")
+            elif t == "tool_result":
+                ok_str = "成功" if event.get("ok", True) else "失败"
+                res_len = len(str(event.get("result", "")))
+                logs.append(f"✓ 技能 {event.get('name')} 执行{ok_str} (结果长度: {res_len})")
             elif t == "error":
-                return AgentResponse(event["msg"], title="❌ AI 错误", color="red")
-            # reasoning_token / tool_start / tool_result / done: 兼容老接口忽略
+                return AgentResponse(event["msg"], title="❌ AI 错误", color="red", logs=logs)
 
         if not final_text.strip():
             final_text = "⚠️ AI 完成了工具调用，但未返回任何文本。"
@@ -1150,5 +1157,5 @@ class Agent:
         session = self.session_mgr.get_or_create(msg.session_key)
         title = (f"🤖 {self.bot_name} [{session.tool_calls}/{self.max_steps}]"
                  if session.status == "working" else f"🤖 {self.bot_name}")
-        return AgentResponse(final_text, title=title, color="blue")
+        return AgentResponse(final_text, title=title, color="blue", logs=logs)
 

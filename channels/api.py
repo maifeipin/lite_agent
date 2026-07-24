@@ -289,7 +289,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             out_data = {
                 "type": "sync",
                 "status": "completed",
-                "response": resp.text
+                "response": resp.text,
+                "logs": getattr(resp, "logs", [])
             }
 
         self.wfile.write(json.dumps(out_data, ensure_ascii=False).encode('utf-8'))

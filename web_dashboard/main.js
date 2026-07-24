@@ -965,6 +965,9 @@ function sendChatMessage(text) {
     .then(r => r.json())
     .then(data => {
         if (data.type === 'sync') {
+            if (data.logs && Array.isArray(data.logs) && data.logs.length > 0) {
+                appendLiveLogLines(data.logs);
+            }
             const md = marked.parse(data.response || '(空)');
             finishAgentResponse(md);
         } else if (data.type === 'async') {
