@@ -219,14 +219,12 @@ def do_backup() -> str:
         # 获取压缩包大小
         size_mb = os.path.getsize(zip_path) / (1024 * 1024)
         
-        # 清理旧备份 (保留最近 30 天)
-        retention_days = 30
-        now = time.time()
+        # 清理旧备份 (本地仅保留最新 1 份，历史备份由百度网盘保留)
         cleaned_count = 0
         for f in os.listdir(backup_dir):
             if f.startswith("backup_") and f.endswith(".zip"):
                 f_path = os.path.join(backup_dir, f)
-                if os.stat(f_path).st_mtime < now - retention_days * 86400:
+                if os.path.abspath(f_path) != os.path.abspath(zip_path):
                     os.remove(f_path)
                     cleaned_count += 1
 
