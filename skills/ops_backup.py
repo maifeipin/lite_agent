@@ -85,6 +85,71 @@ def _create_meili_dump() -> str:
     print("Meilisearch dump timed out")
     return None
 
+
+# HedgeDoc 数据目录
+_HEDGEDOC_COMPOSE = "/app/hedgedoc/docker-compose.yml"
+_HEDGEDOC_DB_CONTAINER = "hedgedoc_database_1"
+_HEDGEDOC_UPLOADS_VOLUME = "hedgedoc_hedgedoc_uploads"
+
+def _backup_hedgedoc() -> list:
+    """备份 HedgeDoc：数据库 pg_dump + uploads 卷 tar + docker-compose.yml，返回临时文件路径列表"""
+    import tempfile
+    import shutil
+
+    tmp_dir = tempfile.mkdtemp(prefix="hedgedoc_backup_")
+    results = []
+
+    # 1. 数据库 pg_dump
+    try:
+        db_dump = os.path.join(tmp_dir, "hedgedoc_db.sql")
+        with open(db_dump, "w") as f:
+            subprocess.run(
+                ["docker", "exec", _HEDGEDOC_DB_CONTAINER,
+                 "pg_dump", "-U", "hedgedoc", "hedgedoc"],
+                stdout=f,
+                stderr=subprocess.PIPE,
+                timeout=300,
+                check=True
+            )
+        results.append(db_dump)
+        print(f"  [hedgedoc] DB dump: {os.path.getsize(db_dump) // 1024} KB")
+    except Exception as e:
+        print(f"  [hedgedoc] DB dump failed: {e}")
+
+    # 2. uploads 卷打包
+    try:
+        uploads_tar = os.path.join(tmp_dir, "hedgedoc_uploads.tar.gz")
+        subprocess.run(
+            ["docker", "run", "--rm",
+             "-v", f"{_HEDGEDOC_UPLOADS_VOLUME}:/data:ro",
+             "-v", f"{tmp_dir}:/backup",
+             "postgres:13-alpine",
+             "tar", "czf", "/backup/hedgedoc_uploads.tar.gz", "/data"],
+            capture_output=True,
+            timeout=600,
+            check=True
+        )
+        results.append(uploads_tar)
+        print(f"  [hedgedoc] uploads: {os.path.getsize(uploads_tar) // (1024*1024)} MB")
+    except Exception as e:
+        print(f"  [hedgedoc] uploads backup failed: {e}")
+
+    # 3. docker-compose.yml
+    if os.path.exists(_HEDGEDOC_COMPOSE):
+        compose_dst = os.path.join(tmp_dir, "docker-compose.yml")
+        shutil.copy2(_HEDGEDOC_COMPOSE, compose_dst)
+        results.append(compose_dst)
+
+    # 若全失败无产出，清理创建的临时目录
+    if not results:
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+    return results
+
+
 def do_backup() -> str:
     """内部函数：执行备份逻辑"""
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -117,6 +182,12 @@ def do_backup() -> str:
         targets.append(meili_snapshot)
         meili_included = True
     
+    # HedgeDoc 备份（数据库 + 附件卷 + 配置）
+    hedgedoc_files = _backup_hedgedoc()
+    for hf in hedgedoc_files:
+        if os.path.exists(hf):
+            targets.append(hf)
+
     # 过滤掉不存在的路径
     valid_targets = []
     for t in targets:
@@ -124,19 +195,26 @@ def do_backup() -> str:
             valid_targets.append(t)
             
     if not valid_targets:
+        # 即使找不到有效目标，也要清理创建的 HedgeDoc 临时目录及 Vaultwarden 快照
+        for hf in hedgedoc_files:
+            try:
+                if os.path.isdir(os.path.dirname(hf)) and 'hedgedoc_backup_' in os.path.dirname(hf):
+                    import shutil
+                    shutil.rmtree(os.path.dirname(hf), ignore_errors=True)
+                    break
+            except Exception:
+                pass
+        if vw_included and vw_snapshot and vw_snapshot.endswith("db_backup.sqlite3"):
+            try:
+                os.remove(vw_snapshot)
+            except Exception:
+                pass
         return "❌ 找不到任何需要备份的源文件或目录。"
 
     try:
         # 使用 zip 命令压缩 (VPS 环境下通常有 zip 工具)
         cmd = ["zip", "-r", zip_path] + valid_targets
         subprocess.run(cmd, check=True, capture_output=True)
-        
-        # 清理 Vaultwarden 临时快照
-        if vw_included and vw_snapshot and vw_snapshot.endswith("db_backup.sqlite3"):
-            try:
-                os.remove(vw_snapshot)
-            except Exception:
-                pass
 
         # 获取压缩包大小
         size_mb = os.path.getsize(zip_path) / (1024 * 1024)
@@ -153,16 +231,35 @@ def do_backup() -> str:
                     cleaned_count += 1
 
         meili_status = "✅ 已包含" if meili_included else "⚠️ 失败"
+        hd_status = "✅ 已包含" if hedgedoc_files else "⚠️ 失败"
         vw_status = "✅ 已包含" if vw_included else "⚠️ 未找到"
         return (f"✅ 备份成功！\n"
                 f"- 备份文件: `{zip_name}`\n"
                 f"- 大小: `{size_mb:.2f} MB`\n"
                 f"- Meilisearch 索引库: {meili_status}\n"
                 f"- Vaultwarden 密码库: {vw_status}\n"
+                f"- HedgeDoc 数据库+附件: {hd_status}\n"
                 f"- 清理了 {cleaned_count} 个过期备份。")
         
     except Exception as e:
         return f"❌ 备份失败: {e}"
+    finally:
+        # 清理 HedgeDoc 临时文件
+        for hf in hedgedoc_files:
+            try:
+                if os.path.isdir(os.path.dirname(hf)) and 'hedgedoc_backup_' in os.path.dirname(hf):
+                    import shutil
+                    shutil.rmtree(os.path.dirname(hf), ignore_errors=True)
+                    break
+            except Exception:
+                pass
+
+        # 清理 Vaultwarden 临时快照
+        if vw_included and vw_snapshot and vw_snapshot.endswith("db_backup.sqlite3"):
+            try:
+                os.remove(vw_snapshot)
+            except Exception:
+                pass
 
 
 def do_backup_and_sync() -> str:
@@ -192,7 +289,7 @@ def do_backup_and_sync() -> str:
 
 @skill(
     name='ops_backup_data',
-    description='手动执行数据备份，打包最新的聊天记录数据库、邮件账单和Vaultwarden密码库。'
+    description='手动执行数据备份，包含聊天记录、邮件账单、Vaultwarden密码库、HedgeDoc数据库和附件。'
 )
 def ops_backup_data() -> str:
     return do_backup()
@@ -200,7 +297,7 @@ def ops_backup_data() -> str:
 
 @skill(
     name='ops_backup_cloud',
-    description='执行数据备份并同步到百度网盘，包含聊天记录、账单、Vaultwarden密码库。'
+    description='执行数据备份并同步到百度网盘，包含聊天记录、账单、Vaultwarden密码库、HedgeDoc数据库和附件。'
 )
 def ops_backup_cloud() -> str:
     return do_backup_and_sync()
