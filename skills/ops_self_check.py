@@ -193,21 +193,83 @@ def _get_health_report() -> str:
     else:
         report.append(f"⚙️ **Systemd 守护进程 ({svc})**: ⚠️ 未激活 (当前可能为手动前台运行模式)")
 
-    # 6.5 备份任务检查
+    # 6.5 备份任务及云同步检查
     try:
         import glob
+        import json
         backup_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'backup')
-        backups = sorted(glob.glob(os.path.join(backup_dir, 'backup_*.zip')), reverse=True)
-        if backups:
-            latest = backups[0]
-            mtime = datetime.fromtimestamp(os.path.getmtime(latest))
-            ago = (datetime.now() - mtime).total_seconds() / 3600
-            if ago < 25:
-                report.append(f"💾 **数据备份**: ✅ 已完成 (最新: {os.path.basename(latest)}, {ago:.1f}h 前)")
+        status_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'backup_status.json')
+        
+        status_loaded = False
+        if os.path.exists(status_file):
+            try:
+                with open(status_file, "r", encoding="utf-8") as sf:
+                    sdata = json.load(sf)
+                
+                last_time_str = sdata.get("last_backup_time")
+                last_time = datetime.strptime(last_time_str, "%Y-%m-%d %H:%M:%S")
+                ago = (datetime.now() - last_time).total_seconds() / 3600
+                
+                # 检查本地备份文件是否完整存在
+                local_files = sdata.get("local_files", [])
+                files_exist = True
+                missing_files = []
+                for lf in local_files:
+                    if not os.path.exists(lf):
+                        files_exist = False
+                        missing_files.append(os.path.basename(lf))
+                
+                sync_info = sdata.get("baidu_pcs_sync", {})
+                sync_status = sync_info.get("status", "pending")
+                sync_err = sync_info.get("error_message")
+                
+                # 状态判定与组装
+                local_desc = "✅ 已完成" if (ago < 25 and files_exist) else "⚠️ 异常"
+                if not files_exist:
+                    local_desc += f" (分卷丢失: {', '.join(missing_files)})"
+                elif ago >= 25:
+                    local_desc += f" (超24h未备份, {ago:.0f}h 前)"
+                else:
+                    local_desc += f" ({ago:.1f}h 前)"
+                
+                if sync_status == "success":
+                    cloud_desc = "✅ 成功"
+                elif sync_status == "pending":
+                    cloud_desc = "⏳ 进行中/等待"
+                else:
+                    cloud_desc = f"❌ 失败 ({sync_err})"
+                
+                report.append(f"💾 **数据备份**: {local_desc}")
+                report.append(f"   - ☁️ **云端同步**: {cloud_desc}")
+                
+                # 输出备份清单状态
+                checklist = sdata.get("backup_checklist", {})
+                checklist_desc = ", ".join(f"{k}: {v}" for k, v in checklist.items())
+                report.append(f"   - 📋 **备份清单**: {checklist_desc}")
+                
+                status_loaded = True
+            except Exception as je:
+                print(f"Failed to parse backup_status.json in self check: {je}")
+        
+        # 兼容冷启动或 JSON 解析失败的回退逻辑
+        if not status_loaded:
+            backups = sorted(
+                glob.glob(os.path.join(backup_dir, 'lite_agent_backup_*.zip')) +
+                glob.glob(os.path.join(backup_dir, 'backup_*.zip')),
+                reverse=True
+            )
+            if backups:
+                latest = backups[0]
+                mtime = datetime.fromtimestamp(os.path.getmtime(latest))
+                ago = (datetime.now() - mtime).total_seconds() / 3600
+                if ago < 25:
+                    report.append(f"💾 **数据备份**: ✅ 已完成 (最新: {os.path.basename(latest)}, {ago:.1f}h 前)")
+                else:
+                    report.append(f"💾 **数据备份**: ⚠️ 超过24h未备份 (最新: {os.path.basename(latest)}, {ago:.0f}h 前)")
             else:
-                report.append(f"💾 **数据备份**: ⚠️ 超过24h未备份 (最新: {os.path.basename(latest)}, {ago:.0f}h 前)")
-        else:
-            report.append("💾 **数据备份**: ⚠️ 暂无备份文件")
+                report.append("💾 **数据备份**: ⚠️ 暂无备份文件")
+            report.append("   - ☁️ **云端同步**: ⚠️ 无法获取同步状态 (未找到状态文件)")
+            
     except Exception as e:
         report.append(f"💾 **数据备份**: ⚠️ 检查失败 ({str(e)})")
 

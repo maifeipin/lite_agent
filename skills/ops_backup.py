@@ -149,115 +149,224 @@ def _backup_hedgedoc() -> list:
 
     return results
 
+def _safe_symlink(src, dst):
+    """安全地创建软链接，若目标已存在则先删除，若源不存在则忽略"""
+    if src and os.path.exists(src):
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        if os.path.lexists(dst):
+            try:
+                if os.path.isdir(dst) and not os.path.islink(dst):
+                    import shutil
+                    shutil.rmtree(dst, ignore_errors=True)
+                else:
+                    os.remove(dst)
+            except Exception:
+                pass
+        try:
+            os.symlink(src, dst)
+        except Exception as e:
+            print(f"Failed to create symlink from {src} to {dst}: {e}")
+
+def _backup_mongodb() -> str:
+    """对 MongoDB 中的 rsslite 数据库做 dump 备份，返回临时备份文件路径或 None"""
+    import tempfile
+    cfg = load_config() or {}
+    uri = cfg.get("rssdb", {}).get("uri", "")
+    if not uri:
+        print("  [mongodb] rsslite backup skipped: RSSDB_URI not configured.")
+        return None
+
+    # 自动适配 authSource=admin
+    if "authSource=" not in uri:
+        if "?" in uri:
+            uri += "&authSource=admin"
+        else:
+            uri += "/?authSource=admin"
+
+    try:
+        tmp_dir = tempfile.mkdtemp(prefix="mongo_backup_")
+        archive_path = os.path.join(tmp_dir, "mongo_dump_rsslite.gz")
+        
+        # 运行 mongodump
+        cmd = [
+            "mongodump",
+            f"--uri={uri}",
+            f"--archive={archive_path}",
+            "--gzip",
+            "--db", "rsslite"
+        ]
+        subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+        print(f"  [mongodb] DB dump size: {os.path.getsize(archive_path) // 1024} KB")
+        return archive_path
+    except Exception as e:
+        print(f"  [mongodb] DB dump failed: {e}")
+        return None
+
 
 def do_backup() -> str:
     """内部函数：执行备份逻辑"""
+    import tempfile
+    import shutil
+    import json
+
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     backup_dir = os.path.join(base_dir, "backup")
     os.makedirs(backup_dir, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    zip_name = f"backup_{timestamp}.zip"
+    zip_name = f"lite_agent_backup_{timestamp}.zip"
     zip_path = os.path.join(backup_dir, zip_name)
 
-    # 待备份的目录或文件
-    targets = [
-        os.path.join(base_dir, "data"), # lite_agent/data/sessions.db
-        os.path.join(_BILLING_DIR, "statements.db"),
-        os.path.join(_BILLING_DIR, "email-downloads"),
-        os.path.join(_BILLING_DIR, "validation-reports")
-    ]
+    checklist = {
+        "lite_agent_core": "Failed",
+        "rsslite_mongodb": "Missing",
+        "vaultwarden": "Missing",
+        "meilisearch": "Missing",
+        "hedgedoc": "Missing"
+    }
 
-    # Vaultwarden 密码库快照
-    vw_snapshot = _backup_vaultwarden()
-    vw_included = False
-    if vw_snapshot:
-        targets.append(vw_snapshot)
-        vw_included = True
-        
-    # Meilisearch 索引库快照
-    meili_snapshot = _create_meili_dump()
-    meili_included = False
-    if meili_snapshot:
-        targets.append(meili_snapshot)
-        meili_included = True
-    
-    # HedgeDoc 备份（数据库 + 附件卷 + 配置）
-    hedgedoc_files = _backup_hedgedoc()
-    for hf in hedgedoc_files:
-        if os.path.exists(hf):
-            targets.append(hf)
-
-    # 过滤掉不存在的路径
-    valid_targets = []
-    for t in targets:
-        if os.path.exists(t):
-            valid_targets.append(t)
-            
-    if not valid_targets:
-        # 即使找不到有效目标，也要清理创建的 HedgeDoc 临时目录及 Vaultwarden 快照
-        for hf in hedgedoc_files:
-            try:
-                if os.path.isdir(os.path.dirname(hf)) and 'hedgedoc_backup_' in os.path.dirname(hf):
-                    import shutil
-                    shutil.rmtree(os.path.dirname(hf), ignore_errors=True)
-                    break
-            except Exception:
-                pass
-        if vw_included and vw_snapshot and vw_snapshot.endswith("db_backup.sqlite3"):
-            try:
-                os.remove(vw_snapshot)
-            except Exception:
-                pass
-        return "❌ 找不到任何需要备份的源文件或目录。"
+    # 1. 准备符号链接临时目录树以避免磁盘双倍占用
+    tree_dir = tempfile.mkdtemp(prefix="backup_tree_")
 
     try:
-        # 使用 zip -s 1g 命令分卷压缩，以规避百度网盘 2GB 单文件上传限制及分片 API 权限限制
-        cmd = ["zip", "-s", "1g", "-r", zip_path] + valid_targets
-        subprocess.run(cmd, check=True, capture_output=True)
+        # A. Lite Agent Core
+        core_targets = [
+            (os.path.join(base_dir, "data"), os.path.join(tree_dir, "lite_agent", "data")),
+            (os.path.join(_BILLING_DIR, "statements.db"), os.path.join(tree_dir, "lite_agent", "statements.db")),
+            (os.path.join(_BILLING_DIR, "email-downloads"), os.path.join(tree_dir, "lite_agent", "email-downloads")),
+            (os.path.join(_BILLING_DIR, "validation-reports"), os.path.join(tree_dir, "lite_agent", "validation-reports"))
+        ]
+        core_ok = False
+        for src, dst in core_targets:
+            if os.path.exists(src):
+                _safe_symlink(src, dst)
+                core_ok = True
+        if core_ok:
+            checklist["lite_agent_core"] = "OK"
+
+        # B. MongoDB rsslite
+        mongo_snapshot = _backup_mongodb()
+        if mongo_snapshot:
+            _safe_symlink(mongo_snapshot, os.path.join(tree_dir, "rsslite", "mongo_dump_rsslite.gz"))
+            checklist["rsslite_mongodb"] = "OK"
+
+        # C. Vaultwarden
+        vw_snapshot = _backup_vaultwarden()
+        vw_included = False
+        if vw_snapshot:
+            _safe_symlink(vw_snapshot, os.path.join(tree_dir, "vaultwarden", "db_backup.sqlite3"))
+            checklist["vaultwarden"] = "OK"
+            vw_included = True
+
+        # D. Meilisearch
+        meili_snapshot = _create_meili_dump()
+        meili_included = False
+        if meili_snapshot:
+            _safe_symlink(meili_snapshot, os.path.join(tree_dir, "meilisearch", "meilisearch_dump"))
+            checklist["meilisearch"] = "OK"
+            meili_included = True
+
+        # E. HedgeDoc
+        hedgedoc_files = _backup_hedgedoc()
+        if hedgedoc_files:
+            for hf in hedgedoc_files:
+                name = os.path.basename(hf)
+                _safe_symlink(hf, os.path.join(tree_dir, "hedgedoc", name))
+            checklist["hedgedoc"] = "OK"
+
+        # 检查是否没有任何有效文件可打包
+        has_files = False
+        for root, dirs, files in os.walk(tree_dir):
+            if files or dirs:
+                has_files = True
+                break
+        if not has_files:
+            return "❌ 找不到任何需要备份的源文件或目录。"
+
+        # 使用 zip -s 1g 命令分卷压缩，跟随符号链接保存（即不加 -y），cwd=tree_dir
+        cmd = ["zip", "-s", "1g", "-r", zip_path, "."]
+        subprocess.run(cmd, cwd=tree_dir, check=True, capture_output=True)
 
         # 计算这一组备份所有分卷的总大小
         size_mb = 0
         current_base = os.path.splitext(os.path.basename(zip_path))[0]
+        local_files = []
         for f in os.listdir(backup_dir):
             if f.startswith(current_base):
-                size_mb += os.path.getsize(os.path.join(backup_dir, f)) / (1024 * 1024)
-        
-        # 清理旧备份 (本地仅保留最新一组备份分卷，历史备份由网盘保留)
+                file_path = os.path.join(backup_dir, f)
+                size_mb += os.path.getsize(file_path) / (1024 * 1024)
+                local_files.append(os.path.abspath(file_path))
+        local_files.sort()
+
+        # 写入 data/backup_status.json
+        status_file = os.path.join(base_dir, "data", "backup_status.json")
+        os.makedirs(os.path.dirname(status_file), exist_ok=True)
+        status_data = {
+            "last_backup_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "local_files": local_files,
+            "total_size_mb": round(size_mb, 2),
+            "backup_checklist": checklist,
+            "baidu_pcs_sync": {
+                "status": "pending",
+                "error_message": None,
+                "completion_time": None
+            }
+        }
+        with open(status_file, "w", encoding="utf-8") as sf:
+            json.dump(status_data, sf, ensure_ascii=False, indent=2)
+
+        # 清理旧备份 (本地仅保留最新一组备份分卷，兼容旧格式 backup_ 和新格式 lite_agent_backup_ 文件的清除)
         cleaned_count = 0
         for f in os.listdir(backup_dir):
-            if f.startswith("backup_") and not f.startswith(current_base):
+            if (f.startswith("backup_") or f.startswith("lite_agent_backup_")) and not f.startswith(current_base):
                 os.remove(os.path.join(backup_dir, f))
                 cleaned_count += 1
 
         meili_status = "✅ 已包含" if meili_included else "⚠️ 失败"
         hd_status = "✅ 已包含" if hedgedoc_files else "⚠️ 失败"
         vw_status = "✅ 已包含" if vw_included else "⚠️ 未找到"
+        mongo_status = "✅ 已包含" if mongo_snapshot else "⚠️ 未找到"
         return (f"✅ 备份成功！\n"
                 f"- 备份文件: `{zip_name}`\n"
                 f"- 大小: `{size_mb:.2f} MB`\n"
+                f"- Lite Agent 数据库: {checklist['lite_agent_core']}\n"
                 f"- Meilisearch 索引库: {meili_status}\n"
                 f"- Vaultwarden 密码库: {vw_status}\n"
                 f"- HedgeDoc 数据库+附件: {hd_status}\n"
+                f"- RSS (rsslite) MongoDB数据库: {mongo_status}\n"
                 f"- 清理了 {cleaned_count} 个过期备份。")
-        
+
     except Exception as e:
         return f"❌ 备份失败: {e}"
     finally:
+        # 清理临时链接目录树
+        if 'tree_dir' in locals() and os.path.exists(tree_dir):
+            shutil.rmtree(tree_dir, ignore_errors=True)
+
         # 清理 HedgeDoc 临时文件
-        for hf in hedgedoc_files:
+        if 'hedgedoc_files' in locals() and hedgedoc_files:
+            for hf in hedgedoc_files:
+                try:
+                    parent_dir = os.path.dirname(hf)
+                    if os.path.isdir(parent_dir) and 'hedgedoc_backup_' in os.path.basename(parent_dir):
+                        shutil.rmtree(parent_dir, ignore_errors=True)
+                        break
+                except Exception:
+                    pass
+
+        # 清理 Vaultwarden 临时快照
+        if 'vw_snapshot' in locals() and vw_snapshot and vw_snapshot.endswith("db_backup.sqlite3"):
             try:
-                if os.path.isdir(os.path.dirname(hf)) and 'hedgedoc_backup_' in os.path.dirname(hf):
-                    import shutil
-                    shutil.rmtree(os.path.dirname(hf), ignore_errors=True)
-                    break
+                os.remove(vw_snapshot)
             except Exception:
                 pass
 
-        # 清理 Vaultwarden 临时快照
-        if vw_included and vw_snapshot and vw_snapshot.endswith("db_backup.sqlite3"):
+        # 清理 MongoDB 临时文件
+        if 'mongo_snapshot' in locals() and mongo_snapshot:
             try:
-                os.remove(vw_snapshot)
+                parent_dir = os.path.dirname(mongo_snapshot)
+                if os.path.isdir(parent_dir) and 'mongo_backup_' in os.path.basename(parent_dir):
+                    shutil.rmtree(parent_dir, ignore_errors=True)
             except Exception:
                 pass
 
@@ -272,20 +381,47 @@ def do_backup_and_sync() -> str:
     # 第二步：同步到百度网盘
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     backup_dir = os.path.join(base_dir, "backup")
+    status_file = os.path.join(base_dir, "data", "backup_status.json")
+
+    sync_status = "success"
+    err_msg = None
+
     try:
         # 指定 --slice 3G 强制单文件上传，规避百度 PCS 分片 API (type=tmpfile) 的 31064 权限报错
         sync_result = subprocess.run(
             ["bypy", "--slice", "3G", "syncup", backup_dir, "lite_agent/backup"],
             capture_output=True, text=True, timeout=3600
         )
-        if sync_result.returncode == 0:
-            return backup_result + "\n\n📤 百度网盘同步: ✅ 已上传至 `lite_agent/backup`"
-        else:
-            return backup_result + f"\n\n📤 百度网盘同步: ❌ 失败\n{sync_result.stderr}"
+        if sync_result.returncode != 0:
+            sync_status = "failed"
+            err_msg = sync_result.stderr or "bypy returned non-zero code"
     except subprocess.TimeoutExpired:
-        return backup_result + "\n\n📤 百度网盘同步: ❌ 超时 (3600s)"
+        sync_status = "failed"
+        err_msg = "bypy upload timeout (3600s)"
     except Exception as e:
-        return backup_result + f"\n\n📤 百度网盘同步: ❌ 异常: {e}"
+        sync_status = "failed"
+        err_msg = f"bypy exception: {e}"
+
+    # 更新 backup_status.json 中的网盘同步状态
+    if os.path.exists(status_file):
+        try:
+            import json
+            with open(status_file, "r", encoding="utf-8") as sf:
+                data = json.load(sf)
+            data["baidu_pcs_sync"] = {
+                "status": sync_status,
+                "error_message": err_msg,
+                "completion_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            with open(status_file, "w", encoding="utf-8") as sf:
+                json.dump(data, sf, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Failed to update backup_status.json: {e}")
+
+    if sync_status == "success":
+        return backup_result + "\n\n📤 百度网盘同步: ✅ 已上传至 `lite_agent/backup`"
+    else:
+        return backup_result + f"\n\n📤 百度网盘同步: ❌ 失败\n{err_msg}"
 
 
 @skill(
