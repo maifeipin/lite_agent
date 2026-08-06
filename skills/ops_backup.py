@@ -212,21 +212,23 @@ def do_backup() -> str:
         return "❌ 找不到任何需要备份的源文件或目录。"
 
     try:
-        # 使用 zip 命令压缩 (VPS 环境下通常有 zip 工具)
-        cmd = ["zip", "-r", zip_path] + valid_targets
+        # 使用 zip -s 1g 命令分卷压缩，以规避百度网盘 2GB 单文件上传限制及分片 API 权限限制
+        cmd = ["zip", "-s", "1g", "-r", zip_path] + valid_targets
         subprocess.run(cmd, check=True, capture_output=True)
 
-        # 获取压缩包大小
-        size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+        # 计算这一组备份所有分卷的总大小
+        size_mb = 0
+        current_base = os.path.splitext(os.path.basename(zip_path))[0]
+        for f in os.listdir(backup_dir):
+            if f.startswith(current_base):
+                size_mb += os.path.getsize(os.path.join(backup_dir, f)) / (1024 * 1024)
         
-        # 清理旧备份 (本地仅保留最新 1 份，历史备份由百度网盘保留)
+        # 清理旧备份 (本地仅保留最新一组备份分卷，历史备份由网盘保留)
         cleaned_count = 0
         for f in os.listdir(backup_dir):
-            if f.startswith("backup_") and f.endswith(".zip"):
-                f_path = os.path.join(backup_dir, f)
-                if os.path.abspath(f_path) != os.path.abspath(zip_path):
-                    os.remove(f_path)
-                    cleaned_count += 1
+            if f.startswith("backup_") and not f.startswith(current_base):
+                os.remove(os.path.join(backup_dir, f))
+                cleaned_count += 1
 
         meili_status = "✅ 已包含" if meili_included else "⚠️ 失败"
         hd_status = "✅ 已包含" if hedgedoc_files else "⚠️ 失败"
@@ -271,8 +273,9 @@ def do_backup_and_sync() -> str:
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     backup_dir = os.path.join(base_dir, "backup")
     try:
+        # 指定 --slice 3G 强制单文件上传，规避百度 PCS 分片 API (type=tmpfile) 的 31064 权限报错
         sync_result = subprocess.run(
-            ["bypy", "syncup", backup_dir, "lite_agent/backup"],
+            ["bypy", "--slice", "3G", "syncup", backup_dir, "lite_agent/backup"],
             capture_output=True, text=True, timeout=3600
         )
         if sync_result.returncode == 0:
