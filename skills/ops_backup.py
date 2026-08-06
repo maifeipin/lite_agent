@@ -198,6 +198,9 @@ def _backup_mongodb() -> str:
         subprocess.run(cmd, check=True, capture_output=True, timeout=300)
         print(f"  [mongodb] DB dump size: {os.path.getsize(archive_path) // 1024} KB")
         return archive_path
+    except subprocess.CalledProcessError as e:
+        print(f"  [mongodb] DB dump failed (exit {e.returncode}): {e.stderr.decode('utf-8', errors='ignore')}")
+        return None
     except Exception as e:
         print(f"  [mongodb] DB dump failed: {e}")
         return None
