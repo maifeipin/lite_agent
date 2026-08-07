@@ -1,6 +1,6 @@
 import sys, os, subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.skill_engine import skill
@@ -264,7 +264,10 @@ def _safe_symlink(src, dst):
             print(f"Failed to create symlink from {src} to {dst}: {e}")
 
 def _backup_mongodb() -> str:
-    """对 MongoDB 中的 rsslite 数据库做 dump 备份，返回临时备份文件路径或 None"""
+    """对 MongoDB 中的 rsslite 数据库做增量备份：只 dump 当月分区表 items_YYYYMM
+
+    日常备份只备份当月活跃数据（通常几十 MB），全量备份用 full_backup_once.py。
+    """
     import tempfile
     cfg = load_config() or {}
     uri = cfg.get("rssdb", {}).get("uri", "")
@@ -279,26 +282,48 @@ def _backup_mongodb() -> str:
         else:
             uri += "/?authSource=admin"
 
+    # 当月分区表名 items_YYYYMM
+    current_month = datetime.now().strftime("%Y%m")
+    collection = f"items_{current_month}"
+
     try:
         tmp_dir = tempfile.mkdtemp(prefix="mongo_backup_")
-        archive_path = os.path.join(tmp_dir, "mongo_dump_rsslite.gz")
+        archive_path = os.path.join(tmp_dir, f"rsslite_{current_month}.gz")
 
-        # 运行 mongodump
+        # 只 dump 当月分区表（增量备份）
         cmd = [
             "mongodump",
             f"--uri={uri}",
             f"--archive={archive_path}",
             "--gzip",
-            "--db", "rsslite"
+            "--db", "rsslite",
+            "--collection", collection,
         ]
         subprocess.run(cmd, check=True, capture_output=True, timeout=300)
-        print(f"  [mongodb] DB dump size: {os.path.getsize(archive_path) // 1024} KB")
+        size_kb = os.path.getsize(archive_path) // 1024
+        print(f"  [mongodb] {collection} dump: {size_kb} KB")
         return archive_path
     except subprocess.CalledProcessError as e:
-        print(f"  [mongodb] DB dump failed (exit {e.returncode}): {e.stderr.decode('utf-8', errors='ignore')}")
+        # 当月表可能不存在（月初），尝试上月
+        stderr = e.stderr.decode('utf-8', errors='ignore') if e.stderr else ""
+        if "does not exist" in stderr or "ns not found" in stderr:
+            prev_month = (datetime.now().replace(day=1) - timedelta(days=1)).strftime("%Y%m")
+            collection = f"items_{prev_month}"
+            print(f"  [mongodb] 当月表不存在，尝试上月 {collection}")
+            try:
+                archive_path = os.path.join(tmp_dir, f"rsslite_{prev_month}.gz")
+                cmd[-1] = collection
+                subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+                size_kb = os.path.getsize(archive_path) // 1024
+                print(f"  [mongodb] {collection} dump: {size_kb} KB")
+                return archive_path
+            except Exception as e2:
+                print(f"  [mongodb] {collection} dump failed: {e2}")
+                return None
+        print(f"  [mongodb] dump failed (exit {e.returncode}): {stderr[:200]}")
         return None
     except Exception as e:
-        print(f"  [mongodb] DB dump failed: {e}")
+        print(f"  [mongodb] dump failed: {e}")
         return None
 
 def _backup_halo() -> str:
