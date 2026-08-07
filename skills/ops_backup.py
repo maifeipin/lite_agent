@@ -302,13 +302,27 @@ def _backup_mongodb() -> str:
         return None
 
 def _backup_halo() -> str:
-    """备份 Halo 的 H2 数据库，返回数据库文件路径或 None"""
-    db_path = os.path.join(_HALO_DATA, "db", "halo.mv.db")
-    if not os.path.exists(db_path):
-        print("  [halo] halo.mv.db not found, skipping")
-        return None
-    # H2 数据库文件可以直接复制（Halo 运行时 H2 使用文件锁，但 mv.db 文件可以安全拷贝）
-    return db_path
+    """备份 Halo 的 H2 数据库，返回临时副本路径或 None
+
+    Halo 数据在 /root/.halo/（root 权限），liteagent 用户无法直接访问。
+    通过 docker cp 从容器内复制到临时目录。
+    """
+    import tempfile
+    tmp_dir = tempfile.mkdtemp(prefix="halo_backup_")
+    tmp_db = os.path.join(tmp_dir, "halo.mv.db")
+    try:
+        subprocess.run(
+            ["docker", "cp", "halo:/root/.halo/db/halo.mv.db", tmp_db],
+            check=True, capture_output=True, timeout=60
+        )
+        if os.path.exists(tmp_db):
+            print(f"  [halo] H2 db: {os.path.getsize(tmp_db) // (1024*1024)} MB")
+            return tmp_db
+    except Exception as e:
+        print(f"  [halo] docker cp failed: {e}")
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    return None
 
 
 # ==========================================
@@ -473,12 +487,20 @@ def do_backup() -> str:
     import shutil
 
     # Halo mtime 增量检测：读取上次备份时记录的 mtime
+    # 通过 docker exec 获取（liteagent 无法直接访问 /root/.halo/）
     status_file = os.path.join(base_dir, "data", "backup_status.json")
-    halo_db_path = os.path.join(_HALO_DATA, "db", "halo.mv.db")
     halo_current_mtime = None
     halo_should_backup = True
-    if os.path.exists(halo_db_path):
-        halo_current_mtime = os.path.getmtime(halo_db_path)
+    try:
+        mtime_str = subprocess.run(
+            ["docker", "exec", "halo", "stat", "-c", "%Y", "/root/.halo/db/halo.mv.db"],
+            capture_output=True, text=True, timeout=10
+        ).stdout.strip()
+        if mtime_str:
+            halo_current_mtime = float(mtime_str)
+    except Exception:
+        pass
+    if halo_current_mtime is not None:
         if os.path.exists(status_file):
             try:
                 with open(status_file, "r", encoding="utf-8") as sf:
@@ -491,12 +513,10 @@ def do_backup() -> str:
             except Exception:
                 pass
 
-    # 清理旧备份
+    # 清理旧备份（含旧的 zip 分卷 .z01/.z02 等）
     for f in os.listdir(backup_dir):
-        if f.endswith(".zip") and (f.startswith("data_") or f.startswith("meilisearch_")
-            or f.startswith("rsslite_") or f.startswith("halo_")
-            or f.startswith("hedgedoc_") or f.startswith("vaultwarden_")
-            or f.startswith("lite_agent_backup_") or f.startswith("backup_")):
+        if f.startswith(("data_", "meilisearch_", "rsslite_", "halo_",
+            "hedgedoc_", "vaultwarden_", "lite_agent_backup_", "backup_")):
             os.remove(os.path.join(backup_dir, f))
 
     # A. Lite Agent Core (data 目录 + billing)
@@ -672,6 +692,11 @@ def do_backup() -> str:
                 shutil.rmtree(tree_dir, ignore_errors=True)
             except Exception as e:
                 print(f"  [halo] zip failed: {e}")
+            finally:
+                # 清理 _backup_halo() 的临时目录
+                halo_parent = os.path.dirname(halo_db)
+                if os.path.isdir(halo_parent) and 'halo_backup_' in os.path.basename(halo_parent):
+                    shutil.rmtree(halo_parent, ignore_errors=True)
 
     if not backup_files:
         return "❌ 找不到任何需要备份的源文件或目录。"
