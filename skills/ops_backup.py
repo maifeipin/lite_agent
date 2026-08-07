@@ -15,6 +15,10 @@ _BILLING_DIR = _cfg.get("billing", {}).get("script_dir", "/home/liteagent/mail-s
 # Vaultwarden 密码库数据目录
 _VAULTWARDEN_DATA = "/opt/vaultwarden/vw-data"
 
+# bdpan CLI 路径（百度官方 CLI，权限完整；bypy 依赖的旧 PCS API 已被百度限制）
+_BDPAN_BIN = "/root/.local/bin/bdpan"
+_BDPAN_REMOTE_DIR = "backup"  # bdpan 授权目录 /apps/bdpan/ 下的子目录
+
 def _backup_vaultwarden() -> str:
     """对 Vaultwarden 的 SQLite 数据库做一致性快照，返回临时备份文件路径或 None"""
     db_path = os.path.join(_VAULTWARDEN_DATA, "db.sqlite3")
@@ -206,6 +210,57 @@ def _backup_mongodb() -> str:
         return None
 
 
+# ==========================================
+# 百度网盘上传（通过官方 bdpan CLI，权限完整）
+# bypy 依赖的旧 PCS API 已被百度限制，第三方应用 API 也无上传权限
+# ==========================================
+
+def _bdpan_sync_dir(backup_dir):
+    """用 bdpan CLI 上传 backup 目录中的备份分卷到百度网盘，返回 (success, detail_str)"""
+    import shutil
+
+    bdpan = _BDPAN_BIN if os.path.exists(_BDPAN_BIN) else shutil.which("bdpan")
+    if not bdpan:
+        return False, "bdpan 未安装，请先运行 install.sh"
+
+    files = sorted(os.listdir(backup_dir))
+    uploads, skipped, failed = [], [], []
+    for fname in files:
+        if not (fname.startswith("lite_agent_backup_") or fname.startswith("backup_")):
+            continue
+        fpath = os.path.join(backup_dir, fname)
+        if not os.path.isfile(fpath):
+            continue
+
+        remote_path = f"{_BDPAN_REMOTE_DIR}/{fname}"
+        try:
+            result = subprocess.run(
+                [bdpan, "upload", fpath, remote_path],
+                capture_output=True, text=True, timeout=3600
+            )
+            if result.returncode == 0:
+                uploads.append(fname)
+                print(f"  [bdpan] 上传 {fname}: 成功")
+            else:
+                err = result.stderr or result.stdout or f"exit code {result.returncode}"
+                # 已存在视为跳过
+                if "已存在" in err or "exist" in err.lower():
+                    skipped.append(fname)
+                else:
+                    failed.append((fname, err.strip()[:200]))
+                    print(f"  [bdpan] 上传 {fname} 失败: {err.strip()[:200]}")
+        except subprocess.TimeoutExpired:
+            failed.append((fname, "上传超时 (3600s)"))
+        except Exception as e:
+            failed.append((fname, str(e)))
+
+    if failed:
+        detail = f"成功 {len(uploads)} 个，跳过 {len(skipped)} 个，失败 {len(failed)} 个: " + "; ".join(f"{n}({m})" for n, m in failed)
+        return False, detail
+    detail = f"上传 {len(uploads)} 个，跳过 {len(skipped)} 个"
+    return True, detail
+
+
 def do_backup() -> str:
     """内部函数：执行备份逻辑"""
     import tempfile
@@ -390,20 +445,13 @@ def do_backup_and_sync() -> str:
     err_msg = None
 
     try:
-        # 指定 --slice 3G 强制单文件上传，规避百度 PCS 分片 API (type=tmpfile) 的 31064 权限报错
-        sync_result = subprocess.run(
-            ["bypy", "--slice", "3G", "syncup", backup_dir, "lite_agent/backup"],
-            capture_output=True, text=True, timeout=3600
-        )
-        if sync_result.returncode != 0:
-            sync_status = "failed"
-            err_msg = sync_result.stderr or "bypy returned non-zero code"
-    except subprocess.TimeoutExpired:
-        sync_status = "failed"
-        err_msg = "bypy upload timeout (3600s)"
+        # 使用百度官方 bdpan CLI 上传（bypy 依赖的旧 PCS API 已被百度限制）
+        sync_status, sync_detail = _bdpan_sync_dir(backup_dir)
+        if sync_status != "success":
+            err_msg = sync_detail
     except Exception as e:
         sync_status = "failed"
-        err_msg = f"bypy exception: {e}"
+        err_msg = f"百度网盘上传异常: {e}"
 
     # 更新 backup_status.json 中的网盘同步状态
     if os.path.exists(status_file):
@@ -422,7 +470,7 @@ def do_backup_and_sync() -> str:
             print(f"Failed to update backup_status.json: {e}")
 
     if sync_status == "success":
-        return backup_result + "\n\n📤 百度网盘同步: ✅ 已上传至 `lite_agent/backup`"
+        return backup_result + f"\n\n📤 百度网盘同步: ✅ 已上传至 `lite_agent/backup`\n{sync_detail}"
     else:
         return backup_result + f"\n\n📤 百度网盘同步: ❌ 失败\n{err_msg}"
 
