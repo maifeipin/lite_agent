@@ -16,7 +16,7 @@ _BILLING_DIR = _cfg.get("billing", {}).get("script_dir", "/home/liteagent/mail-s
 _VAULTWARDEN_DATA = "/opt/vaultwarden/vw-data"
 
 # bdpan CLI 路径（百度官方 CLI，权限完整；bypy 依赖的旧 PCS API 已被百度限制）
-_BDPAN_BIN = "/root/.local/bin/bdpan"
+_BDPAN_BIN = "/usr/local/bin/bdpan"
 _BDPAN_REMOTE_DIR = "backup"  # bdpan 授权目录 /apps/bdpan/ 下的子目录
 
 def _backup_vaultwarden() -> str:
