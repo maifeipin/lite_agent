@@ -264,7 +264,7 @@ def _safe_symlink(src, dst):
             print(f"Failed to create symlink from {src} to {dst}: {e}")
 
 def _backup_mongodb() -> str:
-    """对 MongoDB 中的 rsslite 数据库做增量备份：只 dump 当月分区表 items_YYYYMM
+    """对 MongoDB 中的 rsslite 数据库做增量备份：只 dump 当月分区表 FeedItem_YYYYMM
 
     日常备份只备份当月活跃数据（通常几十 MB），全量备份用 full_backup_once.py。
     """
@@ -282,9 +282,9 @@ def _backup_mongodb() -> str:
         else:
             uri += "/?authSource=admin"
 
-    # 当月分区表名 items_YYYYMM
+    # 当月分区表名 FeedItem_YYYYMM
     current_month = datetime.now().strftime("%Y%m")
-    collection = f"items_{current_month}"
+    collection = f"FeedItem_{current_month}"
 
     try:
         tmp_dir = tempfile.mkdtemp(prefix="mongo_backup_")
@@ -308,7 +308,7 @@ def _backup_mongodb() -> str:
         stderr = e.stderr.decode('utf-8', errors='ignore') if e.stderr else ""
         if "does not exist" in stderr or "ns not found" in stderr:
             prev_month = (datetime.now().replace(day=1) - timedelta(days=1)).strftime("%Y%m")
-            collection = f"items_{prev_month}"
+            collection = f"FeedItem_{prev_month}"
             print(f"  [mongodb] 当月表不存在，尝试上月 {collection}")
             try:
                 archive_path = os.path.join(tmp_dir, f"rsslite_{prev_month}.gz")
