@@ -19,6 +19,19 @@ _VAULTWARDEN_DATA = "/opt/vaultwarden/vw-data"
 _BDPAN_BIN = "/usr/local/bin/bdpan"
 _BDPAN_REMOTE_DIR = "backup"  # bdpan 授权目录 /apps/bdpan/ 下的子目录
 
+# Halo 数据目录（H2 嵌入式数据库）
+_HALO_DATA = "/root/.halo"
+
+# 远端分类子目录（对应 /apps/bdpan/lite-agent/ 下的子目录）
+_BDPAN_CATEGORIES = {
+    "data": "data",
+    "meilisearch": "meilisearch",
+    "rsslite": "rsslite",
+    "halo": "halo",
+    "hedgedoc": "hedgedoc",
+    "vaultwarden": "vaultwarden",
+}
+
 def _backup_vaultwarden() -> str:
     """对 Vaultwarden 的 SQLite 数据库做一致性快照，返回临时备份文件路径或 None"""
     db_path = os.path.join(_VAULTWARDEN_DATA, "db.sqlite3")
@@ -209,6 +222,15 @@ def _backup_mongodb() -> str:
         print(f"  [mongodb] DB dump failed: {e}")
         return None
 
+def _backup_halo() -> str:
+    """备份 Halo 的 H2 数据库，返回数据库文件路径或 None"""
+    db_path = os.path.join(_HALO_DATA, "db", "halo.mv.db")
+    if not os.path.exists(db_path):
+        print("  [halo] halo.mv.db not found, skipping")
+        return None
+    # H2 数据库文件可以直接复制（Halo 运行时 H2 使用文件锁，但 mv.db 文件可以安全拷贝）
+    return db_path
+
 
 # ==========================================
 # 百度网盘上传（通过官方 bdpan CLI，权限完整）
@@ -216,7 +238,7 @@ def _backup_mongodb() -> str:
 # ==========================================
 
 def _bdpan_sync_dir(backup_dir):
-    """用 bdpan CLI 上传 backup 目录中的备份分卷到百度网盘，返回 (success, detail_str)"""
+    """用 bdpan CLI 按分类上传备份 zip 到百度网盘，返回 (success, detail_str)"""
     import shutil
 
     bdpan = _BDPAN_BIN if os.path.exists(_BDPAN_BIN) else shutil.which("bdpan")
@@ -226,24 +248,35 @@ def _bdpan_sync_dir(backup_dir):
     files = sorted(os.listdir(backup_dir))
     uploads, skipped, failed = [], [], []
     for fname in files:
-        if not (fname.startswith("lite_agent_backup_") or fname.startswith("backup_")):
+        if not fname.endswith(".zip"):
             continue
         fpath = os.path.join(backup_dir, fname)
         if not os.path.isfile(fpath):
             continue
 
-        remote_path = f"{_BDPAN_REMOTE_DIR}/{fname}"
+        # 根据文件名前缀确定远端子目录
+        remote_subdir = None
+        for prefix, category in [("data_", "data"), ("meilisearch_", "meilisearch"),
+            ("rsslite_", "rsslite"), ("halo_", "halo"),
+            ("hedgedoc_", "hedgedoc"), ("vaultwarden_", "vaultwarden")]:
+            if fname.startswith(prefix):
+                remote_subdir = f"lite-agent/{category}"
+                break
+        if not remote_subdir:
+            # 兼容旧格式
+            remote_subdir = _BDPAN_REMOTE_DIR
+
+        remote_path = f"{remote_subdir}/{fname}"
         try:
             result = subprocess.run(
                 [bdpan, "upload", fpath, remote_path],
                 capture_output=True, text=True, timeout=3600
             )
             if result.returncode == 0:
-                uploads.append(fname)
-                print(f"  [bdpan] 上传 {fname}: 成功")
+                uploads.append(f"{remote_subdir}/{fname}")
+                print(f"  [bdpan] 上传 {fname} -> {remote_subdir}/: 成功")
             else:
                 err = result.stderr or result.stdout or f"exit code {result.returncode}"
-                # 已存在视为跳过
                 if "已存在" in err or "exist" in err.lower():
                     skipped.append(fname)
                 else:
@@ -262,9 +295,7 @@ def _bdpan_sync_dir(backup_dir):
 
 
 def do_backup() -> str:
-    """内部函数：执行备份逻辑"""
-    import tempfile
-    import shutil
+    """执行备份逻辑：每个数据源单独打 zip"""
     import json
 
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -272,27 +303,36 @@ def do_backup() -> str:
     os.makedirs(backup_dir, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    zip_name = f"lite_agent_backup_{timestamp}.zip"
-    zip_path = os.path.join(backup_dir, zip_name)
-
     checklist = {
         "lite_agent_core": "Failed",
         "rsslite_mongodb": "Missing",
         "vaultwarden": "Missing",
         "meilisearch": "Missing",
-        "hedgedoc": "Missing"
+        "hedgedoc": "Missing",
+        "halo": "Missing",
     }
+    backup_files = []  # [(zip_path, remote_subdir), ...]
+    total_size_mb = 0
 
-    # 1. 准备符号链接临时目录树以避免磁盘双倍占用
-    tree_dir = tempfile.mkdtemp(prefix="backup_tree_")
+    import tempfile
+    import shutil
 
+    # 清理旧备份
+    for f in os.listdir(backup_dir):
+        if f.endswith(".zip") and (f.startswith("data_") or f.startswith("meilisearch_")
+            or f.startswith("rsslite_") or f.startswith("halo_")
+            or f.startswith("hedgedoc_") or f.startswith("vaultwarden_")
+            or f.startswith("lite_agent_backup_") or f.startswith("backup_")):
+            os.remove(os.path.join(backup_dir, f))
+
+    # A. Lite Agent Core (data 目录 + billing)
     try:
-        # A. Lite Agent Core
+        tree_dir = tempfile.mkdtemp(prefix="backup_data_")
         core_targets = [
-            (os.path.join(base_dir, "data"), os.path.join(tree_dir, "lite_agent", "data")),
-            (os.path.join(_BILLING_DIR, "statements.db"), os.path.join(tree_dir, "lite_agent", "statements.db")),
-            (os.path.join(_BILLING_DIR, "email-downloads"), os.path.join(tree_dir, "lite_agent", "email-downloads")),
-            (os.path.join(_BILLING_DIR, "validation-reports"), os.path.join(tree_dir, "lite_agent", "validation-reports"))
+            (os.path.join(base_dir, "data"), os.path.join(tree_dir, "data")),
+            (os.path.join(_BILLING_DIR, "statements.db"), os.path.join(tree_dir, "statements.db")),
+            (os.path.join(_BILLING_DIR, "email-downloads"), os.path.join(tree_dir, "email-downloads")),
+            (os.path.join(_BILLING_DIR, "validation-reports"), os.path.join(tree_dir, "validation-reports"))
         ]
         core_ok = False
         for src, dst in core_targets:
@@ -300,109 +340,95 @@ def do_backup() -> str:
                 _safe_symlink(src, dst)
                 core_ok = True
         if core_ok:
+            zip_path = os.path.join(backup_dir, f"data_{timestamp}.zip")
+            subprocess.run(["zip", "-r", zip_path, "."], cwd=tree_dir, check=True, capture_output=True)
+            size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+            total_size_mb += size_mb
+            backup_files.append((zip_path, "data"))
             checklist["lite_agent_core"] = "OK"
+            print(f"  [data] {size_mb:.1f} MB")
+        shutil.rmtree(tree_dir, ignore_errors=True)
+    except Exception as e:
+        print(f"  [data] backup failed: {e}")
 
-        # B. MongoDB rsslite
-        mongo_snapshot = _backup_mongodb()
-        if mongo_snapshot:
-            _safe_symlink(mongo_snapshot, os.path.join(tree_dir, "rsslite", "mongo_dump_rsslite.gz"))
+    # B. MongoDB rsslite
+    mongo_snapshot = _backup_mongodb()
+    if mongo_snapshot:
+        try:
+            zip_path = os.path.join(backup_dir, f"rsslite_{timestamp}.zip")
+            subprocess.run(["zip", "-r", zip_path, "."],
+                cwd=os.path.dirname(mongo_snapshot), check=True, capture_output=True)
+            size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+            total_size_mb += size_mb
+            backup_files.append((zip_path, "rsslite"))
             checklist["rsslite_mongodb"] = "OK"
+            print(f"  [rsslite] {size_mb:.1f} MB")
+        except Exception as e:
+            print(f"  [rsslite] zip failed: {e}")
+        finally:
+            # 清理 MongoDB 临时文件
+            parent_dir = os.path.dirname(mongo_snapshot)
+            if os.path.isdir(parent_dir) and 'mongo_backup_' in os.path.basename(parent_dir):
+                shutil.rmtree(parent_dir, ignore_errors=True)
 
-        # C. Vaultwarden
-        vw_snapshot = _backup_vaultwarden()
-        vw_included = False
-        if vw_snapshot:
-            _safe_symlink(vw_snapshot, os.path.join(tree_dir, "vaultwarden", "db_backup.sqlite3"))
+    # C. Vaultwarden
+    vw_snapshot = _backup_vaultwarden()
+    if vw_snapshot:
+        try:
+            tree_dir = tempfile.mkdtemp(prefix="backup_vw_")
+            _safe_symlink(vw_snapshot, os.path.join(tree_dir, "db_backup.sqlite3"))
+            zip_path = os.path.join(backup_dir, f"vaultwarden_{timestamp}.zip")
+            subprocess.run(["zip", "-r", zip_path, "."], cwd=tree_dir, check=True, capture_output=True)
+            size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+            total_size_mb += size_mb
+            backup_files.append((zip_path, "vaultwarden"))
             checklist["vaultwarden"] = "OK"
-            vw_included = True
+            print(f"  [vaultwarden] {size_mb:.1f} MB")
+            shutil.rmtree(tree_dir, ignore_errors=True)
+        except Exception as e:
+            print(f"  [vaultwarden] zip failed: {e}")
+        finally:
+            if vw_snapshot.endswith("db_backup.sqlite3"):
+                try:
+                    os.remove(vw_snapshot)
+                except Exception:
+                    pass
 
-        # D. Meilisearch
-        meili_snapshot = _create_meili_dump()
-        meili_included = False
-        if meili_snapshot:
-            _safe_symlink(meili_snapshot, os.path.join(tree_dir, "meilisearch", "meilisearch_dump"))
+    # D. Meilisearch
+    meili_snapshot = _create_meili_dump()
+    if meili_snapshot:
+        try:
+            zip_path = os.path.join(backup_dir, f"meilisearch_{timestamp}.zip")
+            # meili_snapshot 是 dump 目录路径
+            subprocess.run(["zip", "-r", zip_path, "."],
+                cwd=meili_snapshot, check=True, capture_output=True)
+            size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+            total_size_mb += size_mb
+            backup_files.append((zip_path, "meilisearch"))
             checklist["meilisearch"] = "OK"
-            meili_included = True
+            print(f"  [meilisearch] {size_mb:.1f} MB")
+        except Exception as e:
+            print(f"  [meilisearch] zip failed: {e}")
 
-        # E. HedgeDoc
-        hedgedoc_files = _backup_hedgedoc()
-        if hedgedoc_files:
+    # E. HedgeDoc
+    hedgedoc_files = _backup_hedgedoc()
+    if hedgedoc_files:
+        try:
+            tree_dir = tempfile.mkdtemp(prefix="backup_hd_")
             for hf in hedgedoc_files:
                 name = os.path.basename(hf)
-                _safe_symlink(hf, os.path.join(tree_dir, "hedgedoc", name))
+                _safe_symlink(hf, os.path.join(tree_dir, name))
+            zip_path = os.path.join(backup_dir, f"hedgedoc_{timestamp}.zip")
+            subprocess.run(["zip", "-r", zip_path, "."], cwd=tree_dir, check=True, capture_output=True)
+            size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+            total_size_mb += size_mb
+            backup_files.append((zip_path, "hedgedoc"))
             checklist["hedgedoc"] = "OK"
-
-        # 检查是否没有任何有效文件可打包
-        has_files = False
-        for root, dirs, files in os.walk(tree_dir):
-            if files or dirs:
-                has_files = True
-                break
-        if not has_files:
-            return "❌ 找不到任何需要备份的源文件或目录。"
-
-        # 使用 zip -s 1g 命令分卷压缩，跟随符号链接保存（即不加 -y），cwd=tree_dir
-        cmd = ["zip", "-s", "1g", "-r", zip_path, "."]
-        subprocess.run(cmd, cwd=tree_dir, check=True, capture_output=True)
-
-        # 计算这一组备份所有分卷的总大小
-        size_mb = 0
-        current_base = os.path.splitext(os.path.basename(zip_path))[0]
-        local_files = []
-        for f in os.listdir(backup_dir):
-            if f.startswith(current_base):
-                file_path = os.path.join(backup_dir, f)
-                size_mb += os.path.getsize(file_path) / (1024 * 1024)
-                local_files.append(os.path.abspath(file_path))
-        local_files.sort()
-
-        # 写入 data/backup_status.json
-        status_file = os.path.join(base_dir, "data", "backup_status.json")
-        os.makedirs(os.path.dirname(status_file), exist_ok=True)
-        status_data = {
-            "last_backup_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "local_files": local_files,
-            "total_size_mb": round(size_mb, 2),
-            "backup_checklist": checklist,
-            "baidu_pcs_sync": {
-                "status": "pending",
-                "error_message": None,
-                "completion_time": None
-            }
-        }
-        with open(status_file, "w", encoding="utf-8") as sf:
-            json.dump(status_data, sf, ensure_ascii=False, indent=2)
-
-        # 清理旧备份 (本地仅保留最新一组备份分卷，兼容旧格式 backup_ 和新格式 lite_agent_backup_ 文件的清除)
-        cleaned_count = 0
-        for f in os.listdir(backup_dir):
-            if (f.startswith("backup_") or f.startswith("lite_agent_backup_")) and not f.startswith(current_base):
-                os.remove(os.path.join(backup_dir, f))
-                cleaned_count += 1
-
-        meili_status = "✅ 已包含" if meili_included else "⚠️ 失败"
-        hd_status = "✅ 已包含" if hedgedoc_files else "⚠️ 失败"
-        vw_status = "✅ 已包含" if vw_included else "⚠️ 未找到"
-        mongo_status = "✅ 已包含" if mongo_snapshot else "⚠️ 未找到"
-        return (f"✅ 备份成功！\n"
-                f"- 备份文件: `{zip_name}`\n"
-                f"- 大小: `{size_mb:.2f} MB`\n"
-                f"- Lite Agent 数据库: {checklist['lite_agent_core']}\n"
-                f"- Meilisearch 索引库: {meili_status}\n"
-                f"- Vaultwarden 密码库: {vw_status}\n"
-                f"- HedgeDoc 数据库+附件: {hd_status}\n"
-                f"- RSS (rsslite) MongoDB数据库: {mongo_status}\n"
-                f"- 清理了 {cleaned_count} 个过期备份。")
-
-    except Exception as e:
-        return f"❌ 备份失败: {e}"
-    finally:
-        # 清理临时链接目录树
-        if 'tree_dir' in locals() and os.path.exists(tree_dir):
+            print(f"  [hedgedoc] {size_mb:.1f} MB")
             shutil.rmtree(tree_dir, ignore_errors=True)
-
-        # 清理 HedgeDoc 临时文件
-        if 'hedgedoc_files' in locals() and hedgedoc_files:
+        except Exception as e:
+            print(f"  [hedgedoc] zip failed: {e}")
+        finally:
             for hf in hedgedoc_files:
                 try:
                     parent_dir = os.path.dirname(hf)
@@ -412,21 +438,50 @@ def do_backup() -> str:
                 except Exception:
                     pass
 
-        # 清理 Vaultwarden 临时快照
-        if 'vw_snapshot' in locals() and vw_snapshot and vw_snapshot.endswith("db_backup.sqlite3"):
-            try:
-                os.remove(vw_snapshot)
-            except Exception:
-                pass
+    # F. Halo
+    halo_db = _backup_halo()
+    if halo_db:
+        try:
+            tree_dir = tempfile.mkdtemp(prefix="backup_halo_")
+            _safe_symlink(halo_db, os.path.join(tree_dir, "halo.mv.db"))
+            zip_path = os.path.join(backup_dir, f"halo_{timestamp}.zip")
+            subprocess.run(["zip", "-r", zip_path, "."], cwd=tree_dir, check=True, capture_output=True)
+            size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+            total_size_mb += size_mb
+            backup_files.append((zip_path, "halo"))
+            checklist["halo"] = "OK"
+            print(f"  [halo] {size_mb:.1f} MB")
+            shutil.rmtree(tree_dir, ignore_errors=True)
+        except Exception as e:
+            print(f"  [halo] zip failed: {e}")
 
-        # 清理 MongoDB 临时文件
-        if 'mongo_snapshot' in locals() and mongo_snapshot:
-            try:
-                parent_dir = os.path.dirname(mongo_snapshot)
-                if os.path.isdir(parent_dir) and 'mongo_backup_' in os.path.basename(parent_dir):
-                    shutil.rmtree(parent_dir, ignore_errors=True)
-            except Exception:
-                pass
+    if not backup_files:
+        return "❌ 找不到任何需要备份的源文件或目录。"
+
+    # 写入 backup_status.json
+    status_file = os.path.join(base_dir, "data", "backup_status.json")
+    os.makedirs(os.path.dirname(status_file), exist_ok=True)
+    status_data = {
+        "last_backup_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "local_files": [os.path.abspath(p) for p, _ in backup_files],
+        "total_size_mb": round(total_size_mb, 2),
+        "backup_checklist": checklist,
+        "baidu_pcs_sync": {
+            "status": "pending",
+            "error_message": None,
+            "completion_time": None
+        }
+    }
+    with open(status_file, "w", encoding="utf-8") as sf:
+        json.dump(status_data, sf, ensure_ascii=False, indent=2)
+
+    # 构建返回消息
+    lines = [f"✅ 备份成功！"]
+    lines.append(f"- 总大小: `{total_size_mb:.2f} MB`")
+    for cat, status in checklist.items():
+        icon = "✅" if status == "OK" else "⚠️"
+        lines.append(f"- {cat}: {icon} {status}")
+    return "\n".join(lines)
 
 
 def do_backup_and_sync() -> str:
@@ -470,7 +525,7 @@ def do_backup_and_sync() -> str:
             print(f"Failed to update backup_status.json: {e}")
 
     if sync_status == "success":
-        return backup_result + f"\n\n📤 百度网盘同步: ✅ 已上传至 `lite_agent/backup`\n{sync_detail}"
+        return backup_result + f"\n\n📤 百度网盘同步: ✅ 已上传至 `lite-agent/` 各分类目录\n{sync_detail}"
     else:
         return backup_result + f"\n\n📤 百度网盘同步: ❌ 失败\n{err_msg}"
 
