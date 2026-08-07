@@ -32,6 +32,20 @@ _BDPAN_CATEGORIES = {
     "vaultwarden": "vaultwarden",
 }
 
+# 上传日志文件路径
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_BDPAN_SYNC_LOG = os.path.join(_BASE_DIR, "data", "bdpan_sync.log")
+
+# 远端分类子目录列表（上传前幂等 mkdir 用）
+_BDPAN_REMOTE_SUBDIRS = [
+    "lite-agent/data", "lite-agent/meilisearch", "lite-agent/rsslite",
+    "lite-agent/halo", "lite-agent/hedgedoc", "lite-agent/vaultwarden",
+]
+
+# ==========================================
+# 各数据源备份函数
+# ==========================================
+
 def _backup_vaultwarden() -> str:
     """对 Vaultwarden 的 SQLite 数据库做一致性快照，返回临时备份文件路径或 None"""
     db_path = os.path.join(_VAULTWARDEN_DATA, "db.sqlite3")
@@ -48,57 +62,122 @@ def _backup_vaultwarden() -> str:
         # 如果 sqlite3 命令不可用，直接使用原文件（仍然安全，因为是加密密文）
         return db_path
 
+def _get_meili_key_from_docker() -> str:
+    """尝试从 docker inspect 获取 Meilisearch 容器的实际 master_key（fallback）"""
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode != 0:
+            return None
+        meili_container = None
+        for name in result.stdout.strip().split('\n'):
+            if 'meili' in name.lower():
+                meili_container = name.strip()
+                break
+        if not meili_container:
+            return None
+        result = subprocess.run(
+            ["docker", "inspect", "--format",
+             "{{range .Config.Env}}{{println .}}{{end}}", meili_container],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode != 0:
+            return None
+        for line in result.stdout.split('\n'):
+            if line.startswith('MEILI_MASTER_KEY='):
+                return line.split('=', 1)[1].strip()
+        return None
+    except Exception:
+        return None
+
 def _create_meili_dump() -> str:
-    """触发 Meilisearch 生成备份 Dump，返回 dump 目录路径或 None"""
+    """触发 Meilisearch 生成备份 Dump，返回最新的 .dump 文件路径或 None"""
     import urllib.request
-    import urllib.parse
+    import urllib.error
     import json
     import time
-    
+
     cfg = load_config() or {}
     meili_cfg = cfg.get("meilisearch", {})
     url_base = meili_cfg.get("url", "http://127.0.0.1:7700")
     key = meili_cfg.get("master_key", "")
-    
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json"
-    }
-    
-    # 1. 触发 Dump
-    req = urllib.request.Request(f"{url_base}/dumps", headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-            task_uid = data.get("taskUid")
-    except Exception as e:
-        print(f"Failed to trigger Meilisearch dump: {e}")
+
+    def _make_headers(api_key):
+        return {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+
+    def _trigger_dump(api_key):
+        """触发 dump，返回 task_uid 或 "invalid_api_key" 或 None"""
+        headers = _make_headers(api_key)
+        req = urllib.request.Request(f"{url_base}/dumps", headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+                return data.get("taskUid")
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                try:
+                    err_body = e.read().decode('utf-8', errors='ignore')
+                except Exception:
+                    err_body = ""
+                if "invalid_api_key" in err_body or "invalid_api_key" in err_body.lower():
+                    return "invalid_api_key"
+                print(f"Failed to trigger Meilisearch dump: HTTP {e.code} - {err_body[:200]}")
+                return None
+            print(f"Failed to trigger Meilisearch dump: HTTP {e.code}")
+            return None
+        except Exception as e:
+            print(f"Failed to trigger Meilisearch dump: {e}")
+            return None
+
+    # 1. 触发 Dump（先尝试 config 中的 key，invalid_api_key 时 fallback 到 docker inspect）
+    task_uid = _trigger_dump(key)
+    if task_uid == "invalid_api_key":
+        print("  [meilisearch] config key invalid, trying docker inspect fallback...")
+        docker_key = _get_meili_key_from_docker()
+        if docker_key:
+            key = docker_key
+            task_uid = _trigger_dump(key)
+        else:
+            print("  [meilisearch] docker inspect fallback failed: container not found")
+            return None
+
+    if not task_uid or task_uid == "invalid_api_key":
         return None
-        
-    if task_uid is None:
-        return None
-        
-    # 2. 轮询等待成功 (最大等待 15s)
-    for _ in range(15):
+
+    # 2. 轮询等待成功 (最大等待 60s)
+    headers = _make_headers(key)
+    for _ in range(60):
         req_status = urllib.request.Request(f"{url_base}/tasks/{task_uid}", headers=headers)
         try:
             with urllib.request.urlopen(req_status) as resp:
                 task_data = json.loads(resp.read().decode('utf-8'))
                 status = task_data.get("status")
                 if status == "succeeded":
-                    # Dump 导出成功，返回宿主机挂载的 dump 目录
+                    # Dump 导出成功，通过 os.listdir 找最新的 dump 文件
                     dumps_dir = "/home/liteagent/meilisearch/meili_data/dumps"
                     if os.path.exists(dumps_dir):
-                        return dumps_dir
+                        dump_items = [f for f in os.listdir(dumps_dir)
+                                      if not f.startswith('.')]
+                        if dump_items:
+                            latest = max(
+                                dump_items,
+                                key=lambda f: os.path.getmtime(os.path.join(dumps_dir, f))
+                            )
+                            return os.path.join(dumps_dir, latest)
                     return None
                 elif status == "failed":
                     print(f"Meilisearch dump task failed: {task_data.get('error')}")
                     return None
         except Exception as e:
             print(f"Error checking dump task status: {e}")
-            
+
         time.sleep(1.0)
-        
+
     print("Meilisearch dump timed out")
     return None
 
@@ -203,7 +282,7 @@ def _backup_mongodb() -> str:
     try:
         tmp_dir = tempfile.mkdtemp(prefix="mongo_backup_")
         archive_path = os.path.join(tmp_dir, "mongo_dump_rsslite.gz")
-        
+
         # 运行 mongodump
         cmd = [
             "mongodump",
@@ -238,12 +317,19 @@ def _backup_halo() -> str:
 # ==========================================
 
 def _bdpan_sync_dir(backup_dir):
-    """用 bdpan CLI 按分类上传备份 zip 到百度网盘，返回 (success, detail_str)"""
+    """用 bdpan CLI 按分类上传备份 zip 到百度网盘，返回 (success: bool, detail: str)"""
     import shutil
 
     bdpan = _BDPAN_BIN if os.path.exists(_BDPAN_BIN) else shutil.which("bdpan")
     if not bdpan:
         return False, "bdpan 未安装，请先运行 install.sh"
+
+    # 上传前先 mkdir 创建所有分类目录（幂等，已存在不报错）
+    for subdir in _BDPAN_REMOTE_SUBDIRS:
+        try:
+            subprocess.run([bdpan, "mkdir", subdir], capture_output=True, timeout=30)
+        except Exception:
+            pass
 
     files = sorted(os.listdir(backup_dir))
     uploads, skipped, failed = [], [], []
@@ -287,6 +373,18 @@ def _bdpan_sync_dir(backup_dir):
         except Exception as e:
             failed.append((fname, str(e)))
 
+    # 写上传日志
+    try:
+        os.makedirs(os.path.dirname(_BDPAN_SYNC_LOG), exist_ok=True)
+        with open(_BDPAN_SYNC_LOG, "a", encoding="utf-8") as lf:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if failed:
+                lf.write(f"[{ts}] FAILED: 成功 {len(uploads)}, 跳过 {len(skipped)}, 失败 {len(failed)}\n")
+            else:
+                lf.write(f"[{ts}] SUCCESS: 上传 {len(uploads)}, 跳过 {len(skipped)}\n")
+    except Exception:
+        pass
+
     if failed:
         detail = f"成功 {len(uploads)} 个，跳过 {len(skipped)} 个，失败 {len(failed)} 个: " + "; ".join(f"{n}({m})" for n, m in failed)
         return False, detail
@@ -294,11 +392,68 @@ def _bdpan_sync_dir(backup_dir):
     return True, detail
 
 
+# ==========================================
+# 异步上传脚本模板（由 do_backup_and_sync() 生成并后台执行）
+# ==========================================
+
+_ASYNC_UPLOAD_SCRIPT = '''#!/usr/bin/env python3
+"""异步上传脚本：由 do_backup_and_sync() 生成并后台执行"""
+import sys, os, json
+from datetime import datetime
+
+# 确保 PATH 包含 /usr/local/bin（bdpan 所在路径）
+os.environ["PATH"] = "/usr/local/bin:/usr/bin:/bin:" + os.environ.get("PATH", "")
+
+# 添加项目根目录到 sys.path 以便导入 _bdpan_sync_dir
+sys.path.insert(0, __BASE_DIR__)
+
+from skills.ops_backup import _bdpan_sync_dir
+
+backup_dir = __BACKUP_DIR__
+status_file = __STATUS_FILE__
+log_file = __LOG_FILE__
+
+def write_log(msg):
+    try:
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        with open(log_file, "a", encoding="utf-8") as f:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            f.write("[" + ts + "] " + msg + "\\n")
+    except Exception:
+        pass
+
+def update_status(success, detail):
+    if not os.path.exists(status_file):
+        return
+    try:
+        with open(status_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        data["baidu_pcs_sync"] = {
+            "status": "success" if success else "failed",
+            "error_message": None if success else detail,
+            "completion_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        with open(status_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        write_log("Failed to update status: " + str(e))
+
+try:
+    write_log("开始后台上传...")
+    success, detail = _bdpan_sync_dir(backup_dir)
+    write_log(("SUCCESS" if success else "FAILED") + ": " + detail)
+    update_status(success, detail)
+except Exception as e:
+    write_log("ERROR: " + str(e))
+    update_status(False, str(e))
+'''
+
+
 def do_backup() -> str:
     """执行备份逻辑：每个数据源单独打 zip"""
     import json
 
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    base_dir = _BASE_DIR
     backup_dir = os.path.join(base_dir, "backup")
     os.makedirs(backup_dir, exist_ok=True)
 
@@ -316,6 +471,25 @@ def do_backup() -> str:
 
     import tempfile
     import shutil
+
+    # Halo mtime 增量检测：读取上次备份时记录的 mtime
+    status_file = os.path.join(base_dir, "data", "backup_status.json")
+    halo_db_path = os.path.join(_HALO_DATA, "db", "halo.mv.db")
+    halo_current_mtime = None
+    halo_should_backup = True
+    if os.path.exists(halo_db_path):
+        halo_current_mtime = os.path.getmtime(halo_db_path)
+        if os.path.exists(status_file):
+            try:
+                with open(status_file, "r", encoding="utf-8") as sf:
+                    prev_status = json.load(sf)
+                prev_mtime = prev_status.get("halo_last_mtime")
+                if prev_mtime is not None and prev_mtime == halo_current_mtime:
+                    halo_should_backup = False
+                    checklist["halo"] = "Skipped (no change)"
+                    print(f"  [halo] skipped: mtime unchanged ({prev_mtime})")
+            except Exception:
+                pass
 
     # 清理旧备份
     for f in os.listdir(backup_dir):
@@ -399,9 +573,18 @@ def do_backup() -> str:
     if meili_snapshot:
         try:
             zip_path = os.path.join(backup_dir, f"meilisearch_{timestamp}.zip")
-            # meili_snapshot 是 dump 目录路径
-            subprocess.run(["zip", "-r", zip_path, "."],
-                cwd=meili_snapshot, check=True, capture_output=True)
+            if os.path.isdir(meili_snapshot):
+                # dump 目录：zip 目录内容
+                subprocess.run(["zip", "-r", zip_path, "."],
+                    cwd=meili_snapshot, check=True, capture_output=True)
+            else:
+                # dump 文件：通过临时目录软链接后 zip
+                tree_dir = tempfile.mkdtemp(prefix="backup_meili_")
+                _safe_symlink(meili_snapshot,
+                    os.path.join(tree_dir, os.path.basename(meili_snapshot)))
+                subprocess.run(["zip", "-r", zip_path, "."],
+                    cwd=tree_dir, check=True, capture_output=True)
+                shutil.rmtree(tree_dir, ignore_errors=True)
             size_mb = os.path.getsize(zip_path) / (1024 * 1024)
             total_size_mb += size_mb
             backup_files.append((zip_path, "meilisearch"))
@@ -410,62 +593,97 @@ def do_backup() -> str:
         except Exception as e:
             print(f"  [meilisearch] zip failed: {e}")
 
-    # E. HedgeDoc
+    # E. HedgeDoc（拆分为 db + uploads 两个独立 zip）
     hedgedoc_files = _backup_hedgedoc()
     if hedgedoc_files:
-        try:
-            tree_dir = tempfile.mkdtemp(prefix="backup_hd_")
-            for hf in hedgedoc_files:
-                name = os.path.basename(hf)
-                _safe_symlink(hf, os.path.join(tree_dir, name))
-            zip_path = os.path.join(backup_dir, f"hedgedoc_{timestamp}.zip")
-            subprocess.run(["zip", "-r", zip_path, "."], cwd=tree_dir, check=True, capture_output=True)
-            size_mb = os.path.getsize(zip_path) / (1024 * 1024)
-            total_size_mb += size_mb
-            backup_files.append((zip_path, "hedgedoc"))
-            checklist["hedgedoc"] = "OK"
-            print(f"  [hedgedoc] {size_mb:.1f} MB")
-            shutil.rmtree(tree_dir, ignore_errors=True)
-        except Exception as e:
-            print(f"  [hedgedoc] zip failed: {e}")
-        finally:
-            for hf in hedgedoc_files:
-                try:
-                    parent_dir = os.path.dirname(hf)
-                    if os.path.isdir(parent_dir) and 'hedgedoc_backup_' in os.path.basename(parent_dir):
-                        shutil.rmtree(parent_dir, ignore_errors=True)
-                        break
-                except Exception:
-                    pass
+        # 识别各类文件
+        db_dump = None
+        uploads_tar = None
+        compose_file = None
+        for hf in hedgedoc_files:
+            basename = os.path.basename(hf)
+            if basename == "hedgedoc_db.sql":
+                db_dump = hf
+            elif basename == "hedgedoc_uploads.tar.gz":
+                uploads_tar = hf
+            elif basename == "docker-compose.yml":
+                compose_file = hf
 
-    # F. Halo
-    halo_db = _backup_halo()
-    if halo_db:
-        try:
-            tree_dir = tempfile.mkdtemp(prefix="backup_halo_")
-            _safe_symlink(halo_db, os.path.join(tree_dir, "halo.mv.db"))
-            zip_path = os.path.join(backup_dir, f"halo_{timestamp}.zip")
-            subprocess.run(["zip", "-r", zip_path, "."], cwd=tree_dir, check=True, capture_output=True)
-            size_mb = os.path.getsize(zip_path) / (1024 * 1024)
-            total_size_mb += size_mb
-            backup_files.append((zip_path, "halo"))
-            checklist["halo"] = "OK"
-            print(f"  [halo] {size_mb:.1f} MB")
-            shutil.rmtree(tree_dir, ignore_errors=True)
-        except Exception as e:
-            print(f"  [halo] zip failed: {e}")
+        # E1. hedgedoc_db_{timestamp}.zip：db_dump + compose_file（每天）
+        if db_dump or compose_file:
+            try:
+                tree_dir = tempfile.mkdtemp(prefix="backup_hd_db_")
+                if db_dump:
+                    _safe_symlink(db_dump, os.path.join(tree_dir, "hedgedoc_db.sql"))
+                if compose_file:
+                    _safe_symlink(compose_file, os.path.join(tree_dir, "docker-compose.yml"))
+                zip_path = os.path.join(backup_dir, f"hedgedoc_db_{timestamp}.zip")
+                subprocess.run(["zip", "-r", zip_path, "."], cwd=tree_dir, check=True, capture_output=True)
+                size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+                total_size_mb += size_mb
+                backup_files.append((zip_path, "hedgedoc"))
+                checklist["hedgedoc"] = "OK"
+                print(f"  [hedgedoc_db] {size_mb:.1f} MB")
+                shutil.rmtree(tree_dir, ignore_errors=True)
+            except Exception as e:
+                print(f"  [hedgedoc_db] zip failed: {e}")
+
+        # E2. hedgedoc_uploads_{timestamp}.zip：uploads_tar（仅周一）
+        if uploads_tar and datetime.today().weekday() == 0:
+            try:
+                tree_dir = tempfile.mkdtemp(prefix="backup_hd_uploads_")
+                _safe_symlink(uploads_tar, os.path.join(tree_dir, "hedgedoc_uploads.tar.gz"))
+                zip_path = os.path.join(backup_dir, f"hedgedoc_uploads_{timestamp}.zip")
+                subprocess.run(["zip", "-r", zip_path, "."], cwd=tree_dir, check=True, capture_output=True)
+                size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+                total_size_mb += size_mb
+                backup_files.append((zip_path, "hedgedoc"))
+                print(f"  [hedgedoc_uploads] {size_mb:.1f} MB")
+                shutil.rmtree(tree_dir, ignore_errors=True)
+            except Exception as e:
+                print(f"  [hedgedoc_uploads] zip failed: {e}")
+        elif uploads_tar:
+            print(f"  [hedgedoc_uploads] skipped: not Monday (weekday={datetime.today().weekday()})")
+
+        # 清理 HedgeDoc 临时文件
+        for hf in hedgedoc_files:
+            try:
+                parent_dir = os.path.dirname(hf)
+                if os.path.isdir(parent_dir) and 'hedgedoc_backup_' in os.path.basename(parent_dir):
+                    shutil.rmtree(parent_dir, ignore_errors=True)
+                    break
+            except Exception:
+                pass
+
+    # F. Halo（带 mtime 增量检测）
+    if halo_should_backup:
+        halo_db = _backup_halo()
+        if halo_db:
+            try:
+                tree_dir = tempfile.mkdtemp(prefix="backup_halo_")
+                _safe_symlink(halo_db, os.path.join(tree_dir, "halo.mv.db"))
+                zip_path = os.path.join(backup_dir, f"halo_{timestamp}.zip")
+                subprocess.run(["zip", "-r", zip_path, "."], cwd=tree_dir, check=True, capture_output=True)
+                size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+                total_size_mb += size_mb
+                backup_files.append((zip_path, "halo"))
+                checklist["halo"] = "OK"
+                print(f"  [halo] {size_mb:.1f} MB")
+                shutil.rmtree(tree_dir, ignore_errors=True)
+            except Exception as e:
+                print(f"  [halo] zip failed: {e}")
 
     if not backup_files:
         return "❌ 找不到任何需要备份的源文件或目录。"
 
     # 写入 backup_status.json
-    status_file = os.path.join(base_dir, "data", "backup_status.json")
     os.makedirs(os.path.dirname(status_file), exist_ok=True)
     status_data = {
         "last_backup_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "local_files": [os.path.abspath(p) for p, _ in backup_files],
         "total_size_mb": round(total_size_mb, 2),
         "backup_checklist": checklist,
+        "halo_last_mtime": halo_current_mtime,
         "baidu_pcs_sync": {
             "status": "pending",
             "error_message": None,
@@ -485,49 +703,70 @@ def do_backup() -> str:
 
 
 def do_backup_and_sync() -> str:
-    """执行备份并同步到百度网盘"""
-    # 第一步：执行备份
+    """执行备份并异步同步到百度网盘（上传后台进行，不阻塞）"""
+    import tempfile
+
+    # 第一步：同步执行备份（本地打包）
     backup_result = do_backup()
     if not backup_result.startswith("✅"):
         return backup_result
 
-    # 第二步：同步到百度网盘
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # 第二步：异步上传（nohup 后台执行，不等待）
+    base_dir = _BASE_DIR
     backup_dir = os.path.join(base_dir, "backup")
     status_file = os.path.join(base_dir, "data", "backup_status.json")
+    log_file = _BDPAN_SYNC_LOG
 
-    sync_status = "success"
-    err_msg = None
-
-    try:
-        # 使用百度官方 bdpan CLI 上传（bypy 依赖的旧 PCS API 已被百度限制）
-        sync_status, sync_detail = _bdpan_sync_dir(backup_dir)
-        if sync_status != "success":
-            err_msg = sync_detail
-    except Exception as e:
-        sync_status = "failed"
-        err_msg = f"百度网盘上传异常: {e}"
-
-    # 更新 backup_status.json 中的网盘同步状态
+    # 先更新状态为 uploading
     if os.path.exists(status_file):
         try:
             import json
             with open(status_file, "r", encoding="utf-8") as sf:
                 data = json.load(sf)
             data["baidu_pcs_sync"] = {
-                "status": sync_status,
-                "error_message": err_msg,
-                "completion_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                "status": "uploading",
+                "error_message": None,
+                "completion_time": None
             }
             with open(status_file, "w", encoding="utf-8") as sf:
                 json.dump(data, sf, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"Failed to update backup_status.json: {e}")
+        except Exception:
+            pass
 
-    if sync_status == "success":
-        return backup_result + f"\n\n📤 百度网盘同步: ✅ 已上传至 `lite-agent/` 各分类目录\n{sync_detail}"
-    else:
-        return backup_result + f"\n\n📤 百度网盘同步: ❌ 失败\n{err_msg}"
+    # 生成后台上传脚本
+    script = _ASYNC_UPLOAD_SCRIPT
+    script = script.replace("__BASE_DIR__", repr(base_dir))
+    script = script.replace("__BACKUP_DIR__", repr(backup_dir))
+    script = script.replace("__STATUS_FILE__", repr(status_file))
+    script = script.replace("__LOG_FILE__", repr(log_file))
+
+    script_fd, script_path = tempfile.mkstemp(suffix="_upload.py", prefix="bdpan_async_")
+    with os.fdopen(script_fd, "w", encoding="utf-8") as f:
+        f.write(script)
+
+    # 用 nohup + subprocess.Popen 启动后台进程
+    env = os.environ.copy()
+    env["PATH"] = "/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
+    try:
+        subprocess.Popen(
+            ["nohup", "python3", script_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True
+        )
+    except Exception as e:
+        # 如果后台启动失败，记录到日志
+        try:
+            os.makedirs(os.path.dirname(log_file), exist_ok=True)
+            with open(log_file, "a", encoding="utf-8") as lf:
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                lf.write(f"[{ts}] ERROR: 后台进程启动失败: {e}\n")
+        except Exception:
+            pass
+        return backup_result + f"\n\n📤 百度网盘同步: ⚠️ 后台上传启动失败: {e}"
+
+    return backup_result + "\n\n📤 百度网盘同步: 后台上传进行中，结果将写入 `data/bdpan_sync.log`"
 
 
 @skill(
