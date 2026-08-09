@@ -58,9 +58,14 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed_url = urlparse(self.path)
+        req_path = parsed_url.path
+        if req_path.startswith('/agent/'):
+            req_path = req_path[6:]
+        elif req_path == '/agent':
+            req_path = '/'
 
         # 仪表盘 API 无需认证（仅返回注册表指令列表，无敏感数据）
-        if parsed_url.path == '/api/v1/dashboard':
+        if req_path == '/api/v1/dashboard':
             self._handle_dashboard()
             return
 
@@ -68,71 +73,82 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         
         # 边缘节点权限隔离：仅允许 /api/report, /api/pull_task
-        if getattr(self, 'is_edge', False) and parsed_url.path not in ('/api/report', '/api/pull_task'):
+        if getattr(self, 'is_edge', False) and req_path not in ('/api/report', '/api/pull_task'):
             self.send_error(403, "Forbidden: Edge token is limited to /api/report, /api/pull_task")
             return
 
-        if parsed_url.path == '/api/pull_task':
+        if req_path == '/api/pull_task':
             self._handle_pull_task(parsed_url.query)
-        elif parsed_url.path == '/api/v1/sessions':
+        elif req_path == '/api/v1/sessions':
             self._handle_sessions(parsed_url.query)
-        elif parsed_url.path == '/api/v1/sessions/messages':
+        elif req_path == '/api/v1/sessions/messages':
             self._handle_session_messages(parsed_url.query)
-        elif parsed_url.path == '/api/v1/task/stream':
+        elif req_path == '/api/v1/task/stream':
             self._handle_task_stream(parsed_url.query)
-        elif parsed_url.path == '/api/v1/email/html':
+        elif req_path == '/api/v1/email/html':
             self._handle_email_html(parsed_url.query)
-        elif parsed_url.path == '/api/v1/todos':
+        elif req_path == '/api/v1/todos':
             self._handle_todos(parsed_url.query)
-        elif parsed_url.path == '/api/v1/dashboard':
+        elif req_path == '/api/v1/socks5':
+            self._handle_socks5_get(parsed_url.query)
+        elif req_path == '/api/v1/socks5/test':
+            self._handle_socks5_test(parsed_url.query)
+        elif req_path == '/api/v1/socks5/script':
+            self._handle_socks5_script(parsed_url.query)
+        elif req_path == '/api/v1/dashboard':
             self._handle_dashboard()
-        elif parsed_url.path == '/v1/models':
+        elif req_path == '/v1/models':
             self._handle_openai_models()
-        elif parsed_url.path == '/api/v1/rss/brief':
+        elif req_path == '/api/v1/rss/brief':
             self._handle_rss_brief()
         else:
             self.send_error(404, "Not Found")
 
     def do_POST(self):
         parsed_url = urlparse(self.path)
+        req_path = parsed_url.path
+        if req_path.startswith('/agent/'):
+            req_path = req_path[6:]
+        elif req_path == '/agent':
+            req_path = '/'
 
         # 登录接口无需认证
-        if parsed_url.path == '/api/v1/auth':
+        if req_path == '/api/v1/auth':
             self._handle_auth()
             return
 
         if not self._auth():
             return
-            
-        parsed_url = urlparse(self.path)
         
         # 边缘节点权限隔离：仅允许 /api/report, /api/task_result
-        if getattr(self, 'is_edge', False) and parsed_url.path not in ('/api/report', '/api/task_result'):
+        if getattr(self, 'is_edge', False) and req_path not in ('/api/report', '/api/task_result'):
             self.send_error(403, "Forbidden: Edge token is limited to /api/report, /api/task_result")
             return
 
-        if parsed_url.path in ('/api/v1/chat', '/api/v1/task'):
+        if req_path in ('/api/v1/chat', '/api/v1/task'):
             self._handle_chat_or_task()
-        elif parsed_url.path == '/api/v1/alert':
+        elif req_path == '/api/v1/alert':
             self._handle_alert()
-        elif parsed_url.path == '/v1/chat/completions':
+        elif req_path == '/v1/chat/completions':
             self._handle_openai_chat_completions()
-        elif parsed_url.path == '/api/v1/dashboard':
+        elif req_path == '/api/v1/dashboard':
             self._handle_dashboard()
-        elif parsed_url.path == '/api/report':
+        elif req_path == '/api/report':
             self._handle_edge_report()
-        elif parsed_url.path == '/api/task_result':
+        elif req_path == '/api/task_result':
             self._handle_task_result()
-        elif parsed_url.path == '/api/edge_task':
+        elif req_path == '/api/edge_task':
             self._handle_edge_task()
-        elif parsed_url.path == '/api/v1/ocr':
+        elif req_path == '/api/v1/ocr':
             self._handle_ocr_proxy()
-        elif parsed_url.path == '/api/v1/todos':
+        elif req_path == '/api/v1/todos':
             self._handle_post_todo()
-        elif parsed_url.path == '/api/v1/todos/brief/push':
+        elif req_path == '/api/v1/todos/brief/push':
             self._handle_post_todo_brief_push()
-        elif parsed_url.path == '/api/v1/session/title':
+        elif req_path == '/api/v1/session/title':
             self._handle_post_session_title()
+        elif req_path == '/api/v1/socks5':
+            self._handle_socks5_post()
         else:
             self.send_error(404, "Not Found")
 
@@ -143,8 +159,15 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         if not self._auth():
             return
-        if parsed_url.path.startswith('/api/v1/todos/'):
-            self._handle_patch_todo(parsed_url.path)
+        req_path = parsed_url.path
+        if req_path.startswith('/agent/'):
+            req_path = req_path[6:]
+        elif req_path == '/agent':
+            req_path = '/'
+        if req_path.startswith('/api/v1/todos/'):
+            self._handle_patch_todo(req_path)
+        elif req_path.startswith('/api/v1/socks5/'):
+            self._handle_socks5_patch(req_path)
         else:
             self.send_error(404, "Not Found")
 
@@ -155,8 +178,15 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         if not self._auth():
             return
-        if parsed_url.path.startswith('/api/v1/todos/'):
-            self._handle_delete_todo(parsed_url.path)
+        req_path = parsed_url.path
+        if req_path.startswith('/agent/'):
+            req_path = req_path[6:]
+        elif req_path == '/agent':
+            req_path = '/'
+        if req_path.startswith('/api/v1/todos/'):
+            self._handle_delete_todo(req_path)
+        elif req_path.startswith('/api/v1/socks5/'):
+            self._handle_socks5_delete(req_path)
         else:
             self.send_error(404, "Not Found")
 
@@ -1225,6 +1255,145 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps(resp_obj, ensure_ascii=False).encode('utf-8'))
+
+    # ── Socks5 Proxy Management Handlers ──
+    def _handle_socks5_get(self, query: str):
+        qs = parse_qs(query)
+        q = qs.get("q", [None])[0]
+        try:
+            from skills.ops_socks5 import get_socks5_proxies
+            proxies = get_socks5_proxies(query=q)
+            self.send_response(200)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "data": proxies}).encode('utf-8'))
+        except Exception as e:
+            self.send_error(500, str(e))
+
+    def _handle_socks5_post(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length == 0:
+            self.send_error(400, "Bad Request: Empty body")
+            return
+        body = self.rfile.read(content_length)
+        try:
+            data = json.loads(body.decode('utf-8'))
+            servername = data.get("servername")
+            host = data.get("host")
+            if not servername or not host:
+                self.send_error(400, "Bad Request: Missing servername or host")
+                return
+            runcmd = data.get("runcmd", "")
+            clientproxy = data.get("clientproxy", "")
+            memo = data.get("memo", "")
+
+            from skills.ops_socks5 import add_socks5_proxy
+            new_id = add_socks5_proxy(host=host, runcmd=runcmd, servername=servername, clientproxy=clientproxy, memo=memo)
+            self.send_response(200)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "id": new_id}).encode('utf-8'))
+        except Exception as e:
+            self.send_error(500, str(e))
+
+    def _handle_socks5_patch(self, path: str):
+        proxy_id_str = path.rsplit('/', 1)[-1]
+        try:
+            proxy_id = int(proxy_id_str)
+        except ValueError:
+            self.send_error(400, "Invalid proxy ID")
+            return
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+        try:
+            data = json.loads(body.decode('utf-8'))
+            from skills.ops_socks5 import update_socks5_proxy
+            ok = update_socks5_proxy(
+                proxy_id=proxy_id,
+                host=data.get("host"),
+                runcmd=data.get("runcmd"),
+                servername=data.get("servername"),
+                clientproxy=data.get("clientproxy"),
+                memo=data.get("memo")
+            )
+            self.send_response(200)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": ok}).encode('utf-8'))
+        except Exception as e:
+            self.send_error(500, str(e))
+
+    def _handle_socks5_delete(self, path: str):
+        proxy_id_str = path.rsplit('/', 1)[-1]
+        try:
+            proxy_id = int(proxy_id_str)
+        except ValueError:
+            self.send_error(400, "Invalid proxy ID")
+            return
+        try:
+            from skills.ops_socks5 import delete_socks5_proxy
+            ok = delete_socks5_proxy(proxy_id)
+            self.send_response(200)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": ok}).encode('utf-8'))
+        except Exception as e:
+            self.send_error(500, str(e))
+
+    def _handle_socks5_test(self, query: str):
+        qs = parse_qs(query)
+        proxy_id_str = qs.get("id", [None])[0]
+        host = qs.get("host", [None])[0]
+        port_str = qs.get("port", [None])[0]
+        port = int(port_str) if port_str and port_str.isdigit() else None
+
+        from skills.ops_socks5 import test_socks5_host, get_socks5_proxy_by_id
+        runcmd = ""
+        if proxy_id_str and proxy_id_str.isdigit():
+            proxy = get_socks5_proxy_by_id(int(proxy_id_str))
+            if proxy:
+                host = proxy.get("host")
+                runcmd = proxy.get("runcmd", "")
+
+        if not host:
+            self.send_error(400, "Missing host or valid proxy id")
+            return
+
+        res = test_socks5_host(host=host, runcmd=runcmd, port=port)
+        self.send_response(200)
+        self._send_cors_headers()
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(json.dumps({"success": res["success"], "result": res}).encode('utf-8'))
+
+    def _handle_socks5_script(self, query: str):
+        qs = parse_qs(query)
+        proxy_id_str = qs.get("id", [None])[0]
+        script_type = qs.get("type", ["ps1"])[0].lower()
+        if not proxy_id_str or not proxy_id_str.isdigit():
+            self.send_error(400, "Missing proxy id")
+            return
+        
+        from skills.ops_socks5 import get_socks5_proxy_by_id, generate_ps1_script, generate_sh_script
+        proxy = get_socks5_proxy_by_id(int(proxy_id_str))
+        if not proxy:
+            self.send_error(404, "Proxy not found")
+            return
+        
+        if script_type == "sh":
+            script_content = generate_sh_script(proxy)
+        else:
+            script_content = generate_ps1_script(proxy)
+            
+        self.send_response(200)
+        self._send_cors_headers()
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(json.dumps({"success": True, "type": script_type, "script": script_content}).encode('utf-8'))
 
 
 class ApiServer:

@@ -45,6 +45,9 @@
                     <button class="filter-btn" data-source="sessions">
                         <span class="icon">💬</span> 会话记录 <span class="badge" id="badge-sessions">0</span>
                     </button>
+                    <button class="filter-btn" data-source="socks5">
+                        <span class="icon">🧦</span> Socks5 代理 <span class="badge" id="badge-socks5">0</span>
+                    </button>
                 </div>
 
                 <div class="nav-section" id="section-categories" style="display:none;">
@@ -200,6 +203,7 @@
     <script src="modules/rss.js?v=1"></script>
     <script src="modules/sessions.js?v=1"></script>
     <script src="modules/todos.js?v=1"></script>
+    <script src="modules/socks5.js?v=1"></script>
     <script>
     // 动态加载指令列表（从后端注册表）
     (async function loadCommands() {
