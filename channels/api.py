@@ -91,6 +91,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_todos(parsed_url.query)
         elif req_path == '/api/v1/socks5':
             self._handle_socks5_get(parsed_url.query)
+        elif req_path == '/api/v1/socks5/active':
+            self._handle_socks5_active_get()
+        elif req_path == '/api/v1/socks5/health':
+            self._handle_socks5_health()
         elif req_path == '/api/v1/socks5/test':
             self._handle_socks5_test(parsed_url.query)
         elif req_path == '/api/v1/socks5/script':
@@ -149,6 +153,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_post_session_title()
         elif req_path == '/api/v1/socks5':
             self._handle_socks5_post()
+        elif req_path == '/api/v1/socks5/active':
+            self._handle_socks5_active_post()
         else:
             self.send_error(404, "Not Found")
 
@@ -1395,6 +1401,49 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps({"success": True, "type": script_type, "script": script_content}).encode('utf-8'))
 
+    def _handle_socks5_active_get(self):
+        from skills.ops_socks5 import get_current_active_proxy
+        active = get_current_active_proxy()
+        self.send_response(200)
+        self._send_cors_headers()
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(json.dumps({"success": True, "data": active}).encode('utf-8'))
+
+    def _handle_socks5_active_post(self):
+        if getattr(self, 'is_edge', False) or getattr(self, 'is_guest', False):
+            self.send_error(403, "Forbidden: Only master token can perform active proxy switching")
+            return
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length == 0:
+            self.send_error(400, "Bad Request: Empty body")
+            return
+        body = self.rfile.read(content_length)
+        try:
+            data = json.loads(body.decode('utf-8'))
+            proxy_id = data.get("id")
+            if not proxy_id:
+                self.send_error(400, "Missing proxy id")
+                return
+            from skills.ops_socks5 import apply_active_proxy_to_vps1
+            ok, msg = apply_active_proxy_to_vps1(int(proxy_id))
+            self.send_response(200 if ok else 400)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": ok, "message": msg}).encode('utf-8'))
+        except Exception as e:
+            self.send_error(500, str(e))
+
+    def _handle_socks5_health(self):
+        from skills.ops_socks5 import test_socks5_outbound_http
+        res = test_socks5_outbound_http()
+        self.send_response(200)
+        self._send_cors_headers()
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(json.dumps({"success": res["success"], "result": res}).encode('utf-8'))
+
 
 class ApiServer:
     """独立的 API 服务端，专门处理 Web 界面和第三方系统的 REST/SSE 请求"""
@@ -1419,6 +1468,13 @@ class ApiServer:
         self._thread = threading.Thread(target=self.server.serve_forever, daemon=True, name="ApiServer")
         self._thread.start()
         print(f"  📡 API Server 启动成功 (http://{self.host}:{self.port})")
+
+        # 启动 Auto-Failover Worker (S-5)
+        try:
+            from skills.ops_socks5 import start_failover_worker
+            start_failover_worker()
+        except Exception as e:
+            print(f"  ⚠️ 启动 Failover Worker 异常: {str(e)}")
 
     def stop(self):
         if self.server:

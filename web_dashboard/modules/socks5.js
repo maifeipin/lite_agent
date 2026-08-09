@@ -60,10 +60,15 @@ registerTabModule({
         const runcmd = doc.runcmd || '';
         const clientproxy = doc.clientproxy || '';
         const memo = doc.memo || '';
+        const isActive = doc.is_active === 1;
+        const isNaive = runcmd.toLowerCase().includes('naive') || runcmd.toLowerCase().includes('--proxy=');
 
-        let html = `<div class="card socks5-card" data-id="${h(id)}">`;
+        let html = `<div class="card socks5-card ${isActive ? 'socks5-card-active' : ''}" data-id="${h(id)}">`;
         html += `<div class="card-meta">`;
         html += `<span class="tag tag-socks5">🧦 Socks5 节点</span>`;
+        if (isActive) {
+            html += `<span class="tag tag-active-node">🟢 当前 VPS1 在用</span>`;
+        }
         if (host) html += `<span class="tag tag-host">🌐 ${h(host)}</span>`;
         if (memo) html += `<span class="tag tag-memo">📝 ${h(memo)}</span>`;
         html += `<span class="socks5-ping-badge" id="socks5-ping-${h(id)}" style="display:none;"></span>`;
@@ -80,7 +85,17 @@ registerTabModule({
 
         // Action Toolbar
         html += `<div class="socks5-actions">`;
-        html += `<button class="socks5-btn socks5-btn-test" data-action="test" data-id="${h(id)}" data-host="${h(host)}" title="测试服务器 TCP 连通性">⚡ 测试连通性</button>`;
+        if (isNaive) {
+            if (isActive) {
+                html += `<button class="socks5-btn socks5-btn-active-disabled" disabled title="该节点已经是 VPS1 当前生效的主节点">🟢 VPS1 当前主节点</button>`;
+            } else {
+                html += `<button class="socks5-btn socks5-btn-set-active" data-action="set-active" data-id="${h(id)}" title="切换并重启 VPS1 的 naive.service 代理服务">🚀 设为 VPS1 主节点</button>`;
+            }
+        } else {
+            html += `<button class="socks5-btn socks5-btn-disabled" disabled title="Brook 协议节点仅供客户端脚本导出使用，不可直接应用为 VPS1 的 Naive 服务主节点">🚫 Brook 仅导脚本</button>`;
+        }
+        html += `<button class="socks5-btn socks5-btn-outbound" data-action="test-outbound" title="测试 VPS1 本地 18988 代理向公网 (Google) 的真实 HTTP 翻墙能力">🌐 出站翻墙测试</button>`;
+        html += `<button class="socks5-btn socks5-btn-test" data-action="test" data-id="${h(id)}" data-host="${h(host)}" title="测试服务器端口 TCP 连通性">⚡ TCP 连通性</button>`;
         html += `<button class="socks5-btn socks5-btn-ps1" data-action="copy-ps1" data-id="${h(id)}" title="复制 Windows PowerShell 检查安装与启动脚本">💻 复制 PS1</button>`;
         html += `<button class="socks5-btn socks5-btn-sh" data-action="copy-sh" data-id="${h(id)}" title="复制 Linux/macOS Shell 检查安装与启动脚本">🐧 复制 SH</button>`;
         html += `<button class="socks5-btn socks5-btn-copy" data-action="copy-cmd" data-cmd="${h(runcmd)}" title="复制原始启动命令">📋 复制命令</button>`;
@@ -214,7 +229,65 @@ registerTabModule({
             if (!card) return;
             const id = btn.getAttribute('data-id') || card.getAttribute('data-id');
 
-            // 1. 连通性测试
+            // 1. 设置为 VPS1 主节点
+            if (action === 'set-active') {
+                if (!confirm('确定将该节点设为 VPS1 的当前生效主节点并重新加载 naive.service 服务吗？')) return;
+                btn.disabled = true;
+                btn.textContent = '⏳ 正在切节点...';
+                try {
+                    const r = await fetch('/agent/api/v1/socks5/active', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ id: Number(id) })
+                    });
+                    const d = await r.json();
+                    if (d.success) {
+                        alert(d.message || '切换节点成功！');
+                        if (typeof performSearch === 'function') performSearch(false);
+                    } else {
+                        alert('切换失败: ' + (d.message || '未知错误'));
+                    }
+                } catch (err) {
+                    alert('请求失败: ' + err.message);
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = '🚀 设为 VPS1 主节点';
+                }
+                return;
+            }
+
+            // 2. 出站翻墙测试 (HTTP Over Socks5 18988)
+            if (action === 'test-outbound') {
+                const badge = card.querySelector(`#socks5-ping-${id}`);
+                if (badge) {
+                    badge.style.display = 'inline-block';
+                    badge.className = 'socks5-ping-badge testing';
+                    badge.textContent = '⏳ 真实翻墙测试...';
+                }
+                try {
+                    const r = await fetch('/agent/api/v1/socks5/health');
+                    const d = await r.json();
+                    if (d.success && d.result && d.result.success) {
+                        if (badge) {
+                            badge.className = 'socks5-ping-badge online';
+                            badge.textContent = `🌐 HTTP ${d.result.http_code} (${d.result.latency_ms} ms)`;
+                        }
+                    } else {
+                        if (badge) {
+                            badge.className = 'socks5-ping-badge offline';
+                            badge.textContent = `❌ ${d.result ? d.result.error : '出站异常'}`;
+                        }
+                    }
+                } catch (err) {
+                    if (badge) {
+                        badge.className = 'socks5-ping-badge offline';
+                        badge.textContent = '❌ 超时/异常';
+                    }
+                }
+                return;
+            }
+
+            // 3. 服务器 TCP 端口连通性测试
             if (action === 'test') {
                 const host = btn.getAttribute('data-host');
                 const badge = card.querySelector(`#socks5-ping-${id}`);
@@ -246,7 +319,7 @@ registerTabModule({
                 return;
             }
 
-            // 2. 复制 PS1 部署脚本
+            // 4. 复制 PS1 部署脚本
             if (action === 'copy-ps1') {
                 try {
                     const r = await fetch(`/agent/api/v1/socks5/script?id=${id}&type=ps1`);
@@ -263,7 +336,7 @@ registerTabModule({
                 return;
             }
 
-            // 3. 复制 SH 部署脚本
+            // 5. 复制 SH 部署脚本
             if (action === 'copy-sh') {
                 try {
                     const r = await fetch(`/agent/api/v1/socks5/script?id=${id}&type=sh`);
@@ -280,7 +353,7 @@ registerTabModule({
                 return;
             }
 
-            // 4. 复制原始启动命令
+            // 6. 复制原始启动命令
             if (action === 'copy-cmd') {
                 const cmd = btn.getAttribute('data-cmd') || '';
                 if (cmd) {
@@ -292,7 +365,7 @@ registerTabModule({
                 return;
             }
 
-            // 5. 展开 / 隐藏编辑面板
+            // 7. 展开 / 隐藏编辑面板
             if (action === 'toggle-edit') {
                 const panel = card.querySelector(`#socks5-edit-${id}`);
                 if (panel) {
@@ -302,14 +375,14 @@ registerTabModule({
                 return;
             }
 
-            // 6. 取消编辑
+            // 8. 取消编辑
             if (action === 'cancel') {
                 const panel = card.querySelector(`#socks5-edit-${id}`);
                 if (panel) panel.style.display = 'none';
                 return;
             }
 
-            // 7. 保存修改
+            // 9. 保存修改
             if (action === 'save') {
                 const panel = card.querySelector(`#socks5-edit-${id}`);
                 if (!panel) return;
@@ -336,7 +409,7 @@ registerTabModule({
                 return;
             }
 
-            // 8. 删除节点
+            // 10. 删除节点
             if (action === 'delete') {
                 if (!confirm('确定要删除此 Socks5 代理节点吗？')) return;
                 try {
