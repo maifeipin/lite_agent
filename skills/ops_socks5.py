@@ -587,9 +587,9 @@ def ops_socks5_test(id: int) -> str:
         return f"节点 [{proxy['servername']}] (端口 {res['port']}) 连通正常，延迟: {res['latency_ms']} ms"
     return f"节点 [{proxy['servername']}] (端口 {res['port']}) 无法连接：{res.get('error', '未知错误')}"
 
-@skill(name="socks5_test_outbound", description="测试 VPS1 本地代理端口 (127.0.0.1:18988) 的真实 HTTP 翻墙出站能力")
+@skill(name="socks5_test_outbound", description="测试 VPS1 本地代理端口 (127.0.0.1:18988) 的真实 HTTP 出站网络连通测试")
 def ops_socks5_test_outbound() -> str:
-    """测试 VPS1 本地代理端口 (127.0.0.1:18988) 的真实 HTTP 翻墙出站能力。"""
+    """测试 VPS1 本地代理端口 (127.0.0.1:18988) 的真实 HTTP 出站网络连通测试。"""
     res = test_socks5_outbound_http()
     if res["success"]:
         return f"VPS1 本地 18988 代理出站访问正常 (HTTP {res['http_code']})，端到端延迟: {res['latency_ms']} ms"
