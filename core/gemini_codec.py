@@ -17,6 +17,38 @@ import json
 import uuid
 
 
+def openai_tools_to_gemini_declarations(tools):
+    """将 OpenAI Tool Schema 列表转换为 Gemini function_declarations 格式。
+
+    纯格式转换，不访问 registry，不做权限过滤。
+    tools 为 OpenAI 格式 list[dict]，每项形如:
+        {"type": "function", "function": {"name", "description", "parameters": {...}}}
+    返回 list[dict] 符合 Gemini function_declarations 格式。
+    """
+    decls = []
+    for tool in tools:
+        fn = tool["function"]
+        params = fn.get("parameters", {})
+        gemini_params = {
+            "type": params.get("type", "OBJECT").upper(),
+            "properties": {},
+            "required": params.get("required", []),
+        }
+        for pname, pdef in params.get("properties", {}).items():
+            gemini_params["properties"][pname] = {
+                "type": pdef.get("type", "STRING").upper(),
+                "description": pdef.get("description", ""),
+            }
+            if "enum" in pdef:
+                gemini_params["properties"][pname]["enum"] = pdef["enum"]
+        decls.append({
+            "name": fn["name"],
+            "description": fn["description"],
+            "parameters": gemini_params,
+        })
+    return decls
+
+
 def _function_call_part(name, args_obj, thought_signature, call_id):
     from google.genai import types
     fc_kwargs = {"name": name, "args": args_obj}

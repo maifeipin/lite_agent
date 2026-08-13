@@ -11,6 +11,8 @@ from core.model_router import ModelRouter
 from core.worker_agent import WorkerAgent
 from core.skill_engine import SkillEngine
 from core.subtask_dag import Subtask, SubtaskDAG, SubtaskType, SubtaskStatus
+from core.execution import ExecutionContext, ActorType, ExecutionSource
+from core.execution_ledger import ExecutionLedger
 
 PLANNER_PROMPT = """你是一个任务编排专家。请将以下用户目标拆解为子任务列表。
 
@@ -61,12 +63,16 @@ PLANNER_PROMPT = """你是一个任务编排专家。请将以下用户目标拆
 class TaskOrchestrator:
 
     def __init__(self, config: dict, skill_engine: SkillEngine,
-                 session_mgr, channels: list = None):
+                 session_mgr, channels: list = None,
+                 ledger: Optional[ExecutionLedger] = None):
         self.config = config
         self.router = ModelRouter(config)
         self.skill_engine = skill_engine
         self.session_mgr = session_mgr
         self.channels = channels or []
+        # 共享执行账本 (旁路, 不阻断主流程)
+        # TaskOrchestrator 创建父 execution，所有 Worker 子任务挂载其下
+        self.ledger = ledger
         routing = config.get("task_routing", {})
         default_model = config.get("llm", {}).get("default", "")
         self.planner_model = routing.get("planner_model", default_model)
@@ -210,160 +216,208 @@ class TaskOrchestrator:
         print(f"🎯 编排任务 [{task_id}]: {goal[:60]}")
         print(f"{'='*60}")
 
-        self.session_mgr.save_subtask_dag(session_key, task_id,
-            json.dumps({"global_strategy": "", "subtasks": []}, ensure_ascii=False), "planning")
-
-        subtasks, global_strategy = self._plan(goal, max_steps=effective_max_steps)
-        if not subtasks:
-            return "❌ 任务规划失败，无法拆解目标"
-
-        if global_strategy:
-            print(f"  🧭 全局战略: {global_strategy[:120]}...")
-
-        self._classify_and_route(subtasks)
-
-        # Plan B: Fail-Fast — 规划期估算步数，仅拦截明显离谱的规划 (1.5x 弹性)
-        # 因为 Planner 已感知预算并主动精简，运行期还有硬截断兜底，规划期不充当二次裁判。
-        # 只有估算远超预算 (如 30 预算拆 10+ 子任务) 才拦截，避免否决 Planner 的紧凑规划。
-        estimated = len(subtasks) * 5
-        failfast_threshold = effective_max_steps * 1.5
-        if estimated > failfast_threshold:
-            print(f"  ⚠️ Fail-Fast: 预计 {estimated} 步 > 浮动阈值 {failfast_threshold:.0f} 步, 拒绝执行")
-            return (
-                f"⚠️ **任务预算不足，已拦截**\n\n"
-                f"该任务拆解为 **{len(subtasks)}** 个子任务，"
-                f"粗略预计需约 **{estimated}** 步 LLM 交互，"
-                f"远超当前预算 **{effective_max_steps}** 步（浮动阈值 {failfast_threshold:.0f} 步）。\n\n"
-                f"🔧 **解决方案**: 在指令末尾添加 `[steps={estimated + 10}]` "
-                f"重新下发，即可获得足够的步数配额。\n\n"
-                f"> 原指令: {goal[:100]}{'...' if len(goal) > 100 else ''}"
+        # ---- 启动父 execution (供所有 Worker 子任务挂载) ----
+        parent_execution_id = ""
+        if self.ledger is not None:
+            orch_ctx = ExecutionContext(
+                actor_id=session_key,
+                actor_type=ActorType.USER,
+                source=ExecutionSource.ORCHESTRATOR,
+                session_key=session_key,
+                max_steps=effective_max_steps,
+                token_budget=self.dag_max_tokens,
             )
+            parent_exec = self.ledger.start(
+                orch_ctx, model_name=self.planner_model,
+                provider="orchestrator", stream_mode=False,
+            )
+            parent_execution_id = parent_exec.id
 
-        for s in subtasks:
-            print(f"  📋 {s.id} [{s.type.value}] → {s.assigned_model} : {s.name}")
+        # 默认终态: 任何未在正常路径显式覆盖的出口都按异常失败处理。
+        # 正常路径会在 return 前覆盖为 succeeded / 具体失败原因。
+        parent_status = "failed"
+        parent_reason = "orchestrator_exception"
 
-        dag = SubtaskDAG(subtasks, global_strategy=global_strategy, max_depth=self.max_depth)
-        
-        def log_event(msg: str):
-            print(msg)
-            dag.add_log(msg)
-            self._persist_dag(session_key, task_id, dag, force=False)
+        try:
+            self.session_mgr.save_subtask_dag(session_key, task_id,
+                json.dumps({"global_strategy": "", "subtasks": []}, ensure_ascii=False), "planning")
 
-        log_event(f"  [ORCH:PLAN] 拆解完成: {len(subtasks)} 个子任务, strategy={len(global_strategy)} chars")
-        if global_strategy:
-            log_event(f"  🧭 全局战略: {global_strategy}")
+            subtasks, global_strategy = self._plan(goal, max_steps=effective_max_steps)
+            if not subtasks:
+                parent_status, parent_reason = "failed", "planning_failed"
+                return "❌ 任务规划失败，无法拆解目标"
 
-        for s in subtasks:
-            tools_str = f" tools={s.tools}" if s.tools else ""
-            log_event(f"  [ORCH:ROUTE] {s.id} type={s.type.value} → model={s.assigned_model}{tools_str}")
-            log_event(f"  📋 {s.id} [{s.type.value}] → {s.assigned_model} : {s.name}")
+            if global_strategy:
+                print(f"  🧭 全局战略: {global_strategy[:120]}...")
 
-        self._persist_dag(session_key, task_id, dag, force=True)
+            self._classify_and_route(subtasks)
 
-        while not dag.is_all_done():
-            # 全局预算限制检查
-            total_steps = sum(s.steps_used for s in dag.subtasks.values())
-            total_tokens = sum(s.token_usage for s in dag.subtasks.values())
-
-            if total_steps >= effective_max_steps:
-                log_event(f"  ⚠️ DAG 全局步数预算耗尽 ({total_steps}/{effective_max_steps})")
-                for s in dag.subtasks.values():
-                    if s.status == SubtaskStatus.PENDING:
-                        s.status = SubtaskStatus.SKIPPED
-                        s.error = f"全局步数预算耗尽，未执行 (已用 {total_steps} 步)"
-                break
-
-            if total_tokens >= self.dag_max_tokens:
-                log_event(f"  ⚠️ DAG 全局 Token 预算耗尽 ({total_tokens}/{self.dag_max_tokens})")
-                for s in dag.subtasks.values():
-                    if s.status == SubtaskStatus.PENDING:
-                        s.status = SubtaskStatus.SKIPPED
-                        s.error = f"全局 Token 预算耗尽，未执行 (已用 {total_tokens} tokens)"
-                break
-
-            ready = dag.get_ready()
-
-            if not ready and not dag.is_all_done():
-                for sid, s in dag.subtasks.items():
-                    if s.status == SubtaskStatus.PENDING:
-                        unmet = [d for d in s.depends_on
-                                 if dag.subtasks[d].status not in
-                                 (SubtaskStatus.DONE, SubtaskStatus.SKIPPED)]
-                        log_event(f"  ⏳ {sid} 等待依赖: {unmet}")
-                break
-
-            if not ready:
-                break
-
-            batch = ready[:self.max_parallel]
-            futures = []
-            results_lock = threading.Lock()
-            results = {}
-
-            for subtask in batch:
-                subtask.status = SubtaskStatus.RUNNING
-                subtask.started_at = time.time()
-                log_event(f"  ▶ {subtask.id} [{subtask.type.value}] 开始执行")
-
-            self._persist_dag(session_key, task_id, dag, force=True)
-
-            for subtask in batch:
-                upstream = {}
-                for dep in subtask.depends_on:
-                    dep_node = dag.subtasks.get(dep)
-                    if dep_node and dep_node.result:
-                        upstream[dep] = {
-                            "result": dep_node.result,
-                            "tool_results": dep_node.tool_results or []
-                        }
-
-                future = self.executor.submit(
-                    self._run_single_subtask,
-                    subtask, upstream, results, results_lock, goal, global_strategy, log_event
+            # Plan B: Fail-Fast — 规划期估算步数，仅拦截明显离谱的规划 (1.5x 弹性)
+            # 因为 Planner 已感知预算并主动精简，运行期还有硬截断兜底，规划期不充当二次裁判。
+            # 只有估算远超预算 (如 30 预算拆 10+ 子任务) 才拦截，避免否决 Planner 的紧凑规划。
+            estimated = len(subtasks) * 5
+            failfast_threshold = effective_max_steps * 1.5
+            if estimated > failfast_threshold:
+                print(f"  ⚠️ Fail-Fast: 预计 {estimated} 步 > 浮动阈值 {failfast_threshold:.0f} 步, 拒绝执行")
+                parent_status, parent_reason = "failed", "budget_rejected"
+                return (
+                    f"⚠️ **任务预算不足，已拦截**\n\n"
+                    f"该任务拆解为 **{len(subtasks)}** 个子任务，"
+                    f"粗略预计需约 **{estimated}** 步 LLM 交互，"
+                    f"远超当前预算 **{effective_max_steps}** 步（浮动阈值 {failfast_threshold:.0f} 步）。\n\n"
+                    f"🔧 **解决方案**: 在指令末尾添加 `[steps={estimated + 10}]` "
+                    f"重新下发，即可获得足够的步数配额。\n\n"
+                    f"> 原指令: {goal[:100]}{'...' if len(goal) > 100 else ''}"
                 )
-                futures.append(future)
 
-            wait(futures, timeout=self.subtask_timeout)
+            for s in subtasks:
+                print(f"  📋 {s.id} [{s.type.value}] → {s.assigned_model} : {s.name}")
 
-            for sid, result in results.items():
-                node = dag.subtasks.get(sid)
-                if node:
-                    node.result = result["result"]
-                    node.tool_results = result.get("tool_results", [])
-                    node.status = SubtaskStatus(result["status"])
-                    node.error = result.get("error", "")
-                    node.token_usage = result.get("token_usage", 0)
-                    node.steps_used = result.get("steps_used", 0)
+            dag = SubtaskDAG(subtasks, global_strategy=global_strategy, max_depth=self.max_depth)
 
-            if dag.has_failure():
-                failed = [sid for sid, s in dag.subtasks.items()
-                          if s.status == SubtaskStatus.FAILED]
-                for fid in failed:
-                    dag.mark_downstream_skipped(fid)
+            def log_event(msg: str):
+                print(msg)
+                dag.add_log(msg)
+                self._persist_dag(session_key, task_id, dag, force=False)
+
+            log_event(f"  [ORCH:PLAN] 拆解完成: {len(subtasks)} 个子任务, strategy={len(global_strategy)} chars")
+            if global_strategy:
+                log_event(f"  🧭 全局战略: {global_strategy}")
+
+            for s in subtasks:
+                tools_str = f" tools={s.tools}" if s.tools else ""
+                log_event(f"  [ORCH:ROUTE] {s.id} type={s.type.value} → model={s.assigned_model}{tools_str}")
+                log_event(f"  📋 {s.id} [{s.type.value}] → {s.assigned_model} : {s.name}")
 
             self._persist_dag(session_key, task_id, dag, force=True)
 
-            if progress_callback:
-                try:
-                    progress_callback(dag.progress())
-                except Exception:
-                    pass
+            while not dag.is_all_done():
+                # 全局预算限制检查
+                total_steps = sum(s.steps_used for s in dag.subtasks.values())
+                total_tokens = sum(s.token_usage for s in dag.subtasks.values())
 
-            log_event(f"  📊 进度: {dag.progress()}")
+                if total_steps >= effective_max_steps:
+                    log_event(f"  ⚠️ DAG 全局步数预算耗尽 ({total_steps}/{effective_max_steps})")
+                    for s in dag.subtasks.values():
+                        if s.status == SubtaskStatus.PENDING:
+                            s.status = SubtaskStatus.SKIPPED
+                            s.error = f"全局步数预算耗尽，未执行 (已用 {total_steps} 步)"
+                    break
 
-        log_event(f"  ✅ 编排任务 [{task_id}] 所有子任务执行完毕")
-        log_event(f"  [ORCH:AGGR] 正在生成最终总结报告...")
-        final_result = self._aggregate(dag, goal)
-        dag.final_result = final_result or "(总结完成，无额外返回内容)"
-        dag.is_aggregated = True
-        self._persist_dag(session_key, task_id, dag, force=True)
-        log_event(f"  ✅ 总结报告生成完毕")
-        return dag.final_result
+                if total_tokens >= self.dag_max_tokens:
+                    log_event(f"  ⚠️ DAG 全局 Token 预算耗尽 ({total_tokens}/{self.dag_max_tokens})")
+                    for s in dag.subtasks.values():
+                        if s.status == SubtaskStatus.PENDING:
+                            s.status = SubtaskStatus.SKIPPED
+                            s.error = f"全局 Token 预算耗尽，未执行 (已用 {total_tokens} tokens)"
+                    break
+
+                ready = dag.get_ready()
+
+                if not ready and not dag.is_all_done():
+                    for sid, s in dag.subtasks.items():
+                        if s.status == SubtaskStatus.PENDING:
+                            unmet = [d for d in s.depends_on
+                                     if dag.subtasks[d].status not in
+                                     (SubtaskStatus.DONE, SubtaskStatus.SKIPPED)]
+                            log_event(f"  ⏳ {sid} 等待依赖: {unmet}")
+                    break
+
+                if not ready:
+                    break
+
+                batch = ready[:self.max_parallel]
+                futures = []
+                results_lock = threading.Lock()
+                results = {}
+
+                for subtask in batch:
+                    subtask.status = SubtaskStatus.RUNNING
+                    subtask.started_at = time.time()
+                    log_event(f"  ▶ {subtask.id} [{subtask.type.value}] 开始执行")
+
+                self._persist_dag(session_key, task_id, dag, force=True)
+
+                for subtask in batch:
+                    upstream = {}
+                    for dep in subtask.depends_on:
+                        dep_node = dag.subtasks.get(dep)
+                        if dep_node and dep_node.result:
+                            upstream[dep] = {
+                                "result": dep_node.result,
+                                "tool_results": dep_node.tool_results or []
+                            }
+
+                    future = self.executor.submit(
+                        self._run_single_subtask,
+                        subtask, upstream, results, results_lock, goal, global_strategy, log_event,
+                        parent_execution_id,
+                    )
+                    futures.append(future)
+
+                wait(futures, timeout=self.subtask_timeout)
+
+                for sid, result in results.items():
+                    node = dag.subtasks.get(sid)
+                    if node:
+                        node.result = result["result"]
+                        node.tool_results = result.get("tool_results", [])
+                        node.status = SubtaskStatus(result["status"])
+                        node.error = result.get("error", "")
+                        node.token_usage = result.get("token_usage", 0)
+                        node.steps_used = result.get("steps_used", 0)
+
+                if dag.has_failure():
+                    failed = [sid for sid, s in dag.subtasks.items()
+                              if s.status == SubtaskStatus.FAILED]
+                    for fid in failed:
+                        dag.mark_downstream_skipped(fid)
+
+                self._persist_dag(session_key, task_id, dag, force=True)
+
+                if progress_callback:
+                    try:
+                        progress_callback(dag.progress())
+                    except Exception:
+                        pass
+
+                log_event(f"  📊 进度: {dag.progress()}")
+
+            log_event(f"  ✅ 编排任务 [{task_id}] 所有子任务执行完毕")
+            log_event(f"  [ORCH:AGGR] 正在生成最终总结报告...")
+            final_result = self._aggregate(dag, goal)
+            dag.final_result = final_result or "(总结完成，无额外返回内容)"
+            dag.is_aggregated = True
+            self._persist_dag(session_key, task_id, dag, force=True)
+            log_event(f"  ✅ 总结报告生成完毕")
+
+            # 正常完成: 根据子任务整体结果决定终态
+            all_done = all(s.status in (SubtaskStatus.DONE, SubtaskStatus.SKIPPED)
+                           for s in dag.subtasks.values())
+            any_failed = any(s.status == SubtaskStatus.FAILED
+                             for s in dag.subtasks.values())
+            if any_failed and not all_done:
+                parent_status, parent_reason = "failed", "subtask_failed"
+            else:
+                parent_status, parent_reason = "succeeded", "orchestrated"
+
+            return dag.final_result
+        except Exception:
+            parent_status, parent_reason = "failed", "orchestrator_exception"
+            raise
+        finally:
+            # 集中收尾: 任何出口 (正常 return / 提前 return / 异常) 都会结束父 execution。
+            # finish() 对已是终态的记录是空操作，故重复调用安全。
+            if self.ledger is not None and parent_execution_id:
+                self.ledger.finish(parent_execution_id,
+                                   status=parent_status,
+                                   terminal_reason=parent_reason)
 
     def _run_single_subtask(self, subtask: Subtask, upstream: dict,
                             results: dict, lock: threading.Lock,
                             goal: str = "", global_strategy: str = "",
-                            log_callback: Callable = None):
+                            log_callback: Callable = None,
+                            parent_execution_id: str = ""):
         try:
             self._log_and_persist(f"  [WORKER:{subtask.id}] 启动 model={subtask.assigned_model} allowlist={subtask.tools[:3] if subtask.tools else 'all'}...", log_callback)
 
@@ -389,9 +443,11 @@ class TaskOrchestrator:
                 tools_allowlist=subtask.tools if subtask.tools else None,
                 driver=self.router.get_driver(subtask.assigned_model),
                 log_callback=log_callback,
+                ledger=self.ledger,
             )
             result_text, tool_results = worker.run(subtask, upstream,
-                                     goal=goal, global_strategy=global_strategy)
+                                     goal=goal, global_strategy=global_strategy,
+                                     parent_execution_id=parent_execution_id)
             subtask.finished_at = time.time()
 
             with lock:
@@ -423,9 +479,11 @@ class TaskOrchestrator:
                         tools_allowlist=subtask.tools if subtask.tools else None,
                         driver=self.router.get_driver(fb_name),
                         log_callback=log_callback,
+                        ledger=self.ledger,
                     )
                     result_text, tool_results = worker_fb.run(subtask, upstream,
-                                                goal=goal, global_strategy=global_strategy)
+                                                goal=goal, global_strategy=global_strategy,
+                                                parent_execution_id=parent_execution_id)
                     subtask.finished_at = time.time()
                     with lock:
                         results[subtask.id] = {

@@ -7,12 +7,20 @@ import json
 import time
 import threading
 import traceback
-import collections
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from openai import OpenAI
 import openai
 from session import SessionManager
+
+from core.lru_cache import LRUCache
+from core.loop_detector import LoopDetector
+from core.model_invoker import OpenAIInvoker
+from core.model_event import ModelEventType
+from core.agent_runtime import AgentRuntime, RuntimeEventType
+from core.execution import ExecutionContext, ActorType, ExecutionSource
+from core.execution_ledger import ExecutionLedger
+from core.runtime_recorder import RuntimeRecorder
 
 # 定义不可重试的大模型接口异常类型（4xx 客户端错误、鉴权、限流等）
 _NON_RETRYABLE_EXCEPTIONS = (
@@ -32,41 +40,6 @@ from core.command_registry import _registry
 _registry.register('/new', lambda a,m,args: None,
                    category='系统', description='重置当前会话记忆，开启全新对话上下文',
                    show_in_dashboard=True)
-
-class LRUCache:
-    def __init__(self, maxsize=200):
-        self.cache = collections.OrderedDict()
-        self.maxsize = maxsize
-        self.lock = threading.Lock()
-
-    def setdefault(self, key, default):
-        with self.lock:
-            if key in self.cache:
-                self.cache.move_to_end(key)
-                return self.cache[key]
-            self.cache[key] = default
-            if len(self.cache) > self.maxsize:
-                self.cache.popitem(last=False)
-            return self.cache[key]
-
-    def get(self, key, default=None):
-        with self.lock:
-            if key in self.cache:
-                self.cache.move_to_end(key)
-                return self.cache[key]
-            return default
-
-    def __getitem__(self, key):
-        with self.lock:
-            self.cache.move_to_end(key)
-            return self.cache[key]
-
-    def __setitem__(self, key, value):
-        with self.lock:
-            self.cache[key] = value
-            self.cache.move_to_end(key)
-            if len(self.cache) > self.maxsize:
-                self.cache.popitem(last=False)
 
 # 记忆引擎 (可选 — 缺失时优雅降级)
 try:
@@ -164,6 +137,12 @@ class Agent:
             self.model_driver = default_cfg.get("driver", "openai")
             self.max_tokens = default_cfg.get("max_tokens", 2048)
             self.temperature = default_cfg.get("temperature", 0.3)
+            self.model_invoker = OpenAIInvoker(
+                client=self.client,
+                model_name=self.model,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+            )
         else:
             proxy_url = llm_cfg.get("proxy")
             http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
@@ -176,6 +155,12 @@ class Agent:
             self.model_driver = "openai"
             self.max_tokens = llm_cfg.get("max_tokens", 2048)
             self.temperature = llm_cfg.get("temperature", 0.3)
+            self.model_invoker = OpenAIInvoker(
+                client=self.client,
+                model_name=self.model,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+            )
 
         self.bot_name = config.get("bot_name", "Agent")
         self.svc_name = config.get("service_name", "feishu-bot")
@@ -201,6 +186,22 @@ class Agent:
         self.daily_token_limit = session_cfg.get("daily_token_limit", 500000)
         self._dead_loop_counter = LRUCache(maxsize=200)  # session_key -> {tool_fingerprint -> count}
         self.orch_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="AgentOrch")
+
+        # AgentRuntime: 事件驱动执行引擎
+        # Runtime 负责: 模型循环、工具执行、死循环检测、max_steps/token 预算熔断
+        # Agent 负责: Session 持久化、Memory 回调、日额度、动态超时、通道事件转换
+        self.runtime = AgentRuntime(
+            model_invoker=self.model_invoker,
+            skill_engine=self.skill_engine,
+            max_steps=self.max_steps,
+            max_tokens=self.max_tokens,
+            max_retries=1,
+            non_retryable_exceptions=_NON_RETRYABLE_EXCEPTIONS,
+        )
+
+        # ExecutionLedger: 旁路执行账本 (不阻断主流程)
+        # Runtime 产生事实事件 → Recorder 持久化 → SQLite
+        self.ledger = ExecutionLedger()
 
         # 记忆引擎 (跨会话长期记忆)
         self.memory = AgentMemory() if MEMORY_AVAILABLE else None
@@ -788,6 +789,7 @@ class Agent:
             skill_engine=self.skill_engine,
             session_mgr=self.session_mgr,
             channels=self.channels,
+            ledger=self.ledger,
         )
 
         task_id = uuid.uuid4().hex[:8]
@@ -907,263 +909,245 @@ class Agent:
         yield {"type": "done", "usage": empty_usage}
 
     def _stream_ai_loop(self, msg: IncomingMessage):
-        """流式 AI Loop 生成器 (路径 B 真流式底座)。
+        """流式 AI Loop 生成器 (基于 AgentRuntime)。
+
+        边界划分：
+          Runtime 负责: 模型循环、工具执行、死循环检测、max_steps/token 预算熔断
+          Agent  负责: Session 持久化、Memory 回调、日额度、动态超时、通道事件转换
+
         yield 统一事件 dict, 供 handle_stream(SSE) 与 _run_ai_loop(兼容老接口) 共用。
         事件类型: token / reasoning_token / tool_start / tool_result / done / error
         """
         session = self.session_mgr.get_or_create(msg.session_key)
         self.session_mgr.add_message(msg.session_key, "user", msg.text)
 
+        # ---- 构建工具集与 guard prompts ----
         if msg.is_guest:
             tools = self.skill_engine.get_guest_schemas()
+            guest_tool_names = frozenset(s["function"]["name"] for s in tools)
+            allowed_tools = guest_tool_names
         else:
             tools = self.skill_engine.get_all_schemas()
+            allowed_tools = None  # 不限制
+
         guard_prompts = self.skill_engine.get_guard_prompts(msg.text, is_guest=msg.is_guest)
 
+        # ---- 构建初始消息 (system + history) ----
+        system_content = self._build_system_prompt(is_guest=msg.is_guest)
+        if guard_prompts:
+            system_content += "\n\n⚠️【数据忠实执行指令】:\n" + "\n".join(f"- {p}" for p in guard_prompts)
+        if self.memory:
+            memory_ctx = self.memory.before_reply(msg.session_key, msg.text)
+            if memory_ctx:
+                system_content += memory_ctx
+
+        messages = [{"role": "system", "content": system_content}]
+        messages.extend(self.session_mgr.get_history(msg.session_key))
+        messages = self._validate_messages(messages)
+
+        # ---- 日额度拦截 ----
         total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "estimated": False}
+        if session.token_usage >= self.daily_token_limit:
+            warning = f"⚠️ 今日 Token 已达上限 ({self.daily_token_limit})，请明天再试\n当前累计: {session.token_usage}"
+            self.session_mgr.add_message(msg.session_key, "assistant", warning)
+            yield {"type": "error", "msg": warning}
+            yield {"type": "done", "usage": total_usage}
+            return
 
-        for step in range(self.max_steps):
-            # ---- 构建消息 (与旧版一致) ----
-            system_content = self._build_system_prompt(is_guest=msg.is_guest)
-            if guard_prompts:
-                system_content += "\n\n⚠️【数据忠实执行指令】:\n" + "\n".join(f"- {p}" for p in guard_prompts)
-            messages = [{"role": "system", "content": system_content}]
-            if self.memory:
-                memory_ctx = self.memory.before_reply(msg.session_key, msg.text)
-                if memory_ctx:
-                    messages[0]["content"] += memory_ctx
-            messages.extend(self.session_mgr.get_history(msg.session_key))
-            messages = self._validate_messages(messages)
+        # ---- 动态超时 (Agent 负责，不进 Runtime) ----
+        is_pro = "pro" in self.model.lower() or "reasoner" in self.model.lower()
+        dynamic_timeout = 180.0 if is_pro else 45.0
+        total_chars = sum(
+            len(m["content"]) if isinstance(m.get("content"), str) else 0
+            for m in messages
+        )
+        dynamic_timeout += (total_chars // 10000) * 5.0
+        dynamic_timeout = min(dynamic_timeout, 300.0)
 
-            # ---- 日额度拦截 ----
-            if session.token_usage >= self.daily_token_limit:
-                warning = f"⚠️ 今日 Token 已达上限 ({self.daily_token_limit})，请明天再试\n当前累计: {session.token_usage}"
-                self.session_mgr.add_message(msg.session_key, "assistant", warning)
-                yield {"type": "error", "msg": warning}
-                yield {"type": "done", "usage": total_usage}
-                return
+        # ---- 执行上下文 ----
+        ctx = ExecutionContext(
+            actor_id=msg.user_id,
+            actor_type=ActorType.GUEST if msg.is_guest else ActorType.USER,
+            source=ExecutionSource.STREAM,
+            allowed_tools=allowed_tools,
+            session_key=msg.session_key,
+            max_steps=self.max_steps,
+            max_output_tokens=self.max_tokens,
+        )
 
-            # ---- 组装 kwargs (保留 Pro/reasoning 分支) ----
-            kwargs = {"model": self.model, "messages": messages}
-            is_pro = "pro" in self.model.lower() or "reasoner" in self.model.lower()
-            if is_pro:
-                kwargs["reasoning_effort"] = "high"
-                kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
-            else:
-                kwargs["temperature"] = self.temperature
-                kwargs["max_tokens"] = self.max_tokens
-            if tools:
-                kwargs["tools"] = tools
-                kwargs["tool_choice"] = "auto"
+        # ---- 启动账本记录 (旁路, 不阻断主流程) ----
+        execution = self.ledger.start(
+            ctx, model_name=self.model, provider=self.model_driver,
+            stream_mode=True,
+        )
+        # 将 execution_id 注入 ctx，便于下游传播 (Worker/Cron)
+        import dataclasses
+        ctx = dataclasses.replace(ctx, execution_id=execution.id)
 
-            # ---- 智能动态计算读取超时，防止 TCP 静默老化和 LLM 挂起导致机器人锁定 ----
-            if is_pro:
-                dynamic_timeout = 180.0  # 推理模型给 3 分钟首字生成时间（理论值）
-            else:
-                dynamic_timeout = 45.0   # 快速模型给 45 秒静默判定
+        print(f"  🧠 [LLM Stream] 角色: {'Guest' if msg.is_guest else 'SyncAgent'}, 模型: {self.model}")
 
-            # 字符补偿：类型安全，只对 str 型 content 进行累加（避免多模态 list 算错）
-            total_chars = sum(
-                len(m["content"]) if isinstance(m.get("content"), str) else 0
-                for m in messages
-            )
-            dynamic_timeout += (total_chars // 10000) * 5.0
+        # ---- 状态追踪 ----
+        terminal_error = False  # 是否已收到终止性错误事件 (ERROR/DEAD_LOOP/MAX_STEPS/TOKEN_BUDGET)
+        usage_logged_this_step = False  # 防止 USAGE 重复记账
+        step_text = ""        # 本步累积的 TEXT (供估算兜底使用)
+        step_reasoning = ""   # 本步累积的 REASONING (供估算兜底使用)
 
-            kwargs["timeout"] = min(dynamic_timeout, 300.0)  # 最大封顶 5 分钟
-            kwargs["stream"] = True
-            kwargs["stream_options"] = {"include_usage": True}
+        # ---- 消费 Runtime 事件流 (经 Recorder 包装) ----
+        runtime_iter = self.runtime.run(
+            messages=messages,
+            tools=tools,
+            ctx=ctx,
+            timeout=dynamic_timeout,
+            stream=True,
+        )
+        recorder = RuntimeRecorder(self.ledger, execution.id)
+        for event in recorder.wrap(runtime_iter):
+            t = event.type
 
-            print(f"  🧠 [LLM Stream] 角色: SyncAgent, 模型: {self.model}, 步骤: {step+1}/{self.max_steps}")
-            start_t = time.time()
+            if t == RuntimeEventType.STEP_START:
+                step = event.data.get("step", 0)
+                max_steps = event.data.get("max_steps", 0)
+                print(f"  🧠 [LLM Stream] 步骤: {step}/{max_steps}")
+                usage_logged_this_step = False
+                step_text = ""
+                step_reasoning = ""
 
-            # ---- 消费流: 累积 text/reasoning/tool_calls, 独立抓 usage 并支持首字断线重试一次 ----
-            tool_calls_accumulator = {}
-            text_content = ""
-            reasoning_content = ""
-            step_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-            finish_reason = None
+            elif t == RuntimeEventType.TEXT:
+                step_text += event.data
+                yield {"type": "token", "delta": event.data}
 
-            max_attempts = 2
-            for attempt in range(max_attempts):
-                try:
-                    if attempt > 0:
-                        print(f"  🔄 [LLM Stream] 正在重试流式连接 (第 {attempt+1} 次尝试)...")
-                    
-                    with self.client.chat.completions.create(**kwargs) as response_stream:
-                        for chunk in response_stream:
-                            # P0-1: usage 提取独立于 delta, 防止 "content+usage 同 chunk" 被吞
-                            if getattr(chunk, "usage", None):
-                                step_usage["prompt_tokens"] = chunk.usage.prompt_tokens or 0
-                                step_usage["completion_tokens"] = chunk.usage.completion_tokens or 0
-                                step_usage["total_tokens"] = chunk.usage.total_tokens or 0
+            elif t == RuntimeEventType.REASONING:
+                step_reasoning += event.data
+                yield {"type": "reasoning_token", "delta": event.data}
 
-                            if not chunk.choices:
-                                continue
-                            choice0 = chunk.choices[0]
-                            if getattr(choice0, "finish_reason", None):
-                                finish_reason = choice0.finish_reason
-                            delta = choice0.delta
-                            if not delta:
-                                continue
+            elif t == RuntimeEventType.TOOL_CALLS_READY:
+                # 持久化完整 assistant tool_calls 到 Session (含 provider_metadata)
+                data = event.data
+                tool_calls_data = [dict(tc) for tc in data.get("tool_calls", [])]
+                self.session_mgr.add_message(
+                    msg.session_key, "assistant", data.get("content", ""),
+                    tool_calls_data=tool_calls_data,
+                    reasoning_content=data.get("reasoning_content") or None,
+                )
 
-                            if getattr(delta, "content", None):
-                                text_content += delta.content
-                                yield {"type": "token", "delta": delta.content}
-                            if getattr(delta, "reasoning_content", None):
-                                reasoning_content += delta.reasoning_content
-                                yield {"type": "reasoning_token", "delta": delta.reasoning_content}
-                            if getattr(delta, "tool_calls", None):
-                                # P0-2: 分片逐字段补全, 防 None 覆盖
-                                for tc_delta in delta.tool_calls:
-                                    idx = tc_delta.index if tc_delta.index is not None else 0
-                                    acc = tool_calls_accumulator.setdefault(idx, {"id": "", "name": "", "arguments": ""})
-                                    if getattr(tc_delta, "id", None):
-                                        acc["id"] = tc_delta.id
-                                    if getattr(tc_delta, "function", None):
-                                        if getattr(tc_delta.function, "name", None):
-                                            acc["name"] = tc_delta.function.name
-                                        if getattr(tc_delta.function, "arguments", None):
-                                            acc["arguments"] += tc_delta.function.arguments
-                    # 成功消费完流，跳出重试
-                    break
-                except Exception as e:
-                    # 仅在“首字未生成” 且 “不是不可重试的异常类型” 且 “仍有重试名额” 时才进行自动重试
-                    has_generated = bool(text_content or reasoning_content or tool_calls_accumulator)
-                    if (not has_generated 
-                            and not isinstance(e, _NON_RETRYABLE_EXCEPTIONS) 
-                            and attempt < max_attempts - 1):
-                        print(f"  ⚠️ [LLM Stream] {type(e).__name__}: {e}，1s 后重连重试...")
-                        time.sleep(1.0)
-                        continue
-                    
-                    # 区分请求被拒与流式读取异常，给 ops 提供准确的诊断信息
-                    if isinstance(e, _NON_RETRYABLE_EXCEPTIONS):
-                        error_msg = f"LLM 请求被拒({type(e).__name__}): {e}"
-                    else:
-                        error_msg = f"流式读取中断({type(e).__name__}): {e}"
-                        
-                    print(f"  ❌ {error_msg}")
-                    traceback.print_exc()
-                    yield {"type": "error", "msg": error_msg}
-                    yield {"type": "done", "usage": total_usage}
-                    return
+            elif t == RuntimeEventType.TOOL_CALL:
+                self.session_mgr.increment_tool_calls(msg.session_key)
+                yield {"type": "tool_start", "name": event.data["name"], "args": event.data["arguments"]}
 
-            print(f"  ✅ [LLM Stream] 耗时: {time.time()-start_t:.2f}s, 步骤Tokens: {step_usage['total_tokens']}")
+            elif t == RuntimeEventType.TOOL_RESULT:
+                data = event.data
+                # output 写 Session (完整结果), display 只用于前端事件
+                output = data["output"]
+                if not data["ok"] and not output.startswith("❌"):
+                    output = f"❌ {output}"
+                self.session_mgr.add_message(
+                    msg.session_key, "tool", output,
+                    tool_call_id=data["id"], name=data["name"],
+                )
+                yield {"type": "tool_result", "name": data["name"], "ok": data["ok"], "result": data["display"]}
 
-            # P1-4: usage 兜底 (provider 不支持 include_usage 时)
-            estimated_this_step = False
-            if step_usage["total_tokens"] == 0:
-                step_usage = _estimate_tokens(messages, text_content + reasoning_content)
-                estimated_this_step = True
-
-            # 记账: 保持与旧版 "每轮一次" 粒度一致
-            self.session_mgr.log_api_usage(
-                msg.session_key, self.model,
-                step_usage["prompt_tokens"], step_usage["completion_tokens"], step_usage["total_tokens"],
-                provider=self.model_driver, estimated=estimated_this_step
-            )
-            total_usage["prompt_tokens"] += step_usage["prompt_tokens"]
-            total_usage["completion_tokens"] += step_usage["completion_tokens"]
-            total_usage["total_tokens"] += step_usage["total_tokens"]
-            if estimated_this_step:
-                total_usage["estimated"] = True
-
-            # ---- 情况 1: 无工具调用 → 最终回复, 结束 ----
-            if not tool_calls_accumulator:
-                if not text_content.strip():
-                    # P1: 空 content 兜底 (上下文过长/max_tokens/安全过滤)
-                    text_content = (
-                        f"⚠️ 模型未生成有效回复 (finish_reason={finish_reason})。"
-                        f"\n\n这通常因为对话上下文累积过长或工具返回结果太大。"
-                        f"\n\n建议：发送 `/new` 开启新会话后重试，或用更精确的关键词缩小工具调用范围。"
+            elif t == RuntimeEventType.USAGE:
+                # 每步只记账一次 (Runtime 已延迟到成功后发射)
+                if not usage_logged_this_step:
+                    step_usage = dict(event.data)
+                    self.session_mgr.log_api_usage(
+                        msg.session_key, self.model,
+                        step_usage.get("prompt_tokens", 0),
+                        step_usage.get("completion_tokens", 0),
+                        step_usage.get("total_tokens", 0),
+                        provider=self.model_driver, estimated=False,
                     )
-                self.session_mgr.add_message(msg.session_key, "assistant", text_content)
-                if session.status == "working":
-                    self.session_mgr.mark_done(msg.session_key, text_content[:200])
-                if self.memory:
-                    self.memory.after_reply(msg.session_key, '', msg.text, text_content, msg.channel)
-                yield {"type": "done", "usage": total_usage}
-                return
+                    total_usage["prompt_tokens"] += step_usage.get("prompt_tokens", 0)
+                    total_usage["completion_tokens"] += step_usage.get("completion_tokens", 0)
+                    total_usage["total_tokens"] += step_usage.get("total_tokens", 0)
+                    usage_logged_this_step = True
 
-            # ---- 情况 2: 有工具调用 → 先存 assistant(tool_calls) 再执行 ----
-            # P0-2 收尾: provider 始终不发 id 时补一个, 保证 tool 消息 tool_call_id 可关联
-            for acc in tool_calls_accumulator.values():
-                if not acc["id"]:
-                    import uuid
-                    acc["id"] = f"call_{uuid.uuid4().hex[:8]}"
+            elif t == RuntimeEventType.STEP_END:
+                # 若 Runtime 未发射 USAGE (provider 不支持), 做本地估算兜底
+                # 估算必须包含本步实际 TEXT/REASONING 输出，否则 completion_tokens=0 漏计
+                if not usage_logged_this_step:
+                    step_usage = _estimate_tokens(messages, step_text + step_reasoning)
+                    self.session_mgr.log_api_usage(
+                        msg.session_key, self.model,
+                        step_usage["prompt_tokens"], step_usage["completion_tokens"], step_usage["total_tokens"],
+                        provider=self.model_driver, estimated=True,
+                    )
+                    total_usage["prompt_tokens"] += step_usage["prompt_tokens"]
+                    total_usage["completion_tokens"] += step_usage["completion_tokens"]
+                    total_usage["total_tokens"] += step_usage["total_tokens"]
+                    total_usage["estimated"] = True
+                    usage_logged_this_step = True
 
-            tool_calls_data = []
-            for idx in sorted(tool_calls_accumulator):
-                acc = tool_calls_accumulator[idx]
-                tool_calls_data.append({
-                    "id": acc["id"], "type": "function",
-                    "function": {"name": acc["name"], "arguments": acc["arguments"]},
-                })
-            # 必须在执行工具前写入 assistant 消息 (tool 消息靠 tool_call_id 关联)
-            self.session_mgr.add_message(
-                msg.session_key, "assistant", text_content or "",
-                tool_calls_data=tool_calls_data,
-                reasoning_content=reasoning_content or None,
-            )
-
-            # 逐个执行工具
-            for idx in sorted(tool_calls_accumulator):
-                tc = tool_calls_accumulator[idx]
-
-                # P1-3: 死循环熔断 (搬移自旧版) — 命中即终止整个 loop
-                fingerprint = f"{tc['name']}:{tc['arguments']}"
-                counter = self._dead_loop_counter.setdefault(msg.session_key, {})
-                if fingerprint == counter.get("_last"):
-                    counter["_streak"] = counter.get("_streak", 1) + 1
-                else:
-                    counter["_streak"] = 1
-                counter["_last"] = fingerprint
-                if counter["_streak"] >= 3:
-                    warning = f"🔄 检测到工具 `{tc['name']}` 连续重复调用 {counter['_streak']} 次，已自动终止以防止死循环"
+                # P0 日额度贯通: 本步记账后立即检查剩余额度
+                # 若超额，必须在 TOOL_CALLS_READY 之前终止，避免执行本轮工具和进入下一轮
+                if session.token_usage >= self.daily_token_limit:
+                    warning = (f"⚠️ 今日 Token 已达上限 ({self.daily_token_limit})，请明天再试\n"
+                               f"当前累计: {session.token_usage}")
                     self.session_mgr.add_message(msg.session_key, "assistant", warning)
-                    self.session_mgr.mark_done(msg.session_key, "死循环自动终止")
+                    self.session_mgr.mark_done(msg.session_key, "日额度耗尽")
+                    terminal_error = True
+                    # 标记 ledger 为失败 (Runtime 未发终态事件)
+                    self.ledger.finish(execution.id,
+                                       status="failed",
+                                       terminal_reason="daily_quota_exceeded")
                     yield {"type": "error", "msg": warning}
                     yield {"type": "done", "usage": total_usage}
+                    # 关闭 Runtime 生成器，阻止后续工具执行和下一轮
+                    runtime_iter.close()
                     return
 
-                self.session_mgr.increment_tool_calls(msg.session_key)
-                yield {"type": "tool_start", "name": tc["name"], "args": tc["arguments"]}
+            elif t == RuntimeEventType.DONE:
+                # Runtime 的 DONE 不能覆盖更具体的终止原因
+                if not terminal_error:
+                    # 正常回复: 持久化 + mark_done + after_reply
+                    content = event.data.get("content", "")
+                    if not content.strip():
+                        content = (
+                            f"⚠️ 模型未生成有效回复 (finish_reason={event.data.get('finish_reason', 'stop')})。"
+                            f"\n\n这通常因为对话上下文累积过长或工具返回结果太大。"
+                            f"\n\n建议：发送 `/new` 开启新会话后重试，或用更精确的关键词缩小工具调用范围。"
+                        )
+                    self.session_mgr.add_message(msg.session_key, "assistant", content)
+                    if session.status == "working":
+                        self.session_mgr.mark_done(msg.session_key, content[:200])
+                    if self.memory:
+                        self.memory.after_reply(msg.session_key, '', msg.text, content, msg.channel)
+                yield {"type": "done", "usage": total_usage}
 
-                # 访客越权 (非异常但应标记 ok=False)
-                if msg.is_guest and not self.skill_engine.is_guest_ok(tc["name"]):
-                    print(f"  🚫 访客试图越权调用工具: {tc['name']}")
-                    result = f"❌ 权限不足：当前账户为访客，无权调用工具 {tc['name']}"
-                    ok = False
-                else:
-                    from core.utils.masker import mask_secrets
-                    safe_args = mask_secrets(str(tc.get('arguments', '')))
-                    print(f"  🔧 [{step+1}/{self.max_steps}] 调用: {tc['name']}({safe_args})")
-                    try:
-                        result = self.skill_engine.execute(tc["name"], tc["arguments"])
-                        ok = True
-                    except Exception as e:
-                        result = f"❌ 工具执行异常: {e}"
-                        ok = False
-
+            elif t == RuntimeEventType.ERROR:
+                terminal_error = True
+                error_msg = event.data.get("msg", "未知错误")
+                print(f"  ❌ [Runtime] ERROR: {error_msg}")
+                # 与 DEAD_LOOP/MAX_STEPS/TOKEN_BUDGET 保持一致: 持久化错误终态 + mark_done
                 self.session_mgr.add_message(
-                    msg.session_key, "tool", result,
-                    tool_call_id=tc["id"], name=tc["name"],
-                )
-                # P1-5: 截断过大 result 防撑爆前端 (session 里存全量, 事件里截断)
-                display = result if len(result) <= 1000 else result[:1000] + "...(截断)"
-                display = mask_secrets(str(display)) if display else display
-                yield {"type": "tool_result", "name": tc["name"], "ok": ok, "result": display}
+                    msg.session_key, "assistant", f"❌ {error_msg}")
+                self.session_mgr.mark_done(msg.session_key, "模型调用错误")
+                yield {"type": "error", "msg": error_msg}
 
-            # 工具结果已回传, 进入下一轮 loop
+            elif t == RuntimeEventType.DEAD_LOOP:
+                terminal_error = True
+                warning = event.data.get("msg") or f"⚠️ 检测到死循环：工具 '{event.data.get('tool_name', '')}' 连续重复调用相同参数。"
+                if not warning.startswith("⚠️"):
+                    warning = f"⚠️ {warning}"
+                self.session_mgr.add_message(msg.session_key, "assistant", warning)
+                self.session_mgr.mark_done(msg.session_key, "死循环自动终止")
+                yield {"type": "error", "msg": warning}
 
-        # 超出最大步数
-        warning = "⚠️ 任务执行步骤过多，已自动终止。请尝试拆分为更小的任务。"
-        self.session_mgr.add_message(msg.session_key, "assistant", warning)
-        self.session_mgr.mark_done(msg.session_key, "超出最大步骤数")
-        if self.memory:
-            self.memory.after_reply(msg.session_key, '', msg.text, warning, msg.channel)
-        yield {"type": "error", "msg": warning}
-        yield {"type": "done", "usage": total_usage}
+            elif t == RuntimeEventType.MAX_STEPS:
+                terminal_error = True
+                warning = "⚠️ 任务执行步骤过多，已自动终止。请尝试拆分为更小的任务。"
+                self.session_mgr.add_message(msg.session_key, "assistant", warning)
+                self.session_mgr.mark_done(msg.session_key, "超出最大步骤数")
+                yield {"type": "error", "msg": warning}
+
+            elif t == RuntimeEventType.TOKEN_BUDGET_EXCEEDED:
+                terminal_error = True
+                budget = event.data.get("budget", 0)
+                used = event.data.get("used", 0)
+                warning = f"⚠️ Token 预算已耗尽 (预算: {budget}, 已用: {used})"
+                self.session_mgr.add_message(msg.session_key, "assistant", warning)
+                self.session_mgr.mark_done(msg.session_key, "Token 预算耗尽")
+                yield {"type": "error", "msg": warning}
 
     def _run_ai_loop(self, msg: IncomingMessage) -> AgentResponse:
         """Tool Call Loop (兼容老接口): 消费 _stream_ai_loop 事件, 拼回 AgentResponse。
