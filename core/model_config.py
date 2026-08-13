@@ -71,6 +71,10 @@ def validate_model_config(config: dict) -> list[tuple[str, str]]:
     def _warning(msg: str):
         issues.append(("warning", msg))
 
+    # 同一 provider endpoint 下的多个模型通常共享一份凭据。
+    # 先收集缺失项，再按凭据域聚合报错，避免为同一个缺失密钥重复输出。
+    missing_api_keys: dict[tuple[str, str], list[str]] = {}
+
     # 1. 每个模型的 driver 与必需字段
     for name, cfg in models.items():
         if not isinstance(cfg, dict):
@@ -84,12 +88,23 @@ def validate_model_config(config: dict) -> list[tuple[str, str]]:
         if not cfg.get("model"):
             _error(f"模型 {name!r} 缺少 model 字段（实际 API model 名）")
         if not cfg.get("api_key"):
-            _error(f"模型 {name!r} 缺少 api_key（或对应环境变量未配置）")
+            credential_scope = (driver, cfg.get("base_url", ""))
+            missing_api_keys.setdefault(credential_scope, []).append(name)
         if driver and not is_gemini_driver(driver) and not cfg.get("base_url"):
             _error(f"模型 {name!r} 缺少 base_url（OpenAI-compatible 必需）")
         for tag in (cfg.get("tags") or []):
             if tag not in KNOWN_CAPABILITIES:
                 _warning(f"模型 {name!r} 含未知能力标签 {tag!r}")
+
+    for names in missing_api_keys.values():
+        if len(names) == 1:
+            _error(f"模型 {names[0]!r} 缺少 api_key（或对应环境变量未配置）")
+        else:
+            quoted = ", ".join(repr(name) for name in names)
+            _error(
+                f"共享凭据的模型 [{quoted}] 缺少 api_key"
+                "（或对应环境变量未配置）"
+            )
 
     # 2. 顶层角色引用校验 + 调用路径约束
     def _check_ref(label: str, name):
