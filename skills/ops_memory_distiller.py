@@ -7,7 +7,7 @@
   3. 动态: 未蒸馏消息 > 100 条自动触发
 
 LLM 蒸馏:
-  需要设置 LLM_API_KEY 和 LLM_BASE_URL 环境变量
+  使用 ARK_API_KEY（兼容旧的 LLM_API_KEY）和 LLM_BASE_URL 环境变量
   或通过 --no-llm 标志使用纯规则蒸馏
 """
 
@@ -25,7 +25,7 @@ from memory_engine.engine import MemoryEngine
 
 def get_llm_callback():
     """创建一个使用 DeepSeek / OpenAI API 的 LLM 回调"""
-    api_key = os.environ.get('LLM_API_KEY', '')
+    api_key = os.environ.get('ARK_API_KEY') or os.environ.get('LLM_API_KEY', '')
     base_url = os.environ.get('LLM_BASE_URL', 'https://api.deepseek.com/v1')
 
     if not api_key:
