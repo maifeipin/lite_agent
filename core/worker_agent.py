@@ -1,42 +1,14 @@
 import json
-import time
 import traceback
-import collections
-from typing import Callable
-from core.skill_engine import SkillEngine
+from typing import Callable, Optional
+from core.agent_runtime import AgentRuntime, RuntimeEvent, RuntimeEventType
+from core.execution import ExecutionContext, ExecutionSource, ActorType
+from core.execution_ledger import ExecutionLedger
+from core.runtime_recorder import RuntimeRecorder
+from core.skill_engine import SkillEngine, _cap_tool_result
 from core.subtask_dag import Subtask
 from core.model_config import is_gemini_driver, supports_vision
-
-
-class LRUCache:
-    def __init__(self, maxsize=200):
-        self.cache = collections.OrderedDict()
-        self.maxsize = maxsize
-
-    def setdefault(self, key, default):
-        if key in self.cache:
-            self.cache.move_to_end(key)
-            return self.cache[key]
-        self.cache[key] = default
-        if len(self.cache) > self.maxsize:
-            self.cache.popitem(last=False)
-        return self.cache[key]
-
-    def get(self, key, default=None):
-        if key in self.cache:
-            self.cache.move_to_end(key)
-            return self.cache[key]
-        return default
-
-    def __getitem__(self, key):
-        self.cache.move_to_end(key)
-        return self.cache[key]
-
-    def __setitem__(self, key, value):
-        self.cache[key] = value
-        self.cache.move_to_end(key)
-        if len(self.cache) > self.maxsize:
-            self.cache.popitem(last=False)
+from core.model_invoker import OpenAIInvoker, GeminiInvoker
 
 
 class WorkerAgent:
@@ -44,7 +16,8 @@ class WorkerAgent:
     def __init__(self, name: str, client, model_name: str,
                  model_cfg: dict, skill_engine: SkillEngine,
                  tools_allowlist: list = None, driver: str = "openai",
-                 log_callback: Callable = None):
+                 log_callback: Callable = None,
+                 ledger: Optional[ExecutionLedger] = None):
         self.name = name
         self.client = client
         self.model_name = model_name
@@ -56,7 +29,24 @@ class WorkerAgent:
         self.max_steps = model_cfg.get("max_steps", 8)
         self.max_tokens = model_cfg.get("max_tokens", 2048)
         self.temperature = model_cfg.get("temperature", 0.3)
-        self._dead_loop_counter = LRUCache(maxsize=200)
+
+        # ExecutionLedger: 旁路执行账本 (可选, 由调用方注入)
+        self.ledger = ledger
+
+        if is_gemini_driver(driver):
+            self.model_invoker = GeminiInvoker(
+                client=client,
+                model_name=model_name,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+            )
+        else:
+            self.model_invoker = OpenAIInvoker(
+                client=client,
+                model_name=model_name,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+            )
 
     def _log(self, msg: str):
         print(msg)
@@ -67,11 +57,19 @@ class WorkerAgent:
                 pass
 
     def _get_tools(self):
-        all_tools = self.skill_engine.get_all_schemas()
+        """获取本轮可用工具 Schema 列表。
+
+        tools_allowlist=None -> 返回全部工具；
+        tools_allowlist=[]   -> 返回空列表（禁止全部）；
+        tools_allowlist=[...] -> 只返回指定工具。
+        """
+        if self.tools_allowlist is None:
+            return self.skill_engine.get_all_schemas()
         if not self.tools_allowlist:
-            return all_tools
+            return []
         allowlist = set(self.tools_allowlist)
-        return [t for t in all_tools if t["function"]["name"] in allowlist]
+        return [t for t in self.skill_engine.get_all_schemas()
+                if t["function"]["name"] in allowlist]
 
     def _build_prompt(self, subtask: Subtask, upstream: dict = None,
                       goal: str = None, global_strategy: str = None) -> str:
@@ -132,7 +130,13 @@ class WorkerAgent:
 
     def run(self, subtask: Subtask, upstream: dict = None,
             images: list = None, goal: str = None,
-            global_strategy: str = None) -> tuple[str, list]:
+            global_strategy: str = None,
+            parent_execution_id: str = "") -> tuple[str, list]:
+        """执行子任务，返回 (reply, extracted_tools)。
+
+        parent_execution_id: 父 Orchestrator 任务的 execution_id，
+                              用于在账本中建立父子关系。
+        """
         system_msg = {
             "role": "system",
             "content": self._build_prompt(subtask, upstream, goal, global_strategy),
@@ -153,202 +157,106 @@ class WorkerAgent:
         tools = self._get_tools()
         extracted_tools = []
 
-        for step in range(self.max_steps):
-            try:
-                subtask.steps_used += 1
-                result = self._call_model(messages, tools)
-            except Exception as e:
-                traceback.print_exc()
-                return f"❌ LLM 调用失败: {e}", extracted_tools
-
-            if result.get("usage_total"):
-                subtask.token_usage += result["usage_total"]
-
-            tool_calls = result.get("tool_calls") or []
-            if tool_calls:
-                tool_calls_data = []
-                for tc in tool_calls:
-                    item = {
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {
-                            "name": tc["name"],
-                            "arguments": tc["arguments"],
-                        },
-                    }
-                    if tc.get("provider_metadata"):
-                        item["provider_metadata"] = tc["provider_metadata"]
-                    tool_calls_data.append(item)
-                messages.append({
-                    "role": "assistant",
-                    "content": result.get("content") or "",
-                    "tool_calls": tool_calls_data,
-                })
-
-                for tc in tool_calls:
-                    if self._check_dead_loop(
-                        tc["name"], tc["arguments"], messages
-                    ):
-                        return self._dead_loop_msg(tc["name"]), extracted_tools
-
-                    self._log(
-                        f"  🔧 [{self.name}] [{step + 1}/{self.max_steps}] "
-                        f"{tc['name']}({tc['arguments'][:80]})"
-                    )
-                    tool_result = self.skill_engine.execute(
-                        tc["name"], tc["arguments"]
-                    )
-                    extracted_tools.append(self._extract_tool_result(
-                        tc["name"], tc["arguments"], tool_result
-                    ))
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "name": tc["name"],
-                        "content": tool_result,
-                    })
-                continue
-
-            reply = result.get("content") or ""
-            if not reply:
-                reply = "(空回复 - 安全过滤)" if result.get("empty") else "(空回复)"
-            messages.append({"role": "assistant", "content": reply})
-            return reply, extracted_tools
-
-        return "⚠️ 子任务执行步骤过多，已自动终止", extracted_tools
-
-    # ------------------------------------------------------------------
-    #  统一调用层：协议差异只体现在这里，上层 Tool Loop 不再分支。
-    # ------------------------------------------------------------------
-    def _call_model(self, messages: list, tools: list) -> dict:
-        """发起一次模型请求并返回统一结构 dict。"""
-        if is_gemini_driver(self.driver):
-            return self._call_gemini(messages, tools)
-        return self._call_openai(messages, tools)
-
-    def _call_openai(self, messages: list, tools: list) -> dict:
-        actual_model = self.model_cfg.get("model", self.model_name)
-        kwargs = {"model": actual_model, "messages": messages}
-
-        if (
-            "pro" in self.model_name.lower()
-            or "reasoner" in self.model_name.lower()
-        ):
-            kwargs["reasoning_effort"] = "high"
-        else:
-            kwargs["temperature"] = self.temperature
-            kwargs["max_tokens"] = self.max_tokens
-
-        if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
-
-        kwargs["timeout"] = 60.0
-
-        start_t = time.time()
-        self._log(f"  🧠 [LLM Request] 角色: {self.name}, 模型: {actual_model}")
-        response = self.client.chat.completions.create(**kwargs)
-        self._log(
-            f"  ✅ [LLM Response] 耗时: {time.time() - start_t:.2f}s, "
-            f"Tokens: {response.usage.total_tokens if response.usage else 0}"
-        )
-
-        choice = response.choices[0]
-        tool_calls = []
-        if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
-            tool_calls = [
-                {
-                    "id": tc.id,
-                    "name": tc.function.name,
-                    "arguments": tc.function.arguments,
-                }
-                for tc in choice.message.tool_calls
-            ]
-
-        return {
-            "content": choice.message.content or "",
-            "tool_calls": tool_calls,
-            "finish_reason": choice.finish_reason,
-            "usage_total": response.usage.total_tokens if response.usage else 0,
-            "empty": False,
-        }
-
-    def _call_gemini(self, messages: list, tools: list) -> dict:
-        from core.gemini_codec import (
-            openai_messages_to_gemini,
-            gemini_response_to_unified,
-        )
-        from google.genai import types
-
-        gemini_model = self.model_cfg.get("model", self.model_name)
-        system_instruction, contents = openai_messages_to_gemini(messages)
-
-        tool_names = self.tools_allowlist if self.tools_allowlist else None
-        fn_decls = self.skill_engine.get_gemini_tool_declarations(tool_names)
-        tool_config = types.Tool(function_declarations=fn_decls) if fn_decls else None
-
-        generate_config = types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            temperature=self.temperature,
+        # 构造 ExecutionContext
+        # source=ORCHESTRATOR：Worker 由 DAG/Orchestrator 分派执行，非用户直接调用
+        ctx = ExecutionContext(
+            actor_id=self.name,
+            actor_type=ActorType.WORKER,
+            source=ExecutionSource.ORCHESTRATOR,
+            allowed_tools=frozenset(self.tools_allowlist) if self.tools_allowlist is not None else None,
+            session_key=f"worker_{self.name}",
+            max_steps=self.max_steps,
             max_output_tokens=self.max_tokens,
-            tools=[tool_config] if tool_config else None,
         )
 
-        start_t = time.time()
-        self._log(f"  🧠 [LLM Request] 角色: {self.name}, 模型: {gemini_model} (gemini)")
+        # 启动账本记录 (旁路, 不阻断主流程)
+        execution = None
+        if self.ledger is not None:
+            execution = self.ledger.start(
+                ctx, model_name=self.model_name, provider=self.driver,
+                parent_execution_id=parent_execution_id, stream_mode=False,
+            )
+            import dataclasses
+            ctx = dataclasses.replace(ctx, execution_id=execution.id)
 
-        max_retries = 3
-        response = None
-        for attempt in range(max_retries):
-            try:
-                response = self.client.models.generate_content(
-                    model=gemini_model,
-                    contents=contents,
-                    config=generate_config,
-                )
-                break
-            except Exception as e:
-                if "429" in str(e) and attempt < max_retries - 1:
-                    print(f"  ⚠️ [Rate Limit] {self.name} hit 429, sleeping 35s...")
-                    time.sleep(35)
-                else:
-                    raise
-
-        self._log(f"  ✅ [LLM Response] 耗时: {time.time() - start_t:.2f}s")
-        return gemini_response_to_unified(response)
-
-    # ------------------------------------------------------------------
-    #  共享工具方法
-    # ------------------------------------------------------------------
-    def _extract_tool_result(self, name: str, args: str, raw_result) -> dict:
-        from core.skill_engine import _cap_tool_result
-        res_str = str(raw_result)
-        return {
-            "name": name,
-            "args": args,
-            "result": _cap_tool_result(name, res_str, max_len=4000)
-        }
-
-    def _check_dead_loop(self, tool_name: str, args_str: str,
-                         _messages=None) -> bool:
-        fingerprint = f"{tool_name}:{args_str}"
-        counter = self._dead_loop_counter
-        if fingerprint == counter.get("_last"):
-            counter["_streak"] = counter.get("_streak", 1) + 1
-        else:
-            counter["_streak"] = 1
-        counter["_last"] = fingerprint
-        return counter["_streak"] >= 3
-
-    def _dead_loop_msg(self, tool_name: str) -> str:
-        print(
-            f"  🔄 [{self.name}] 死循环: {tool_name} "
-            f"x{self._dead_loop_counter.get('_streak', 0)}"
+        # 创建 AgentRuntime（Worker 使用同步模式）
+        runtime = AgentRuntime(
+            model_invoker=self.model_invoker,
+            skill_engine=self.skill_engine,
+            max_steps=self.max_steps,
+            max_tokens=self.max_tokens,
         )
-        return (
-            f"死循环终止: {tool_name} "
-            f"连续重复 {self._dead_loop_counter.get('_streak', 0)} 次"
-        )
+
+        try:
+            runtime_iter = runtime.run(messages, tools, ctx, stream=False)
+            # 经 Recorder 包装 (若 ledger 可用)
+            if execution is not None:
+                recorder = RuntimeRecorder(self.ledger, execution.id)
+                event_iter = recorder.wrap(runtime_iter)
+            else:
+                event_iter = runtime_iter
+
+            for event in event_iter:
+                if event.type == RuntimeEventType.STEP_START:
+                    subtask.steps_used += 1
+
+                elif event.type == RuntimeEventType.USAGE:
+                    subtask.token_usage += event.data.get("total_tokens", 0)
+
+                elif event.type == RuntimeEventType.TOOL_CALL:
+                    self._log(
+                        f"  🔧 [{self.name}] [{subtask.steps_used}/{self.max_steps}] "
+                        f"{event.data['name']}({event.data['arguments'][:80]})"
+                    )
+
+                elif event.type == RuntimeEventType.TOOL_RESULT:
+                    extracted_tools.append({
+                        "name": event.data["name"],
+                        "args": event.data.get("arguments", ""),
+                        "result": _cap_tool_result(
+                            event.data["name"],
+                            event.data["output"],
+                            max_len=4000,
+                        ),
+                    })
+
+                elif event.type == RuntimeEventType.DONE:
+                    # 空响应语义（保持旧 Worker 行为）：
+                    #   empty=True (Gemini 安全过滤/无候选) → "(空回复 - 安全过滤)"
+                    #   empty=False 且 content 为空 (普通空响应) → "(空回复)"
+                    reply = event.data.get("content", "")
+                    empty = event.data.get("empty", False)
+                    if empty:
+                        reply = "(空回复 - 安全过滤)"
+                    elif not reply:
+                        reply = "(空回复)"
+                    return reply, extracted_tools
+
+                elif event.type == RuntimeEventType.ERROR:
+                    return f"❌ {event.data.get('msg', '执行失败')}", extracted_tools
+
+                elif event.type == RuntimeEventType.DEAD_LOOP:
+                    return event.data.get("msg", "⚠️ 死循环检测"), extracted_tools
+
+                elif event.type == RuntimeEventType.MAX_STEPS:
+                    return "⚠️ 子任务执行步骤过多，已自动终止", extracted_tools
+
+                elif event.type == RuntimeEventType.TOKEN_BUDGET_EXCEEDED:
+                    return "⚠️ Token 预算已耗尽", extracted_tools
+
+        except Exception as e:
+            traceback.print_exc()
+            # 异常退出: ledger 由 recorder.wrap 标记 failed, 兜底再 finish 一次
+            if execution is not None:
+                self.ledger.finish(execution.id, status="failed",
+                                   terminal_reason="worker_exception")
+            return f"❌ 执行失败: {e}", extracted_tools
+
+        # 正常退出但未收到 DONE (不应发生): 标记 ledger 为 succeeded 兜底
+        if execution is not None:
+            self.ledger.finish(execution.id, status="succeeded",
+                               terminal_reason="no_terminal_event")
+        return "⚠️ 子任务执行异常终止", extracted_tools
 
     def _supports_vision(self) -> bool:
         return supports_vision(self.model_cfg.get("tags", []))

@@ -11,6 +11,8 @@ import traceback
 from typing import Any, Dict, List, Optional
 
 from core.constants import PROJECT_ROOT
+from core.execution import ExecutionContext, ExecutionResult, ExecutionSource, SkillPolicy
+
 AUDIT_LOG = os.path.join(PROJECT_ROOT, 'workspace', 'audit.log')
 
 # 工具结果最大长度（字符）。超过则保留头尾、丢弃中段，避免单个工具返回撑爆 LLM 上下文
@@ -39,7 +41,10 @@ def _cap_tool_result(skill_name: str, result: str, max_len: int = MAX_TOOL_RESUL
 _skill_registry: Dict[str, Dict] = {}  # {name: {"func": callable, "schema": dict}}
 
 
-def skill(name: str, description: str, params: dict = None, tags: list = None, guest_ok: bool = False, guard_keywords: list = None, guard_prompt: str = "", guard_threshold: int = 1):
+def skill(name: str, description: str, params: dict = None, tags: list = None,
+          guest_ok: bool = False, guard_keywords: list = None, guard_prompt: str = "",
+          guard_threshold: int = 1, side_effect: Optional[bool] = None,
+          dry_run_handler=None):
     """
     技能装饰器 - 标记一个函数为可被 AI 调用的技能
 
@@ -47,18 +52,14 @@ def skill(name: str, description: str, params: dict = None, tags: list = None, g
         @skill(
             name="ops_sys_status",
             description="获取 VPS 系统状态",
-            params={
-                "detail": {
-                    "type": "boolean",
-                    "description": "是否返回详细信息",
-                    "default": False
-                }
-            },
+            params={...},
             tags=["sys", "text"],
             guest_ok=False,
             guard_keywords=["系统", "status"],
             guard_prompt="请勿捏造系统状态...",
-            guard_threshold=1
+            guard_threshold=1,
+            side_effect=None,        # None=未知, True=有副作用, False=纯查询
+            dry_run_handler=None,    # 预演回调，提供则 supports_dry_run 自动为 True
         )
         def ops_sys_status(detail: bool = False) -> str:
             ...
@@ -94,14 +95,21 @@ def skill(name: str, description: str, params: dict = None, tags: list = None, g
             },
         }
 
+        policy = SkillPolicy(
+            side_effect=side_effect,
+            supports_dry_run=dry_run_handler is not None,
+            guest_ok=guest_ok,
+            guard_keywords=guard_keywords or [],
+            guard_prompt=guard_prompt,
+            guard_threshold=guard_threshold,
+        )
+
         _skill_registry[name] = {
             "func": func,
             "schema": schema,
             "tags": tags or [],
-            "guest_ok": guest_ok,
-            "guard_keywords": guard_keywords or [],
-            "guard_prompt": guard_prompt,
-            "guard_threshold": guard_threshold,
+            "policy": policy,
+            "dry_run_handler": dry_run_handler,
         }
         func._skill_name = name
         return func
@@ -168,11 +176,13 @@ class SkillEngine:
 
     def get_guest_schemas(self) -> List[Dict]:
         """返回所有已注册且 guest_ok=True 的技能 OpenAI Tool Schema 列表"""
-        return [info["schema"] for info in _skill_registry.values() if info.get("guest_ok")]
+        return [info["schema"] for info in _skill_registry.values()
+                if info["policy"].guest_ok]
 
     def get_schemas_by_names(self, names: list) -> List[Dict]:
-        """返回指定名称的技能 Schema"""
-        if not names:
+        """返回指定名称的技能 Schema。
+        names=None → 返回全部；names=[] → 返回空列表（禁止全部）。"""
+        if names is None:
             return self.get_all_schemas()
         return [info["schema"] for name, info in _skill_registry.items()
                 if name in names]
@@ -187,7 +197,7 @@ class SkillEngine:
         decls = []
         items = (
             [(n, _skill_registry[n]) for n in names if n in _skill_registry]
-            if names
+            if names is not None
             else _skill_registry.items()
         )
         for name, info in items:
@@ -214,28 +224,123 @@ class SkillEngine:
 
     def execute(self, skill_name: str, arguments: str) -> str:
         """
-        执行指定技能
+        执行指定技能（旧接口，单向委托给 execute_with_context）。
         :param skill_name: 技能名称
         :param arguments: JSON 格式的参数字符串
         :return: 执行结果字符串
         """
-        if skill_name not in _skill_registry:
-            return f"❌ 未知技能: {skill_name}"
+        ctx = ExecutionContext(
+            actor_id="legacy",
+            source=ExecutionSource.LEGACY,
+            allowed_tools=None,  # 旧接口不限制工具权限
+        )
+        return self.execute_with_context(ctx, skill_name, arguments).to_legacy_string()
 
-        func = _skill_registry[skill_name]["func"]
+    def execute_with_context(self, ctx: ExecutionContext, skill_name: str,
+                             arguments: str) -> ExecutionResult:
+        """
+        执行指定技能，返回结构化 ExecutionResult。
+
+        :param ctx: 执行上下文（含权限、来源、预算等信息）
+        :param skill_name: 技能名称
+        :param arguments: JSON 格式的参数字符串
+        :return: ExecutionResult
+        """
+        # 权限检查先于 registry 存在性检查，防止通过错误码差异枚举技能
+        if not ctx.has_tool_access(skill_name):
+            _write_audit(skill_name, arguments, ctx,
+                         outcome="denied", error_code="PERMISSION_DENIED")
+            return ExecutionResult.error(
+                skill_name, {"raw": arguments},
+                error_code="PERMISSION_DENIED",
+                error_msg=f"无权调用技能: {skill_name}",
+                retryable=False,
+            )
+
+        if skill_name not in _skill_registry:
+            _write_audit(skill_name, arguments, ctx,
+                         outcome="denied", error_code="UNKNOWN_SKILL")
+            return ExecutionResult.unknown_skill(skill_name, arguments)
+
+        info = _skill_registry[skill_name]
+        policy = info["policy"]
+
+        # 访客权限检查
+        if ctx.is_guest and not policy.guest_ok:
+            _write_audit(skill_name, arguments, ctx,
+                         outcome="denied", error_code="GUEST_FORBIDDEN")
+            return ExecutionResult.error(
+                skill_name, {"raw": arguments},
+                error_code="GUEST_FORBIDDEN",
+                error_msg=f"访客无权调用技能: {skill_name}",
+                retryable=False,
+            )
 
         # 解析参数
         try:
             kwargs = json.loads(arguments) if arguments else {}
         except json.JSONDecodeError as e:
-            return f"❌ 参数解析失败: {e}"
+            _write_audit(skill_name, arguments, ctx,
+                         outcome="denied", error_code="INVALID_ARGS")
+            return ExecutionResult.invalid_args(skill_name, arguments, str(e))
+
+        # dry-run 检查
+        if ctx.is_dry_run:
+            if policy.can_dry_run:
+                dry_run_handler = info.get("dry_run_handler")
+                if not dry_run_handler:
+                    # can_dry_run=True 但无 handler：内部配置错误，不应出现在正常注册路径
+                    _write_audit(skill_name, arguments, ctx,
+                                 outcome="denied", error_code="DRY_RUN_REJECTED")
+                    return ExecutionResult.error(
+                        skill_name, kwargs,
+                        error_code="DRY_RUN_REJECTED",
+                        error_msg=f"技能 {skill_name} 声明支持 dry-run 但未注册 dry_run_handler",
+                        retryable=False,
+                    )
+                try:
+                    from core.utils.masker import mask_secrets
+                    print(f"  🧪 dry-run: {skill_name}({mask_secrets(str(kwargs))})")
+                    result = dry_run_handler(**kwargs)
+                    if not isinstance(result, str):
+                        result = json.dumps(result, ensure_ascii=False, indent=2)
+                    result = _cap_tool_result(skill_name, result)
+                except Exception as e:
+                    error_msg = f"❌ dry-run 异常 [{skill_name}]: {e}"
+                    print(error_msg)
+                    traceback.print_exc()
+                    _write_audit(skill_name, arguments, ctx,
+                                 outcome="error", error_code="DRY_RUN_ERROR")
+                    return ExecutionResult.error(
+                        skill_name, kwargs,
+                        error_code="DRY_RUN_ERROR",
+                        error_msg=f"dry-run 执行异常: {e}",
+                        retryable=False,
+                    )
+                _write_audit(skill_name, arguments, ctx,
+                             outcome="dry_run")
+                return ExecutionResult.success(
+                    skill_name, kwargs,
+                    output=result,
+                    side_effects=[],
+                )
+            else:
+                _write_audit(skill_name, arguments, ctx,
+                             outcome="denied", error_code="DRY_RUN_REJECTED")
+                return ExecutionResult.error(
+                    skill_name, kwargs,
+                    error_code="DRY_RUN_REJECTED",
+                    error_msg=f"技能 {skill_name} 不支持 dry-run（副作用未知或未声明 dry_run_handler）",
+                    retryable=False,
+                )
+
+        func = info["func"]
 
         # 执行
         try:
             from core.utils.masker import mask_secrets
             safe_kwargs = mask_secrets(str(kwargs))
             print(f"  🔧 执行技能: {skill_name}({safe_kwargs})")
-            _write_audit(skill_name, arguments)
             result = func(**kwargs)
             if not isinstance(result, str):
                 result = json.dumps(result, ensure_ascii=False, indent=2)
@@ -245,12 +350,15 @@ class SkillEngine:
                 print(f"  ✂️ 工具结果截断: {skill_name} {raw_len} → {len(result)} 字符")
             else:
                 print(f"  ✓ {skill_name} result_len={raw_len}")
-            return result
+            _write_audit(skill_name, arguments, ctx, outcome="success")
+            return ExecutionResult.success(skill_name, kwargs, output=result)
         except Exception as e:
+            _write_audit(skill_name, arguments, ctx,
+                         outcome="error", error_code="SKILL_ERROR")
             error_msg = f"❌ 技能执行异常 [{skill_name}]: {e}"
             print(error_msg)
             traceback.print_exc()
-            return error_msg
+            return ExecutionResult.skill_error(skill_name, kwargs, str(e))
 
     def list_skills(self, is_guest: bool = False) -> str:
         """列出所有已注册技能 (供 System Prompt 和 /help 展示)"""
@@ -258,7 +366,7 @@ class SkillEngine:
             return "(暂无技能)"
         lines = []
         for name, info in _skill_registry.items():
-            if is_guest and not info.get("guest_ok"):
+            if is_guest and not info["policy"].guest_ok:
                 continue
             desc = info["schema"]["function"]["description"]
             params = info["schema"]["function"]["parameters"]["properties"]
@@ -267,9 +375,16 @@ class SkillEngine:
         return "\n".join(lines) if lines else "(无可用工具)"
 
     def list_skills_filtered(self, names: list) -> str:
-        """列出指定名称的技能"""
+        """列出指定名称的技能
+
+        names=None -> 全部技能
+        names=[]   -> 无技能
+        names=[...] -> 指定技能
+        """
         if not _skill_registry:
             return "(暂无技能)"
+        if names is not None and len(names) == 0:
+            return "(无可用工具)"
         lines = []
         name_set = set(names) if names else set()
         for name, info in _skill_registry.items():
@@ -290,17 +405,18 @@ class SkillEngine:
         info = _skill_registry.get(skill_name)
         if not info:
             return False
-        return bool(info.get("guest_ok"))
+        return bool(info["policy"].guest_ok)
 
     def get_guard_prompts(self, text: str, is_guest: bool = False) -> List[str]:
         """检查消息是否命中技能的 guard_keywords，返回对应 guard_prompt"""
         prompts = []
         for name, info in _skill_registry.items():
-            if is_guest and not info.get("guest_ok"):
+            policy = info["policy"]
+            if is_guest and not policy.guest_ok:
                 continue
-            kws = info.get("guard_keywords", [])
-            prompt = info.get("guard_prompt")
-            threshold = info.get("guard_threshold", 1)
+            kws = policy.guard_keywords
+            prompt = policy.guard_prompt
+            threshold = policy.guard_threshold
             if kws and prompt:
                 matched_count = sum(1 for kw in kws if kw in text)
                 if matched_count >= threshold:
@@ -309,15 +425,25 @@ class SkillEngine:
         return prompts
 
 
-def _write_audit(name: str, args: str):
-    """写审计日志"""
+def _write_audit(tool_name: str, args: str, ctx: ExecutionContext = None,
+                 outcome: str = "success", error_code: str = ""):
+    """统一审计出口 — 所有执行路径必须经过此函数记录。"""
     try:
         from core.utils.masker import mask_secrets
         safe_args = mask_secrets(str(args or ''))
         args_short = safe_args[:200] if len(safe_args) > 200 else safe_args
         os.makedirs(os.path.dirname(AUDIT_LOG), exist_ok=True)
         ts = time.strftime('%Y-%m-%d %H:%M:%S')
+        parts = [f'[{ts}] {tool_name}  outcome={outcome}']
+        if error_code:
+            parts.append(f' error_code={error_code}')
+        parts.append(f' args={args_short}')
+        if ctx:
+            parts.append(f' actor={ctx.actor_id}')
+            parts.append(f' source={ctx.source.value}')
+        if ctx and ctx.is_dry_run:
+            parts.append(' dry_run=1')
         with open(AUDIT_LOG, 'a', encoding='utf-8') as f:
-            f.write(f'[{ts}] {name}  {args_short}\n')
+            f.write(''.join(parts) + '\n')
     except Exception:
         pass
