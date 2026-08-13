@@ -38,8 +38,8 @@ PLANNER_PROMPT = """你是一个任务编排专家。请将以下用户目标拆
 - text: 通用文本处理、翻译、总结、闲聊
 - code: 代码生成、调试、审查、脚本编写
 - multimodal: 图片理解、OCR、文件视觉分析
-- complex_reasoning: 多步推理、数学计算、逻辑分析
-- data_analysis: 数据分析、报表生成、趋势判断
+- complex_reasoning: 仅用于数学证明、多步逻辑推导、创造性方案等真正需要深度推理的任务
+- data_analysis: 巡检、审计、端口研判、结构化数据归类、报表生成和趋势判断；不要因为任务含“分析”就归为 complex_reasoning
 
 编排规则:
 1. 尽可能让无依赖的子任务并行，depends_on 写依赖的 id
@@ -68,9 +68,9 @@ class TaskOrchestrator:
         self.session_mgr = session_mgr
         self.channels = channels or []
         routing = config.get("task_routing", {})
-        self.planner_model = routing.get("planner_model", "pro")
-        self.classifier_model = routing.get("classifier_model",
-                                            config.get("llm", {}).get("default", "flash"))
+        default_model = config.get("llm", {}).get("default", "")
+        self.planner_model = routing.get("planner_model", default_model)
+        self.classifier_model = routing.get("classifier_model", default_model)
         self.max_parallel = routing.get("max_parallel_subtasks", 3)
         self.subtask_timeout = routing.get("subtask_timeout_minutes", 15) * 60
         self.max_depth = routing.get("dag_max_depth", 5)
@@ -387,7 +387,7 @@ class TaskOrchestrator:
                 model_cfg=model_cfg,
                 skill_engine=self.skill_engine,
                 tools_allowlist=subtask.tools if subtask.tools else None,
-                provider=self.router.get_provider(subtask.assigned_model),
+                driver=self.router.get_driver(subtask.assigned_model),
                 log_callback=log_callback,
             )
             result_text, tool_results = worker.run(subtask, upstream,
@@ -408,7 +408,7 @@ class TaskOrchestrator:
             error_text = str(e)
             self._log_and_persist(f"  ❌ {subtask.id} 失败: {error_text}", log_callback)
 
-            fb = self.router.get_fallback(subtask.assigned_model)
+            fb = self.router.get_fallback(subtask.assigned_model, subtask.type.value)
             if fb and fb[0] != subtask.assigned_model:
                 fb_name, fb_client = fb
                 self._log_and_persist(f"  🔄 {subtask.id} fallback → {fb_name}", log_callback)
@@ -421,7 +421,7 @@ class TaskOrchestrator:
                         model_cfg=fb_cfg,
                         skill_engine=self.skill_engine,
                         tools_allowlist=subtask.tools if subtask.tools else None,
-                        provider=self.router.get_provider(fb_name),
+                        driver=self.router.get_driver(fb_name),
                         log_callback=log_callback,
                     )
                     result_text, tool_results = worker_fb.run(subtask, upstream,

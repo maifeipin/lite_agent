@@ -58,7 +58,7 @@ def test_worker_prompt_welding():
         model_name="flash",
         model_cfg={"max_steps": 2, "max_tokens": 512, "temperature": 0.3},
         skill_engine=se,
-        provider="openai",
+        driver="openai",
     )
 
     subtask = Subtask(

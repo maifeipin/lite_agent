@@ -2,10 +2,11 @@ import json
 import time
 import traceback
 import collections
-from typing import Callable, Optional
-from openai import OpenAI
+from typing import Callable
 from core.skill_engine import SkillEngine
 from core.subtask_dag import Subtask
+from core.model_config import is_gemini_driver, supports_vision
+
 
 class LRUCache:
     def __init__(self, maxsize=200):
@@ -42,7 +43,7 @@ class WorkerAgent:
 
     def __init__(self, name: str, client, model_name: str,
                  model_cfg: dict, skill_engine: SkillEngine,
-                 tools_allowlist: list = None, provider: str = "openai",
+                 tools_allowlist: list = None, driver: str = "openai",
                  log_callback: Callable = None):
         self.name = name
         self.client = client
@@ -50,7 +51,7 @@ class WorkerAgent:
         self.model_cfg = model_cfg
         self.skill_engine = skill_engine
         self.tools_allowlist = tools_allowlist
-        self.provider = provider
+        self.driver = driver
         self.log_callback = log_callback
         self.max_steps = model_cfg.get("max_steps", 8)
         self.max_tokens = model_cfg.get("max_tokens", 2048)
@@ -82,7 +83,7 @@ class WorkerAgent:
                 if isinstance(dep_result, dict):
                     res_text = dep_result.get("result", "")
                     tool_res = dep_result.get("tool_results", [])
-                    
+
                     block = f"### {dep_id}\n[执行结论]:\n{res_text[:8000]}\n"
                     if tool_res:
                         block += "\n[工具调用明细]:\n"
@@ -92,9 +93,9 @@ class WorkerAgent:
                 else:
                     # Legacy fallback for old string formats
                     ctx_lines.append(f"### {dep_id}\n{str(dep_result)[:1500]}")
-                    
+
             ctx_block = "\n\n上游子任务结果（参考上下文）:\n" + "\n\n".join(ctx_lines)
-            
+
             # Total fan-in truncation to prevent context explosion (~16K+ tokens if CJK)
             if len(ctx_block) > 24000:
                 ctx_block = ctx_block[:24000] + "\n\n... ⚠️ [上游已截断, 依赖的部分内容被省略] ..."
@@ -132,25 +133,6 @@ class WorkerAgent:
     def run(self, subtask: Subtask, upstream: dict = None,
             images: list = None, goal: str = None,
             global_strategy: str = None) -> tuple[str, list]:
-        if self.provider == "gemini":
-            return self._run_gemini(subtask, upstream, images, goal, global_strategy)
-        return self._run_openai(subtask, upstream, images, goal, global_strategy)
-
-    def _extract_tool_result(self, name: str, args: str, raw_result) -> dict:
-        from core.skill_engine import _cap_tool_result
-        res_str = str(raw_result)
-        return {
-            "name": name,
-            "args": args,
-            "result": _cap_tool_result(name, res_str, max_len=4000)
-        }
-
-    # ==================================================================
-    #  OpenAI 路径 (原有)
-    # ==================================================================
-    def _run_openai(self, subtask: Subtask, upstream: dict = None,
-                    images: list = None, goal: str = None,
-                    global_strategy: str = None) -> tuple[str, list]:
         system_msg = {
             "role": "system",
             "content": self._build_prompt(subtask, upstream, goal, global_strategy),
@@ -174,218 +156,179 @@ class WorkerAgent:
         for step in range(self.max_steps):
             try:
                 subtask.steps_used += 1
-                actual_model = self.model_cfg.get("model", self.model_name)
-                kwargs = {"model": actual_model, "messages": messages}
-
-                if (
-                    "pro" in self.model_name.lower()
-                    or "reasoner" in self.model_name.lower()
-                ):
-                    kwargs["reasoning_effort"] = "high"
-                else:
-                    kwargs["temperature"] = self.temperature
-                    kwargs["max_tokens"] = self.max_tokens
-
-                if tools:
-                    kwargs["tools"] = tools
-                    kwargs["tool_choice"] = "auto"
-
-                kwargs["timeout"] = 60.0
-                
-                start_t = time.time()
-                self._log(f"  🧠 [LLM Request] 角色: {self.name}, 模型: {actual_model}")
-                response = self.client.chat.completions.create(**kwargs)
-                self._log(f"  ✅ [LLM Response] 耗时: {time.time()-start_t:.2f}s, Tokens: {response.usage.total_tokens if response.usage else 0}")
-                
-                choice = response.choices[0]
-
-                if response.usage:
-                    subtask.token_usage += response.usage.total_tokens
-
+                result = self._call_model(messages, tools)
             except Exception as e:
                 traceback.print_exc()
                 return f"❌ LLM 调用失败: {e}", extracted_tools
 
-            if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
-                tool_calls_data = [
-                    {
-                        "id": tc.id,
+            if result.get("usage_total"):
+                subtask.token_usage += result["usage_total"]
+
+            tool_calls = result.get("tool_calls") or []
+            if tool_calls:
+                tool_calls_data = []
+                for tc in tool_calls:
+                    item = {
+                        "id": tc["id"],
                         "type": "function",
                         "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
+                            "name": tc["name"],
+                            "arguments": tc["arguments"],
                         },
                     }
-                    for tc in choice.message.tool_calls
-                ]
+                    if tc.get("provider_metadata"):
+                        item["provider_metadata"] = tc["provider_metadata"]
+                    tool_calls_data.append(item)
                 messages.append({
                     "role": "assistant",
-                    "content": choice.message.content or "",
+                    "content": result.get("content") or "",
                     "tool_calls": tool_calls_data,
                 })
 
-                for tc in choice.message.tool_calls:
+                for tc in tool_calls:
                     if self._check_dead_loop(
-                        tc.function.name, tc.function.arguments, messages
+                        tc["name"], tc["arguments"], messages
                     ):
-                        return self._dead_loop_msg(tc.function.name), extracted_tools
+                        return self._dead_loop_msg(tc["name"]), extracted_tools
 
                     self._log(
                         f"  🔧 [{self.name}] [{step + 1}/{self.max_steps}] "
-                        f"{tc.function.name}({tc.function.arguments[:80]})"
+                        f"{tc['name']}({tc['arguments'][:80]})"
                     )
-                    result = self.skill_engine.execute(
-                        tc.function.name, tc.function.arguments
+                    tool_result = self.skill_engine.execute(
+                        tc["name"], tc["arguments"]
                     )
                     extracted_tools.append(self._extract_tool_result(
-                        tc.function.name, tc.function.arguments, result
+                        tc["name"], tc["arguments"], tool_result
                     ))
                     messages.append({
                         "role": "tool",
-                        "tool_call_id": tc.id,
-                        "name": tc.function.name,
-                        "content": result,
+                        "tool_call_id": tc["id"],
+                        "name": tc["name"],
+                        "content": tool_result,
                     })
                 continue
 
-            reply = choice.message.content or "(空回复)"
+            reply = result.get("content") or ""
+            if not reply:
+                reply = "(空回复 - 安全过滤)" if result.get("empty") else "(空回复)"
             messages.append({"role": "assistant", "content": reply})
             return reply, extracted_tools
 
         return "⚠️ 子任务执行步骤过多，已自动终止", extracted_tools
 
-    # ==================================================================
-    #  Gemini 路径 (google-genai)
-    # ==================================================================
-    def _run_gemini(self, subtask: Subtask, upstream: dict = None,
-                    images: list = None, goal: str = None,
-                    global_strategy: str = None) -> tuple[str, list]:
+    # ------------------------------------------------------------------
+    #  统一调用层：协议差异只体现在这里，上层 Tool Loop 不再分支。
+    # ------------------------------------------------------------------
+    def _call_model(self, messages: list, tools: list) -> dict:
+        """发起一次模型请求并返回统一结构 dict。"""
+        if is_gemini_driver(self.driver):
+            return self._call_gemini(messages, tools)
+        return self._call_openai(messages, tools)
+
+    def _call_openai(self, messages: list, tools: list) -> dict:
+        actual_model = self.model_cfg.get("model", self.model_name)
+        kwargs = {"model": actual_model, "messages": messages}
+
+        if (
+            "pro" in self.model_name.lower()
+            or "reasoner" in self.model_name.lower()
+        ):
+            kwargs["reasoning_effort"] = "high"
+        else:
+            kwargs["temperature"] = self.temperature
+            kwargs["max_tokens"] = self.max_tokens
+
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+
+        kwargs["timeout"] = 60.0
+
+        start_t = time.time()
+        self._log(f"  🧠 [LLM Request] 角色: {self.name}, 模型: {actual_model}")
+        response = self.client.chat.completions.create(**kwargs)
+        self._log(
+            f"  ✅ [LLM Response] 耗时: {time.time() - start_t:.2f}s, "
+            f"Tokens: {response.usage.total_tokens if response.usage else 0}"
+        )
+
+        choice = response.choices[0]
+        tool_calls = []
+        if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
+            tool_calls = [
+                {
+                    "id": tc.id,
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                }
+                for tc in choice.message.tool_calls
+            ]
+
+        return {
+            "content": choice.message.content or "",
+            "tool_calls": tool_calls,
+            "finish_reason": choice.finish_reason,
+            "usage_total": response.usage.total_tokens if response.usage else 0,
+            "empty": False,
+        }
+
+    def _call_gemini(self, messages: list, tools: list) -> dict:
+        from core.gemini_codec import (
+            openai_messages_to_gemini,
+            gemini_response_to_unified,
+        )
         from google.genai import types
 
-        system_text = self._build_prompt(subtask, upstream, goal, global_strategy)
         gemini_model = self.model_cfg.get("model", self.model_name)
+        system_instruction, contents = openai_messages_to_gemini(messages)
 
         tool_names = self.tools_allowlist if self.tools_allowlist else None
         fn_decls = self.skill_engine.get_gemini_tool_declarations(tool_names)
         tool_config = types.Tool(function_declarations=fn_decls) if fn_decls else None
 
         generate_config = types.GenerateContentConfig(
-            system_instruction=system_text,
+            system_instruction=system_instruction,
             temperature=self.temperature,
             max_output_tokens=self.max_tokens,
             tools=[tool_config] if tool_config else None,
         )
 
-        contents = [subtask.prompt]
+        start_t = time.time()
+        self._log(f"  🧠 [LLM Request] 角色: {self.name}, 模型: {gemini_model} (gemini)")
 
-        if images and self._supports_vision():
-            parts = [types.Part(text=subtask.prompt)]
-            for img_url in images:
-                parts.append(types.Part.from_uri(
-                    file_uri=img_url, mime_type="image/jpeg"
-                ))
-            contents = [types.Content(role="user", parts=parts)]
-
-        extracted_tools = []
-        for step in range(self.max_steps):
+        max_retries = 3
+        response = None
+        for attempt in range(max_retries):
             try:
-                subtask.steps_used += 1
-                max_retries = 3
-                response = None
-                for attempt in range(max_retries):
-                    try:
-                        response = self.client.models.generate_content(
-                            model=gemini_model,
-                            contents=contents,
-                            config=generate_config,
-                        )
-                        break
-                    except Exception as e:
-                        if "429" in str(e) and attempt < max_retries - 1:
-                            print(f"  ⚠️ [Rate Limit] {self.name} hit 429, sleeping 35s...")
-                            time.sleep(35)
-                        else:
-                            raise
-            except Exception as e:
-                traceback.print_exc()
-                return f"❌ Gemini 调用失败: {e}", extracted_tools
-
-            if not response.candidates:
-                return f"❌ Gemini 无候选回复 (可能是安全过滤或配额问题)", extracted_tools
-
-            candidate = response.candidates[0]
-
-            if response.usage_metadata:
-                subtask.token_usage += response.usage_metadata.total_token_count
-
-            if not candidate.content or not candidate.content.parts:
-                finish_reason = str(candidate.finish_reason) if hasattr(candidate, 'finish_reason') else "unknown"
-                if candidate.finish_reason and hasattr(candidate.finish_reason, 'name'):
-                    finish_reason = candidate.finish_reason.name
-                if "STOP" in str(finish_reason).upper():
-                    return "(空回复 - 安全过滤)", extracted_tools
-                return f"❌ 异常终止: finish_reason={finish_reason}", extracted_tools
-
-            has_function_call = False
-            text_parts = []
-            function_calls = []
-
-            for part in candidate.content.parts:
-                if part.text:
-                    text_parts.append(part.text)
-                if hasattr(part, "function_call") and part.function_call:
-                    has_function_call = True
-                    function_calls.append(part.function_call)
-
-            if has_function_call:
-                fn_response_parts = []
-                for fn_call in function_calls:
-                    name = fn_call.name
-                    args = (
-                        dict(fn_call.args)
-                        if fn_call.args
-                        else {}
-                    )
-                    args_json = json.dumps(args, ensure_ascii=False)
-
-                    if self._check_dead_loop(name, args_json, None):
-                        return self._dead_loop_msg(name), extracted_tools
-
-                    print(
-                        f"  🔧 [{self.name}] [{step + 1}/{self.max_steps}] "
-                        f"{name}({args_json[:80]})"
-                    )
-                    tool_result = self.skill_engine.execute(name, args_json)
-                    extracted_tools.append(self._extract_tool_result(
-                        name, args_json, tool_result
-                    ))
-
-                    fn_response_part = types.Part.from_function_response(
-                        name=name,
-                        response={"result": tool_result},
-                    )
-                    fn_response_parts.append(fn_response_part)
-
-                fn_content = types.Content(
-                    role="user",
-                    parts=fn_response_parts,
+                response = self.client.models.generate_content(
+                    model=gemini_model,
+                    contents=contents,
+                    config=generate_config,
                 )
-                if isinstance(contents, list):
-                    contents.append(candidate.content)
-                    contents.append(fn_content)
+                break
+            except Exception as e:
+                if "429" in str(e) and attempt < max_retries - 1:
+                    print(f"  ⚠️ [Rate Limit] {self.name} hit 429, sleeping 35s...")
+                    time.sleep(35)
                 else:
-                    contents = [candidate.content, fn_content]
+                    raise
 
-                continue
+        self._log(f"  ✅ [LLM Response] 耗时: {time.time() - start_t:.2f}s")
+        return gemini_response_to_unified(response)
 
-            reply = "\n".join(text_parts) if text_parts else "(空回复)"
-            return reply, extracted_tools
-
-        return "⚠️ 子任务执行步骤过多，已自动终止", extracted_tools
-
-    # ==================================================================
+    # ------------------------------------------------------------------
     #  共享工具方法
-    # ==================================================================
+    # ------------------------------------------------------------------
+    def _extract_tool_result(self, name: str, args: str, raw_result) -> dict:
+        from core.skill_engine import _cap_tool_result
+        res_str = str(raw_result)
+        return {
+            "name": name,
+            "args": args,
+            "result": _cap_tool_result(name, res_str, max_len=4000)
+        }
+
     def _check_dead_loop(self, tool_name: str, args_str: str,
                          _messages=None) -> bool:
         fingerprint = f"{tool_name}:{args_str}"
@@ -408,5 +351,4 @@ class WorkerAgent:
         )
 
     def _supports_vision(self) -> bool:
-        tags = self.model_cfg.get("tags", [])
-        return "multimodal" in tags or "vision" in tags
+        return supports_vision(self.model_cfg.get("tags", []))

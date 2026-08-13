@@ -153,7 +153,12 @@ def _register_cron_jobs(agent: Agent, config: dict):
 def main():
     print("🤖 正在启动 Lite Agent...")
     config = load_config()
-    
+
+    # 0. 模型配置强校验 + 实际生效摘要（error 级阻断启动）
+    from core.model_config import validate_and_print
+    if not validate_and_print(config):
+        exit(1)
+
     # 1. 初始化 AI 核心
     agent = Agent(config)
     
