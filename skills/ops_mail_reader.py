@@ -2,6 +2,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.skill_engine import skill
 from core.config_loader import load_config
+from core.model_config import is_gemini_driver
 from core.command_registry import slash_command
 import subprocess
 
@@ -23,8 +24,8 @@ def _build_llm_pool_env(cfg) -> dict:
         if isinstance(api_key, str) and api_key.startswith('${') and api_key.endswith('}'):
             api_key = os.environ.get(api_key[2:-1], '')
         burl = m.get('base_url', 'https://api.openai.com/v1')
-        mtags = m.get('tags', [])
-        provider = 'gemini' if ('gemini' in mtags or 'generativelanguage' in burl or 'googleapis' in burl) else 'openai'
+        driver = m.get('driver', '')
+        provider = 'gemini' if is_gemini_driver(driver) else 'openai'
         if not api_key:
             continue
         endpoints.append({'api_key': api_key, 'base_url': burl, 'provider': provider, 'model': m.get('model', '')})
@@ -61,9 +62,9 @@ def _run_mail_reader_cmd(cmd_args: list, timeout=None) -> str:
     base_url = model_cfg.get("base_url", "https://api.openai.com/v1")
     model = model_cfg.get("model", "")
     
-    # 简单的 provider 判定
-    tags = model_cfg.get("tags", [])
-    provider = "gemini" if "gemini" in tags or "generativelanguage" in base_url or "googleapis" in base_url else "openai"
+    # provider 判定改用显式 driver，不再靠 tags/URL 字符串推测
+    driver = model_cfg.get("driver", "")
+    provider = "gemini" if is_gemini_driver(driver) else "openai"
     
     # 构建子进程环境变量
     env = dict(os.environ)

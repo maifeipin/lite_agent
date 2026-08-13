@@ -161,6 +161,7 @@ class Agent:
                 http_client=http_client
             )
             self.model = default_cfg.get("model", default_model)
+            self.model_driver = default_cfg.get("driver", "openai")
             self.max_tokens = default_cfg.get("max_tokens", 2048)
             self.temperature = default_cfg.get("temperature", 0.3)
         else:
@@ -172,6 +173,7 @@ class Agent:
                 http_client=http_client
             )
             self.model = llm_cfg["model"]
+            self.model_driver = "openai"
             self.max_tokens = llm_cfg.get("max_tokens", 2048)
             self.temperature = llm_cfg.get("temperature", 0.3)
 
@@ -445,15 +447,9 @@ class Agent:
     def _async_refine_title(self, session_key: str, text: str):
         def _task():
             try:
-                fast_model = self._config.get("llm", {}).get("fast", self.model)
-                client = self.client
-                if hasattr(self, 'skill_engine') and hasattr(self.skill_engine, 'router'):
-                    c = self.skill_engine.router.get_client(fast_model)
-                    if c:
-                        client = c
                 prompt = f"请用 10 个字以内精炼概括用户的这句提问，不要包含标点符号、引号或多余前缀。提问内容：{text[:200]}"
-                res = client.chat.completions.create(
-                    model=fast_model,
+                res = self.client.chat.completions.create(
+                    model=self.model,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.3,
                     max_tokens=30,
@@ -1063,7 +1059,8 @@ class Agent:
             # 记账: 保持与旧版 "每轮一次" 粒度一致
             self.session_mgr.log_api_usage(
                 msg.session_key, self.model,
-                step_usage["prompt_tokens"], step_usage["completion_tokens"], step_usage["total_tokens"]
+                step_usage["prompt_tokens"], step_usage["completion_tokens"], step_usage["total_tokens"],
+                provider=self.model_driver, estimated=estimated_this_step
             )
             total_usage["prompt_tokens"] += step_usage["prompt_tokens"]
             total_usage["completion_tokens"] += step_usage["completion_tokens"]

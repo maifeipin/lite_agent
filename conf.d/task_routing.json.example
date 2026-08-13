@@ -1,0 +1,64 @@
+{
+    "planner_model": "flash",
+    "classifier_model": "flash",
+    "route_rules": [
+        {
+            "type": "text",
+            "model": "gemini-flash",
+            "fallback": "flash",
+            "allowed_models": [
+                "gemini-flash",
+                "flash",
+                "doubao-pro",
+                "glm-5.2",
+                "nvidia-glm-5.2"
+            ]
+        },
+        {
+            "type": "code",
+            "model": "gemini-pro",
+            "fallback": "flash",
+            "allowed_models": [
+                "gemini-pro",
+                "flash",
+                "glm-5.2"
+            ],
+            "tools": [
+                "ops_workspace_run"
+            ]
+        },
+        {
+            "type": "complex_reasoning",
+            "model": "gemini-pro",
+            "fallback": "doubao-pro",
+            "allowed_models": [
+                "gemini-pro",
+                "doubao-pro",
+                "glm-5.2"
+            ]
+        },
+        {
+            "type": "data_analysis",
+            "model": "gemini-flash",
+            "fallback": "flash",
+            "allowed_models": [
+                "gemini-flash",
+                "flash",
+                "doubao-pro",
+                "glm-5.2"
+            ],
+            "tools": [
+                "ops_billing_cost",
+                "ops_logs_query",
+                "ops_sys_status",
+                "ops_workspace_run",
+                "ops_web_fetch"
+            ]
+        }
+    ],
+    "max_parallel_subtasks": 3,
+    "subtask_timeout_minutes": 15,
+    "dag_max_depth": 5,
+    "dag_max_total_steps": 30,
+    "dag_max_total_tokens": 200000
+}

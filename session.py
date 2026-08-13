@@ -116,6 +116,8 @@ class SessionManager:
                     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
                     session_key        TEXT,
                     model              TEXT,
+                    provider           TEXT DEFAULT '',
+                    estimated          INTEGER DEFAULT 0,
                     prompt_tokens      INTEGER,
                     completion_tokens  INTEGER,
                     total_tokens       INTEGER,
@@ -126,6 +128,15 @@ class SessionManager:
                     created_at         REAL
                 );
             """)
+            # api_usage_log 迁移：补充 provider / estimated 列（旧库兼容）
+            try:
+                conn.execute("ALTER TABLE api_usage_log ADD COLUMN provider TEXT DEFAULT ''")
+            except Exception:
+                pass
+            try:
+                conn.execute("ALTER TABLE api_usage_log ADD COLUMN estimated INTEGER DEFAULT 0")
+            except Exception:
+                pass
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10.0, check_same_thread=False)
@@ -240,7 +251,7 @@ class SessionManager:
     # ------------------------------------------------------------------
     #  消息与计费管理
     # ------------------------------------------------------------------
-    def log_api_usage(self, session_key: str, model: str, prompt_tokens: int, completion_tokens: int, total_tokens: int):
+    def log_api_usage(self, session_key: str, model: str, prompt_tokens: int, completion_tokens: int, total_tokens: int, provider: str = "", estimated: bool = False):
         """记录每一次大模型请求的计费详情 (线程安全)"""
         with self._lock:
             # 1. 更新内存状态并持久化主表
@@ -254,9 +265,9 @@ class SessionManager:
                     with self._connect() as conn:
                         conn.execute(
                             "INSERT INTO api_usage_log "
-                            "(session_key, model, prompt_tokens, completion_tokens, total_tokens, created_at) "
-                            "VALUES (?, ?, ?, ?, ?, ?)",
-                            (session_key, model, prompt_tokens, completion_tokens, total_tokens, time.time())
+                            "(session_key, model, provider, estimated, prompt_tokens, completion_tokens, total_tokens, created_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            (session_key, model, provider, 1 if estimated else 0, prompt_tokens, completion_tokens, total_tokens, time.time())
                         )
                     return
                 except sqlite3.OperationalError as e:

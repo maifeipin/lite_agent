@@ -1,0 +1,69 @@
+{
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "${DEEPSEEK_API_KEY}",
+    "model": "deepseek-v4-flash",
+    "max_tokens": 8192,
+    "temperature": 0.3,
+    "models": {
+        "flash": {
+            "driver": "deepseek",
+            "base_url": "https://api.deepseek.com/v1",
+            "api_key": "${DEEPSEEK_API_KEY}",
+            "model": "deepseek-v4-flash",
+            "max_tokens": 8192,
+            "max_steps": 30,
+            "tags": ["text", "fast"]
+        },
+        "gemini-flash": {
+            "driver": "gemini_native",
+            "api_key": "${GEMINI_API_KEY}",
+            "model": "gemini-2.5-flash",
+            "max_tokens": 8192,
+            "temperature": 0.3,
+            "max_steps": 30,
+            "proxy": "socks5h://127.0.0.1:18988",
+            "tags": ["text", "fast"]
+        },
+        "gemini-pro": {
+            "driver": "gemini_native",
+            "api_key": "${GEMINI_API_KEY}",
+            "model": "gemini-3.1-pro-preview",
+            "max_tokens": 8192,
+            "temperature": 0.1,
+            "max_steps": 30,
+            "proxy": "socks5h://127.0.0.1:18988",
+            "tags": ["code", "complex_reasoning"]
+        },
+        "doubao-pro": {
+            "driver": "ark",
+            "base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
+            "api_key": "${ARK_API_KEY}",
+            "model": "doubao-seed-2.0-pro",
+            "max_tokens": 8192,
+            "temperature": 0.2,
+            "max_steps": 30,
+            "tags": ["text", "complex_reasoning"]
+        },
+        "glm-5.2": {
+            "driver": "ark",
+            "base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
+            "api_key": "${ARK_API_KEY}",
+            "model": "glm-5.2",
+            "max_tokens": 8192,
+            "temperature": 0.2,
+            "max_steps": 30,
+            "tags": ["text", "complex_reasoning"]
+        },
+        "nvidia-glm-5.2": {
+            "driver": "openai",
+            "base_url": "https://integrate.api.nvidia.com/v1",
+            "api_key": "${NVIDIA_API_KEY}",
+            "model": "z-ai/glm-5.2",
+            "max_tokens": 16384,
+            "temperature": 1.0,
+            "max_steps": 30,
+            "tags": ["text", "creative"]
+        }
+    },
+    "default": "flash"
+}

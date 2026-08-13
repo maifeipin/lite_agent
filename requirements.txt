@@ -4,6 +4,7 @@ dingtalk-stream>=0.24.0
 websockets<14.0
 chromadb>=0.4.0
 sentence-transformers>=2.2.0
-google-genai>=1.0.0
+google-genai>=1.47.0
+httpx[socks]>=0.28.0
 
 psycopg2-binary>=2.9.0

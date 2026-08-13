@@ -63,6 +63,14 @@ vim .env
 cp config.example.json config.json
 ```
 
+3. 复制模型配置示例到 `conf.d/`（`llm` / `task_routing` / `committee` 已从 `config.json` 拆分到 `conf.d/` 独立维护，改模型只需改这三个文件后重启）：
+```bash
+mkdir -p conf.d
+cp conf.d/llm.json.example conf.d/llm.json
+cp conf.d/task_routing.json.example conf.d/task_routing.json
+cp conf.d/committee.json.example conf.d/committee.json
+```
+
 ### 2. 启动
 ```bash
 pip install -r requirements.txt

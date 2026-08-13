@@ -1,7 +1,12 @@
-import os
 from typing import Optional
 
 from openai import OpenAI
+
+from core.model_config import (
+    DRIVER_OPENAI,
+    is_gemini_driver,
+    supports_vision,
+)
 
 
 class ModelRouter:
@@ -13,15 +18,16 @@ class ModelRouter:
         routing = config.get("task_routing", {})
         self.rules: list[dict] = routing.get("route_rules", [])
         self._clients: dict[str, object] = {}
-        self._providers: dict[str, str] = {}
+        self._drivers: dict[str, str] = {}
         self._init_clients()
 
     def _init_clients(self):
         for name, cfg in self.models_cfg.items():
-            provider = self._detect_provider(cfg)
-            self._providers[name] = provider
+            # 显式 driver，不再靠 tags/URL 字符串推测。
+            driver = cfg.get("driver", DRIVER_OPENAI)
+            self._drivers[name] = driver
 
-            if provider == "gemini":
+            if is_gemini_driver(driver):
                 self._clients[name] = self._make_gemini_client(name, cfg)
             else:
                 import httpx
@@ -33,15 +39,6 @@ class ModelRouter:
                     http_client=http_client
                 )
 
-    def _detect_provider(self, cfg: dict) -> str:
-        tags = cfg.get("tags", [])
-        if "gemini" in tags:
-            return "gemini"
-        base = cfg.get("base_url", "")
-        if "generativelanguage" in base or "googleapis" in base:
-            return "gemini"
-        return "openai"
-
     def _make_gemini_client(self, name: str, cfg: dict):
         try:
             from google import genai
@@ -50,9 +47,9 @@ class ModelRouter:
                 "Gemini 模型需要 google-genai 库: pip install google-genai"
             )
 
-        proxy = cfg.get("proxy", os.environ.get("HTTPS_PROXY", ""))
+        # 代理只来自显式配置，不再读取 HTTPS_PROXY 环境变量兜底。
+        proxy = cfg.get("proxy", "")
         http_options = {}
-
         if proxy:
             http_options = {
                 "clientArgs": {"proxy": proxy},
@@ -66,38 +63,49 @@ class ModelRouter:
         print(f"  🤖 Gemini[{name}] 客户端就绪 model={cfg.get('model', name)}")
         return client
 
-    @staticmethod
-    def _setup_socks_proxy(proxy_url: str, name: str):
-        try:
-            import socks
-            url = proxy_url.replace("socks5h://", "").replace("socks5://", "")
-            host, port = url.split(":")
-            socks.set_default_proxy(socks.SOCKS5, host, int(port))
-            import socket
-            socket.socket = socks.socksocket
-            print(f"  🌐 Gemini[{name}] SOCKS5 代理: {host}:{port}")
-        except ImportError:
-            print(f"  ⚠️ PySocks 未安装，无法使用 SOCKS 代理")
-        except Exception as e:
-            print(f"  ⚠️ SOCKS 代理设置失败: {e}")
-
-    def get_provider(self, model_name: str) -> str:
-        return self._providers.get(model_name, "openai")
+    def get_driver(self, model_name: str) -> str:
+        return self._drivers.get(model_name, DRIVER_OPENAI)
 
     def route(self, subtask_type: str) -> tuple[str, object, list[str]]:
         for rule in self.rules:
             if rule.get("type") == subtask_type:
-                model_name = rule["model"]
-                client = self._clients.get(model_name)
                 tools = rule.get("tools", [])
-                return (model_name, client, tools)
+                primary = rule.get("model", "")
+                fallback = rule.get("fallback", "")
+                allowed = rule.get("allowed_models")
+
+                # allowed_models 是强制边界，不是 UI 元数据。
+                # 没有该字段的历史规则保持原有 primary/fallback 行为。
+                candidates = [primary, fallback]
+                if isinstance(allowed, list):
+                    candidates.extend(allowed)
+                    candidates = [name for name in candidates if name in allowed]
+                seen = set()
+                for model_name in candidates:
+                    if not model_name or model_name in seen:
+                        continue
+                    seen.add(model_name)
+                    client = self._clients.get(model_name)
+                    if client is not None:
+                        if model_name != primary:
+                            print(
+                                f"  ⚠️ 路由 {subtask_type} 的主模型 {primary!r} 不可用，"
+                                f"自动选择允许范围内的 {model_name!r}"
+                            )
+                        return (model_name, client, tools)
+                return (primary, None, tools)
         default_client = self._clients.get(self.default_model)
         return (self.default_model, default_client, [])
 
-    def get_fallback(self, model_name: str) -> Optional[tuple[str, object]]:
+    def get_fallback(self, model_name: str, subtask_type: str = "") -> Optional[tuple[str, object]]:
         for rule in self.rules:
+            if subtask_type and rule.get("type") != subtask_type:
+                continue
             if rule.get("model") == model_name and rule.get("fallback"):
                 fb_name = rule["fallback"]
+                allowed = rule.get("allowed_models")
+                if isinstance(allowed, list) and fb_name not in allowed:
+                    continue
                 fb_client = self._clients.get(fb_name)
                 if fb_client:
                     return (fb_name, fb_client)
@@ -108,5 +116,4 @@ class ModelRouter:
 
     def supports_vision(self, model_name: str) -> bool:
         cfg = self.models_cfg.get(model_name, {})
-        tags = cfg.get("tags", [])
-        return "multimodal" in tags or "vision" in tags
+        return supports_vision(cfg.get("tags", []))

@@ -1,88 +1,6 @@
 {
+    "_comment_model_config": "模型相关配置 (llm / task_routing / committee) 已拆分到 conf.d/ 目录，由对应 conf.d/*.json 完整维护。复制 conf.d/*.json.example 为 *.json 后重启生效。",
     "bot_name": "VPS 助手",
-    "llm": {
-        "base_url": "https://api.deepseek.com/v1",
-        "api_key": "${DEEPSEEK_API_KEY}",
-        "model": "deepseek-v4-flash",
-        "max_tokens": 8192,
-        "temperature": 0.3,
-        "models": {
-            "flash": {
-                "base_url": "https://api.deepseek.com/v1",
-                "api_key": "${DEEPSEEK_API_KEY}",
-                "model": "deepseek-v4-flash",
-                "max_tokens": 8192,
-                "max_steps": 30,
-                "tags": [
-                    "text",
-                    "fast"
-                ]
-            },
-            "gemini-flash": {
-                "api_key": "${GEMINI_API_KEY}",
-                "model": "gemini-2.5-flash",
-                "max_tokens": 8192,
-                "temperature": 0.3,
-                "max_steps": 30,
-                "proxy": "socks5://127.0.0.1:18988",
-                "tags": [
-                    "gemini",
-                    "text",
-                    "fast"
-                ]
-            },
-            "gemini-pro": {
-                "api_key": "${GEMINI_API_KEY}",
-                "model": "gemini-3.1-pro-preview",
-                "max_tokens": 8192,
-                "temperature": 0.1,
-                "max_steps": 30,
-                "proxy": "socks5://127.0.0.1:18988",
-                "tags": [
-                    "gemini",
-                    "code",
-                    "complex_reasoning"
-                ]
-            },
-            "doubao-pro": {
-                "base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
-                "api_key": "${ARK_API_KEY}",
-                "model": "doubao-seed-2.0-pro",
-                "max_tokens": 8192,
-                "temperature": 0.2,
-                "max_steps": 30,
-                "tags": [
-                    "text",
-                    "complex_reasoning"
-                ]
-            },
-            "glm-5.2": {
-                "base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
-                "api_key": "${ARK_API_KEY}",
-                "model": "glm-5.2",
-                "max_tokens": 8192,
-                "temperature": 0.2,
-                "max_steps": 30,
-                "tags": [
-                    "text",
-                    "complex_reasoning"
-                ]
-            },
-            "nvidia-glm-5.2": {
-                "base_url": "https://integrate.api.nvidia.com/v1",
-                "api_key": "${NVIDIA_API_KEY}",
-                "model": "z-ai/glm-5.2",
-                "max_tokens": 16384,
-                "temperature": 1.0,
-                "max_steps": 30,
-                "tags": [
-                    "text",
-                    "creative"
-                ]
-            }
-        },
-        "default": "flash"
-    },
     "session": {
         "ttl_minutes": 30,
         "max_history": 20,
@@ -396,47 +314,6 @@
         }
     ],
     "service_name": "lite-agent",
-    "task_routing": {
-        "planner_model": "flash",
-        "classifier_model": "flash",
-        "route_rules": [
-            {
-                "type": "text",
-                "model": "gemini-flash",
-                "fallback": "flash"
-            },
-            {
-                "type": "code",
-                "model": "pro",
-                "fallback": "flash",
-                "tools": [
-                    "ops_workspace_run"
-                ]
-            },
-            {
-                "type": "complex_reasoning",
-                "model": "gemini-pro",
-                "fallback": "pro"
-            },
-            {
-                "type": "data_analysis",
-                "model": "pro",
-                "fallback": "flash",
-                "tools": [
-                    "ops_billing_cost",
-                    "ops_logs_query",
-                    "ops_sys_status",
-                    "ops_workspace_run",
-                    "ops_web_fetch"
-                ]
-            }
-        ],
-        "max_parallel_subtasks": 3,
-        "subtask_timeout_minutes": 15,
-        "dag_max_depth": 5,
-        "dag_max_total_steps": 30,
-        "dag_max_total_tokens": 200000
-    },
     "halo": {
         "url": "http://127.0.0.1:8090",
         "username": "admin",
@@ -459,47 +336,6 @@
     "rssadapter": {
         "url": "http://100.103.70.97:5216",
         "description": "Mac Tailscale RssAdapter with Playwright"
-    },
-    "committee": {
-        "models": [
-            "gemini-pro",
-            "flash",
-            "glm-5.2"
-        ],
-        "task_profiles": {
-            "price_comparison": {
-                "base_weights": {
-                    "profitability": 0.35,
-                    "execution": 0.2,
-                    "timeliness": 0.15,
-                    "confidence": 0.1
-                },
-                "extra_criteria": [
-                    {
-                        "name": "supply_demand_balance",
-                        "weight": 0.2,
-                        "description": "判断市场供需关系、出手速度和库存风险"
-                    }
-                ],
-                "description": "用于评估闲鱼二手比价和套利空间的决策"
-            },
-            "trend_analysis": {
-                "base_weights": {
-                    "profitability": 0.1,
-                    "execution": 0.4,
-                    "timeliness": 0.4,
-                    "confidence": 0.1
-                },
-                "extra_criteria": [
-                    {
-                        "name": "virality_potential",
-                        "weight": 0.2,
-                        "description": "评估该趋势在小红书、抖音、YouTube上的传播势能"
-                    }
-                ],
-                "description": "用于评估短视频趋势、社交媒体热点是否值得跟进"
-            }
-        }
     },
     "edge_token": "${EDGE_TOKEN}",
     "meilisearch": {
