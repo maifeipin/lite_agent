@@ -65,7 +65,7 @@ body {
     height: 100%;
 }
 
-/* 侧边导航 */
+/* 侧边导航 (支持抽屉折叠展开) */
 .sidebar {
     width: 280px;
     height: 100%;
@@ -77,19 +77,122 @@ body {
     flex-direction: column;
     padding: 24px;
     flex-shrink: 0;
+    transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), 
+                padding 0.3s cubic-bezier(0.4, 0, 0.2, 1), 
+                transform 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+                border 0.3s ease,
+                opacity 0.25s ease;
+    overflow: hidden;
+    position: relative;
+    z-index: 50;
+    white-space: nowrap;
 }
 
 .sidebar-header {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 12px;
-    margin-bottom: 40px;
+    margin-bottom: 32px;
+}
+
+.sidebar-header .logo-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    overflow: hidden;
+    transition: opacity 0.2s ease;
 }
 
 .sidebar-header h2 {
     font-size: 1.15rem;
     font-weight: 600;
     letter-spacing: 0.5px;
+}
+
+.sidebar-icon-btn,
+.sidebar-drawer-btn {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--panel-border);
+    color: var(--text-muted);
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    flex-shrink: 0;
+}
+
+.sidebar-icon-btn:hover,
+.sidebar-drawer-btn:hover {
+    background: rgba(255, 255, 255, 0.12);
+    color: var(--text-primary);
+    border-color: rgba(255, 255, 255, 0.25);
+    transform: translateY(-1px);
+}
+
+.sidebar-icon-btn:active,
+.sidebar-drawer-btn:active {
+    transform: translateY(0);
+}
+
+.sidebar-drawer-btn {
+    margin-right: 14px;
+}
+
+/* 抽屉折叠状态 (Sidebar Collapsed) */
+.app-container.sidebar-collapsed .sidebar {
+    width: 0;
+    padding-left: 0;
+    padding-right: 0;
+    border-right-color: transparent;
+    opacity: 0;
+    pointer-events: none;
+    visibility: hidden;
+}
+
+/* 遮罩层 (用于小屏或移动端抽屉遮罩) */
+.sidebar-backdrop {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    z-index: 45;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+@media (max-width: 900px) {
+    .sidebar {
+        position: fixed;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        transform: translateX(0);
+        box-shadow: 10px 0 30px rgba(0, 0, 0, 0.6);
+        z-index: 50;
+    }
+    .app-container.sidebar-collapsed .sidebar {
+        transform: translateX(-100%);
+        width: 280px;
+        opacity: 0;
+        visibility: hidden;
+    }
+    .app-container:not(.sidebar-collapsed) .sidebar-backdrop {
+        display: block;
+        opacity: 1;
+    }
+    .top-header {
+        padding: 0 16px;
+    }
 }
 
 .nav-filters {
