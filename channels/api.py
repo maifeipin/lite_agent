@@ -94,7 +94,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         elif req_path == '/api/v1/socks5/active':
             self._handle_socks5_active_get()
         elif req_path == '/api/v1/socks5/health':
-            self._handle_socks5_health()
+            self._handle_socks5_health(parsed_url.query)
         elif req_path == '/api/v1/socks5/test':
             self._handle_socks5_test(parsed_url.query)
         elif req_path == '/api/v1/socks5/script':
@@ -1435,14 +1435,26 @@ class ApiHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self.send_error(500, str(e))
 
-    def _handle_socks5_health(self):
-        from skills.ops_socks5 import test_socks5_outbound_http
-        res = test_socks5_outbound_http()
-        self.send_response(200)
-        self._send_cors_headers()
-        self.send_header('Content-Type', 'application/json; charset=utf-8')
-        self.end_headers()
-        self.wfile.write(json.dumps({"success": res["success"], "result": res}).encode('utf-8'))
+    def _handle_socks5_health(self, query: str = ""):
+        try:
+            from urllib.parse import parse_qs
+            qs = parse_qs(query)
+            proxy_id_list = qs.get("id") or qs.get("proxy_id")
+            
+            if proxy_id_list and proxy_id_list[0].isdigit():
+                from skills.ops_socks5 import test_socks5_proxy_outbound
+                res = test_socks5_proxy_outbound(int(proxy_id_list[0]))
+            else:
+                from skills.ops_socks5 import test_socks5_outbound_http
+                res = test_socks5_outbound_http()
+                
+            self.send_response(200)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": res.get("success", False), "result": res}).encode('utf-8'))
+        except Exception as e:
+            self.send_error(500, f"Socks5 Health probe error: {str(e)}")
 
 
 class ApiServer:
