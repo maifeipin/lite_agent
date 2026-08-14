@@ -94,7 +94,7 @@ registerTabModule({
         } else {
             html += `<button class="socks5-btn socks5-btn-disabled" disabled title="Brook 协议节点仅供客户端脚本导出使用，不可直接应用为 VPS1 的 Naive 服务主节点">🚫 Brook 仅导脚本</button>`;
         }
-        html += `<button class="socks5-btn socks5-btn-outbound" data-action="test-outbound" title="测试 VPS1 本地 18988 代理向公网 (Google) 的真实 HTTP 出站连通性">🌐 出站网络测试</button>`;
+        html += `<button class="socks5-btn socks5-btn-outbound" data-action="test-outbound" data-id="${h(id)}" title="对该节点发起真实的 HTTP 出站网络与数据包出口 IP 回显测试">🌐 出站网络测试</button>`;
         html += `<button class="socks5-btn socks5-btn-test" data-action="test" data-id="${h(id)}" data-host="${h(host)}" title="测试服务器端口 TCP 连通性">⚡ TCP 连通性</button>`;
         html += `<button class="socks5-btn socks5-btn-ps1" data-action="copy-ps1" data-id="${h(id)}" title="复制 Windows PowerShell 检查安装与启动脚本">💻 复制 PS1</button>`;
         html += `<button class="socks5-btn socks5-btn-sh" data-action="copy-sh" data-id="${h(id)}" title="复制 Linux/macOS Shell 检查安装与启动脚本">🐧 复制 SH</button>`;
@@ -265,12 +265,14 @@ registerTabModule({
                     badge.textContent = '⏳ 出站网络测试中...';
                 }
                 try {
-                    const r = await fetch('/agent/api/v1/socks5/health');
+                    const r = await fetch(`/agent/api/v1/socks5/health?id=${encodeURIComponent(id)}`);
                     const d = await r.json();
                     if (d.success && d.result && d.result.success) {
                         if (badge) {
                             badge.className = 'socks5-ping-badge online';
-                            badge.textContent = `🌐 HTTP ${d.result.http_code} (${d.result.latency_ms} ms)`;
+                            const ipStr = d.result.ip ? ` · 出站 IP: ${d.result.ip}` : '';
+                            const locStr = d.result.loc ? ` (${d.result.loc})` : '';
+                            badge.textContent = `🌐 HTTP ${d.result.http_code}${ipStr}${locStr} (${d.result.latency_ms} ms)`;
                         }
                     } else {
                         if (badge) {

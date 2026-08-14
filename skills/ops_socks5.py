@@ -374,24 +374,166 @@ def test_socks5_host(host: str, runcmd: str = "", port: int = None, timeout: flo
     except Exception as e:
         return {"success": False, "host": clean_host, "port": target_port, "error": str(e), "latency_ms": -1}
 
-def test_socks5_outbound_http(proxy_url: str = "socks5://127.0.0.1:18988", test_url: str = "https://www.google.com", timeout: int = 5) -> dict:
+def _get_free_local_port() -> int:
+    """获取一个随机未被占用的本地空闲端口。"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('127.0.0.1', 0))
+        return s.getsockname()[1]
+
+def test_socks5_outbound_http(proxy_url: str = "socks5://127.0.0.1:18988", test_url: str = None, timeout: int = 5) -> dict:
     """
-    通过本地 Socks5 代理发起真实 HTTP Over Socks5 网页访问测试 (P-9, R-4)。
-    使用系统 curl 命令做零依赖精准测试，校验 HTTP 状态码 %{http_code}。
+    通过指定的 Socks5 本地代理端点发起真实 HTTP 网页访问测试 (P-9, R-4)。
+    测试数据包真实出站连通性，并提取回显实际出站公网出口 IP 及地理区域。
     """
     start_time = time.time()
-    # 防范假在线，校验 HTTP 状态码 200/204/301/302 (R-4)
-    cmd = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--socks5-hostname", "127.0.0.1:18988", "-m", str(timeout), test_url]
+    # 解析代理主机与端口 (例如 socks5://127.0.0.1:18995 -> 127.0.0.1:18995)
+    proxy_target = "127.0.0.1:18988"
+    if proxy_url:
+        m_target = re.search(r'(?:socks5h?://|socks://)?([^/]+)', proxy_url)
+        if m_target:
+            proxy_target = m_target.group(1)
+
+    endpoints = [test_url] if test_url else [
+        "https://cloudflare.com/cdn-cgi/trace",
+        "https://api.ipify.org",
+        "https://icanhazip.com"
+    ]
+    
+    last_error = None
+    for url in endpoints:
+        cmd = ["curl", "-s", "-w", "\n__HTTP_CODE__:%{http_code}", "--socks5-hostname", proxy_target, "-m", str(timeout), url]
+        try:
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout + 2)
+            latency_ms = round((time.time() - start_time) * 1000, 1)
+            raw_output = proc.stdout.strip()
+            
+            http_code = "000"
+            body = raw_output
+            if "__HTTP_CODE__:" in raw_output:
+                parts = raw_output.rsplit("__HTTP_CODE__:", 1)
+                body = parts[0].strip()
+                http_code = parts[1].strip()
+            
+            if http_code in ("200", "204", "301", "302"):
+                ip = ""
+                loc = ""
+                
+                # 尝试从 Cloudflare trace 解析 (ip=..., loc=...)
+                m_ip = re.search(r'(?:^|\n)ip=([^\r\n]+)', body)
+                if m_ip:
+                    ip = m_ip.group(1).strip()
+                else:
+                    m_raw_ip = re.search(r'\b(?:\d{1,3}\.){3}\d{1,3}\b|[0-9a-fA-F:]{4,}', body)
+                    if m_raw_ip:
+                        ip = m_raw_ip.group(0).strip()
+                        
+                m_loc = re.search(r'(?:^|\n)loc=([^\r\n]+)', body)
+                if m_loc:
+                    loc = m_loc.group(1).strip()
+                    
+                return {
+                    "success": True,
+                    "http_code": http_code,
+                    "ip": ip,
+                    "loc": loc,
+                    "latency_ms": latency_ms,
+                    "url": url,
+                    "proxy_target": proxy_target
+                }
+            else:
+                last_error = f"HTTP response status {http_code}"
+        except Exception as e:
+            last_error = str(e)
+            
+    return {
+        "success": False,
+        "http_code": "000",
+        "ip": "",
+        "loc": "",
+        "latency_ms": -1,
+        "error": last_error or "所有出站测试端点均不可达",
+        "proxy_target": proxy_target
+    }
+
+def test_socks5_proxy_outbound(proxy_id: int, timeout: int = 5) -> dict:
+    """
+    对特定的 Socks5/Naive 节点发起真实 HTTP 出站网络与出口 IP 回显测试。
+    - 若该节点为当前 Active 节点：直接复用本地 127.0.0.1:18988 发起测试。
+    - 若该节点为候选/非活动节点：动态分配随机空闲端口，启动隔离的临时 naive 进程进行独立测试，测试完成后立即销毁，互不干扰且绝不端口冲突。
+    """
+    proxy = get_socks5_proxy_by_id(proxy_id)
+    if not proxy:
+        return {"success": False, "error": f"未找到 ID 为 {proxy_id} 的节点", "latency_ms": -1}
+        
+    runcmd = proxy.get("runcmd", "")
+    is_naive = "naive" in runcmd.lower() or "--proxy=" in runcmd.lower()
+    if not is_naive:
+        return {"success": False, "error": "非 Naive 协议节点（如 Brook）暂不支持独立出站探针测试", "latency_ms": -1}
+        
+    # 如果刚好是当前已在 18988 运行的主节点，直接测 18988
+    active_proxy = get_current_active_proxy()
+    if active_proxy and active_proxy["id"] == proxy_id:
+        return test_socks5_outbound_http(proxy_url="socks5://127.0.0.1:18988", timeout=timeout)
+        
+    # 非当前主节点，在 Linux 环境下寻找 naive 二进制启动临时实例
+    if os.name != 'posix':
+        return {"success": False, "error": "独立候选节点出站探针仅支持 Linux 环境 (Windows 开发环境请直接使用当前生效主节点)", "latency_ms": -1}
+
+    naive_bin = "/etc/proxy/naive"
+    if not os.path.exists(naive_bin):
+        naive_bin = "naive"
+        
+    free_port = _get_free_local_port()
+    temp_listen = f"socks://127.0.0.1:{free_port}"
+    config_dict = parse_runcmd_to_naive_config(runcmd, proxy.get("host", ""), temp_listen)
+    
+    proc = None
+    tmp_json_path = None
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout + 2)
-        latency_ms = round((time.time() - start_time) * 1000, 1)
-        http_code = proc.stdout.strip()
-        if http_code in ("200", "204", "301", "302"):
-            return {"success": True, "http_code": http_code, "latency_ms": latency_ms, "url": test_url}
-        else:
-            return {"success": False, "http_code": http_code, "latency_ms": -1, "error": f"HTTP response status {http_code}"}
+        import tempfile
+        tmp_fd, tmp_json_path = tempfile.mkstemp(prefix="naive_test_", suffix=".json")
+        with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
+            json.dump(config_dict, f)
+            
+        proc = subprocess.Popen(
+            [naive_bin, "--config", tmp_json_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        # 等待临时 naive 进程端口就绪（最多等待 1.5s）
+        port_ready = False
+        for _ in range(15):
+            time.sleep(0.1)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.1)
+                if s.connect_ex(('127.0.0.1', free_port)) == 0:
+                    port_ready = True
+                    break
+                    
+        if not port_ready:
+            return {"success": False, "error": f"临时 Naive 实例启动失败 (端口 {free_port} 未就绪)", "latency_ms": -1}
+            
+        # 发起经过该独立临时端口的真实出站测试
+        res = test_socks5_outbound_http(proxy_url=f"socks5://127.0.0.1:{free_port}", timeout=timeout)
+        return res
     except Exception as e:
-        return {"success": False, "http_code": "000", "latency_ms": -1, "error": str(e)}
+        return {"success": False, "error": f"独立节点测试异常: {str(e)}", "latency_ms": -1}
+    finally:
+        if proc:
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except Exception:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
+        if tmp_json_path and os.path.exists(tmp_json_path):
+            try:
+                os.remove(tmp_json_path)
+            except Exception:
+                pass
 
 # ── Auto-Failover 后台守护逻辑 (P-5, R-5, R-6, B-4) ──
 def failover_worker_loop():
@@ -605,11 +747,23 @@ def ops_socks5_test(id: int) -> str:
         return f"节点 [{proxy['servername']}] (端口 {res['port']}) 连通正常，延迟: {res['latency_ms']} ms"
     return f"节点 [{proxy['servername']}] (端口 {res['port']}) 无法连接：{res.get('error', '未知错误')}"
 
-@skill(name="socks5_test_outbound", description="测试 VPS1 本地代理端口 (127.0.0.1:18988) 的真实 HTTP 出站网络连通测试")
-def ops_socks5_test_outbound() -> str:
-    """测试 VPS1 本地代理端口 (127.0.0.1:18988) 的真实 HTTP 出站网络连通测试。"""
-    res = test_socks5_outbound_http()
+@skill(
+    name="socks5_test_outbound", 
+    description="测试 Socks5 代理节点的真实 HTTP 出站网络连通性与数据包公网出口 IP 回显",
+    params={"id": {"type": "integer", "description": "指定测试的节点 ID，留空则测试当前 VPS1 生效的主节点 (18988)", "default": None}}
+)
+def ops_socks5_test_outbound(id: int = None) -> str:
+    """测试指定节点（或当前在用主节点）的真实 HTTP 出站网络连通测试与出口 IP 回显。"""
+    if id is not None:
+        res = test_socks5_proxy_outbound(id)
+        node_prefix = f"节点 [ID:{id}] "
+    else:
+        res = test_socks5_outbound_http()
+        node_prefix = "VPS1 当前生效代理 (18988) "
+        
     if res["success"]:
-        return f"VPS1 本地 18988 代理出站访问正常 (HTTP {res['http_code']})，端到端延迟: {res['latency_ms']} ms"
-    return f"VPS1 本地 18988 代理出站访问异常: {res.get('error')}"
+        ip_info = f"，真实出站 IP: {res['ip']}" if res.get("ip") else ""
+        loc_info = f" [{res['loc']}]" if res.get("loc") else ""
+        return f"{node_prefix}出站访问正常 (HTTP {res['http_code']}){ip_info}{loc_info}，端到端延迟: {res['latency_ms']} ms"
+    return f"{node_prefix}出站访问异常: {res.get('error')}"
 
