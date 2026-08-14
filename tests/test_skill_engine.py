@@ -1465,6 +1465,33 @@ def test_e2e_plain_text_reply():
     agent.session_mgr.log_api_usage.assert_called_once()
 
 
+def test_e2e_selector_miss_marker_filtered_and_counted(monkeypatch):
+    """真实裁剪路径中，内部 miss 标记不得流向用户或 Session，且必须计数。"""
+    from core.request_selector import TOOLSET_MISS_MARK
+
+    monkeypatch.setenv("LITE_AGENT_SELECTOR_ENABLED", "1")
+    monkeypatch.delenv("LITE_AGENT_SELECTOR_SHADOW", raising=False)
+    agent = _make_e2e_agent()
+    reply = f"{TOOLSET_MISS_MARK} 当前工具不足"
+    agent.model_invoker.invoke_stream = _stream_text(reply)
+    msg = IncomingMessage(channel="test", user_id="u1", chat_id="c1",
+                          message_id="m1", text="查看待办")
+
+    events = list(agent._stream_ai_loop(msg))
+    visible = "".join(e["delta"] for e in events if e["type"] == "token")
+    persisted = agent.session_mgr.add_message.call_args_list[-1].args[2]
+
+    assert visible == " 当前工具不足"
+    assert TOOLSET_MISS_MARK not in visible
+    assert persisted == "当前工具不足"
+    assert agent.request_selector._miss_count == 1
+    args = agent.memory.after_reply.call_args.args
+    assert args[3] == "当前工具不足"  # bot_reply
+
+    # token 记账一次
+    agent.session_mgr.log_api_usage.assert_called_once()
+
+
 # ----------------------------------------------------------------
 #  2. 工具循环 (tool_call → tool_result → 最终文本)
 # ----------------------------------------------------------------
