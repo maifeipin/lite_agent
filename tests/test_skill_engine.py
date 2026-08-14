@@ -1492,6 +1492,42 @@ def test_e2e_selector_miss_marker_filtered_and_counted(monkeypatch):
     agent.session_mgr.log_api_usage.assert_called_once()
 
 
+def test_session_tool_calls_immutable_payload_and_bytes_round_trip(tmp_path):
+    """Runtime 的 mappingproxy/tuple 与 Gemini bytes 元数据可安全持久化并恢复。"""
+    from types import MappingProxyType
+    from session import SessionManager
+
+    db_path = str(tmp_path / "session-tool-calls.db")
+    manager = SessionManager(db_path=db_path)
+    frozen_call = MappingProxyType({
+        "id": "call_1",
+        "type": "function",
+        "function": MappingProxyType({
+            "name": "test_echo",
+            "arguments": '{"text":"hi"}',
+        }),
+        "provider_metadata": MappingProxyType({
+            "thought_signature": b"sig_bytes",
+            "parts": ("a", "b"),
+        }),
+    })
+
+    manager.add_message(
+        "test:u1", "assistant", "",
+        tool_calls_data=(frozen_call,),
+    )
+    in_memory = manager.get_or_create("test:u1").messages[-1]["tool_calls"][0]
+    assert isinstance(in_memory, dict)
+    assert isinstance(in_memory["function"], dict)
+    assert in_memory["provider_metadata"]["thought_signature"] == b"sig_bytes"
+
+    reloaded = SessionManager(db_path=db_path).get_or_create("test:u1")
+    restored = reloaded.messages[-1]["tool_calls"][0]
+    assert restored["function"]["name"] == "test_echo"
+    assert restored["provider_metadata"]["thought_signature"] == b"sig_bytes"
+    assert restored["provider_metadata"]["parts"] == ["a", "b"]
+
+
 # ----------------------------------------------------------------
 #  2. 工具循环 (tool_call → tool_result → 最终文本)
 # ----------------------------------------------------------------
