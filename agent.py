@@ -33,6 +33,12 @@ _NON_RETRYABLE_EXCEPTIONS = (
 )
 from core.cron_engine import CronManager
 from core.skill_engine import SkillEngine
+from core.request_selector import (
+    MissMarkStreamFilter,
+    RequestSelector,
+    detect_miss,
+    strip_miss_mark,
+)
 from core.command_registry import dispatch as _registry_dispatch
 from core.command_registry import _registry
 
@@ -180,6 +186,10 @@ class Agent:
 
         # 技能引擎
         self.skill_engine = SkillEngine()
+
+        # RequestSelector: 动态工具选择（设计 3.5，仅在此初始化一次，启动校验随构造完成）
+        # 代码能力一次交付；Phase 1/2 仅通过环境变量切换 Shadow/Enabled。
+        self.request_selector = RequestSelector(self.skill_engine)
 
         # 安全限制
         self.max_steps = session_cfg.get("max_steps_per_goal", 30)
@@ -331,14 +341,31 @@ class Agent:
             except Exception as e:
                 print(f"❌ 通道 {ch.name} 广播异常: {e}")
 
-    def _build_system_prompt(self, is_guest: bool = False) -> str:
+    def _build_system_prompt(self, is_guest: bool = False, skill_names: list = None,
+                             read_only_mode: bool = False) -> str:
         """构建系统提示词 (包含技能列表)"""
         now_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (UTC%z)")
-        skills_summary = self.skill_engine.list_skills(is_guest=is_guest)
+        if skill_names is not None:
+            skills_summary = self.skill_engine.list_skills_filtered(skill_names)
+        else:
+            skills_summary = self.skill_engine.list_skills(is_guest=is_guest)
         project_root = self._config.get("project_root", "/root/lite_agent")
 
+        extra_hint = ""
+        if skill_names:
+            extra_hint = (
+                "\n\n⚠️ 当前仅为你注入了相关领域的工具。"
+                "如果用户的需求超出当前可用工具，请在回复开头包含 [TOOLSET_MISS] 标记，"
+                "并说明缺失的能力。"
+            )
+        if read_only_mode:
+            extra_hint += (
+                "\n\n🔒 当前为只读模式：未注入修改/推送/同步类工具。"
+                "如需此类操作，请用户明确表达意图后再请求。"
+            )
+
         if is_guest:
-            return f"""你是 {self.bot_name}，一个运行在 Linux VPS 上的私人智能助手。
+            base_prompt = f"""你是 {self.bot_name}，一个运行在 Linux VPS 上的私人智能助手。
 【当前系统时间】: `{now_str}`
 目前你正在与普通访客（非管理员）对话。
 
@@ -356,7 +383,7 @@ class Agent:
 - 不要编造数据，一切以工具返回的真实结果为准。对于任何你不确定的时效性事实、数据、新闻，你必须调用 `web_search` 进行联网搜索，严禁凭预训练记忆编造数据。
 - 如果工具返回错误，向用户解释原因。如果提示中包含学到的偏好，优先遵循。"""
         else:
-            return f"""你是 {self.bot_name}，一个运行在 Linux VPS 上的私人智能助手。
+            base_prompt = f"""你是 {self.bot_name}，一个运行在 Linux VPS 上的私人智能助手。
 
 【系统环境自知】:
 - 当前系统精确绝对时间: `{now_str}`
@@ -383,6 +410,48 @@ class Agent:
 - 选择工具的优先级：(1) 历史纠正中学到的偏好 (2) 领域专用工具（先搜索工具列表，找到语义匹配的专用工具直接调用）(3) ops_workspace_run 仅作最后手段。ops_workspace_run 每一步都要 LLM 生成代码→执行→读结果，成本高、步骤多、Token 消耗大；如果发现自己已经用 ops_workspace_run 走了 3 步以上仍未完成，说明大概率有专用工具被忽略了，应重新审视工具列表。
 - **回答排版原则**：在回复工具调用结果时，请直接给出精炼的结构化结论、表格或建议，**严禁在最终回答正文中原样复制/复读工具返回的中间原始步骤与命令行日志**（例如 "--- 步骤1: ... ---" 等细节），中间原始日志已由系统的执行过程日志框独立承载。
 - 如果工具返回错误，向用户解释原因并建议解决方案"""
+
+        return base_prompt + extra_hint
+
+    def _full_tools_and_names(self, msg: IncomingMessage):
+        """Return the pre-selector tool set; shared by default, shadow and fallback paths."""
+        tools = (self.skill_engine.get_guest_schemas() if msg.is_guest
+                 else self.skill_engine.get_all_schemas())
+        return tools, None
+
+    def _select_request_tools(self, msg: IncomingMessage, history: list):
+        """Apply selector flags without changing the default or shadow tool injection."""
+        selector_enabled = os.environ.get("LITE_AGENT_SELECTOR_ENABLED") == "1"
+        selector_shadow = os.environ.get("LITE_AGENT_SELECTOR_SHADOW") == "1"
+        try:
+            candidate = self.request_selector.select(
+                text=msg.text,
+                history=history,
+                is_guest=msg.is_guest,
+            )
+        except Exception as exc:
+            print(f"⚠️ [RequestSelector] 单请求回退全量: {type(exc).__name__}")
+            candidate = None
+
+        selector_result = None
+        if selector_enabled and candidate is not None:
+            selector_result = candidate
+            if candidate.names is None:
+                tools, system_names = self._full_tools_and_names(msg)
+            elif not candidate.names:
+                tools, system_names = [], []
+            else:
+                tools = self.skill_engine.get_schemas_by_names(candidate.names)
+                system_names = candidate.names
+        else:
+            tools, system_names = self._full_tools_and_names(msg)
+            if selector_shadow and candidate is not None:
+                selected_count = len(candidate.names) if candidate.names is not None else None
+                print(
+                    f"[Selector-Shadow] domains={candidate.domains}, names={selected_count}, "
+                    f"confidence={candidate.confidence}, read_only={candidate.read_only_mode}"
+                )
+        return tools, system_names, selector_result
 
     # ------------------------------------------------------------------
     #  消息入口
@@ -922,18 +991,21 @@ class Agent:
         self.session_mgr.add_message(msg.session_key, "user", msg.text)
 
         # ---- 构建工具集与 guard prompts ----
-        if msg.is_guest:
-            tools = self.skill_engine.get_guest_schemas()
-            guest_tool_names = frozenset(s["function"]["name"] for s in tools)
-            allowed_tools = guest_tool_names
-        else:
-            tools = self.skill_engine.get_all_schemas()
-            allowed_tools = None  # 不限制
+        history = self.session_mgr.get_history(msg.session_key)
+        tools, system_names, selector_result = self._select_request_tools(msg, history)
+        allowed_tools = (
+            frozenset(s["function"]["name"] for s in tools)
+            if msg.is_guest else None
+        )
 
         guard_prompts = self.skill_engine.get_guard_prompts(msg.text, is_guest=msg.is_guest)
 
         # ---- 构建初始消息 (system + history) ----
-        system_content = self._build_system_prompt(is_guest=msg.is_guest)
+        system_content = self._build_system_prompt(
+            is_guest=msg.is_guest,
+            skill_names=system_names,
+            read_only_mode=bool(selector_result and selector_result.read_only_mode),
+        )
         if guard_prompts:
             system_content += "\n\n⚠️【数据忠实执行指令】:\n" + "\n".join(f"- {p}" for p in guard_prompts)
         if self.memory:
@@ -942,7 +1014,7 @@ class Agent:
                 system_content += memory_ctx
 
         messages = [{"role": "system", "content": system_content}]
-        messages.extend(self.session_mgr.get_history(msg.session_key))
+        messages.extend(history)
         messages = self._validate_messages(messages)
 
         # ---- 日额度拦截 ----
@@ -991,6 +1063,13 @@ class Agent:
         usage_logged_this_step = False  # 防止 USAGE 重复记账
         step_text = ""        # 本步累积的 TEXT (供估算兜底使用)
         step_reasoning = ""   # 本步累积的 REASONING (供估算兜底使用)
+        had_tool_calls = False
+        # 默认/Shadow 路径不改变流式分块；仅真实裁剪且注入了工具时才过滤内部标记。
+        miss_mark_filter = (
+            MissMarkStreamFilter()
+            if selector_result is not None and bool(selector_result.names)
+            else None
+        )
 
         # ---- 消费 Runtime 事件流 (经 Recorder 包装) ----
         runtime_iter = self.runtime.run(
@@ -1014,13 +1093,17 @@ class Agent:
 
             elif t == RuntimeEventType.TEXT:
                 step_text += event.data
-                yield {"type": "token", "delta": event.data}
+                visible_text = (miss_mark_filter.feed(event.data)
+                                if miss_mark_filter is not None else event.data)
+                if visible_text:
+                    yield {"type": "token", "delta": visible_text}
 
             elif t == RuntimeEventType.REASONING:
                 step_reasoning += event.data
                 yield {"type": "reasoning_token", "delta": event.data}
 
             elif t == RuntimeEventType.TOOL_CALLS_READY:
+                had_tool_calls = True
                 # 持久化完整 assistant tool_calls 到 Session (含 provider_metadata)
                 data = event.data
                 tool_calls_data = [dict(tc) for tc in data.get("tool_calls", [])]
@@ -1031,6 +1114,7 @@ class Agent:
                 )
 
             elif t == RuntimeEventType.TOOL_CALL:
+                had_tool_calls = True
                 self.session_mgr.increment_tool_calls(msg.session_key)
                 yield {"type": "tool_start", "name": event.data["name"], "args": event.data["arguments"]}
 
@@ -1097,10 +1181,16 @@ class Agent:
                     return
 
             elif t == RuntimeEventType.DONE:
+                pending_text = miss_mark_filter.flush() if miss_mark_filter is not None else ""
+                if pending_text:
+                    yield {"type": "token", "delta": pending_text}
                 # Runtime 的 DONE 不能覆盖更具体的终止原因
                 if not terminal_error:
                     # 正常回复: 持久化 + mark_done + after_reply
-                    content = event.data.get("content", "")
+                    raw_content = event.data.get("content", "")
+                    content = strip_miss_mark(raw_content)
+                    if detect_miss(selector_result, raw_content, had_tool_calls):
+                        self.request_selector.record_miss(selector_result)
                     if not content.strip():
                         content = (
                             f"⚠️ 模型未生成有效回复 (finish_reason={event.data.get('finish_reason', 'stop')})。"
@@ -1174,4 +1264,3 @@ class Agent:
         title = (f"🤖 {self.bot_name} [{session.tool_calls}/{self.max_steps}]"
                  if session.status == "working" else f"🤖 {self.bot_name}")
         return AgentResponse(final_text, title=title, color="blue", logs=logs)
-
