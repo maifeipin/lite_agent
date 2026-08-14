@@ -1,8 +1,9 @@
 {
     "models": [
-        "gemini-pro",
+        "glm-5.3",
+        "kimi-k3",
         "flash",
-        "glm-5.2"
+        "gemini-pro"
     ],
     "task_profiles": {
         "price_comparison": {

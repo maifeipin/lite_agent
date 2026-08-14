@@ -1,27 +1,31 @@
 {
-    "planner_model": "flash",
-    "classifier_model": "flash",
+    "planner_model": "glm-5.3",
+    "classifier_model": "glm-5.3",
     "route_rules": [
         {
             "type": "text",
-            "model": "gemini-flash",
+            "model": "glm-5.3",
             "fallback": "flash",
             "allowed_models": [
-                "gemini-flash",
-                "flash",
-                "doubao-pro",
+                "glm-5.3",
+                "kimi-k3",
                 "glm-5.2",
+                "doubao-pro",
+                "flash",
+                "gemini-flash",
                 "nvidia-glm-5.2"
             ]
         },
         {
             "type": "code",
-            "model": "gemini-pro",
+            "model": "glm-5.3",
             "fallback": "flash",
             "allowed_models": [
+                "glm-5.3",
+                "kimi-k3",
+                "glm-5.2",
                 "gemini-pro",
-                "flash",
-                "glm-5.2"
+                "flash"
             ],
             "tools": [
                 "ops_workspace_run"
@@ -29,23 +33,27 @@
         },
         {
             "type": "complex_reasoning",
-            "model": "gemini-pro",
-            "fallback": "doubao-pro",
+            "model": "glm-5.3",
+            "fallback": "kimi-k3",
             "allowed_models": [
-                "gemini-pro",
+                "glm-5.3",
+                "kimi-k3",
+                "glm-5.2",
                 "doubao-pro",
-                "glm-5.2"
+                "gemini-pro"
             ]
         },
         {
             "type": "data_analysis",
-            "model": "gemini-flash",
+            "model": "glm-5.3",
             "fallback": "flash",
             "allowed_models": [
-                "gemini-flash",
-                "flash",
+                "glm-5.3",
+                "kimi-k3",
+                "glm-5.2",
                 "doubao-pro",
-                "glm-5.2"
+                "flash",
+                "gemini-flash"
             ],
             "tools": [
                 "ops_billing_cost",
