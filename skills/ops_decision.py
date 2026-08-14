@@ -43,6 +43,13 @@ class PeerReview(BaseModel):
     suggested_score_delta: int = Field(ge=-20, le=20, description="建议总分调整量")
     should_escalate_to_human: bool = Field(description="是否因为分歧严重而必须交由人类裁决")
 
+# 模块导入期显式预热 Schema，彻底避免多线程并发冷启动触发 Pydantic 内部 import lock 竞争
+try:
+    DecisionResult.model_json_schema()
+    PeerReview.model_json_schema()
+except Exception:
+    pass
+
 # =========================================================
 # 2. 核心调度与实现
 # =========================================================

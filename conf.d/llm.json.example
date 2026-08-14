@@ -46,9 +46,29 @@
         },
         "glm-5.2": {
             "driver": "ark",
-            "base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
+            "base_url": "https://ark.cn-beijing.volces.com/api/plan/v3",
             "api_key": "${ARK_API_KEY}",
             "model": "glm-5.2",
+            "max_tokens": 8192,
+            "temperature": 0.2,
+            "max_steps": 30,
+            "tags": ["text", "complex_reasoning"]
+        },
+        "glm-5.3": {
+            "driver": "ark",
+            "base_url": "https://ark.cn-beijing.volces.com/api/plan/v3",
+            "api_key": "${ARK_API_KEY}",
+            "model": "glm-5.3",
+            "max_tokens": 8192,
+            "temperature": 0.2,
+            "max_steps": 30,
+            "tags": ["text", "complex_reasoning"]
+        },
+        "kimi-k3": {
+            "driver": "ark",
+            "base_url": "https://ark.cn-beijing.volces.com/api/plan/v3",
+            "api_key": "${ARK_API_KEY}",
+            "model": "kimi-k3",
             "max_tokens": 8192,
             "temperature": 0.2,
             "max_steps": 30,
@@ -65,5 +85,5 @@
             "tags": ["text", "creative"]
         }
     },
-    "default": "flash"
+    "default": "glm-5.3"
 }
