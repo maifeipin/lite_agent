@@ -417,6 +417,7 @@ def failover_worker_loop():
                 _consecutive_failures += 1
                 current_active = get_current_active_proxy()
                 curr_id = current_active["id"] if current_active else -1
+                curr_name = current_active.get("servername", f"节点#{curr_id}") if current_active else "未知节点"
                 if curr_id != -1:
                     failed_round_node_ids.add(curr_id)
                     
@@ -434,20 +435,37 @@ def failover_worker_loop():
                             candidate = p
                             break
                             
+                    from skills.ops_todo import send_im_alert
                     if candidate:
-                        print(f"  [*] Triggering Auto-Failover: switching to [{candidate['servername']}]")
+                        print(f"  [*] Triggering Auto-Failover: switching from [{curr_name}] to [{candidate['servername']}]")
                         ok, msg = apply_active_proxy_to_vps1(candidate["id"])
                         if ok:
-                            try:
-                                from skills.ops_todo import todo_add
-                                todo_add(title=f"Socks5 自动回退告警", description=f"原节点失效，已自动切至备用节点 [{candidate['servername']}]", kind="misc")
-                            except Exception:
-                                pass
+                            send_im_alert(
+                                title="⚠️ Socks5 自动回退成功",
+                                text=f"原节点 [{curr_name}] (ID: {curr_id}) 出站失效，已自动切换至备用节点 [{candidate['servername']}] (ID: {candidate['id']})",
+                                color="yellow",
+                                dedup_key=f"socks5_failover:{curr_id}->{candidate['id']}:{int(time.time() // 600)}"
+                            )
+                        else:
+                            print(f"  [!] Failed to switch to candidate [{candidate['servername']}]: {msg}")
+                            failed_round_node_ids.add(candidate["id"])
+                            send_im_alert(
+                                title="🚨 Socks5 自动回退失败",
+                                text=f"原节点 [{curr_name}] (ID: {curr_id}) 出站失效，尝试切换至备用节点 [{candidate['servername']}] (ID: {candidate['id']}) 失败: {msg}",
+                                color="red",
+                                dedup_key=f"socks5_failover_err:{candidate['id']}:{int(time.time() // 300)}"
+                            )
                     else:
                         print("  [!] Warning: All Naive proxy nodes failed in this round. Entering 15m backoff...")
                         _failover_backoff_until = time.time() + 900 # 15 分钟退避
                         _consecutive_failures = 0
                         failed_round_node_ids.clear()
+                        send_im_alert(
+                            title="🚨 Socks5 全部备用节点耗尽",
+                            text=f"原节点 [{curr_name}] (ID: {curr_id}) 出站失效，且本轮所有备用 Naive 节点均探测失败或不可用！系统进入 15 分钟退避冷却，请运维人员尽快介入排查。",
+                            color="red",
+                            dedup_key=f"socks5_all_exhausted:{int(time.time() // 900)}"
+                        )
         except Exception as e:
             print(f"  [!] Failover Worker error: {str(e)}")
 

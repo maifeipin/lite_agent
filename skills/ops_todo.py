@@ -492,6 +492,8 @@ def _send_im_alert(title: str, text: str, color: str = "yellow", dedup_key: str 
     except Exception as e:
         print(f"[_send_im_alert] 推送跳过/异常: {e}")
 
+send_im_alert = _send_im_alert
+
 def _parse_target_hm_and_dow(recur_cron: str):
     """
     解析循环周期表达式，支持:
