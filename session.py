@@ -5,11 +5,38 @@
 
 import sqlite3
 import json
+import base64
 import time
 import threading
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict
+
+
+_BYTES_JSON_TAG = "__lite_agent_bytes_b64__"
+
+
+def _pack_json_value(value):
+    """Convert immutable runtime payloads to JSON values while preserving bytes."""
+    if isinstance(value, bytes):
+        return {_BYTES_JSON_TAG: base64.b64encode(value).decode("ascii")}
+    if isinstance(value, Mapping):
+        return {str(key): _pack_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_pack_json_value(item) for item in value]
+    return value
+
+
+def _unpack_json_value(value):
+    """Restore bytes and ordinary mutable containers from persisted JSON values."""
+    if isinstance(value, dict):
+        if set(value) == {_BYTES_JSON_TAG}:
+            return base64.b64decode(value[_BYTES_JSON_TAG], validate=True)
+        return {key: _unpack_json_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_unpack_json_value(item) for item in value]
+    return value
 
 
 @dataclass
@@ -215,8 +242,8 @@ class SessionManager:
                     msg["name"] = mr[3]
                 if mr[4]:
                     try:
-                        msg["tool_calls"] = json.loads(mr[4])
-                    except json.JSONDecodeError:
+                        msg["tool_calls"] = _unpack_json_value(json.loads(mr[4]))
+                    except (json.JSONDecodeError, TypeError, ValueError):
                         pass
                 if len(mr) > 5 and mr[5]:
                     msg["reasoning_content"] = mr[5]
@@ -287,13 +314,15 @@ class SessionManager:
         """添加一条消息到会话 (内存 + SQLite)"""
         with self._lock:
             session = self.get_or_create(session_key)
+            packed_tool_calls = (_pack_json_value(tool_calls_data)
+                                 if tool_calls_data else None)
             msg = {"role": role, "content": content}
             if tool_call_id:
                 msg["tool_call_id"] = tool_call_id
             if name:
                 msg["name"] = name
-            if tool_calls_data:
-                msg["tool_calls"] = tool_calls_data
+            if packed_tool_calls:
+                msg["tool_calls"] = _unpack_json_value(packed_tool_calls)
             if reasoning_content:
                 msg["reasoning_content"] = reasoning_content
 
@@ -311,7 +340,7 @@ class SessionManager:
                                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                                 (session_key, role, content,
                                  tool_call_id or "", name or "",
-                                 json.dumps(tool_calls_data, ensure_ascii=False) if tool_calls_data else "",
+                                 json.dumps(packed_tool_calls, ensure_ascii=False) if packed_tool_calls else "",
                                  reasoning_content or "",
                                  time.time())
                             )
