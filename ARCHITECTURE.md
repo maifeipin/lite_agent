@@ -6,7 +6,7 @@
 
 ## 1. 项目定位
 
-个人 VPS 上的多通道 AI 运维助手。通过飞书/钉钉/企微/Telegram 任一 IM 下发指令，Agent 调度本地技能（运维、账单、RSS、记忆）执行并返回结果。
+个人 VPS 上的多通道 AI 运维助手。通过飞书/钉钉/企微/Telegram/个人微信任一 IM 下发指令，Agent 调度本地技能（运维、账单、RSS、记忆）执行并返回结果。
 
 **设计原则**：零重型框架依赖、一个人可维护、配置驱动、技能即 Python 函数。
 
@@ -32,6 +32,8 @@ lite_agent/
 │   ├── dingtalk.py       # 钉钉 Stream (dingtalk-stream SDK)
 │   ├── wecom.py          # 企业微信 HTTP 回调 + pushmsg
 │   ├── telegram.py       # Telegram Long Polling (subprocess+curl)
+│   ├── wechat.py         # 个人微信 iLink 长轮询通道
+│   ├── wechat_ilink.py   # iLink 协议客户端、登录与游标持久化
 │   └── api.py            # 对外提供的 REST/SSE API (兼容 OpenAI)
 │
 ├── memory_engine/       # 长期记忆引擎
@@ -113,6 +115,7 @@ class BaseChannel(ABC):
 | 钉钉 | dingtalk-stream SDK | SDK 文本 | 直连 |
 | 企微 | Flask w.py 回调 → POST :8899 | pushmsg :6969 HTTP API | 内网直连 |
 | TG | subprocess+curl Long Polling | curl HTTP API | socks5h 代理 |
+| 个人微信 | iLink HTTP Long Polling | iLink HTTP API（依赖入站 context_token） | 直连 |
 | API | 内置 ThreadingHTTPServer | 标准 JSON / SSE 兼容 OpenAI | 直连 |
 
 **企微架构**（最复杂，独立于 Lite Agent 进程）：
@@ -367,7 +370,7 @@ V2EX_TOKEN = config['v2ex']['token']
 
 3. **配置驱动 Cron**：定时任务从 config.json 注册，加新任务只改配置不写代码。
 
-4. **通道回退链**：`_send_card()` 按 `feishu → dingtalk → wecom → telegram` 顺序尝试，任一成功即停。
+4. **通道回退链**：`_send_card()` 按 `feishu → dingtalk → wecom → telegram → wechat` 顺序尝试，任一成功即停；微信仅在有未过期入站 context_token 时可发送。
 
 5. **单例 CronManager**：模块级 `CronManager()` 调用返回同一实例，确保 `main.py` 注册和 `ops_backup.py` 模块级注册共享同一调度器。
 
@@ -449,6 +452,7 @@ scp file.py vps1:/root/lite_agent/   # 部署单文件
 | 功能 | 状态 |
 |------|:---:|
 | 飞书/钉钉/企微/TG 四条通道 | ✅ |
+| 个人微信 iLink 通道 | 🧪 离线契约与集成测试通过，待真实扫码验收 |
 | 接收指令 + 回复 | ✅ |
 | 定时推送 fallback 链 | ✅ |
 | RSS 多源聚合评分 | ✅ |

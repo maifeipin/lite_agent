@@ -52,6 +52,7 @@ def _register_cron_jobs(agent: Agent, config: dict):
     root = config['project_root']
     feishu_cfg = config.get('channels', {}).get('feishu', {})
     admin_open_id = feishu_cfg.get('admin_open_id', '')
+    wx_admin_id = config.get('channels', {}).get('wechat', {}).get('admin_wxid', '')
 
     from agent import AgentResponse
 
@@ -62,11 +63,16 @@ def _register_cron_jobs(agent: Agent, config: dict):
 
     def _send_card(text, title, color='blue'):
         tg_chat_id = config.get('channels', {}).get('telegram', {}).get('admin_chat_id', '')
-        for ch_name in ('feishu', 'dingtalk', 'wecom', 'telegram'):
+        for ch_name in ('feishu', 'dingtalk', 'wecom', 'telegram', 'wechat'):
             ch = next((c for c in agent.channels if c.name == ch_name), None)
             if not ch or not hasattr(ch, 'send_to'):
                 continue
-            uid = tg_chat_id if ch_name == 'telegram' else admin_open_id
+            if ch_name == 'telegram':
+                uid = tg_chat_id
+            elif ch_name == 'wechat':
+                uid = wx_admin_id
+            else:
+                uid = admin_open_id
             if uid and ch.send_to(uid, AgentResponse(text, title=title, color=color)):
                 return True
         return False
@@ -203,6 +209,16 @@ def main():
         wecom_ch.start()
         channels.append(wecom_ch)
 
+    # -- 个人微信通道 (iLink Long Polling) --
+    wx_channel = None
+    wx_cfg = config.get('channels', {}).get('wechat', {})
+    if wx_cfg.get('enabled'):
+        from channels.wechat import WeChatChannel
+        wx_channel = WeChatChannel(wx_cfg, agent)
+        # start() 只提交后台轮询；无本地凭据时保持 offline，不阻塞其他通道。
+        wx_channel.start()
+        channels.append(wx_channel)
+
     # -- API 开放通道 --
     api_server = None
     if config.get('channels', {}).get('api', {}).get('enabled'):
@@ -212,6 +228,25 @@ def main():
 
     # 将所有激活的通道实例绑定到 Agent，以便后续广播
     agent.channels = channels
+
+    # 微信 iLink 无凭据/失效时的跨通道提醒；微信本身不能作为提醒目标。
+    if wx_channel is not None:
+        from agent import AgentResponse
+
+        def _wx_notify(text, title='微信通道'):
+            for channel in agent.channels:
+                if channel.name == 'wechat' or not hasattr(channel, 'send_to'):
+                    continue
+                channel_cfg = config.get('channels', {}).get(channel.name, {})
+                user_id = (channel_cfg.get('admin_chat_id') or
+                           channel_cfg.get('admin_staff_id') or
+                           channel_cfg.get('admin_userid') or
+                           channel_cfg.get('admin_open_id'))
+                if user_id and channel.send_to(user_id, AgentResponse(text, title=title, color='red')):
+                    return True
+            return False
+
+        wx_channel.set_admin_notifier(_wx_notify)
 
     if not channels and not api_server:
         print("⚠️ 没有启用任何通信通道，程序将退出。")

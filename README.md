@@ -5,7 +5,7 @@
 ![效果演示](assets/screenshot.png)
 ## 🌟 核心特性
 
-- **多通道无缝接入**: 一套代码同时支持飞书 (WebSocket)、Telegram (Long Polling/Webhook)、钉钉、企业微信。
+- **多通道无缝接入**: 一套代码同时支持飞书 (WebSocket)、Telegram (Long Polling/Webhook)、钉钉、企业微信和个人微信 iLink（扫码登录后长轮询）。
 - **全自动多模态视觉 (OCR)**: 零额外指令！向机器人直接发送图片，自动调用外置大语言视觉模型（通过 `OCR_ENDPOINT` 代理），秒级解析并返回包含公式渲染的极致排版 Markdown。
 - **动态技能引擎 (Skills)**: 通过简单的 Python 脚本即可为 Agent 扩展新能力（如发送邮件、查询数据）。
 - **自带任务编排**: 支持将复杂任务拆解成多步 DAG 图执行。

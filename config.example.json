@@ -54,6 +54,17 @@
             "listen_port": 8899,
             "admin_userid": "ChenLi"
         },
+        "wechat": {
+            "enabled": false,
+            "admin_wxid": "",
+            "session_file": "data/wechat_session.json",
+            "contexts_file": "data/wechat_contexts.json",
+            "cursor_file": "data/wechat_cursor.json",
+            "context_ttl_hours": 24,
+            "context_max_sends": 10,
+            "poll_timeout": 35,
+            "max_msg_len": 2000
+        },
         "api": {
             "enabled": true,
             "host": "127.0.0.1",

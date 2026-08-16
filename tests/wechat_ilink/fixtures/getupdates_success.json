@@ -1,0 +1,17 @@
+{
+  "ret": 0,
+  "errmsg": "",
+  "get_updates_buf": "opaque-cursor-v2",
+  "longpolling_timeout_ms": 35000,
+  "msgs": [
+    {
+      "message_id": 103,
+      "from_user_id": "wxid_fixture",
+      "to_user_id": "bot_fixture",
+      "message_type": 1,
+      "message_state": 2,
+      "context_token": "context-fixture-token",
+      "item_list": [{"type": 1, "text_item": {"text": "hello"}}]
+    }
+  ]
+}
