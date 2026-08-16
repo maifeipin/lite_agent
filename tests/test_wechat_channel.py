@@ -166,3 +166,20 @@ def test_permanent_auth_error_clears_credential(channel):
     channel._handle_auth_error(ILinkAuthError("permanent", permanent=True))
     assert channel.client.logged_out is True
     assert waits == [60]
+
+
+def test_notifier_does_not_emit_a_false_startup_offline_alert(channel):
+    notices = []
+    channel._running = True
+    channel.set_admin_notifier(lambda text, title: notices.append((text, title)))
+    assert notices == []
+
+    channel._set_offline("credential unavailable")
+    assert notices == [("credential unavailable", "微信通道")]
+
+
+def test_notifier_replays_a_real_failure_that_precedes_wiring(channel):
+    notices = []
+    channel._set_offline("network unavailable")
+    channel.set_admin_notifier(lambda text, title: notices.append((text, title)))
+    assert notices == [("network unavailable", "微信通道")]

@@ -75,6 +75,7 @@ class WeChatChannel(BaseChannel):
         self._running = False
         self._online = False
         self._offline_reported = False
+        self._offline_reason = ""
         self._stale_probe_pending = False
         self._isolate_until = 0.0
         self._warned_no_admin = False
@@ -84,9 +85,11 @@ class WeChatChannel(BaseChannel):
     def set_admin_notifier(self, fn) -> None:
         """Set the cross-channel, best-effort offline status notifier."""
         self._notifier = fn
-        if self._running and not self._online:
+        # Startup is an indeterminate state until the first long poll returns.
+        # Only replay a concrete prior failure, never send a false startup alert.
+        if self._offline_reason:
             self._offline_reported = False
-            self._set_offline("微信通道离线，等待凭据或网络恢复")
+            self._set_offline(self._offline_reason)
 
     def start(self) -> None:
         """Start a worker only; service mode never invokes the QR-login flow."""
@@ -461,10 +464,12 @@ class WeChatChannel(BaseChannel):
         if not self._online:
             print("  [WeChat] iLink channel is online")
         self._online = True
+        self._offline_reason = ""
         self._offline_reported = False
 
     def _set_offline(self, reason: str) -> None:
         self._online = False
+        self._offline_reason = reason
         if self._offline_reported:
             return
         print("  [WeChat] %s" % reason)
