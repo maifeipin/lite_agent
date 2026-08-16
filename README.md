@@ -1,6 +1,6 @@
 # Lite Agent
 
-🚀 **Lite Agent** 是一个轻量级、零外部依赖（仅依赖官方 SDK）、支持深度思考大模型的私有化 AI 智能助手引擎。通过 WebSocket / HTTP 回调接入**飞书、钉钉、企业微信**三大国内 IM，并通过自然语言全自动调度本地服务器的运维、账单、RSS 精选等技能。
+🚀 **Lite Agent** 是一个轻量级、支持深度思考大模型的私有化 AI 智能助手引擎。通过 WebSocket / HTTP 回调 / 长轮询接入**飞书、钉钉、企业微信、Telegram 与个人微信 iLink**，并通过自然语言全自动调度本地服务器的运维、账单、RSS 精选等技能。
 
 ![效果演示](assets/screenshot.png)
 ## 🌟 核心特性
@@ -70,6 +70,37 @@ cp conf.d/llm.json.example conf.d/llm.json
 cp conf.d/task_routing.json.example conf.d/task_routing.json
 cp conf.d/committee.json.example conf.d/committee.json
 ```
+
+### 个人微信 iLink（可选）
+
+在 `config.json` 的 `channels` 下增加以下配置。iLink 凭据由扫码登录生成，**不要**写入 `config.json` 或 `.env`：
+
+```json
+"wechat": {
+  "enabled": true,
+  "admin_wxid": "",
+  "session_file": "data/wechat_session.json",
+  "contexts_file": "data/wechat_contexts.json",
+  "cursor_file": "data/wechat_cursor.json",
+  "context_ttl_hours": 24,
+  "context_max_sends": 10,
+  "poll_timeout": 35,
+  "max_msg_len": 2000
+}
+```
+
+若 systemd 以 `liteagent` 用户运行，必须使用同一用户完成扫码登录，否则 0600 会话文件无法被服务读取：
+
+```bash
+cd /home/liteagent/lite_agent
+sudo -u liteagent -H /usr/bin/python3 -m channels.wechat_ilink --login \
+  --session-file data/wechat_session.json
+sudo systemctl restart lite-agent
+```
+
+扫码确认后，向机器人发送一条消息以建立 `context_token`；个人微信的主动推送仅在该用户有未过期上下文时可用（默认 24 小时、每个 token 最多 10 次出站）。首次消息默认按访客处理，确认对应 `wxid` 后再填入 `admin_wxid` 并重启服务。
+
+同一个 iLink Bot 只能保留一个长轮询消费者。迁移到 Lite Agent 后，应停用 OpenClaw 或其他客户端的同一微信通道，避免竞争收消息。
 
 ### 2. 启动
 ```bash
