@@ -14,7 +14,7 @@ from agent import AgentResponse
 from core.config_loader import load_config
 
 # 通道优先级: 谁启用谁先, 逐个 try 直到成功
-_CHANNEL_PRIORITY = ['feishu', 'wecom', 'dingtalk', 'telegram']
+_CHANNEL_PRIORITY = ['feishu', 'wecom', 'wechat', 'dingtalk', 'telegram']
 
 
 def _resolve_admin_uid(ch_name: str, channels_cfg: dict) -> str:
@@ -22,8 +22,9 @@ def _resolve_admin_uid(ch_name: str, channels_cfg: dict) -> str:
     c = channels_cfg.get(ch_name, {})
     if ch_name == 'feishu':    return c.get('admin_open_id', '')
     if ch_name == 'wecom':     return c.get('admin_userid', '')
+    if ch_name == 'wechat':    return c.get('admin_wxid', '')
     if ch_name == 'telegram':  return c.get('admin_chat_id', '')
-    if ch_name == 'dingtalk':  return c.get('admin_chat_id', '') or c.get('admin_open_id', '')
+    if ch_name == 'dingtalk':  return c.get('admin_staff_id', '') or c.get('admin_userid', '')
     return ''
 
 

@@ -370,7 +370,7 @@ V2EX_TOKEN = config['v2ex']['token']
 
 3. **配置驱动 Cron**：定时任务从 config.json 注册，加新任务只改配置不写代码。
 
-4. **通道回退链**：`_send_card()` 按 `feishu → dingtalk → wecom → telegram → wechat` 顺序尝试，任一成功即停；微信仅在有未过期入站 context_token 时可发送。
+4. **通道回退链**：`_send_card()` 与 Edge 告警按 `feishu → wecom → wechat → dingtalk → telegram` 顺序尝试，任一成功即停；微信仅在有未过期入站 context_token 时可发送。
 
 5. **单例 CronManager**：模块级 `CronManager()` 调用返回同一实例，确保 `main.py` 注册和 `ops_backup.py` 模块级注册共享同一调度器。
 
