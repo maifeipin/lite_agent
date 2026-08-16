@@ -47,7 +47,7 @@ lite_agent/
     ├── ops_rss.py         # RSS 精选引擎 (300+ 行，最复杂)
     ├── ops_self_check.py  # 健康自检 (/check)
     ├── ops_billing.py     # 账单管理（调外部 mail-statement-parser）
-    ├── ops_backup.py      # 数据备份
+    ├── ops_backup.py      # 数据打包与百度网盘 (bdpan) 云端备份
     ├── ops_sys.py         # 系统状态
     ├── ops_security.py    # 安全审查
     ├── ops_logs.py        # 日志检索
@@ -56,7 +56,7 @@ lite_agent/
     ├── ops_llm.py         # API 余额查询
     ├── ops_memory_distiller.py  # 记忆蒸馏 CLI
     ├── ops_blog.py        # Halo 博客管理与发布
-    ├── ops_bypy.py        # 百度网盘直连同步与备份
+    ├── ops_bypy.py        # 百度网盘旧版接口 (Legacy)
     └── ops_media.py       # 媒体库与NAS管理 (PostgreSQL)
 ```
 

@@ -39,9 +39,9 @@
 - **自动发布与导出**: 结合 Halo API 实现全自动增量博客发布、批量文章导出备份。
 - **无感交互**: 与大模型完美融合，只需自然语言即可完成博客素材重组、排版到发布的完整链路。
 
-### ☁️ 云盘灾备 (`ops_bypy.py`)
-- **百度网盘直连**: 原生集成 Bypy 客户端，支持网盘容量查询、远程目录管理。
-- **自动化增量备份**: 配置深夜 Cron 定时任务，全自动将 Halo 博客数据及 Lite Agent 核心源码增量推送到百度网盘，实现狡兔三窟的数据保障。
+### ☁️ 云盘灾备 (`ops_backup.py`)
+- **百度网盘官方直连**: 集成官方 `bdpan` CLI 工具（替代已受限的旧版 bypy / PCS API），具备完整的上传与目录管理权限。
+- **分类自动化备份**: 配置深夜 Cron 定时任务，全自动将 Halo 博客、Meilisearch、RSSLite、HedgeDoc、Vaultwarden 及核心数据打包增量推送到百度网盘 `/apps/bdpan/lite-agent/`，实现多重数据灾备。
 
 ### 🎵 媒体与NAS管理 (`ops_media.py`)
 - **音乐库整理**: 对接 PostgreSQL 媒体数据库，支持按 FileHash 查重以及查询缺失封面的音乐。
@@ -101,6 +101,28 @@ sudo systemctl restart lite-agent
 扫码确认后，向机器人发送一条消息以建立 `context_token`；个人微信的主动推送仅在该用户有未过期上下文时可用（默认 24 小时、每个 token 最多 10 次出站）。首次消息默认按访客处理，确认对应 `wxid` 后再填入 `admin_wxid` 并重启服务。
 
 同一个 iLink Bot 只能保留一个长轮询消费者。迁移到 Lite Agent 后，应停用 OpenClaw 或其他客户端的同一微信通道，避免竞争收消息。
+
+### 百度网盘 bdpan 备份（可选）
+
+云盘自动灾备功能依赖官方 `bdpan` CLI 工具（`/usr/local/bin/bdpan`）。
+
+1. **安装与初始化**：
+将 `bdpan` 可执行文件放置于 `/usr/local/bin/bdpan` 并赋予执行权限：
+```bash
+sudo chmod +x /usr/local/bin/bdpan
+```
+
+2. **登录授权与权限规范**：
+若 systemd 服务以 `liteagent` 运行，**必须以同一用户完成授权登录**，确保生成的凭据（保存在 `~/.config/bdpan/` 目录）具备对应读写权限：
+```bash
+sudo -u liteagent -H bdpan login
+```
+根据终端提示在浏览器中打开授权链接完成账号绑定。
+
+3. **授权目录与同步日志**：
+- 百度网盘官方应用授权目录为 `/apps/bdpan/`。
+- 备份模块会自动在网盘内创建并维护 `lite-agent/data`、`lite-agent/halo`、`lite-agent/meilisearch`、`lite-agent/hedgedoc`、`lite-agent/vaultwarden` 等分类子目录。
+- 备份同步日志持久化记录于 `data/bdpan_sync.log`。
 
 ### 2. 启动
 ```bash
