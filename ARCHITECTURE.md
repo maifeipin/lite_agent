@@ -1,504 +1,323 @@
 # Lite Agent 架构文档
 
-> 本文档供 AI 编程助手在新会话中快速理解项目全貌。约 5,200 行 Python，一个人维护。
+> 本文档供 AI 编程助手与开发者在新会话中快速理解项目全貌。纯原生 Python 实现，零重型框架依赖，具备动态工具分流、执行审计账本与多 Agent 编排能力。
 
 ---
 
-## 1. 项目定位
+## 1. 项目定位与设计原则
 
-个人 VPS 上的多通道 AI 运维助手。通过飞书/钉钉/企微/Telegram/个人微信任一 IM 下发指令，Agent 调度本地技能（运维、账单、RSS、记忆）执行并返回结果。
+个人 VPS 上的多通道私有化 AI 运维与智能助理引擎。通过飞书、钉钉、企业微信、Telegram、个人微信（iLink 官方协议）或内置 Web 控制台下发指令，Agent 自动完成意图识别、动态工具裁剪、模型分流，并调度本地服务器的各类运维、待办、账单与资讯技能。
 
-**设计原则**：零重型框架依赖、一个人可维护、配置驱动、技能即 Python 函数。
+**核心设计原则**：
+1. **轻量自研，零重型框架**：不依赖 LangChain/LlamaIndex 等重型框架，核心控制流纯原生实现，透明易维护。
+2. **动态工具分流 (RequestSelector)**：针对 80+ 工具全量注入带来的 Token 消耗与模型幻觉问题，采用三态领域分流与三层权限组装机制。
+3. **全链路可审计 (ExecutionLedger)**：工具调用与执行步骤持久化落库，具备完备的可观测性与历史回溯能力。
+4. **配置安全与模块解耦**：密钥在 `.env` 隔离，模型配置独立于 `conf.d/`，技能即单文件 Python 函数。
 
 ---
 
-## 2. 目录结构
+## 2. 完整目录结构
 
 ```
 lite_agent/
-├── main.py              # 入口: 加载配置 → 初始化 Agent → 启动通道 → 注册 Cron
-├── agent.py             # Agent 核心: 消息路由、AI 循环、Tool Calling
-├── session.py           # 会话管理: SQLite 存储、TTL、上下文窗口
-├── skill_engine.py      # 技能引擎: @skill 装饰器 → Tool Schema → 函数调用
-├── cron_engine.py       # 定时引擎: CronJob + CronManager 单例、HH:MM 匹配
-├── security.py          # 安全: 命令沙箱、路径白名单
-├── config.example.json  # 配置模板（含所有可配置项）
+├── main.py              # 入口: 初始化 Agent → 启动通道 → 注册 Cron → 启动 API
+├── agent.py             # Agent 核心: 消息分流、AI 生成循环、会话与多轮上下文管理
+├── session.py           # 会话管理: SQLite 存储、TTL 清理、上下文窗口管理
+├── security.py          # 安全沙箱: 命令拦截、沙箱路径校验
+├── config.example.json  # 基础配置模板
 ├── config.json           # 生产配置（gitignore）
 ├── requirements.txt
 │
-├── channels/            # IM 通道层
-│   ├── base.py           # BaseChannel 抽象基类
-│   ├── feishu.py         # 飞书 WebSocket (lark SDK)
-│   ├── dingtalk.py       # 钉钉 Stream (dingtalk-stream SDK)
-│   ├── wecom.py          # 企业微信 HTTP 回调 + pushmsg
-│   ├── telegram.py       # Telegram Long Polling (subprocess+curl)
-│   ├── wechat.py         # 个人微信 iLink 长轮询通道
-│   ├── wechat_ilink.py   # iLink 协议客户端、登录与游标持久化
-│   └── api.py            # 对外提供的 REST/SSE API (兼容 OpenAI)
+├── conf.d/              # 模型与任务路由独立配置目录
+│   ├── llm.json.example           # 主对话模型配置
+│   ├── task_routing.json.example  # 任务场景模型路由配置
+│   └── committee.json.example     # 决策委员会多模型配置
+│
+├── core/                # 核心引擎与基础设施层
+│   ├── agent_runtime.py     # 统一代理运行时与事件状态机
+│   ├── request_selector.py  # 动态工具选择器 (三态分流/写意图守卫/Shadow 模式)
+│   ├── execution_ledger.py  # 执行审计账本持久化
+│   ├── task_orchestrator.py # DAG 任务编排器 (Planner -> Worker -> Aggregator)
+│   ├── subtask_dag.py       # 子任务依赖拓扑图构建
+│   ├── worker_agent.py      # 编排子任务执行 Agent
+│   ├── model_router.py      # 模型路由分流与故障降级
+│   ├── model_invoker.py     # 模型调用器 (OpenAI 协议封装/Token 估算)
+│   ├── model_config.py      # 模型配置加载与动态解析
+│   ├── skill_engine.py      # 技能引擎: @skill 装饰器/Tool Schema/反射执行
+│   ├── cron_engine.py       # 定时引擎: CronJob + CronManager 单例
+│   ├── alerts.py            # 全局跨通道告警分发
+│   ├── config_loader.py     # 环境变量与 JSON 配置动态合并加载
+│   ├── gemini_codec.py      # Gemini thought_signature 等元数据编解码
+│   └── constants.py         # 系统全局路径常量
+│
+├── channels/            # 多通道接入层
+│   ├── base.py              # BaseChannel 抽象基类
+│   ├── feishu.py            # 飞书 WebSocket 长连接通道 (lark SDK)
+│   ├── dingtalk.py          # 钉钉 Stream 长连接通道 (dingtalk-stream SDK)
+│   ├── wecom.py             # 企业微信 HTTP 接收与推送
+│   ├── telegram.py          # Telegram Long Polling 通道 (curl + socks5h)
+│   ├── wechat.py            # 个人微信 iLink 通道 (Context-Token 出站管理)
+│   ├── wechat_ilink.py      # 微信 iLink 官方协议客户端 (扫码/游标长轮询)
+│   └── api.py               # REST API / SSE 流式接口 / Web 控制台后端
+│
+├── web_dashboard/       # 内置 Web 管理控制台 (前端单页应用)
+│   ├── index.html           # 主界面 (支持流式聊天、会话切换、指令抽屉)
+│   ├── login.html           # 登录鉴权页
+│   ├── style.css            # 现代化响应式设计系统
+│   ├── main.js              # 控制台前端核心逻辑
+│   ├── components/          # 模块化前端组件 (chat.js, facets.js 等)
+│   └── modules/             # 业务视图模块 (todos, socks5, monitor 等)
 │
 ├── memory_engine/       # 长期记忆引擎
-│   ├── engine.py         # MemoryEngine: ChromaDB 向量库 + LLM 蒸馏
-│   ├── pipeline.py       # DistillPipeline + DistillTrigger
-│   ├── store.py          # MemoryStore: SQLite + Chroma 双写
-│   ├── feedback.py       # 反馈闭环
-│   └── lite_integration.py
+│   ├── engine.py            # MemoryEngine: ChromaDB 向量库 + LLM 蒸馏
+│   ├── pipeline.py          # DistillPipeline (定时蒸馏与反思)
+│   ├── store.py             # MemoryStore (SQLite + Chroma 双写)
+│   └── feedback.py          # 对话反馈闭环
 │
-└── skills/              # 技能库（每个文件自动注册）
-    ├── ops_rss.py         # RSS 精选引擎 (300+ 行，最复杂)
-    ├── ops_self_check.py  # 健康自检 (/check)
-    ├── ops_billing.py     # 账单管理（调外部 mail-statement-parser）
-    ├── ops_backup.py      # 数据打包与百度网盘 (bdpan) 云端备份
-    ├── ops_sys.py         # 系统状态
-    ├── ops_security.py    # 安全审查
-    ├── ops_logs.py        # 日志检索
-    ├── ops_crontab.py     # crontab 管理
-    ├── ops_workspace.py   # 工作区文件操作
-    ├── ops_llm.py         # API 余额查询
-    ├── ops_memory_distiller.py  # 记忆蒸馏 CLI
-    ├── ops_blog.py        # Halo 博客管理与发布
-    ├── ops_bypy.py        # 百度网盘旧版接口 (Legacy)
-    └── ops_media.py       # 媒体库与NAS管理 (PostgreSQL)
+├── edge_node/           # 边缘节点哨兵载荷 (独立部署在远端 VPS)
+│   ├── edge_sentinel.py     # 边缘定时巡检与拉取执行守护进程
+│   ├── edge_crypto.py       # Ed25519 零信任加解密与验签
+│   ├── edge_whitelist.py    # 边缘命令安全白名单过滤
+│   └── whitelist.json       # 白名单规则定义
+│
+├── scripts/             # 运维与离线数据处理管线
+│   └── rss_topic/           # BERTopic 离线热点聚类管线 (分类内聚类/LLM命名/Meili同步)
+│
+└── skills/              # 内置技能库 (32 个模块，80+ 项 Tools)
+    ├── ops_rss.py           # RSS 资讯聚合与加权评分推送
+    ├── ops_rss_node.py      # RSS 节点状态查询
+    ├── ops_todo.py          # 待办任务全生命周期管理与 IM 简报
+    ├── ops_billing.py       # 财务对账、账单报表与临期提醒
+    ├── ops_mail_reader.py   # 邮件阅读与批量解析
+    ├── ops_mail_search.py   # 邮件跨主题/发件人搜索
+    ├── ops_mail_stats.py    # 邮箱健康与处理统计
+    ├── ops_mail_list.py     # 邮件列表概览
+    ├── ops_mail_reprocess.py# 邮件重新识别与入库
+    ├── ops_sys.py           # 系统资源负载与进程状态
+    ├── ops_logs.py          # 系统高级跨文件日志检索
+    ├── ops_security.py      # SSH 爆破审查与异常登录审计
+    ├── ops_sentinel.py      # 安全哨兵基线扫描与漂移检查
+    ├── ops_fleet_audit.py   # 集群安全审查
+    ├── ops_self_check.py    # `/check` 全方位 9 项健康体检
+    ├── ops_backup.py        # 本地数据打包与百度网盘 (bdpan) 官方云端增量备份
+    ├── ops_blog.py          # Halo 博客自动发布与文章备份
+    ├── ops_web_clipper.py   # 网页搜索、Markdown 提取与 HedgeDoc 云端转存
+    ├── ops_socks5.py        # Socks5 代理节点管理、健康检查与动态端口出站探测
+    ├── ops_decision.py      # AI 决策委员会多模型协同审议与投票
+    ├── ops_gaokao.py        # 高考位次、专业录取与推荐分析
+    ├── ops_edge_cmd.py      # 边缘节点指令下发
+    ├── ops_edge_health.py   # 边缘节点健康度监控
+    ├── ops_workspace.py     # 工作区文件操作
+    ├── ops_crontab.py       # Linux 系统 Crontab 管理
+    ├── ops_llm.py           # 大模型 API 余额与 Token 消耗统计
+    ├── ops_memory_distiller.py # 长期记忆蒸馏 CLI
+    ├── ops_media.py         # 媒体库与 NAS 去重管理 (PostgreSQL)
+    ├── ops_meili_sync.py    # Meilisearch 全文索引同步
+    ├── ops_search.py        # 聚合搜索引擎
+    └── ops_bypy.py          # 百度网盘旧版接口 (Legacy)
 ```
 
 ---
 
-## 3. 核心架构
+## 3. 核心架构与请求处理流
 
-### 3.1 消息流
+### 3.1 消息处理全景流
 
 ```
-用户发消息 (IM App)
-  → 通道层 (channels/*.py) 接收，封 IncomingMessage
-    → Agent.handle(msg) 路由
-      ├── "::" 前缀 → _handle_double_colon (技能直接调用)
-      ├── "/" 前缀 → _handle_builtin (内置指令)
-      └── 其他     → _run_ai_loop (LLM Tool Calling)
-    → AgentResponse
-  → 通道层回复
+用户消息 (IM / Web / API)
+  │
+  ▼
+通道接入层 (channels/*.py) ── 封装为 IncomingMessage
+  │
+  ▼
+Agent.handle() 分流网关
+  ├─ "::" 前缀 ──────► 技能直接调用 (绕过 LLM，秒级执行)
+  ├─ "/" 前缀 ───────► 内置指令处理器 (check / cron / status / new 等)
+  └─ 普通自然语言 ───► _stream_ai_loop (AI 推理与工具调用循环)
+                          │
+                          ├─► RequestSelector 动态工具分流
+                          │     ├── 关键词与领域匹配 (Domain Map)
+                          │     ├── 多轮上下文与写意图继承守卫
+                          │     └── 三层组装 (Action > Default > Explicit)
+                          │
+                          ├─► ModelRouter & ModelInvoker (模型调度与调用)
+                          │
+                          ├─► SkillEngine (反射执行命中 Tool)
+                          │     └─► ExecutionLedger (落库执行审计账本)
+                          │
+                          └─► 生成最终回复 (流式推送 / 卡片下发)
 ```
 
-### 3.2 IncomingMessage / AgentResponse
+### 3.2 RequestSelector 动态工具选择器 (`core/request_selector.py`)
 
-```python
-# agent.py
-class IncomingMessage:
-    channel: str        # 'feishu'|'dingtalk'|'wecom'|'telegram'
-    user_id: str        # 发信人 ID
-    chat_id: str
-    message_id: str
-    text: str
-    @property session_key → f"{channel}:{user_id}"
+为了解决 80+ 个工具全量注入导致的中小模型干扰、Token 膨胀与误调风险，系统引入了 RequestSelector：
 
-class AgentResponse:
-    text: str
-    title: str = ""
-    color: str = "blue"  # 卡片颜色
-```
-
-### 3.3 BaseChannel 接口
-
-```python
-class BaseChannel(ABC):
-    def start(self)           # 启动连接
-    def stop(self)            # 停止
-    def send_response(msg_id, AgentResponse) -> bool  # 回复
-    def send_to(open_id, AgentResponse) -> bool       # 主动推送（可选）
-    def broadcast(AgentResponse) -> bool              # 广播（可选）
-    def send_progress(msg_id, text) -> bool           # 已收到回显（可选）
-```
-
-### 3.4 各通道实现对比
-
-| 通道 | 接收方式 | 发送方式 | 代理需求 |
-|------|---------|---------|---------|
-| 飞书 | lark SDK WebSocket | SDK 卡片回复 | 直连 |
-| 钉钉 | dingtalk-stream SDK | SDK 文本 | 直连 |
-| 企微 | Flask w.py 回调 → POST :8899 | pushmsg :6969 HTTP API | 内网直连 |
-| TG | subprocess+curl Long Polling | curl HTTP API | socks5h 代理 |
-| 个人微信 | iLink HTTP Long Polling | iLink HTTP API（依赖入站 context_token） | 直连 |
-| API | 内置 ThreadingHTTPServer | 标准 JSON / SSE 兼容 OpenAI | 直连 |
-
-**企微架构**（最复杂，独立于 Lite Agent 进程）：
-```
-企业微信 → w.py(:6008,Flask) → POST to Lite Agent(:8899) → WeComChannel
-WeComChannel.send_to → pushmsg(:6969,Flask) → 企业微信 API
-```
+1. **三态选择结果**：
+   * `[]`（空集）：明确为闲聊/纯文本问答，不注入任何工具；
+   * `None`（全量）：意图不明确或多领域工具超限，回退全量注入；
+   * `[...]`（子集）：明确命中特定领域，仅注入对应工具集。
+2. **两级安全分层（按用户风险）**：
+   * `default_tools`：查询类只读工具，默认直接注入；
+   * `explicit_intent_tools`：涉及数据修改、推送或外部同步的工具，必须匹配用户显式动作词（或满足写意图继承守卫）才注入。
+3. **多轮写意图继承守卫**：
+   用户回复“*确认*”、“*好的*”时，必须同时满足「短确认词 + 上轮助手是确认问句 + 领域匹配」三条件，才允许继承上轮的写操作工具，防止写权限意外残留。
+4. **影子运行 (Shadow Mode)**：
+   支持 `LITE_AGENT_SELECTOR_SHADOW=1` 环境变量，在真实请求走全量工具的同时后台预演并收集统计指标，确保零风险过渡。
 
 ---
 
-## 4. Skill Engine
+## 4. 关键子系统
 
-### 4.1 注册技能
+### 4.1 AI 决策委员会 (`ops_decision.py` & `conf.d/committee.json`)
+针对关键系统决策或复杂方案，系统支持拉起由多个不同家族模型（如 `glm-5.3`、`kimi-k3`、`deepseek-v3` 等）构成的决策委员会，并发获取各模型审议意见并自动汇总投票仲裁。
 
-```python
-@skill(name='ops_xxx', description='...', params={'arg1': {...}})
-def ops_xxx(arg1: str) -> str:
-    return "result"
-```
+### 4.2 复杂任务编排器 (`core/task_orchestrator.py`)
+对于跨领域、多步骤的长耗时任务：
+1. **Planner**：根据任务目标自动拆解为 DAG（有向无环图）子任务依赖链；
+2. **Worker**：多线程并发执行互不依赖的子任务节点；
+3. **Aggregator**：汇总各节点输出并生成最终交付结果。
 
-`@skill` 装饰器自动：
-1. 提取函数的 GPT Function Calling tool schema
-2. 注册到 SkillEngine._skill_registry
-3. 记录参数类型、默认值
+### 4.3 记忆引擎 (`memory_engine/`)
+双层记忆架构：
+* **短期记忆**：`session.py` 基于 SQLite 维护最近对话历史（带滑动窗口与 Token 截断）；
+* **长期记忆**：`MemoryEngine` 基于 ChromaDB 向量库存储重要事实，夜间定时触发 `DistillPipeline` 对会话进行反思与提炼蒸馏。
 
-### 4.2 AI 调用流程
+### 4.4 BERTopic 离线热点发现与主题聚类管线 (`scripts/rss_topic/`)
+为了对海量多源 RSS 资讯进行宏观主题提炼与热点态势追踪，系统内置了 5 阶段离线聚类管线：
+1. **Stage 1 & 2 (数据抽取与特征计算)**：从 MongoDB 抽取近 24h / 近一周文章，导出 ID 并构建特征向量（Embeddings）；
+2. **Stage 3 (双层聚类机制)**：
+   * **Layer 1**：基于来源规则进行领域大类粗分类；
+   * **Layer 2**：类内执行 **BERTopic + UMAP + HDBSCAN + jieba 中文分词** 细粒度主题聚类；
+   * **双模式调度**：
+     * `daily`（每日 06:00）：增量调用 `BERTopic.transform()` 归入已有主题模型，~5 分钟内快速产出；
+     * `weekly`（每周一 03:00）：全量 `BERTopic.fit_transform()` 重新训练分类模型，并计算话题演化 diff（新增/消亡/热度涨跌）。
+3. **Stage 4 (LLM 智能语义命名)**：调用 DeepSeek 大模型根据每个 Topic 的代表性标题样本提炼主题名称与标签；
+4. **Stage 5 (Meilisearch 索引回填与热点检索)**：将主题标签与热点得分回填写入 Meilisearch，供 `/rss_topic` 指令（`ops_search.py`）与 Web 控制台秒级检索。
 
-LLM 返回 `tool_calls` → SkillEngine 查 registry → 调用 `fn(**args)` → 返回结果给 LLM 继续推理。最大 10 步循环。
-
-### 4.3 内置指令（/）
-
-| 指令 | 功能 |
-|------|------|
-| `/check` | 9 项健康自检 |
-| `/cron` | 查看定时任务 |
-| `/cron <n>` | 手动执行 |
-| `/cron toggle <n>` | 启停 |
-| `/balance` | API 余额 |
-| `/status` | 会话状态 |
-| `/history` | 对话历史 |
-| `/new` | 重置会话 |
-| `/help` | 帮助 |
-| `/remember <type> <内容>` | 强制记忆 |
-
-### 4.4 :: 直接技能调用（不走 AI）
-
-```
-/rss_fetch       → 获取今日 RSS 精选摘要 (Top 5)
-/rss_list [分组] → 查看 RSS 分组文章列表 (无参=概览)
-/rss_topic [标签] → 按分类/主题查 RSS (Meilisearch, 无参=标签概览)
-/rss_log         → 查看推送/预计算日志
-::cron log     → 查看定时任务日志
-```
+### 4.5 边缘节点哨兵体系 (Edge Sentinel & `edge_node/`)
+针对多台远端 VPS（如 `vps2`, `vps3`, `bwg`, `oracle1`, `vps5` 等）的统一安全管理与只读运维，系统构建了**零信任 Pull 模型边缘哨兵架构**：
+1. **零信任双层签名体系 (`edge_crypto.py`)**：
+   * **热私钥 (Hot Key)**：中枢在下发只读白名单命令时自动签名（携带 `task_id`、`ts` 时间戳与不可变 `nonce` 防重放）；
+   * **根私钥 (Root Key)**：离线保管，仅在下发高危命令或管道组合命令时由管理员手动签名授权；
+   * 边缘节点部署对应公钥，任何未签名或验签失败的任务直接拒绝执行。
+2. **边缘拉取与状态机机制 (`core/edge_db.py`)**：
+   * 边缘节点不开放任何入站端口，运行 `edge_sentinel.py` 定期（每 5 分钟）向中枢 `GET /api/pull_task` 拉取待执行任务；
+   * 中枢通过 SQLite 事务状态机（`pending` → `dispatched` → `done/failed`）维护任务生命周期，杜绝多节点并发抢单；
+   * 边缘执行完毕后通过 `POST /api/report` 回传结果（带 exit_code、stdout、stderr 与主机负载指标）。
+3. **Agent 运维调度技能**：
+   * `ops_edge_cmd.py` (`edge_cmd(node, cmd)`)：Agent 向指定节点下发只读命令，支持 30s 同步等待（超时自动转为异步）；
+   * `ops_edge_health.py` (`edge_health()`)：全局巡检所有边缘节点心跳健康度与时延。
 
 ---
 
-## 5. 定时任务引擎
+## 5. Web 控制台与 API 通道 (`web_dashboard/` & `channels/api.py`)
 
-### 5.1 CronManager（单例）
+系统内置了单页 Web 管理控制台 (SPA) 与兼容 OpenAI 规范的 REST/SSE API 服务，由 `channels/api.py` 内置 `ThreadingHTTPServer` 统一托管：
 
-```python
-class CronJob:
-    name, cron_expr, func, enabled, last_run_date
+### 5.1 Web Dashboard 功能模块 (`web_dashboard/`)
+* **📧 邮件中心 (`modules/emails.js`)**：邮件列表多维检索、安全渲染 HTML 原文、账单与重要邮件快速筛选。
+* **📰 RSS 新闻与 BERTopic 热点简报 (`modules/rss.js`)**：全源资讯流浏览、今日 BERTopic 热点每日简报看板（话题聚类分析、情感极性、热度演化标签）。
+* **✅ 待办看板 (`modules/todos.js`)**：待办事项全生命周期管理（CRUD、优先级、延期/搁置、快捷标记完成、分类标签筛选）。
+* **💬 会话管理 (`modules/sessions.js`)**：跨通道（飞书/企微/钉钉/TG/微信/API）历史会话列表查看、对话明细追溯与单会话一键清理。
+* **🧦 Socks5 代理监控 (`modules/socks5.js`)**：节点状态看板、动态出站探测、出口 IP echo 验证与故障节点排查。
+* **核心交互组件 (`components/`)**：
+  * `chat.js`：流式 AI 对话抽屉，支持 Markdown + KaTeX 数学公式渲染、打字机效果与 `/` 快捷指令唤起；
+  * `facets.js`：全局多维 Facet 检索与智能聚合过滤器；
+  * `terminal.js`：内嵌终端仿真器，供系统运维与直接执行指令；
+  * `modal.js`：模态弹窗系统（用于 HTML 邮件原文安全沙箱预览、节点配置详情等）。
 
-class CronManager:
-    add_job(name, time, func)
-    start()  # 后台线程，每分钟检查 HH:MM
-    list_jobs()
-    toggle_job(idx)
-```
+### 5.2 鉴权体系
+* **Admin Token (`auth_token`)**：拥有最高管理权限，可访问全部控制台模块与执行所有运维技能；
+* **Guest Token (`guest_token`)**：仅开放只读面板与白名单对话技能，用于外网演示或访客安全接入；
+* **Edge Token (`edge_token`)**：专用于边缘节点的心跳上报与任务拉取隔离权限。
 
-### 5.2 任务定义（config.json → cron_jobs）
-
-两种类型：
-- **command**: 执行 shell 命令，支持 `{root}` 占位符
-- **skill**: 调用 `skills/` 模块函数
-
-```json
-{
-  "cron_jobs": [
-    {"name": "证书过期检查", "time": "09:00", "command": "bash /root/down/check_cert_expiry.sh"},
-    {"name": "记忆蒸馏复盘", "time": "03:00", "command": "python3 {root}/skills/ops_memory_distiller.py --mode daily"},
-    {"name": "RSS 精选推送", "time_range": {"start": 9, "end": 22, "minute": 3}, "skill": "ops_rss::rss_push"},
-    {"name": "数据打包备份", "time": "03:00", "skill": "ops_backup::do_backup"}
-  ]
-}
-```
-
-`time_range`: 生成 `09:03, 10:03, ..., 22:03` 多条 cron job。
-
-另外 `ops_backup.py` 和 `ops_memory_distiller.py` 也有模块级 `CronManager().add_job()` 注册。`main.py` 在启动时强制 `import skills.ops_backup` 确保这些注册生效。
-
----
-
-## 6. 记忆引擎 (memory_engine/)
-
-```
-MemoryEngine (engine.py)
-├── MemoryStore (store.py): 双写 SQLite + ChromaDB
-├── DistillPipeline (pipeline.py): LLM 蒸馏 → 提取长期记忆
-├── DistillTrigger (pipeline.py): 定时(每天 03:00) + 阈值(100条)
-├── FeedbackLoop (feedback.py): 对话反思 → 修正记忆
-└── lite_integration.py: LiteLLM 兼容适配
-```
-
-Agent 对话后自动存储，每天凌晨蒸馏复盘。依赖 `chromadb` + `sentence-transformers` (bge-small-zh-v1.5)。
+### 5.3 核心 API 路由清单
+| 路由 | 方法 | 鉴权要求 | 说明 |
+|---|---|---|---|
+| `/v1/chat/completions` | POST | Bearer Token | OpenAI 标准兼容对话接口（支持 SSE 真流式事件与工具调用） |
+| `/v1/models` | GET | Bearer Token | 获取可用模型清单 |
+| `/api/v1/auth` | POST | 公开 | 控制台登录与 Token 校验 |
+| `/api/v1/sessions` | GET/DELETE | Bearer Token | 会话列表查询与单会话清理 |
+| `/api/v1/sessions/messages` | GET | Bearer Token | 会话历史消息详细记录 |
+| `/api/v1/todos` | GET/POST/PATCH | Bearer Token | 待办任务查询、新增与状态更新 |
+| `/api/v1/socks5` | GET/POST/DELETE | Bearer Token | Socks5 节点查询、维护与动态测试 |
+| `/api/v1/socks5/active` | GET | Bearer Token | 当前活跃出口节点查询 |
+| `/api/v1/socks5/health` | GET | Bearer Token | 节点连通性健康巡检 |
+| `/api/v1/socks5/test` | GET | Bearer Token | 节点延迟与测速 |
+| `/api/v1/email/html` | GET | Bearer Token | 邮件 HTML 原文安全渲染 |
+| `/api/v1/rss/brief` | GET | Bearer Token | BERTopic 今日热点每日简报数据 |
+| `/api/report` & `/api/pull_task` | POST/GET | Edge Token | 边缘 Edge 节点监控指标上报与任务下发 |
+| `/api/v1/dashboard` | GET | 公开 | 获取指令注册表概览与静态资源 |
 
 ---
 
-## 7. 配置系统 (config.json)
+## 6. 定时任务与告警回退链
 
-### 7.1 完整 Schema
+### 6.1 任务调度 (CronManager)
+定时任务支持 Crontab 表达式与时间范围区间定义（如 `09:03-22:03` 每小时执行一次），支持执行系统 Shell 命令或反射调用 `skills/` 模块函数。
 
-```json
-{
-  "bot_name": "VPS 助手",
-  "project_root": "/root/lite_agent",
-  "service_name": "lite-agent",
-
-  "llm": {
-    "base_url": "https://api.deepseek.com/v1",
-    "api_key": "sk-xxx",
-    "model": "deepseek-v4-flash",
-    "max_tokens": 2048,
-    "temperature": 0.3
-  },
-
-  "session": {
-    "ttl_minutes": 30,
-    "max_history": 20,
-    "max_steps_per_goal": 10,
-    "daily_token_limit": 500000
-  },
-
-  "security": {
-    "allowed_users": [],
-    "sandbox_paths": ["/var/log", "/root/down", "/root/script"],
-    "blocked_commands": ["rm -rf /", "mkfs", "dd if=", "> /dev/sd", "shutdown", "reboot", "passwd"]
-  },
-
-  "rssdb": {
-    "uri": "mongodb://user:pass@localhost:27017",
-    "database": "rsslite"
-  },
-
-  "v2ex": {
-    "token": "YOUR_V2EX_TOKEN"
-  },
-
-  "cron_jobs": [{...}],
-
-  "channels": {
-    "feishu": {
-      "enabled": true,
-      "app_id": "cli_xxx",
-      "app_secret": "xxx",
-      "admin_open_id": "ou_xxx"
-    },
-    "dingtalk": {
-      "enabled": false,
-      "client_id": "dingxxx",
-      "client_secret": "xxx"
-    },
-    "telegram": {
-      "enabled": true,
-      "bot_token": "xxx",
-      "proxy": "socks5h://127.0.0.1:18988",
-      "admin_chat_id": "123456789"
-    },
-    "wecom": {
-      "enabled": true,
-      "listen_port": 8899,
-      "push_url": "http://127.0.0.1:6969/send_message",
-      "push_token": "xxx"
-    }
-  }
-}
+### 6.2 全局告警回退链 (`core/alerts.py`)
+系统告警与定时推送按以下优先级依次尝试，直至送达：
 ```
-
-### 7.2 config.json vs config.example.json
-- `config.json`: 生产配置，含真实密钥，gitignore
-- `config.example.json`: 模板文件，占位符，提交到仓库
+飞书 (feishu) ──► 企业微信 (wecom) ──► 个人微信 (wechat) ──► 钉钉 (dingtalk) ──► Telegram (telegram)
+```
+*注：个人微信通道仅在对应管理员持有未过期的入站 `context_token` 时可接收推送。*
 
 ---
 
-## 8. 外部系统集成
+## 7. 部署与运维
 
-### 8.1 VPS 上的独立服务
+### 7.1 systemd 服务配置
 
-| 服务 | 位置 | 端口 | 说明 |
-|------|------|------|------|
-| MongoDB | localhost:27017 | RSS 数据存储 |
-| w.py | /root/down/wx/weworkapi_python-master/w.py | :6008 | 企微回调接收 |
-| pushmsg.py | /root/down/wx/weworkapi_python-master/pushmsg/ | :6969 | 企微消息发送 (text/markdown) |
-| mail_client.py | /root/mail-statement-parser/ | CLI | 邮件账单解析 |
-| qdrant | localhost | :6333 | 向量库（RssAdapter 用） |
-| RssAdapter | /app/RssAdapter | systemd | RSS 爬虫（C#） |
-
-### 8.2 外部监控
-
-```bash
-# crontab: 每 5 分钟检查 lite-agent 存活
-*/5 * * * * python3 /root/alert/monitor_lite_agent.py >> /tmp/monitor_lite_agent.log 2>&1
-```
-
-独立于进程，systemctl is-active → 异常时走 pushmsg 发企微告警。
-
-### 8.3 证书监控
-
-bash 脚本 `/root/down/check_cert_expiry.sh` → 调 pushmsg API 发通知。作为 cron command 注册。
-
----
-
-## 9. RSS 精选引擎 (ops_rss.py) - 重点模块
-
-最复杂的技能（314 行），处理流程：
-
-```
-RssNode(MongoDB) → FeedItem(按日集合) → 评分 → 去重 → 缓存 → 推送
-```
-
-### 9.1 评分算法
-
-```python
-score = SITE_QUALITY[site]        # 站点基础分 (3~9)
-score += sum(HOT_KEYWORDS in title)  # 关键词加分
-score -= 10 if V2EX_LOW_TAGS in title  # 低质量标签降权
-score += reply_bonus              # V2EX API 回复数加成
-```
-
-### 9.2 预计算缓存
-
-- HH:50 预计算 → `rss_cache.json` (900s 有效)
-- HH:03 读取缓存 → 秒级推送
-- 缓存过期自动实时计算
-
-### 9.3 V2EX API 集成
-
-```python
-# 通过 socks5h 代理调 V2EX API 获取回复数
-V2EX_TOKEN = config['v2ex']['token']
-# 回复数 >=20: +1, >=50: +3, >=100: +5
-```
-
----
-
-## 10. 关键设计决策
-
-1. **不使用 Webhook 公网暴露**：飞书/钉钉用 WebSocket 主动出站连接，企微用内网 HTTP 桥接。VPS 无需公网 IP 和 Nginx 配置。
-
-2. **curl + subprocess 做 HTTP**：TG 和 V2EX API 用 `subprocess.run(['curl', ...])` 而非 `requests`，因为 socks5h 代理在 Python 里不稳定（PySocks 与 urllib3 兼容问题）。
-
-3. **配置驱动 Cron**：定时任务从 config.json 注册，加新任务只改配置不写代码。
-
-4. **通道回退链**：`_send_card()` 与 Edge 告警按 `feishu → wecom → wechat → dingtalk → telegram` 顺序尝试，任一成功即停；微信仅在有未过期入站 context_token 时可发送。
-
-5. **单例 CronManager**：模块级 `CronManager()` 调用返回同一实例，确保 `main.py` 注册和 `ops_backup.py` 模块级注册共享同一调度器。
-
-6. **Send-Only 通道**：企微和 TG 的接收路径不在 Lite Agent 进程内（w.py、TG long polling 在进程内），但发送统一通过 `send_to` 方法。
-
----
-
-## 11. 会话管理 (session.py)
-
-```python
-class SessionManager:
-    _connect() → sqlite3.Connection
-    get_or_create(session_key) → Session
-    reset_session(key)
-    cleanup_expired()       # 后台线程每 5 分钟清理
-    add_message(key, role, content)
-
-class Session:
-    messages: list[dict]    # [{"role":"user","content":"..."}, ...]
-    token_count: int
-    created_at, last_active: float
-```
-
-`data/sessions.db` 单文件 SQLite，TTL 30 分钟，最多 20 条历史。
-
----
-
-## 12. AI 循环 (agent.py)
-
-```python
-Agent._run_ai_loop(msg) → AgentResponse:
-    1. 构建 messages: system_prompt + 记忆 + 历史 + user_msg
-    2. 调 LLM (OpenAI SDK)
-    3. 如返回 tool_calls → SkillEngine 执行 → 结果回填 → 回到步骤 2
-    4. 如返回 content → 存储记忆 → 返回 AgentResponse
-    5. 最多 max_steps_per_goal (10) 步，防死循环
-```
-
-System prompt 从 `agent.py:AGENT_PROMPT` 常量生成，含 bot_name 和技能列表。
-
----
-
-## 13. 部署
-
-### 13.1 systemd service
-
-```
+```ini
 # /etc/systemd/system/lite-agent.service
-ExecStart=/usr/bin/python3 /root/lite_agent/main.py
+[Unit]
+Description=Lite Agent Service
+After=network.target
+
+[Service]
+Type=simple
+User=liteagent
+WorkingDirectory=/home/liteagent/lite_agent
+ExecStart=/usr/bin/python3 /home/liteagent/lite_agent/main.py
 Restart=always
 RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-### 13.2 依赖
+### 7.2 百度网盘官方 CLI (`bdpan`) 配置
 
-```
-openai>=1.0
-lark-oapi
-dingtalk-stream
-chromadb
-sentence-transformers
-pymongo
-PySocks
-psutil
-```
-
-### 13.3 常用运维命令
-
+云盘自动备份模块依赖百度官方 `bdpan` CLI：
 ```bash
-systemctl restart lite-agent
-journalctl -u lite-agent -f
-scp file.py vps1:/root/lite_agent/   # 部署单文件
+# 1. 下载安装器 (Linux x86_64 示例)
+curl -fsSL https://issuecdn.baidupcs.com/issue/netdisk/ai-bdpan/installer/3.8.4/bdpan-installer-linux-amd64 -o bdpan-installer
+chmod +x bdpan-installer && ./bdpan-installer --yes
+sudo ln -sf ~/.local/bin/bdpan /usr/local/bin/bdpan
+
+# 2. 授权登录 (必须以运行服务的 liteagent 用户执行)
+sudo -u liteagent -H bdpan login
+# 验证状态: bdpan whoami
 ```
 
 ---
 
-## 14. 当前状态 (v2.2)
+## 8. 当前功能就绪状态矩阵
 
-| 功能 | 状态 |
-|------|:---:|
-| 飞书/钉钉/企微/TG 四条通道 | ✅ |
-| 个人微信 iLink 通道 | 🧪 离线契约与集成测试通过，待真实扫码验收 |
-| 接收指令 + 回复 | ✅ |
-| 定时推送 fallback 链 | ✅ |
-| RSS 多源聚合评分 | ✅ |
-| V2EX API 回复数加成 | ✅ |
-| 低质量标签降权 | ✅ |
-| 9 项健康自检 `/check` | ✅ |
-| 长期记忆 + 蒸馏 | ✅ |
-| 外部独立监控 | ✅ |
-| 数据自动备份 | ✅ |
-| 账单管理 | ✅ |
-| 配置驱动 Cron | ✅ |
-| 多模型路由 | ✅ (ModelRouter 支持跨模型调度与降级) |
-| Web 管理面板 | ❌ |
-| Web 控制台通道 / API | ✅ (完美兼容 OpenAI 接口与 Guest 模式) |
-| OCR / TTS / STT | ⚠️ OCR ✅ (dashboard集成 + 渠道调外置 OCR_ENDPOINT) / TTS·STT ✅ (实现于 C# RssAdapter 项目) |
-| 多 Agent 长任务 | ✅ (TaskOrchestrator 编排子任务) |
-| 文件识别 | ❌ |
-| 支付集成 | ❌ (计划中) |
-
----
-
-## 15. Roadmap / 预留扩展点
-
-1. **Web 管理面板**：Flask/FastAPI 独立进程，读 sessions.db，展示状态
-2. **OCR** ✅ (已通过 web dashboard 整合 + 外置 `OCR_ENDPOINT` 视觉模型实现)；**TTS/STT** ✅ (已由 C# `RssAdapter` 原生实现)；未来可在此新增对应 `skills/` 直接接入
-3. **支付集成**：支付宝 SDK，`skills/ops_pay.py`
-
----
-
-## 16. 新通道开发模板
-
-1. 继承 `BaseChannel`，实现 `start/stop/send_response`
-2. 可选 `send_to(open_id, response)` 用于定时推送
-3. 在 `main.py` 加加载逻辑
-4. 在 `config.example.json` 加配置段
-5. 在 `_send_card()` 回退链加通道名
-
----
-
-## 17. 架构演进与决策记录 (Memory Base)
-
-### PR3: AI 引擎真流式改造 (Streaming Engine)
-- **三层分流决策**:
-  - 路径 A (内置指令/子任务编排等): 保持非流式，最终通过 `_wrap_sync_response` 降级为单次 token 事件，维持统一接口。
-  - 路径 B (底层 AI 循环): `_stream_ai_loop` 实现真流式引擎底座，通过生成器实时 `yield` 标准化事件流 (token/reasoning/tool_start/tool_result/error/done)。
-  - 路径 C (老接口兼容): `_run_ai_loop` 消费路径 B，丢弃工具调用的中间状态，仅拼合最终文本，实现对上层旧通道的零感知兼容。
-- **参数兼容性实测**: `stream_options: {"include_usage": True}` 在 DeepSeek 与 Doubao 上实测完美兼容，均无 400 报错，末尾 chunk 正常返回 `usage`。`_estimate_tokens` (tiktoken) 仅作为 provider 未返回时的后备兜底。
-- **中间内容拼接实测**: 测试证实 LLM 决定发起工具调用的 stream 步骤中，`delta.content` 为空，不会混入如“我来查一下”等多余前置对话内容，免除了增加复杂标志位的需要。
-- **全程会话锁待收窄**: 当前 `handle_stream` 为确保安全采取全程持锁策略，同一会话的请求强制串行。这在单用户控制台模式下足够，但记录为后续待观测点：未来接入 Web 后，若观察到“⏳ 会话锁等待”高频触发，再进行锁粒度拆分。
+| 模块 / 特性 | 状态 | 备注 |
+|---|:---:|---|
+| **飞书 / 钉钉 / 企业微信 / Telegram** | ✅ | 四大主流 IM 通道全部就绪 |
+| **个人微信 iLink 通道** | ✅ | 官方扫码长轮询接入，支持 Context-Token 出站管理 |
+| **Web 管理控制台 (Dashboard)** | ✅ | 单页 SPA，支持流式对话、会话切换与指令抽屉 |
+| **OpenAI 兼容 API / SSE 流式** | ✅ | `/v1/chat/completions` 全兼容，支持 Guest 隔离 |
+| **动态工具分流 (RequestSelector)** | 🔄 | Phase 1 Shadow 运行中，支持三态与写意图守卫 |
+| **AI 决策委员会** | ✅ | 支持 GLM-5.3、Kimi-K3 等多模型投票决策 |
+| **DAG 复杂任务编排** | ✅ | TaskOrchestrator 支持多子任务并发执行 |
+| **执行审计账本 (ExecutionLedger)** | ✅ | 全量工具调用与执行步骤持久化落库 |
+| **双层长短期记忆引擎** | ✅ | SQLite 对话历史 + ChromaDB 长期记忆蒸馏 |
+| **全自动多模态视觉 (OCR)** | ✅ | 直传图片调外置 OCR 代理解析 |
+| **百度网盘官方增量灾备** | ✅ | 基于 `bdpan` CLI 自动归档 Halo/DB/配置至云端 |
+| **BERTopic 离线热点聚类管线** | ✅ | 支持 Daily 增量 transform 与 Weekly 全量重聚类及演化分析 |
+| **Edge 边缘节点哨兵体系** | ✅ | 零信任 Ed25519 签名下发、拉取状态机与健康监控 |
+| **Socks5 节点动态探测** | ✅ | 支持隔离端口出站探测与出口 IP 识别 |
