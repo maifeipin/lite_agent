@@ -83,11 +83,13 @@ def _get_health_report() -> str:
             feishu = cfg.get('channels', {}).get('feishu', {}).get('enabled', False)
             dingtalk = cfg.get('channels', {}).get('dingtalk', {}).get('enabled', False)
             wecom = cfg.get('channels', {}).get('wecom', {}).get('enabled', False)
+            wechat = cfg.get('channels', {}).get('wechat', {}).get('enabled', False)
             tg = cfg.get('channels', {}).get('telegram', {}).get('enabled', False)
             channels = []
             if feishu: channels.append("飞书")
             if dingtalk: channels.append("钉钉")
             if wecom: channels.append("企业微信")
+            if wechat: channels.append("个人微信")
             if tg: channels.append("Telegram")
             report.append(f"📡 **启用的通讯通道**: ✅ {', '.join(channels) if channels else '无'}")
             
