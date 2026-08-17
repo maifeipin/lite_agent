@@ -49,13 +49,19 @@ registerTabModule({
         const content = safeSnippet(fmt.content || doc.content || '', 150);
 
         let html = '<div class="card rss-card">';
-        html += `<div class="card-meta"><span class="tag">${h(node)}</span>`;
+        html += `<div class="card-meta"><span class="tag tag-rss">${h(node)}</span>`;
         html += `<span class="date">${published}</span></div>`;
         html += `<h3 class="card-title">`;
-        if (link) html += `<a href="${h(link)}" target="_blank" rel="noopener">${title}</a>`;
+        if (link) html += `<a href="${h(link)}" target="_blank" rel="noopener noreferrer">${title}</a>`;
         else html += title;
         html += '</h3>';
-        html += `<div class="card-snippet">${content}</div></div>`;
+        html += `<div class="card-snippet">${content}</div>`;
+        if (link) {
+            html += `<div class="card-actions">`;
+            html += `<a href="${h(link)}" target="_blank" rel="noopener noreferrer" class="card-btn card-btn-link">查看原文 ↗</a>`;
+            html += `</div>`;
+        }
+        html += '</div>';
         return html;
     },
 
