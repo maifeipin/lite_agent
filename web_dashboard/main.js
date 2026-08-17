@@ -677,7 +677,6 @@ function initSidebarCollapse() {
 }
 
 // ============================================================
->>>>>>> Stashed changes
 //  Bootstrap
 // ============================================================
 document.addEventListener('DOMContentLoaded', () => {
