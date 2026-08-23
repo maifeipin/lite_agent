@@ -1,3 +1,4 @@
+import copy
 from typing import Optional
 
 from openai import OpenAI
@@ -125,20 +126,59 @@ class ModelRouter:
         if client is None:
             return None
         cfg = self.models_cfg.get(model_name, {})
+        profile_name = str(kwargs.get("profile") or "")
+        profile = self.get_call_profile(model_name, profile_name)
         actual_model = cfg.get("model", model_name)
         common = {
             "client": client,
             "model_name": actual_model,
-            "temperature": kwargs.get("temperature", cfg.get("temperature", 0.3)),
-            "max_tokens": kwargs.get("max_tokens", cfg.get("max_tokens", 2048)),
+            "temperature": kwargs.get("temperature", profile["temperature"]),
+            "max_tokens": kwargs.get("max_tokens", profile["max_tokens"]),
             "output_recovery": cfg.get("output_recovery", {}),
         }
         if is_gemini_driver(self.get_driver(model_name)):
             return GeminiInvoker(**common)
         return OpenAIInvoker(
             **common,
-            timeout=kwargs.get("timeout", 60.0),
+            timeout=kwargs.get("timeout", profile["timeout"]),
         )
+
+    def get_call_profile(self, model_name: str,
+                         profile_name: str = "") -> dict:
+        """Resolve one model's reusable call contract.
+
+        ``profiles.default`` supplies provider/model defaults and the named
+        profile adds role semantics such as structured JSON or a tool loop.
+        Unknown profile names intentionally fall back to model defaults.
+        """
+        cfg = self.models_cfg.get(model_name, {}) or {}
+        is_structured = profile_name == "structured_json"
+        resolved = {
+            "temperature": float(cfg.get("temperature", 0.3)),
+            "max_tokens": int(cfg.get("max_tokens", 2048)),
+            "timeout": 120.0 if is_structured else 60.0,
+            "max_retries": 0 if is_structured else 1,
+            "invoke_kwargs": {},
+        }
+        profiles = cfg.get("profiles") or {}
+        layers = [profiles.get("default") or {}]
+        if profile_name:
+            layers.append(profiles.get(profile_name) or {})
+        for raw_layer in layers:
+            if not isinstance(raw_layer, dict):
+                continue
+            layer = copy.deepcopy(raw_layer)
+            resolved["invoke_kwargs"].update(
+                layer.pop("invoke_kwargs", {}) or {}
+            )
+            for key in ("temperature", "max_tokens", "timeout", "max_retries"):
+                if key in layer:
+                    resolved[key] = layer[key]
+        resolved["temperature"] = float(resolved["temperature"])
+        resolved["max_tokens"] = max(1, int(resolved["max_tokens"]))
+        resolved["timeout"] = max(1.0, float(resolved["timeout"]))
+        resolved["max_retries"] = max(0, int(resolved["max_retries"]))
+        return resolved
 
     def supports_vision(self, model_name: str) -> bool:
         cfg = self.models_cfg.get(model_name, {})

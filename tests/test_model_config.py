@@ -73,3 +73,22 @@ def test_native_gemini_can_be_default_and_simple_model():
     errors = [message for level, message in validate_model_config(config) if level == "error"]
 
     assert errors == []
+
+
+def test_invalid_model_call_profile_is_rejected():
+    config = _config({
+        "glm": _model("glm", api_key="x") | {
+            "profiles": {
+                "structured_json": {
+                    "max_tokens": 0,
+                    "invoke_kwargs": "not-an-object",
+                },
+            },
+        },
+    })
+
+    errors = [message for level, message in validate_model_config(config)
+              if level == "error"]
+
+    assert any("invoke_kwargs" in message for message in errors)
+    assert any("max_tokens" in message for message in errors)

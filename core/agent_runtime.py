@@ -95,13 +95,15 @@ class AgentRuntime:
 
     def __init__(self, model_invoker: ModelInvoker, skill_engine: SkillEngine,
                  max_steps: int = 8, max_tokens: int = 2048,
-                 max_retries: int = 1, non_retryable_exceptions: tuple = ()):
+                 max_retries: int = 1, non_retryable_exceptions: tuple = (),
+                 call_kwargs: Optional[dict] = None):
         self.model_invoker = model_invoker
         self.skill_engine = skill_engine
         self.max_steps = max_steps
         self.max_tokens = max_tokens
         self.max_retries = max_retries
         self.non_retryable_exceptions = non_retryable_exceptions
+        self.call_kwargs = dict(call_kwargs or {})
 
     def run(self, messages: list, tools: list,
             ctx: ExecutionContext,
@@ -362,9 +364,11 @@ class AgentRuntime:
             has_output = False  # 是否已产出 TEXT/REASONING/TOOL_CALL_DELTA
 
             try:
+                invocation_kwargs = dict(self.call_kwargs)
+                invocation_kwargs.update(call_overrides or {})
                 for event in self.model_invoker.invoke_stream(
                     state.messages, tools, timeout=timeout, max_tokens=max_tokens,
-                    **(call_overrides or {}),
+                    **invocation_kwargs,
                 ):
                     if event.type == ModelEventType.TEXT:
                         has_output = True
@@ -428,9 +432,11 @@ class AgentRuntime:
                       max_tokens: int,
                       call_overrides: dict = None) -> Iterator[RuntimeEvent]:
         """同步消费 invoke_sync 返回的 dict，转换为 RuntimeEvent。"""
+        invocation_kwargs = dict(self.call_kwargs)
+        invocation_kwargs.update(call_overrides or {})
         result = self.model_invoker.invoke_sync(
             state.messages, tools, max_tokens=max_tokens,
-            **(call_overrides or {}),
+            **invocation_kwargs,
         )
 
         content = result.get("content", "")

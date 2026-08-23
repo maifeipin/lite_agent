@@ -30,6 +30,13 @@ def _service(tmp_path, model_output, skill_engine=None, request_selector=None,
     router = MagicMock()
     router.models_cfg = copy.deepcopy(effective_config["llm"]["models"])
     router.get_fallback.return_value = None
+    router.get_call_profile.return_value = {
+        "temperature": 0.3,
+        "max_tokens": 8192,
+        "timeout": 60.0,
+        "max_retries": 0,
+        "invoke_kwargs": {},
+    }
     invoker = MagicMock()
     invoker.invoke_sync.return_value = {
         "content": json.dumps(model_output, ensure_ascii=False),
@@ -178,6 +185,33 @@ def test_author_call_profile_is_configurable_per_model_and_role(tmp_path):
     assert kwargs["max_tokens"] == 6000
     assert kwargs["timeout"] == 45
     assert kwargs["max_retries"] == 1
+    assert kwargs["response_format"] == {"type": "json_object"}
+    assert kwargs["thinking"] == {"type": "disabled"}
+
+
+def test_task_spec_reuses_generic_structured_json_profile(tmp_path):
+    service, invoker = _service(
+        tmp_path, {"task": {"required_inputs": {}}}
+    )
+    service.router.get_call_profile.return_value = {
+        "temperature": 0.1,
+        "max_tokens": 7000,
+        "timeout": 75.0,
+        "max_retries": 1,
+        "invoke_kwargs": {
+            "response_format": {"type": "json_object"},
+            "thinking": {"type": "disabled"},
+        },
+    }
+
+    service.generate("查看最近的外币账单")
+
+    kwargs = invoker.invoke_sync.call_args.kwargs
+    service.router.get_call_profile.assert_called_with(
+        "pro", "structured_json"
+    )
+    assert kwargs["max_tokens"] == 7000
+    assert kwargs["timeout"] == 75.0
     assert kwargs["response_format"] == {"type": "json_object"}
     assert kwargs["thinking"] == {"type": "disabled"}
 

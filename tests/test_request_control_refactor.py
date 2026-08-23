@@ -32,6 +32,42 @@ def test_model_router_builds_invoker_for_each_driver():
     assert gem_invoker.model_name == "gem-actual"
 
 
+def test_model_call_profile_merges_default_and_named_settings():
+    router = ModelRouter.__new__(ModelRouter)
+    router.models_cfg = {
+        "glm": {
+            "temperature": 0.2,
+            "max_tokens": 8192,
+            "profiles": {
+                "default": {
+                    "timeout": 90,
+                    "invoke_kwargs": {"thinking": {"type": "auto"}},
+                },
+                "structured_json": {
+                    "max_tokens": 6000,
+                    "max_retries": 1,
+                    "invoke_kwargs": {
+                        "response_format": {"type": "json_object"}
+                    },
+                },
+            },
+        },
+    }
+
+    profile = router.get_call_profile("glm", "structured_json")
+
+    assert profile == {
+        "temperature": 0.2,
+        "max_tokens": 6000,
+        "timeout": 90.0,
+        "max_retries": 1,
+        "invoke_kwargs": {
+            "thinking": {"type": "auto"},
+            "response_format": {"type": "json_object"},
+        },
+    }
+
+
 def _orchestrator_for_direct_execution(enabled=True):
     orch = TaskOrchestrator.__new__(TaskOrchestrator)
     orch.direct_tool_execution = enabled
@@ -221,6 +257,11 @@ def test_hard_model_policy_controls_planner_and_worker_route():
     }
     orch.router.get_invoker.return_value = invoker
     orch.router.get_driver.return_value = "ark"
+    orch.router.get_call_profile.return_value = {
+        "temperature": 0.2, "max_tokens": 8192, "timeout": 90.0,
+        "max_retries": 2,
+        "invoke_kwargs": {"thinking": {"type": "disabled"}},
+    }
     orch.request_selector = MagicMock()
     orch.request_selector.select.return_value = SimpleNamespace(
         names=[], confidence="high"
@@ -248,6 +289,11 @@ def test_worker_factory_reuses_router_invoker():
     invoker = MagicMock(model_name="doubao-actual")
     orch.router.get_invoker.return_value = invoker
     orch.router.get_driver.return_value = "ark"
+    orch.router.get_call_profile.return_value = {
+        "temperature": 0.2, "max_tokens": 8192, "timeout": 90.0,
+        "max_retries": 2,
+        "invoke_kwargs": {"thinking": {"type": "disabled"}},
+    }
     orch.skill_engine = MagicMock()
     orch.ledger = None
     orch._active_worker_max_steps = 5
@@ -258,7 +304,12 @@ def test_worker_factory_reuses_router_invoker():
 
     assert worker.model_invoker is invoker
     assert worker.max_steps == 5
-    orch.router.get_invoker.assert_called_once_with("doubao-pro")
+    orch.router.get_invoker.assert_called_once_with(
+        "doubao-pro", profile="tool_loop"
+    )
+    assert worker.max_retries == 2
+    assert worker.call_timeout == 90.0
+    assert worker.call_kwargs == {"thinking": {"type": "disabled"}}
 
 
 def test_worker_model_error_uses_only_decision_fallbacks():
