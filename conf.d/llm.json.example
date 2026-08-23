@@ -75,7 +75,7 @@
             "temperature": 0.2,
             "max_steps": 30,
             "output_recovery": {
-                "retry_kwargs": {"thinking": {"type": "disabled"}}
+                "retry_kwargs": {"thinking": {"type": "auto"}}
             },
             "tags": ["text", "complex_reasoning"]
         },
