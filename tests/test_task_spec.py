@@ -6,6 +6,7 @@ from core.task_spec import (
     content_digest,
     new_task_spec,
     next_run_at,
+    normalize_task_spec,
     policy_digest,
     preflight,
 )
@@ -99,6 +100,15 @@ def test_missing_required_input_and_conflicting_network_rules_are_blocked():
 
     assert "MISSING_INPUT" in codes
     assert "INVALID_VALUE" in codes
+
+
+def test_empty_required_inputs_array_is_normalized_without_guessing_values():
+    spec = new_task_spec("test")
+    spec["task"]["required_inputs"] = []
+
+    normalized = normalize_task_spec(spec)
+
+    assert normalized["task"]["required_inputs"] == {}
 
 
 def test_once_and_repeat_schedule_next_run():
