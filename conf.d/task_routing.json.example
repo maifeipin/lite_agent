@@ -1,6 +1,7 @@
 {
     "planner_model": "glm-5.3",
     "classifier_model": "glm-5.3",
+    "simple_model": "flash",
     "route_rules": [
         {
             "type": "text",
@@ -45,13 +46,9 @@
         },
         {
             "type": "data_analysis",
-            "model": "glm-5.3",
-            "fallback": "flash",
+            "model": "flash",
+            "fallback": "gemini-flash",
             "allowed_models": [
-                "glm-5.3",
-                "kimi-k3",
-                "glm-5.2",
-                "doubao-pro",
                 "flash",
                 "gemini-flash"
             ],
@@ -66,6 +63,7 @@
     ],
     "max_parallel_subtasks": 3,
     "subtask_timeout_minutes": 15,
+    "direct_tool_execution": false,
     "dag_max_depth": 5,
     "dag_max_total_steps": 30,
     "dag_max_total_tokens": 200000

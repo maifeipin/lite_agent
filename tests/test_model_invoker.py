@@ -321,6 +321,32 @@ class TestOpenAISync:
         call_kwargs = invoker.client.chat.completions.create.call_args[1]
         assert call_kwargs["reasoning_effort"] == "high"
 
+    def test_explicit_recovery_overrides_pro_name_heuristic(self):
+        invoker = OpenAIInvoker(
+            client=MagicMock(), model_name="qwen-pro", temperature=0.3,
+            max_tokens=256,
+        )
+        msg = SimpleNamespace(content="ok", tool_calls=None)
+        choice = SimpleNamespace(finish_reason="stop", message=msg)
+        invoker.client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[choice], usage=SimpleNamespace(total_tokens=10)
+        )
+
+        invoker.invoke_sync(
+            [{"role": "user", "content": "hi"}],
+            extra_body={"enable_thinking": False},
+        )
+
+        call_kwargs = invoker.client.chat.completions.create.call_args[1]
+        assert call_kwargs["extra_body"] == {"enable_thinking": False}
+        assert "reasoning_effort" not in call_kwargs
+        assert call_kwargs["max_tokens"] == 256
+
+    def test_openai_max_tokens_finish_reason_is_normalized(self, invoker):
+        self._set_response(invoker, content="", finish_reason="MAX_TOKENS")
+        result = invoker.invoke_sync([{"role": "user", "content": "hi"}])
+        assert result["finish_reason"] == "length"
+
     # ---- tools 参数 ----
 
     def test_tools_none(self, invoker):
@@ -435,6 +461,22 @@ class TestGeminiSync:
             p.start()
         try:
             gemini_invoker.invoke_sync([{"role": "user", "content": "hi"}])
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+    def test_thinking_budget_is_passed_to_generate_config(self, gemini_invoker):
+        patches = self._setup_gemini_patches()
+        for p in patches:
+            p.start()
+        try:
+            from google.genai import types
+            types.ThinkingConfig = MagicMock(return_value="thinking-config")
+            gemini_invoker.invoke_sync(
+                [{"role": "user", "content": "hi"}], thinking_budget=0
+            )
+            types.ThinkingConfig.assert_called_once_with(thinking_budget=0)
+            assert types.GenerateContentConfig.call_args.kwargs["thinking_config"] == "thinking-config"
         finally:
             for p in reversed(patches):
                 p.stop()

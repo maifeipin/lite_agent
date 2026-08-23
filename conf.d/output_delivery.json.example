@@ -1,0 +1,25 @@
+{
+    "long_output": {
+        "full_delivery": "email",
+        "reply_mode": "summary",
+        "summary_model": "flash",
+        "summary_chars": 1200,
+        "fallback_order": ["hedgedoc", "email", "sqlite"]
+    },
+    "email": {
+        "enabled": false,
+        "recipient": "${OUTPUT_EMAIL_RECIPIENT}",
+        "provider_order": ["qq", "163", "outlook", "gmail"],
+        "subject_prefix": "[Lite Agent 完整回复]"
+    },
+    "sqlite": {
+        "path": "data/output_archive.db"
+    },
+    "channel_limits": {
+        "telegram": 4000,
+        "feishu": 4000,
+        "dingtalk": 2500,
+        "wecom": 2048,
+        "wechat": 2000
+    }
+}

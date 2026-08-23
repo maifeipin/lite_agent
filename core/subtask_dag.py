@@ -27,6 +27,9 @@ class Subtask:
     prompt: str = ""
     depends_on: list = field(default_factory=list)
     tools: list = field(default_factory=list)
+    execution_mode: str = "agent"
+    tool_name: str = ""
+    tool_arguments: dict = field(default_factory=dict)
     assigned_model: str = ""
     status: SubtaskStatus = SubtaskStatus.PENDING
     result: str = ""
@@ -155,6 +158,9 @@ class SubtaskDAG:
                 "prompt": s.prompt,
                 "depends_on": s.depends_on,
                 "tools": s.tools,
+                "execution_mode": s.execution_mode,
+                "tool_name": s.tool_name,
+                "tool_arguments": s.tool_arguments,
                 "assigned_model": s.assigned_model,
                 "status": s.status.value,
                 "result": str(s.result)[:1000] if s.result else "",
@@ -203,6 +209,9 @@ class SubtaskDAG:
                 prompt=item.get("prompt", ""),
                 depends_on=item.get("depends_on", []),
                 tools=item.get("tools", []),
+                execution_mode=item.get("execution_mode", "agent"),
+                tool_name=item.get("tool_name", ""),
+                tool_arguments=item.get("tool_arguments", {}),
                 assigned_model=item.get("assigned_model", ""),
                 status=SubtaskStatus(item.get("status", "pending")),
                 result=item.get("result", ""),

@@ -174,22 +174,32 @@ def gemini_response_to_unified(response):
       }
     """
     usage_total = 0
+    prompt_tokens = 0
+    completion_tokens = 0
     if getattr(response, "usage_metadata", None):
         usage_total = response.usage_metadata.total_token_count or 0
+        prompt_tokens = getattr(response.usage_metadata, "prompt_token_count", 0) or 0
+        completion_tokens = getattr(response.usage_metadata, "candidates_token_count", 0) or 0
 
     candidates = getattr(response, "candidates", None)
     if not candidates:
         return {"content": "", "tool_calls": [], "finish_reason": "no_candidates",
-                "usage_total": usage_total, "empty": True}
+                "usage_total": usage_total, "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens, "empty": True}
 
     candidate = candidates[0]
     finish_reason = "stop"
     if hasattr(candidate, "finish_reason") and candidate.finish_reason is not None:
         finish_reason = getattr(candidate.finish_reason, "name", str(candidate.finish_reason))
+    if str(finish_reason).upper() == "MAX_TOKENS":
+        finish_reason = "length"
+    else:
+        finish_reason = str(finish_reason).lower()
 
     if not getattr(candidate, "content", None) or not candidate.content.parts:
         return {"content": "", "tool_calls": [], "finish_reason": finish_reason,
-                "usage_total": usage_total, "empty": True}
+                "usage_total": usage_total, "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens, "empty": True}
 
     text_parts = []
     tool_calls = []
@@ -216,5 +226,7 @@ def gemini_response_to_unified(response):
         "tool_calls": tool_calls,
         "finish_reason": finish_reason,
         "usage_total": usage_total,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
         "empty": False,
     }

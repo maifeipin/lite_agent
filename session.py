@@ -9,6 +9,7 @@ import base64
 import time
 import threading
 import os
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict
@@ -153,6 +154,11 @@ class SessionManager:
                 CREATE TABLE IF NOT EXISTS processed_msgs (
                     msg_id             TEXT PRIMARY KEY,
                     created_at         REAL
+                );
+                CREATE TABLE IF NOT EXISTS active_conversations (
+                    scope_key          TEXT PRIMARY KEY,
+                    session_key        TEXT NOT NULL,
+                    updated_at         REAL NOT NULL
                 );
             """)
             # api_usage_log 迁移：补充 provider / estimated 列（旧库兼容）
@@ -575,27 +581,68 @@ class SessionManager:
     # ------------------------------------------------------------------
     #  会话控制
     # ------------------------------------------------------------------
-    def reset_session(self, session_key: str):
-        """强制重置会话 (清空消息、重置状态)"""
+    def resolve_active_session(self, scope_key: str) -> str:
+        """Resolve a stable channel/user scope to its current conversation."""
         with self._lock:
-            session = Session(
-                key=session_key,
-                created_at=time.time(),
-                updated_at=time.time(),
-            )
-            self._cache[session_key] = session
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT session_key FROM active_conversations WHERE scope_key=?",
+                    (scope_key,),
+                ).fetchone()
+                if row:
+                    return str(row[0])
+                conn.execute(
+                    "INSERT INTO active_conversations(scope_key, session_key, updated_at) "
+                    "VALUES (?, ?, ?)",
+                    (scope_key, scope_key, time.time()),
+                )
+            return scope_key
+
+    def reset_session(self, session_key: str, scope_key: str = "") -> str:
+        """Archive the current conversation and create a new active one.
+
+        ``scope_key`` is the stable transport identity (for example
+        ``wechat:<user>``). Conversation messages are retained so history,
+        output archive and memory lifecycles are not coupled to ``/new``.
+        """
+        with self._lock:
+            now = time.time()
+            current = self.get_or_create(session_key)
+            current.status = "archived"
+            current.updated_at = now
+            self._persist_session(current)
+
+            stable_scope = scope_key or session_key
+            new_key = f"{stable_scope}:c_{int(now * 1000)}_{uuid.uuid4().hex[:6]}"
+            fresh = Session(key=new_key, created_at=now, updated_at=now)
+            self._cache[new_key] = fresh
+            self._persist_session(fresh)
+
             with self._db_write_lock:
-                for attempt in range(3):
-                    try:
-                        with self._connect() as conn:
-                            conn.execute("DELETE FROM messages WHERE session_key = ?", (session_key,))
-                        break
-                    except sqlite3.OperationalError as e:
-                        if "locked" in str(e).lower() and attempt < 2:
-                            time.sleep(0.1)
-                            continue
-                        break
-            self._persist_session(session)
+                with self._connect() as conn:
+                    conn.execute(
+                        "INSERT INTO active_conversations(scope_key, session_key, updated_at) "
+                        "VALUES (?, ?, ?) ON CONFLICT(scope_key) DO UPDATE SET "
+                        "session_key=excluded.session_key, updated_at=excluded.updated_at",
+                        (stable_scope, new_key, now),
+                    )
+            return new_key
+
+    def list_channel_user_ids(self, channel: str) -> list[str]:
+        """Return transport user ids without leaking conversation suffixes."""
+        prefix = f"{channel}:"
+        with self._connect() as conn:
+            active = conn.execute(
+                "SELECT scope_key FROM active_conversations WHERE scope_key LIKE ?",
+                (f"{prefix}%",),
+            ).fetchall()
+            legacy = conn.execute(
+                "SELECT session_key FROM sessions "
+                "WHERE session_key LIKE ? AND session_key NOT LIKE '%:c_%'",
+                (f"{prefix}%",),
+            ).fetchall()
+        scopes = {str(row[0]) for row in active + legacy}
+        return sorted({key[len(prefix):] for key in scopes if key.startswith(prefix)})
 
     def save_subtask_dag(self, session_key: str, task_id: str,
                           dag_json: str, status: str = "running"):
