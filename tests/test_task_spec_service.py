@@ -109,6 +109,52 @@ def test_enrich_updates_existing_task_and_increments_revision(tmp_path):
     assert invoker.invoke_sync.call_count == 1
 
 
+def test_enrich_can_use_one_time_model_without_changing_default(tmp_path):
+    service, invoker = _service(tmp_path, {"task": {"context": "一次性模型"}})
+    manual = service.create_manual("查看账单")
+
+    enriched = service.enrich(manual["id"], model="flash")
+
+    assert enriched["spec"]["contract"]["generated_by"] == "flash"
+    assert service.author_model == "pro"
+    assert service.router.get_invoker.call_args.args[0] == "flash"
+    assert invoker.invoke_sync.call_count == 1
+
+
+def test_enrich_rejects_unconfigured_one_time_model(tmp_path):
+    service, invoker = _service(tmp_path, {})
+    manual = service.create_manual("查看账单")
+
+    with pytest.raises(ValueError, match="not configured"):
+        service.enrich(manual["id"], model="unknown-pro")
+
+    invoker.invoke_sync.assert_not_called()
+
+
+def test_model_input_default_is_suggested_but_requires_user_confirmation(tmp_path):
+    service, _ = _service(tmp_path, {
+        "task": {
+            "required_inputs": {
+                "time_range": {
+                    "description": "查询时间范围",
+                    "required": True,
+                    "value": "最近30天",
+                }
+            }
+        }
+    })
+
+    generated = service.generate("查看最近的外币账单")
+    time_range = generated["spec"]["task"]["required_inputs"]["time_range"]
+
+    assert time_range["value"] == ""
+    assert time_range["suggested_value"] == "最近30天"
+    assert generated["status"] == "blocked"
+    assert "MISSING_INPUT" in {
+        item["code"] for item in generated["preflight"]["findings"]
+    }
+
+
 def test_enrich_does_not_overwrite_edit_made_while_model_is_running(tmp_path):
     service, invoker = _service(tmp_path, {
         "task": {"context": "模型生成的背景"},

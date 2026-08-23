@@ -477,6 +477,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             "policy_digest": policy_digest(),
             "models": models,
             "capabilities": self._task_specs.capability_map,
+            "author_model": self._task_specs.author_model,
+            "validator_model": self._task_specs.validator_model,
+            "model_tiers": (
+                (self._task_specs.config.get("task_specs", {}) or {})
+                .get("model_tiers", {}) or {}
+            ),
         })
 
     def _handle_task_spec_get(self, path: str):
@@ -555,7 +561,12 @@ class ApiHandler(BaseHTTPRequestHandler):
         task_id, action = parts[-2], parts[-1]
         try:
             if action == "enrich":
-                result = self._task_specs.enrich(task_id)
+                data = self._read_json_body() if int(
+                    self.headers.get('Content-Length', 0)
+                ) > 0 else {}
+                result = self._task_specs.enrich(
+                    task_id, str(data.get("model") or "")
+                )
             elif action == "validate":
                 result = self._task_specs.review(task_id)
             elif action == "confirm":

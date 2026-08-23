@@ -36,7 +36,7 @@
 - `POST /agent/api/v1/task-specs/generate`，body `{goal, name?}`：兼容旧前端的立即创建接口，同样不调用模型。响应的 `generation.status` 为 `not_started`。
 - `POST /agent/api/v1/task-specs`，body `{spec}`：导入 JSON。
 - `PATCH /agent/api/v1/task-specs/{id}`，body `{spec}`：保存编辑结果。
-- `POST /agent/api/v1/task-specs/{id}/enrich`：可选的 AI 完善。它在已有任务上调用高价值生成模型，成功返回完善后的同一个任务。
+- `POST /agent/api/v1/task-specs/{id}/enrich`，可选 body `{model?}`：可选的 AI 完善。`model` 必须是 meta 返回的已配置模型，只对本次调用生效，不修改服务端默认配置。成功返回完善后的同一个任务。
 - `POST /agent/api/v1/task-specs/{id}/confirm`：确认未经修改的模型草案。
 - `POST /agent/api/v1/task-specs/{id}/validate`：高价值模型复核。
 - `POST /agent/api/v1/task-specs/{id}/acknowledge`，body `{rationale}`：用户经验覆盖可确认建议。
@@ -97,6 +97,9 @@
 - 点击“创建任务规则”后显示短暂 loading、禁用重复提交；该请求应很快返回，不能显示“高价值模型生成中”。
 - 创建成功后立即选中新任务并展示编辑器。即使用户刷新页面，基础任务也已经在列表中。
 - “AI 完善规则（可选）”是独立按钮。点击后显示“AI 正在完善，可能需要几十秒”，只禁用该任务的重复完善按钮，不锁住编辑器或整个页面。
+- 创建区允许一次性选择“创建后使用哪个模型完善”；留空时只创建基础规则。编辑器里的 AI 完善按钮也提供单次模型下拉。不要把这个选择保存成系统默认配置。
+- `task.required_inputs` 是以输入名为 key 的 JSON object，不是数组。自动渲染每个输入的名称、说明、值和必填标记，并按相同 object 结构保存。
+- AI 可以返回 `suggested_value`，但它不是已确认的 `value`。前端可以预填建议值，同时显示“待确认”；用户点击确认按钮，或聚焦检查后按 Tab/离开输入框，才把它保存进 `value`。
 - AI 完善期间允许用户编辑，但保存可能导致完善接口返回 409；按上述冲突流程处理。
 - 浏览器刷新或网络断开不会删除已创建的基础任务。重新进入页面时从任务列表恢复，不要再次创建同一任务。
 - 请求结束后无论成功或失败都恢复按钮。
