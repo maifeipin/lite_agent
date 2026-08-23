@@ -64,6 +64,7 @@ registerTabModule({
             '尚未运行';
         const isRunning = doc.last_run_status === 'running';
         const canSchedule = schedule.mode === 'once' || schedule.mode === 'repeat';
+        if (isRunning) this._pollRun(doc.id);
 
         // Findings format
         const validation = spec.validation || {};
@@ -1075,6 +1076,5 @@ registerTabModule({
         this._autoOpenId = null;
         this._fallbackNotice = null;
         this._enrichingIds.clear();
-        this._runningPollIds.clear();
     }
 });
