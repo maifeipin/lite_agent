@@ -3,16 +3,58 @@
     "validator_model": "glm-5.3",
     "model_options": {
         "glm-5.3": {
-            "author": {
+            "default": {
                 "invoke_kwargs": {
                     "response_format": {"type": "json_object"},
                     "thinking": {"type": "auto"}
                 }
-            },
-            "validator": {
+            }
+        },
+        "glm-5.2": {
+            "default": {
                 "invoke_kwargs": {
                     "response_format": {"type": "json_object"},
-                    "thinking": {"type": "auto"}
+                    "thinking": {"type": "disabled"}
+                }
+            }
+        },
+        "kimi-k3": {
+            "default": {
+                "invoke_kwargs": {
+                    "response_format": {"type": "json_object"},
+                    "thinking": {"type": "disabled"}
+                }
+            }
+        },
+        "doubao-pro": {
+            "default": {
+                "invoke_kwargs": {
+                    "response_format": {"type": "json_object"},
+                    "thinking": {"type": "disabled"}
+                }
+            }
+        },
+        "flash": {
+            "default": {
+                "invoke_kwargs": {
+                    "response_format": {"type": "json_object"},
+                    "extra_body": {"enable_thinking": false}
+                }
+            }
+        },
+        "gemini-flash": {
+            "default": {
+                "invoke_kwargs": {
+                    "response_format": {"type": "json_object"},
+                    "thinking_budget": 0
+                }
+            }
+        },
+        "gemini-pro": {
+            "default": {
+                "invoke_kwargs": {
+                    "response_format": {"type": "json_object"},
+                    "thinking_budget": 0
                 }
             }
         }
