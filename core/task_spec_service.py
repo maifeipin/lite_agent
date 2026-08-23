@@ -28,7 +28,9 @@ AUTHOR_PROMPT = """你负责把用户目标编译成可编辑的 TaskSpec。只�
 需要根据上游结果判断或有副作用的步骤使用 mode=agent。普通执行节点优先低成本模型，
 高价值模型只用于真正的复杂推理。plan 节点格式：
 缺少的必需条件写入 task.required_inputs，格式为
-{{"条件名":{{"description":"说明","required":true,"value":""}}}}；不要猜测 value。
+{{"条件名":{{"description":"说明","required":true,"value":"","suggested_value":"可选默认建议"}}}}。
+你不能替用户确认 value，必须保持 value 为空；只有存在明显、安全、可修改的默认值时才填写
+suggested_value，例如“最近30天”。没有可靠默认值时省略 suggested_value。
 {{"id":"step_1","objective":"...","type":"text|code|data_analysis|complex_reasoning",
 "depends_on":[],"mode":"tool|agent","capabilities":["web.search"],
 "executor":{{"preferred_model":"","model_tier":"low"}},
@@ -162,13 +164,20 @@ class TaskSpecService:
         }
         return saved
 
-    def _invoke_author(self, spec: dict, goal: str) -> dict:
+    def _author_model_for_request(self, model: str = "") -> str:
+        selected = str(model or self.author_model).strip()
+        if selected not in self.router.models_cfg:
+            raise ValueError(f"TaskSpec author model is not configured: {selected}")
+        return selected
+
+    def _invoke_author(self, spec: dict, goal: str, model: str = "") -> tuple[dict, str]:
+        selected_model = self._author_model_for_request(model)
         invoker = self.router.get_invoker(
-            self.author_model, temperature=0.1, max_tokens=8192, timeout=120.0
+            selected_model, temperature=0.1, max_tokens=8192, timeout=120.0
         )
         if invoker is None:
             raise RuntimeError(
-                f"TaskSpec author model unavailable: {self.author_model}"
+                f"TaskSpec author model unavailable: {selected_model}"
             )
         prompt = AUTHOR_PROMPT.format(
             goal=goal,
@@ -178,20 +187,43 @@ class TaskSpecService:
         )
         result = self.llm.invoke_sync(
             [{"role": "user", "content": prompt}],
-            model=self.author_model, invoker=invoker, role="task_spec_author",
-            provider=self.router.get_driver(self.author_model),
+            model=selected_model, invoker=invoker, role="task_spec_author",
+            provider=self.router.get_driver(selected_model),
             session_key=f"task_spec:{spec['contract']['task_id']}",
             source=ExecutionSource.API, max_tokens=8192, timeout=120.0,
         )
-        return _parse_json_object(result["content"])
+        return _parse_json_object(result["content"]), selected_model
 
-    def _apply_generated(self, spec: dict, generated: dict) -> tuple[dict, dict, str]:
+    @staticmethod
+    def _require_confirmation_for_suggestions(spec: dict, generated: dict) -> dict:
+        """A model may suggest missing input values, but cannot confirm them."""
+        safe = copy.deepcopy(generated)
+        base_inputs = (spec.get("task") or {}).get("required_inputs") or {}
+        generated_inputs = (safe.get("task") or {}).get("required_inputs")
+        if not isinstance(generated_inputs, dict):
+            return safe
+        for name, detail in generated_inputs.items():
+            if not isinstance(detail, dict):
+                continue
+            base_detail = base_inputs.get(name) if isinstance(base_inputs, dict) else None
+            if isinstance(base_detail, dict) and base_detail.get("value") not in (None, "", [], {}):
+                detail.pop("value", None)
+                continue
+            proposed = detail.get("value")
+            if proposed not in (None, "", [], {}):
+                detail.setdefault("suggested_value", proposed)
+                detail["value"] = ""
+        return safe
+
+    def _apply_generated(self, spec: dict, generated: dict,
+                         generated_by: str) -> tuple[dict, dict, str]:
         updated = copy.deepcopy(spec)
+        generated = self._require_confirmation_for_suggestions(spec, generated)
         for key in ("task", "execution", "output", "on_failure"):
             if key in generated:
                 updated[key] = _merge_generated(updated[key], generated[key])
         updated = normalize_task_spec(updated)
-        updated["contract"]["generated_by"] = self.author_model
+        updated["contract"]["generated_by"] = generated_by
         digest = content_digest(updated)
         updated["contract"]["content_digest"] = digest
         updated["contract"]["generated_digest"] = digest
@@ -222,15 +254,17 @@ class TaskSpecService:
     def generate(self, goal: str, name: str = "") -> dict:
         spec = new_task_spec(goal, name=name)
         try:
-            generated = self._invoke_author(spec, goal)
+            generated, selected_model = self._invoke_author(spec, goal)
         except Exception as exc:
             return self._save_generation_fallback(spec, exc)
-        spec, report, status = self._apply_generated(spec, generated)
+        spec, report, status = self._apply_generated(
+            spec, generated, selected_model
+        )
         saved = self.store.save(spec, status=status, enabled=False)
         saved["preflight"] = report
         return saved
 
-    def enrich(self, task_id: str) -> dict:
+    def enrich(self, task_id: str, model: str = "") -> dict:
         """Optionally improve an already-persisted draft without losing user edits."""
         current = self.store.get(task_id)
         if current is None:
@@ -243,8 +277,11 @@ class TaskSpecService:
             or starting_spec.get("task", {}).get("objective")
             or ""
         )
+        selected_model = self._author_model_for_request(model)
         try:
-            generated = self._invoke_author(starting_spec, goal)
+            generated, selected_model = self._invoke_author(
+                starting_spec, goal, selected_model
+            )
         except Exception as exc:
             latest = self.store.get(task_id)
             if latest is None:
@@ -262,7 +299,9 @@ class TaskSpecService:
             }
             return result
 
-        updated, report, status = self._apply_generated(starting_spec, generated)
+        updated, report, status = self._apply_generated(
+            starting_spec, generated, selected_model
+        )
         updated["contract"]["revision"] = starting_revision + 1
         # Serialize only the final compare-and-save. A concurrent user save wins;
         # two enrich requests cannot both overwrite the same starting revision.
