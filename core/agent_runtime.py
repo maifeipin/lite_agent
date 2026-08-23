@@ -28,6 +28,7 @@ from core.execution import ExecutionContext, ExecutionResult, ExecutionSource, A
 from core.loop_detector import LoopDetector
 from core.model_event import ModelEvent, ModelEventType
 from core.model_invoker import ModelInvoker
+from core.llm_gateway import LLMGateway
 from core.skill_engine import SkillEngine
 from core.utils.masker import mask_secrets
 
@@ -96,7 +97,8 @@ class AgentRuntime:
     def __init__(self, model_invoker: ModelInvoker, skill_engine: SkillEngine,
                  max_steps: int = 8, max_tokens: int = 2048,
                  max_retries: int = 1, non_retryable_exceptions: tuple = (),
-                 call_kwargs: Optional[dict] = None):
+                 call_kwargs: Optional[dict] = None,
+                 gateway: Optional[LLMGateway] = None):
         self.model_invoker = model_invoker
         self.skill_engine = skill_engine
         self.max_steps = max_steps
@@ -104,6 +106,10 @@ class AgentRuntime:
         self.max_retries = max_retries
         self.non_retryable_exceptions = non_retryable_exceptions
         self.call_kwargs = dict(call_kwargs or {})
+        # The invoker argument remains a compatibility seam for callers that
+        # construct provider adapters themselves. All runtime dispatch still
+        # passes through the gateway boundary.
+        self.gateway = gateway or LLMGateway()
 
     def run(self, messages: list, tools: list,
             ctx: ExecutionContext,
@@ -366,8 +372,9 @@ class AgentRuntime:
             try:
                 invocation_kwargs = dict(self.call_kwargs)
                 invocation_kwargs.update(call_overrides or {})
-                for event in self.model_invoker.invoke_stream(
-                    state.messages, tools, timeout=timeout, max_tokens=max_tokens,
+                for event in self.gateway.invoke_stream(
+                    state.messages, tools, invoker=self.model_invoker,
+                    timeout=timeout, max_tokens=max_tokens,
                     **invocation_kwargs,
                 ):
                     if event.type == ModelEventType.TEXT:
@@ -434,8 +441,8 @@ class AgentRuntime:
         """同步消费 invoke_sync 返回的 dict，转换为 RuntimeEvent。"""
         invocation_kwargs = dict(self.call_kwargs)
         invocation_kwargs.update(call_overrides or {})
-        result = self.model_invoker.invoke_sync(
-            state.messages, tools, max_tokens=max_tokens,
+        result = self.gateway.invoke_sync(
+            state.messages, tools, invoker=self.model_invoker, max_tokens=max_tokens,
             **invocation_kwargs,
         )
 

@@ -13,7 +13,7 @@ class LLMGateway:
         self.router = router
         self.ledger = ledger
 
-    def invoke_sync(self, messages: list, *, model: str = "", invoker=None,
+    def invoke_sync(self, messages: list, tools: list = None, *, model: str = "", invoker=None,
                     role: str = "llm", provider: str = "",
                     session_key: str = "", parent_execution_id: str = "",
                     source: ExecutionSource = ExecutionSource.DIRECT,
@@ -35,7 +35,7 @@ class LLMGateway:
         if not provider and self.router is not None and model:
             provider = self.router.get_driver(model)
         if self.ledger is None:
-            return invoker.invoke_sync(messages=messages, **kwargs)
+            return invoker.invoke_sync(messages=messages, tools=tools, **kwargs)
 
         max_output_tokens = int(
             kwargs.get("max_tokens", getattr(invoker, "max_tokens", 0)) or 0
@@ -59,7 +59,7 @@ class LLMGateway:
             self.ledger.record_and_project(
                 execution.id, 0, "STEP_START", {"step": 1, "max_steps": 1}, step=1
             )
-            result = invoker.invoke_sync(messages=messages, **kwargs)
+            result = invoker.invoke_sync(messages=messages, tools=tools, **kwargs)
             prompt_tokens = int(result.get("prompt_tokens", 0) or 0)
             completion_tokens = int(result.get("completion_tokens", 0) or 0)
             total_tokens = int(result.get("usage_total", 0) or 0)
@@ -90,3 +90,20 @@ class LLMGateway:
                 execution.id, status="failed", terminal_reason="model_exception"
             )
             raise
+
+    def invoke_stream(self, messages: list, tools: list, *, model: str = "",
+                      invoker=None, **kwargs):
+        """Return the provider stream through the single call boundary.
+
+        Streaming runtime calls are recorded by ``RuntimeRecorder`` because
+        usage and tool events are only known while the stream is consumed.
+        Keeping provider dispatch here prevents Runtime/Worker from growing
+        another routing or provider-specific branch.
+        """
+        if invoker is None:
+            if self.router is None or not model:
+                raise ValueError("model or invoker is required")
+            invoker = self.router.get_invoker(model, **kwargs)
+            if invoker is None:
+                raise RuntimeError(f"Model is not available: {model}")
+        return invoker.invoke_stream(messages, tools, **kwargs)
