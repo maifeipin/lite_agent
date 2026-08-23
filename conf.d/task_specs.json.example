@@ -1,0 +1,20 @@
+{
+    "author_model": "glm-5.3",
+    "validator_model": "glm-5.3",
+    "model_options": {
+        "glm-5.3": {
+            "author": {
+                "invoke_kwargs": {
+                    "response_format": {"type": "json_object"},
+                    "thinking": {"type": "disabled"}
+                }
+            },
+            "validator": {
+                "invoke_kwargs": {
+                    "response_format": {"type": "json_object"},
+                    "thinking": {"type": "disabled"}
+                }
+            }
+        }
+    }
+}
