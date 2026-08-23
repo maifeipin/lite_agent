@@ -1,5 +1,6 @@
 import copy
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -23,7 +24,7 @@ def _config():
     }
 
 
-def _service(tmp_path, model_output):
+def _service(tmp_path, model_output, skill_engine=None, request_selector=None):
     router = MagicMock()
     router.models_cfg = {"pro": {}, "flash": {}}
     invoker = MagicMock()
@@ -35,7 +36,9 @@ def _service(tmp_path, model_output):
     router.get_invoker.return_value = invoker
     with patch("core.task_spec_service.ModelRouter", return_value=router):
         service = TaskSpecService(
-            _config(), store=TaskSpecStore(str(tmp_path / "specs.db"))
+            _config(), skill_engine=skill_engine,
+            store=TaskSpecStore(str(tmp_path / "specs.db")),
+            request_selector=request_selector,
         )
     return service, invoker
 
@@ -109,6 +112,84 @@ def test_enrich_updates_existing_task_and_increments_revision(tmp_path):
     assert enriched["spec"]["task"]["context"] == "读取已配置的账单数据源"
     assert enriched["spec"]["execution"]["model_policy"]["preferred_model"] == "flash"
     assert invoker.invoke_sync.call_count == 1
+
+
+def test_author_receives_selector_tool_schemas_and_disables_hidden_retries(tmp_path):
+    skill_engine = MagicMock()
+    skill_engine.get_all_names.return_value = {"billing_recent", "billing_report"}
+    skill_engine.get_schemas_by_names.return_value = [{
+        "type": "function",
+        "function": {
+            "name": "billing_report",
+            "description": "生成近期账单报告，包含外币交易",
+            "parameters": {
+                "type": "object",
+                "properties": {"months": {"type": "integer", "default": 3}},
+            },
+        },
+    }]
+    selector = MagicMock()
+    selector.select.return_value = SimpleNamespace(names=["billing_report"])
+    service, invoker = _service(
+        tmp_path,
+        {"task": {"required_inputs": {}}},
+        skill_engine=skill_engine,
+        request_selector=selector,
+    )
+
+    service.generate("查看一下最近的外币账单")
+
+    selector.select.assert_called_once()
+    prompt = invoker.invoke_sync.call_args.kwargs["messages"][0]["content"]
+    assert "billing_report" in prompt
+    assert '"default": 3' in prompt
+    assert invoker.invoke_sync.call_args.kwargs["max_retries"] == 0
+
+
+def test_author_does_not_inject_all_tools_for_unknown_intent(tmp_path):
+    skill_engine = MagicMock()
+    selector = MagicMock()
+    selector.select.return_value = SimpleNamespace(names=None)
+    service, _ = _service(
+        tmp_path,
+        {"task": {"required_inputs": {}}},
+        skill_engine=skill_engine,
+        request_selector=selector,
+    )
+
+    service.generate("一个尚未映射领域的复杂目标")
+
+    skill_engine.get_schemas_by_names.assert_not_called()
+
+
+def test_enrich_can_remove_inputs_replaced_by_a_direct_tool(tmp_path):
+    service, _ = _service(tmp_path, {
+        "task": {"required_inputs": {}},
+        "execution": {
+            "plan": [{
+                "id": "step_1",
+                "objective": "读取最近的账单并筛选外币交易",
+                "type": "data_analysis",
+                "depends_on": [],
+                "mode": "tool",
+                "capabilities": [],
+                "executor": {"preferred_model": "", "model_tier": "low"},
+                "tool": {"name": "billing_report", "arguments": {"months": 3}},
+            }],
+        },
+    })
+    manual = service.create_manual("查看一下最近的外币账单")
+    edited = copy.deepcopy(manual["spec"])
+    edited["task"]["required_inputs"] = {
+        "bill_data": {"description": "账单数据", "required": True, "value": ""},
+        "time_range": {"description": "时间范围", "required": True, "value": ""},
+    }
+    service.update(manual["id"], edited)
+
+    enriched = service.enrich(manual["id"])
+
+    assert enriched["spec"]["task"]["required_inputs"] == {}
+    assert enriched["spec"]["execution"]["plan"][0]["tool"]["name"] == "billing_report"
 
 
 def test_enrich_can_use_one_time_model_without_changing_default(tmp_path):

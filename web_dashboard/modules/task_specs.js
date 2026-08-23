@@ -345,8 +345,10 @@ registerTabModule({
             </div>
         `;
 
-        // Interactive Plan Step List Render Helper
+        // Interactive Plan Step List Render Helper. Keep this editor aligned
+        // with the canonical TaskSpec plan-node schema used by the backend.
         const capNames = Object.keys(meta.capabilities || {});
+        const toolDefs = Array.isArray(meta.tools) ? meta.tools : [];
         const renderSteps = () => {
             const listEl = panel.querySelector('.task-steps-list');
             if (!listEl) return;
@@ -355,12 +357,18 @@ registerTabModule({
                 return;
             }
             listEl.innerHTML = planSteps.map((step, idx) => {
-                const sid = step.id || (idx + 1);
-                const sname = step.name || step.title || `步骤 ${idx + 1}`;
-                const scap = step.capability || step.action || '';
-                const sdesc = step.description || step.input || (typeof step.params === 'object' ? JSON.stringify(step.params) : (step.params || ''));
-                const sdep = Array.isArray(step.depends_on) ? step.depends_on.join(', ') : (step.depends_on || '');
-                const capOpts = `<option value="">-- 选择执行能力 --</option>` + capNames.map(cn => `<option value="${h(cn)}" ${scap === cn ? 'selected' : ''}>${h(cn)}</option>`).join('');
+                const sid = step.id || `step_${idx + 1}`;
+                const objective = step.objective || step.name || step.title || `步骤 ${idx + 1}`;
+                const capabilities = Array.isArray(step.capabilities) ? step.capabilities : [];
+                const selectedCapability = capabilities[0] || step.capability || step.action || '';
+                const mode = step.mode || (step.tool?.name ? 'tool' : 'agent');
+                const type = step.type || 'text';
+                const toolName = step.tool?.name || '';
+                const toolArgs = step.tool?.arguments && typeof step.tool.arguments === 'object'
+                    ? JSON.stringify(step.tool.arguments) : '{}';
+                const dependencies = Array.isArray(step.depends_on) ? step.depends_on.join(', ') : (step.depends_on || '');
+                const capOpts = `<option value="">-- 选择执行能力 --</option>` + capNames.map(name => `<option value="${h(name)}" ${selectedCapability === name ? 'selected' : ''}>${h(name)}</option>`).join('');
+                const toolOpts = `<option value="">-- 选择工具 --</option>` + toolDefs.map(tool => `<option value="${h(tool.name || '')}" ${toolName === tool.name ? 'selected' : ''}>${h(tool.name || '')}${tool.description ? ` · ${h(tool.description)}` : ''}</option>`).join('');
 
                 return `<div class="task-step-card" data-idx="${idx}">
                     <div class="task-step-card-header">
@@ -372,11 +380,21 @@ registerTabModule({
                         </div>
                     </div>
                     <div class="task-step-grid">
-                        <input class="step-name-input" value="${h(sname)}" placeholder="步骤动作名称 (如: 读取当月账单)">
+                        <input class="step-objective-input" value="${h(objective)}" placeholder="步骤目标（如：读取最近的外币账单）">
+                        <select class="step-mode-input">
+                            <option value="tool" ${mode === 'tool' ? 'selected' : ''}>直接调用工具</option>
+                            <option value="agent" ${mode === 'agent' ? 'selected' : ''}>由 Agent 执行</option>
+                        </select>
+                        <select class="step-type-input">
+                            ${['text', 'code', 'data_analysis', 'complex_reasoning'].map(value => `<option value="${value}" ${type === value ? 'selected' : ''}>${value}</option>`).join('')}
+                        </select>
                         <select class="step-cap-input">${capOpts}</select>
                     </div>
-                    <input class="step-desc-input" value="${h(sdesc)}" placeholder="输入参数或具体指示描述">
-                    <input class="step-dep-input" value="${h(sdep)}" placeholder="前置依赖步骤 ID (例如: 1, 2，可选)">
+                    <div class="step-tool-wrap" style="display:${mode === 'tool' ? 'grid' : 'none'};">
+                        <select class="step-tool-input">${toolOpts}</select>
+                        <input class="step-tool-args-input" value="${h(toolArgs)}" placeholder='工具参数 JSON，例如 {"months":3}'>
+                    </div>
+                    <input class="step-dep-input" value="${h(dependencies)}" placeholder="前置依赖步骤 ID (例如: step_1, step_2，可选)">
                 </div>`;
             }).join('');
         };
@@ -385,17 +403,37 @@ registerTabModule({
             const stepCards = panel.querySelectorAll('.task-step-card');
             const newSteps = [];
             stepCards.forEach((card, idx) => {
-                const name = card.querySelector('.step-name-input').value.trim();
+                const previous = planSteps[idx] || {};
+                const objective = card.querySelector('.step-objective-input').value.trim();
+                const mode = card.querySelector('.step-mode-input').value;
+                const type = card.querySelector('.step-type-input').value;
                 const capability = card.querySelector('.step-cap-input').value;
-                const desc = card.querySelector('.step-desc-input').value.trim();
+                const toolName = card.querySelector('.step-tool-input').value;
+                const rawToolArgs = card.querySelector('.step-tool-args-input').value.trim() || '{}';
                 const depStr = card.querySelector('.step-dep-input').value.trim();
-                const deps = depStr ? depStr.split(',').map(x => x.trim()).filter(Boolean) : [];
+                const dependencies = depStr ? depStr.split(',').map(value => value.trim()).filter(Boolean) : [];
+                let toolArgs = {};
+                if (mode === 'tool') {
+                    try {
+                        toolArgs = JSON.parse(rawToolArgs);
+                    } catch {
+                        throw new Error(`步骤 ${idx + 1} 的工具参数不是有效 JSON`);
+                    }
+                    if (!toolArgs || Array.isArray(toolArgs) || typeof toolArgs !== 'object') {
+                        throw new Error(`步骤 ${idx + 1} 的工具参数必须是 JSON object`);
+                    }
+                }
                 newSteps.push({
-                    id: idx + 1,
-                    name: name || `步骤 ${idx + 1}`,
-                    capability: capability || undefined,
-                    description: desc || undefined,
-                    depends_on: deps.length > 0 ? deps : undefined
+                    id: previous.id || `step_${idx + 1}`,
+                    objective: objective || `步骤 ${idx + 1}`,
+                    type,
+                    depends_on: dependencies,
+                    mode,
+                    capabilities: capability ? [capability] : [],
+                    executor: previous.executor || { preferred_model: '', model_tier: 'low' },
+                    tool: mode === 'tool'
+                        ? { name: toolName, arguments: toolArgs }
+                        : { name: '', arguments: {} }
                 });
             });
             planSteps = newSteps;
@@ -407,8 +445,15 @@ registerTabModule({
 
         // Step list event delegation
         const stepsListEl = panel.querySelector('.task-steps-list');
-        stepsListEl.oninput = () => syncStepsFromDOM();
-        stepsListEl.onchange = () => syncStepsFromDOM();
+        stepsListEl.oninput = () => {
+            // Tool arguments are edited as JSON and are temporarily invalid
+            // while the user is typing. Validation remains strict on save.
+            try { syncStepsFromDOM(); } catch {}
+        };
+        stepsListEl.onchange = (ev) => {
+            syncStepsFromDOM();
+            if (ev.target.classList.contains('step-mode-input')) renderSteps();
+        };
         stepsListEl.onclick = (ev) => {
             const card = ev.target.closest('.task-step-card');
             if (!card) return;
@@ -436,10 +481,14 @@ registerTabModule({
         panel.querySelector('.task-add-step').onclick = () => {
             syncStepsFromDOM();
             planSteps.push({
-                id: planSteps.length + 1,
-                name: '',
-                capability: '',
-                description: ''
+                id: `step_${planSteps.length + 1}`,
+                objective: '',
+                type: 'text',
+                depends_on: [],
+                mode: 'agent',
+                capabilities: [],
+                executor: { preferred_model: '', model_tier: 'low' },
+                tool: { name: '', arguments: {} }
             });
             renderSteps();
             syncStepsFromDOM();
@@ -715,16 +764,54 @@ registerTabModule({
 
     async _enrichTask(id, model = '') {
         if (this._enrichingIds.has(String(id))) return;
+        let startingRevision = 0;
+        try {
+            const current = await fetch(`/agent/api/v1/task-specs/${id}`, {
+                cache: 'no-store'
+            }).then(r => r.json());
+            startingRevision = Number(current.spec?.contract?.revision || 0);
+        } catch {}
+
         this._enrichingIds.add(String(id));
-        await performSearch(false);
+        try { await performSearch(false); } catch {}
+        let stopPolling = false;
 
         try {
-            const r = await fetch(`/agent/api/v1/task-specs/${id}/enrich`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model })
-            });
-            const d = await r.json();
+            const request = fetch(`/agent/api/v1/task-specs/${id}/enrich`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model })
+                }).then(async r => ({ r, d: await r.json() }));
+
+            // A proxy/browser can lose the synchronous response after the server
+            // has committed the new revision. Poll the persisted task as the
+            // source of truth so the UI cannot remain stuck indefinitely.
+            const persisted = (async () => {
+                for (let attempt = 0; attempt < 50 && !stopPolling; attempt += 1) {
+                    await new Promise(resolve => setTimeout(resolve, 3000));
+                    if (stopPolling) break;
+                    try {
+                        const item = await fetch(`/agent/api/v1/task-specs/${id}`, {
+                            cache: 'no-store'
+                        }).then(r => r.json());
+                        const revision = Number(item.spec?.contract?.revision || 0);
+                        const generated = item.spec?.contract?.generated_digest;
+                        if (revision > startingRevision && generated &&
+                                ['draft', 'blocked'].includes(item.status)) {
+                            return { persisted: true, d: item };
+                        }
+                    } catch {}
+                }
+                throw new Error('AI 完善超过 150 秒，已停止等待；基础规则仍保留，可稍后刷新');
+            })();
+
+            const outcome = await Promise.race([request, persisted]);
+            if (outcome.persisted) {
+                this._fallbackNotice = null;
+                this._autoOpenId = id;
+                return;
+            }
+            const { r, d } = outcome;
 
             if (r.status === 409) {
                 alert(`⚠️ AI 结果未覆盖你的修改：${d.error || '任务在 AI 完善期间已被修改；已保留你当前编辑的内容'}`);
@@ -745,8 +832,13 @@ registerTabModule({
         } catch (ex) {
             alert(`AI 完善任务失败: ${ex.message}`);
         } finally {
+            stopPolling = true;
             this._enrichingIds.delete(String(id));
-            await performSearch(false);
+            document.querySelectorAll(`.task-spec-card[data-id="${id}"] .task-enrich`).forEach(btn => {
+                btn.disabled = false;
+                btn.textContent = '✨ AI 完善规则 (可选)';
+            });
+            try { await performSearch(false); } catch {}
         }
     },
 
