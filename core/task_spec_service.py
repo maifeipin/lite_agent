@@ -91,6 +91,10 @@ def _merge_generated(base: dict, generated: dict) -> dict:
     return merged
 
 
+class TaskSpecRevisionConflict(ValueError):
+    """The editable task changed while a model was preparing an update."""
+
+
 class TaskSpecService:
     def __init__(self, config: dict, skill_engine=None,
                  store: Optional[TaskSpecStore] = None, ledger=None):
@@ -158,6 +162,44 @@ class TaskSpecService:
         }
         return saved
 
+    def _invoke_author(self, spec: dict, goal: str) -> dict:
+        invoker = self.router.get_invoker(
+            self.author_model, temperature=0.1, max_tokens=8192, timeout=120.0
+        )
+        if invoker is None:
+            raise RuntimeError(
+                f"TaskSpec author model unavailable: {self.author_model}"
+            )
+        prompt = AUTHOR_PROMPT.format(
+            goal=goal,
+            draft=json.dumps(spec, ensure_ascii=False, indent=2),
+            models=json.dumps(sorted(self.router.models_cfg), ensure_ascii=False),
+            capabilities=json.dumps(self.capability_map, ensure_ascii=False),
+        )
+        result = self.llm.invoke_sync(
+            [{"role": "user", "content": prompt}],
+            model=self.author_model, invoker=invoker, role="task_spec_author",
+            provider=self.router.get_driver(self.author_model),
+            session_key=f"task_spec:{spec['contract']['task_id']}",
+            source=ExecutionSource.API, max_tokens=8192, timeout=120.0,
+        )
+        return _parse_json_object(result["content"])
+
+    def _apply_generated(self, spec: dict, generated: dict) -> tuple[dict, dict, str]:
+        updated = copy.deepcopy(spec)
+        for key in ("task", "execution", "output", "on_failure"):
+            if key in generated:
+                updated[key] = _merge_generated(updated[key], generated[key])
+        updated = normalize_task_spec(updated)
+        updated["contract"]["generated_by"] = self.author_model
+        digest = content_digest(updated)
+        updated["contract"]["content_digest"] = digest
+        updated["contract"]["generated_digest"] = digest
+        updated["contract"].pop("validated_digest", None)
+        report = self.deterministic_preflight(updated)
+        status = "draft" if report["status"] == "ready" else "blocked"
+        return self._validation(updated, status, report), report, status
+
     def import_spec(self, uploaded: dict) -> dict:
         """Import an uploaded rule file without trusting its identity or policy."""
         if uploaded.get("policy") != BASE_POLICY:
@@ -180,42 +222,64 @@ class TaskSpecService:
     def generate(self, goal: str, name: str = "") -> dict:
         spec = new_task_spec(goal, name=name)
         try:
-            invoker = self.router.get_invoker(
-                self.author_model, temperature=0.1, max_tokens=8192, timeout=120.0
-            )
-            if invoker is None:
-                raise RuntimeError(
-                    f"TaskSpec author model unavailable: {self.author_model}"
-                )
-            prompt = AUTHOR_PROMPT.format(
-                goal=goal,
-                draft=json.dumps(spec, ensure_ascii=False, indent=2),
-                models=json.dumps(sorted(self.router.models_cfg), ensure_ascii=False),
-                capabilities=json.dumps(self.capability_map, ensure_ascii=False),
-            )
-            result = self.llm.invoke_sync(
-                [{"role": "user", "content": prompt}],
-                model=self.author_model, invoker=invoker, role="task_spec_author",
-                provider=self.router.get_driver(self.author_model),
-                session_key="task_spec:author", source=ExecutionSource.API,
-                max_tokens=8192, timeout=120.0,
-            )
-            generated = _parse_json_object(result["content"])
+            generated = self._invoke_author(spec, goal)
         except Exception as exc:
             return self._save_generation_fallback(spec, exc)
-        for key in ("task", "execution", "output", "on_failure"):
-            if key in generated:
-                spec[key] = _merge_generated(spec[key], generated[key])
-        spec = normalize_task_spec(spec)
-        spec["contract"]["generated_by"] = self.author_model
-        digest = content_digest(spec)
-        spec["contract"]["content_digest"] = digest
-        spec["contract"]["generated_digest"] = digest
-        report = self.deterministic_preflight(spec)
-        status = "draft" if report["status"] == "ready" else "blocked"
-        spec = self._validation(spec, status, report)
+        spec, report, status = self._apply_generated(spec, generated)
         saved = self.store.save(spec, status=status, enabled=False)
         saved["preflight"] = report
+        return saved
+
+    def enrich(self, task_id: str) -> dict:
+        """Optionally improve an already-persisted draft without losing user edits."""
+        current = self.store.get(task_id)
+        if current is None:
+            raise KeyError(task_id)
+        starting_spec = normalize_task_spec(current["spec"])
+        starting_revision = int(starting_spec["contract"].get("revision", 1))
+        starting_digest = content_digest(starting_spec)
+        goal = str(
+            starting_spec["contract"].get("original_goal")
+            or starting_spec.get("task", {}).get("objective")
+            or ""
+        )
+        try:
+            generated = self._invoke_author(starting_spec, goal)
+        except Exception as exc:
+            latest = self.store.get(task_id)
+            if latest is None:
+                raise KeyError(task_id)
+            result = copy.deepcopy(latest)
+            is_timeout = "timeout" in type(exc).__name__.lower()
+            result["generation"] = {
+                "status": "fallback",
+                "code": "AUTHOR_MODEL_TIMEOUT" if is_timeout else "AUTHOR_MODEL_FAILED",
+                "message": (
+                    "高价值生成模型调用超时，基础规则已保留，可稍后重试。"
+                    if is_timeout else
+                    "高价值生成模型暂时不可用，基础规则已保留，可稍后重试。"
+                ),
+            }
+            return result
+
+        updated, report, status = self._apply_generated(starting_spec, generated)
+        updated["contract"]["revision"] = starting_revision + 1
+        # Serialize only the final compare-and-save. A concurrent user save wins;
+        # two enrich requests cannot both overwrite the same starting revision.
+        with self.store._lock:
+            latest = self.store.get(task_id)
+            if latest is None:
+                raise KeyError(task_id)
+            latest_spec = latest["spec"]
+            latest_revision = int(latest_spec.get("contract", {}).get("revision", 1))
+            if (latest_revision != starting_revision
+                    or content_digest(latest_spec) != starting_digest):
+                raise TaskSpecRevisionConflict(
+                    "任务在 AI 完善期间已被修改；模型结果未覆盖当前版本，请刷新后重试"
+                )
+            saved = self.store.save(updated, status=status, enabled=False)
+        saved["preflight"] = report
+        saved["generation"] = {"status": "completed"}
         return saved
 
     def update(self, task_id: str, edited_spec: dict) -> dict:
