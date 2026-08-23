@@ -211,6 +211,48 @@ def test_task_spec_settings_can_override_model_with_dotted_name(tmp_path):
     assert kwargs["response_format"] == {"type": "json_object"}
 
 
+def test_task_spec_profile_merges_model_default_and_role_overrides(tmp_path):
+    config = _config()
+    config["llm"]["models"]["pro"] = {
+        "max_tokens": 12000,
+        "task_spec": {
+            "default": {
+                "max_tokens": 6000,
+                "invoke_kwargs": {
+                    "response_format": {"type": "json_object"},
+                    "thinking": {"type": "disabled"},
+                },
+            },
+            "author": {
+                "timeout": 45,
+                "invoke_kwargs": {"thinking": {"type": "auto"}},
+            },
+        },
+    }
+    config["task_specs"]["model_options"] = {
+        "pro": {
+            "default": {
+                "max_retries": 1,
+                "invoke_kwargs": {"temperature_hint": "stable"},
+            },
+            "author": {"max_tokens": 7000},
+        },
+    }
+    service, invoker = _service(
+        tmp_path, {"task": {"required_inputs": {}}}, config=config
+    )
+
+    service.generate("查看最近的外币账单")
+
+    kwargs = invoker.invoke_sync.call_args.kwargs
+    assert kwargs["max_tokens"] == 7000
+    assert kwargs["timeout"] == 45
+    assert kwargs["max_retries"] == 1
+    assert kwargs["response_format"] == {"type": "json_object"}
+    assert kwargs["thinking"] == {"type": "auto"}
+    assert kwargs["temperature_hint"] == "stable"
+
+
 def test_author_does_not_inject_all_tools_for_unknown_intent(tmp_path):
     skill_engine = MagicMock()
     selector = MagicMock()
