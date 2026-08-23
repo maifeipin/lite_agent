@@ -134,6 +134,12 @@ def new_task_spec(goal: str, name: str = "", task_id: str = "") -> dict:
 def normalize_task_spec(spec: dict) -> dict:
     """Overlay immutable policy values without silently repairing other fields."""
     normalized = copy.deepcopy(spec)
+    task = normalized.get("task")
+    # Browser form libraries commonly serialize an empty object editor as [].
+    # Empty is unambiguous here; non-empty arrays remain invalid and visible to
+    # deterministic preflight instead of being guessed into a mapping.
+    if isinstance(task, dict) and task.get("required_inputs") == []:
+        task["required_inputs"] = {}
     normalized.setdefault("contract", {})
     normalized["contract"]["schema_version"] = SCHEMA_VERSION
     normalized["contract"]["policy_profile"] = BASE_POLICY["profile"]
