@@ -103,6 +103,10 @@ class TaskSpecRevisionConflict(ValueError):
     """The editable task changed while a model was preparing an update."""
 
 
+class TaskSpecOutputTruncated(ValueError):
+    """The provider stopped before completing the required JSON object."""
+
+
 class TaskSpecService:
     def __init__(self, config: dict, skill_engine=None,
                  store: Optional[TaskSpecStore] = None, ledger=None,
@@ -115,6 +119,7 @@ class TaskSpecService:
         self.llm = LLMGateway(self.router, ledger)
         self.request_selector = request_selector
         task_cfg = config.get("task_specs", {}) or {}
+        self.task_cfg = task_cfg
         routing = config.get("task_routing", {}) or {}
         llm = config.get("llm", {}) or {}
         self.author_model = task_cfg.get(
@@ -151,12 +156,16 @@ class TaskSpecService:
         """Keep the interactive workflow usable when the author model fails."""
         error_name = type(exc).__name__
         is_timeout = "timeout" in error_name.lower()
-        code = "AUTHOR_MODEL_TIMEOUT" if is_timeout else "AUTHOR_MODEL_FAILED"
-        message = (
-            "高价值生成模型调用超时，已创建可编辑的基础规则。"
-            if is_timeout else
-            "高价值生成模型暂时不可用，已创建可编辑的基础规则。"
-        )
+        is_truncated = isinstance(exc, TaskSpecOutputTruncated)
+        if is_timeout:
+            code = "AUTHOR_MODEL_TIMEOUT"
+            message = "高价值生成模型调用超时，已创建可编辑的基础规则。"
+        elif is_truncated:
+            code = "AUTHOR_OUTPUT_TRUNCATED"
+            message = "生成模型输出超过 JSON 长度上限，已创建可编辑的基础规则。"
+        else:
+            code = "AUTHOR_MODEL_FAILED"
+            message = "高价值生成模型暂时不可用，已创建可编辑的基础规则。"
         report = self.deterministic_preflight(spec)
         spec["contract"]["generated_by"] = "deterministic-fallback"
         spec = self._validation(spec, "review_required", report, [finding(
@@ -192,15 +201,61 @@ class TaskSpecService:
         schemas = self.skill_engine.get_schemas_by_names(selected.names)
         return [schema.get("function", {}) for schema in schemas]
 
-    def _invoke_author(self, spec: dict, goal: str, model: str = "") -> tuple[dict, str]:
-        selected_model = self._author_model_for_request(model)
+    def _call_profile(self, model: str, role: str) -> dict:
+        """Resolve TaskSpec call limits without imposing one profile on all models."""
+        model_cfg = self.router.models_cfg.get(model, {}) or {}
+        role_cfg = ((model_cfg.get("task_spec") or {}).get(role) or {})
+        default_tokens = int(model_cfg.get("max_tokens", 8192) or 8192)
+        max_tokens = int(role_cfg.get(
+            "max_tokens",
+            self.task_cfg.get(f"{role}_max_tokens", default_tokens),
+        ))
+        timeout = float(role_cfg.get(
+            "timeout",
+            self.task_cfg.get(f"{role}_timeout", 120.0),
+        ))
+        max_retries = int(role_cfg.get(
+            "max_retries",
+            self.task_cfg.get(f"{role}_max_retries", 0),
+        ))
+        invoke_kwargs = copy.deepcopy(role_cfg.get("invoke_kwargs") or {})
+        for reserved in ("max_tokens", "timeout", "max_retries"):
+            invoke_kwargs.pop(reserved, None)
+        return {
+            "max_tokens": max(1, max_tokens),
+            "timeout": max(1.0, timeout),
+            "max_retries": max(0, max_retries),
+            "invoke_kwargs": invoke_kwargs,
+        }
+
+    def _invoke_author_model(self, prompt: str, spec: dict,
+                             selected_model: str) -> dict:
+        profile = self._call_profile(selected_model, "author")
         invoker = self.router.get_invoker(
-            selected_model, temperature=0.1, max_tokens=4096, timeout=120.0
+            selected_model, temperature=0.1,
+            max_tokens=profile["max_tokens"], timeout=profile["timeout"],
         )
         if invoker is None:
             raise RuntimeError(
                 f"TaskSpec author model unavailable: {selected_model}"
             )
+        result = self.llm.invoke_sync(
+            [{"role": "user", "content": prompt}],
+            model=selected_model, invoker=invoker, role="task_spec_author",
+            provider=self.router.get_driver(selected_model),
+            session_key=f"task_spec:{spec['contract']['task_id']}",
+            source=ExecutionSource.API,
+            max_tokens=profile["max_tokens"], timeout=profile["timeout"],
+            max_retries=profile["max_retries"], **profile["invoke_kwargs"],
+        )
+        if result.get("finish_reason") == "length":
+            raise TaskSpecOutputTruncated(
+                f"TaskSpec author output truncated: {selected_model}"
+            )
+        return _parse_json_object(result["content"])
+
+    def _invoke_author(self, spec: dict, goal: str, model: str = "") -> tuple[dict, str]:
+        selected_model = self._author_model_for_request(model)
         prompt = AUTHOR_PROMPT.format(
             goal=goal,
             draft=json.dumps(spec, ensure_ascii=False, indent=2),
@@ -208,15 +263,21 @@ class TaskSpecService:
             capabilities=json.dumps(self.capability_map, ensure_ascii=False),
             tools=json.dumps(self._author_tools(goal), ensure_ascii=False, indent=2),
         )
-        result = self.llm.invoke_sync(
-            [{"role": "user", "content": prompt}],
-            model=selected_model, invoker=invoker, role="task_spec_author",
-            provider=self.router.get_driver(selected_model),
-            session_key=f"task_spec:{spec['contract']['task_id']}",
-            source=ExecutionSource.API, max_tokens=4096, timeout=120.0,
-            max_retries=0,
-        )
-        return _parse_json_object(result["content"]), selected_model
+        try:
+            return self._invoke_author_model(prompt, spec, selected_model), selected_model
+        except Exception as primary_error:
+            fallback = self.router.get_fallback(
+                selected_model, SubtaskType.TEXT.value
+            )
+            if not fallback or fallback[0] == selected_model:
+                raise
+            fallback_model = fallback[0]
+            try:
+                return self._invoke_author_model(
+                    prompt, spec, fallback_model
+                ), fallback_model
+            except Exception as fallback_error:
+                raise fallback_error from primary_error
 
     @staticmethod
     def _require_confirmation_for_suggestions(spec: dict, generated: dict) -> dict:
@@ -322,14 +383,20 @@ class TaskSpecService:
                 raise KeyError(task_id)
             result = copy.deepcopy(latest)
             is_timeout = "timeout" in type(exc).__name__.lower()
+            is_truncated = isinstance(exc, TaskSpecOutputTruncated)
+            if is_timeout:
+                code = "AUTHOR_MODEL_TIMEOUT"
+                message = "高价值生成模型调用超时，基础规则已保留，可稍后重试。"
+            elif is_truncated:
+                code = "AUTHOR_OUTPUT_TRUNCATED"
+                message = "生成模型输出超过 JSON 长度上限，基础规则已保留，可改用更精简的模型重试。"
+            else:
+                code = "AUTHOR_MODEL_FAILED"
+                message = "高价值生成模型暂时不可用，基础规则已保留，可稍后重试。"
             result["generation"] = {
                 "status": "fallback",
-                "code": "AUTHOR_MODEL_TIMEOUT" if is_timeout else "AUTHOR_MODEL_FAILED",
-                "message": (
-                    "高价值生成模型调用超时，基础规则已保留，可稍后重试。"
-                    if is_timeout else
-                    "高价值生成模型暂时不可用，基础规则已保留，可稍后重试。"
-                ),
+                "code": code,
+                "message": message,
             }
             return result
 
@@ -391,6 +458,31 @@ class TaskSpecService:
         saved = self.store.save(spec, status="approved", enabled=current["enabled"])
         return {"status": "approved", "preflight": report, "task": saved}
 
+    def _invoke_reviewer_model(self, prompt: str, task_id: str,
+                               selected_model: str) -> dict:
+        profile = self._call_profile(selected_model, "validator")
+        invoker = self.router.get_invoker(
+            selected_model, temperature=0.1,
+            max_tokens=profile["max_tokens"], timeout=profile["timeout"],
+        )
+        if invoker is None:
+            raise RuntimeError(
+                f"TaskSpec validator model unavailable: {selected_model}"
+            )
+        result = self.llm.invoke_sync(
+            [{"role": "user", "content": prompt}],
+            model=selected_model, invoker=invoker, role="task_spec_validator",
+            provider=self.router.get_driver(selected_model),
+            session_key=f"task_spec:{task_id}", source=ExecutionSource.API,
+            max_tokens=profile["max_tokens"], timeout=profile["timeout"],
+            max_retries=profile["max_retries"], **profile["invoke_kwargs"],
+        )
+        if result.get("finish_reason") == "length":
+            raise TaskSpecOutputTruncated(
+                f"TaskSpec validator output truncated: {selected_model}"
+            )
+        return _parse_json_object(result["content"])
+
     def review(self, task_id: str) -> dict:
         current = self.store.get(task_id)
         if current is None:
@@ -402,52 +494,51 @@ class TaskSpecService:
             self.store.save(spec, status="blocked", enabled=False)
             return {"status": "blocked", "preflight": hard_report, "findings": []}
 
-        invoker = self.router.get_invoker(
-            self.validator_model, temperature=0.1, max_tokens=4096, timeout=120.0
-        )
-        if invoker is None:
-            unavailable = finding(
-                "MODEL_UNAVAILABLE",
-                f"TaskSpec validator model unavailable: {self.validator_model}",
-            )
-            spec = self._validation(spec, "blocked", hard_report, [unavailable])
-            self.store.save(spec, status="blocked", enabled=False)
-            return {"status": "blocked", "preflight": hard_report,
-                    "findings": [unavailable]}
         prompt = REVIEW_PROMPT.format(
             spec=json.dumps(spec, ensure_ascii=False, indent=2)
         )
         try:
-            result = self.llm.invoke_sync(
-                [{"role": "user", "content": prompt}],
-                model=self.validator_model, invoker=invoker, role="task_spec_validator",
-                provider=self.router.get_driver(self.validator_model),
-                session_key=f"task_spec:{task_id}", source=ExecutionSource.API,
-                max_tokens=4096, timeout=120.0,
-                max_retries=0,
+            reviewed = self._invoke_reviewer_model(
+                prompt, task_id, self.validator_model
             )
-            reviewed = _parse_json_object(result["content"])
         except Exception as exc:
-            error_name = type(exc).__name__
-            is_timeout = "timeout" in error_name.lower()
-            code = "VALIDATOR_MODEL_TIMEOUT" if is_timeout else "VALIDATOR_MODEL_FAILED"
-            message = (
-                "高价值复核模型调用超时，请稍后重试。"
-                if is_timeout else "高价值复核模型暂时不可用，请稍后重试。"
+            fallback = self.router.get_fallback(
+                self.validator_model, SubtaskType.TEXT.value
             )
-            unavailable = finding(
-                code, message, path="/validation",
-                resolution="任务草案已保留，可稍后再次点击高价值复核。",
-                severity="warning", overrideable=False, source="runtime",
-            )
-            spec = self._validation(
-                spec, "review_required", hard_report, [unavailable]
-            )
-            self.store.save(spec, status="review_required", enabled=False)
-            return {
-                "status": "review_required", "preflight": hard_report,
-                "findings": [unavailable],
-            }
+            if fallback and fallback[0] != self.validator_model:
+                try:
+                    reviewed = self._invoke_reviewer_model(
+                        prompt, task_id, fallback[0]
+                    )
+                    exc = None
+                except Exception as fallback_error:
+                    exc = fallback_error
+            if exc is not None:
+                error_name = type(exc).__name__
+                is_timeout = "timeout" in error_name.lower()
+                is_truncated = isinstance(exc, TaskSpecOutputTruncated)
+                if is_timeout:
+                    code = "VALIDATOR_MODEL_TIMEOUT"
+                    message = "高价值复核模型调用超时，请稍后重试。"
+                elif is_truncated:
+                    code = "VALIDATOR_OUTPUT_TRUNCATED"
+                    message = "复核模型输出超过 JSON 长度上限，请改用更精简的模型后重试。"
+                else:
+                    code = "VALIDATOR_MODEL_FAILED"
+                    message = "高价值复核模型暂时不可用，请稍后重试。"
+                unavailable = finding(
+                    code, message, path="/validation",
+                    resolution="任务草案已保留，可稍后再次点击高价值复核。",
+                    severity="warning", overrideable=False, source="runtime",
+                )
+                spec = self._validation(
+                    spec, "review_required", hard_report, [unavailable]
+                )
+                self.store.save(spec, status="review_required", enabled=False)
+                return {
+                    "status": "review_required", "preflight": hard_report,
+                    "findings": [unavailable],
+                }
         findings = []
         allowed_severity = {"suggestion", "warning", "needs_ack"}
         for raw in reviewed.get("findings") or []:
