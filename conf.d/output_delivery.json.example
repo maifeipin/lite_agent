@@ -1,6 +1,6 @@
 {
     "long_output": {
-        "full_delivery": "auto",
+        "full_delivery": "email",
         "reply_mode": "summary",
         "summary_model": "flash",
         "summary_chars": 1200,
