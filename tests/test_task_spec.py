@@ -141,13 +141,55 @@ def test_store_round_trip_due_and_once_claim(tmp_path):
     assert len(store.list()) == 1
     assert len(store.due(datetime(2026, 8, 23, 9, 0, tzinfo=timezone.utc))) == 1
 
-    store.mark_started("abc123")
+    store.mark_started("abc123", scheduled=True)
     claimed = store.get("abc123")
     assert claimed["enabled"] is False
     assert claimed["last_run_status"] == "running"
 
     store.mark_finished("abc123", True, "done")
     assert store.get("abc123")["last_run_status"] == "succeeded"
+
+
+def test_manual_run_does_not_enable_schedule(tmp_path):
+    store = TaskSpecStore(str(tmp_path / "tasks.db"))
+    spec = new_task_spec("manual", task_id="manual123")
+    store.save(spec, status="approved", enabled=False)
+
+    store.mark_started("manual123")
+
+    running = store.get("manual123")
+    assert running["enabled"] is False
+    assert running["next_run_at"] is None
+    assert running["last_run_status"] == "running"
+
+
+def test_manual_run_preserves_an_enabled_repeat_schedule(tmp_path):
+    store = TaskSpecStore(str(tmp_path / "tasks.db"))
+    spec = new_task_spec("repeat", task_id="repeat123")
+    spec["execution"]["schedule"] = {
+        "mode": "repeat", "run_at": "", "cron": "*/15 * * * *",
+        "timezone": "UTC",
+    }
+    saved = store.save(spec, status="approved", enabled=True)
+
+    store.mark_started("repeat123")
+
+    running = store.get("repeat123")
+    assert running["enabled"] is True
+    assert running["next_run_at"] == saved["next_run_at"]
+
+
+def test_store_recovers_running_tasks_after_restart(tmp_path):
+    store = TaskSpecStore(str(tmp_path / "tasks.db"))
+    spec = new_task_spec("interrupted", task_id="stale123")
+    store.save(spec, status="approved", enabled=False)
+    store.mark_started("stale123")
+
+    assert store.recover_interrupted() == 1
+
+    recovered = store.get("stale123")
+    assert recovered["last_run_status"] == "interrupted"
+    assert "重启" in recovered["last_run_result"]
 
 
 def test_plan_rejects_unknown_tool_dependency_cycle_and_model():

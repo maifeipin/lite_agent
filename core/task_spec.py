@@ -569,18 +569,28 @@ class TaskSpecStore:
             """, (now_iso,)).fetchall()
         return [self._row(row) for row in rows]
 
-    def mark_started(self, task_id: str):
+    def mark_started(self, task_id: str, scheduled: bool = False):
+        """Mark a run active; only scheduler-triggered runs consume a schedule."""
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._connect() as conn:
-            row = conn.execute("SELECT spec_json FROM task_specs WHERE id=?", (task_id,)).fetchone()
+            row = conn.execute(
+                "SELECT spec_json, enabled, next_run_at FROM task_specs WHERE id=?",
+                (task_id,),
+            ).fetchone()
             if not row:
                 return
             spec = json.loads(row["spec_json"])
             schedule = spec["execution"]["schedule"]
-            if schedule.get("mode") == "once":
+            if not scheduled:
+                enabled, following = row["enabled"], row["next_run_at"]
+            elif schedule.get("mode") == "once":
                 enabled, following = 0, None
+            elif schedule.get("mode") == "repeat":
+                enabled, following = 1, next_run_at(
+                    spec, datetime.now(timezone.utc)
+                )
             else:
-                enabled, following = 1, next_run_at(spec, datetime.now(timezone.utc))
+                enabled, following = 0, None
             conn.execute("""
                 UPDATE task_specs SET enabled=?, next_run_at=?, last_run_at=?,
                     last_run_status='running', updated_at=? WHERE id=?
@@ -593,6 +603,17 @@ class TaskSpecStore:
                 UPDATE task_specs SET last_run_status=?, last_run_result=?,
                     updated_at=? WHERE id=?
             """, ("succeeded" if ok else "failed", str(result)[:20000], now, task_id))
+
+    def recover_interrupted(self) -> int:
+        """Close runs whose worker thread disappeared during a process restart."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as conn:
+            cur = conn.execute("""
+                UPDATE task_specs SET last_run_status='interrupted',
+                    last_run_result='Lite Agent 重启，任务执行被中断', updated_at=?
+                WHERE last_run_status='running'
+            """, (now,))
+            return cur.rowcount
 
     @staticmethod
     def _row(row) -> dict:
