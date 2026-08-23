@@ -163,6 +163,19 @@ def test_manual_run_does_not_enable_schedule(tmp_path):
     assert running["last_run_status"] == "running"
 
 
+def test_running_task_preserves_previous_result_for_history(tmp_path):
+    store = TaskSpecStore(str(tmp_path / "tasks.db"))
+    spec = new_task_spec("manual", task_id="history123")
+    store.save(spec, status="approved", enabled=False)
+    store.mark_finished("history123", True, "previous result")
+
+    store.mark_started("history123")
+
+    running = store.get("history123")
+    assert running["last_run_status"] == "running"
+    assert running["last_run_result"] == "previous result"
+
+
 def test_manual_run_preserves_an_enabled_repeat_schedule(tmp_path):
     store = TaskSpecStore(str(tmp_path / "tasks.db"))
     spec = new_task_spec("repeat", task_id="repeat123")
