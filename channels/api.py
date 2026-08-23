@@ -1749,6 +1749,7 @@ class ApiServer:
                     ledger=self.agent.ledger,
                 )
                 planned = self.task_specs.build_subtasks(spec)
+                execution_policy = self.task_specs.build_execution_policy(spec)
                 if planned:
                     # Direct nodes in an approved immutable TaskSpec do not need a
                     # Worker LLM. SkillEngine still enforces the tool allowlist.
@@ -1763,6 +1764,7 @@ class ApiServer:
                     wall_seconds_override=int(budget.get("max_wall_seconds", 900)),
                     planned_subtasks=planned or None,
                     planned_strategy=str((spec.get("task") or {}).get("context") or ""),
+                    execution_policy=execution_policy,
                 )
                 delivered_result = self.agent._prepare_output(
                     result, "task", overrides=spec.get("output") or {},

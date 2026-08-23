@@ -82,6 +82,7 @@ class IncomingMessage:
         # 如 钉钉的 msg_data(含sessionWebhook)、飞书的 sender open_id 等。默认 None 向后兼容。
         self.channel_payload = channel_payload or {}
         self.output_mode = output_mode
+        self.model_override = ""
         self._session_key = ""
 
     @property
@@ -536,6 +537,17 @@ class Agent:
         """实际处理逻辑, 调用方必须已持有 session 锁"""
         text = msg.text.strip()
 
+        if (
+            not msg.is_guest and text and not text.startswith("/")
+            and not text.startswith("::")
+        ):
+            try:
+                msg.model_override = self._extract_model_override(text) or ""
+            except ValueError as exc:
+                return AgentResponse(
+                    f"❌ {exc}", title="❌ 模型选择失败", color="red"
+                )
+
         session = self.session_mgr.get_or_create(msg.session_key)
 
         # 标题自动生成 (两阶段：阶段1即时截取，阶段2后台LLM精炼)
@@ -901,19 +913,8 @@ class Agent:
         Supported forms are deterministic: ``[model=name]`` and natural
         ``用/使用 name`` with spaces accepted in place of hyphens.
         """
-        models = (self._config.get("llm", {}) or {}).get("models", {}) or {}
-        bracket = re.search(r"\[model=([^\]]+)\]", text or "", re.IGNORECASE)
-        if bracket:
-            requested = bracket.group(1).strip()
-            if requested not in models:
-                raise ValueError(f"未配置模型: {requested}")
-            return requested
-        lowered = (text or "").lower()
-        for name in sorted(models, key=len, reverse=True):
-            alias = re.escape(name.lower()).replace(r"\-", r"[\s_-]+")
-            if re.search(rf"(?:用|使用|指定)\s*{alias}(?:\s|来|去|，|,|$)", lowered):
-                return name
-        return None
+        from core.model_policy import ModelSelector
+        return ModelSelector(self._config).extract_override(text) or None
 
     def _get_request_model_router(self):
         router = self._request_model_router
@@ -930,6 +931,7 @@ class Agent:
 
     def _run_orchestrated(self, msg: IncomingMessage) -> AgentResponse:
         from core.task_orchestrator import TaskOrchestrator
+        from core.model_policy import ExecutionPolicy
         import uuid
         import re
 
@@ -953,6 +955,10 @@ class Agent:
         )
 
         task_id = uuid.uuid4().hex[:8]
+        execution_policy = (
+            ExecutionPolicy.user_locked(msg.model_override)
+            if msg.model_override else ExecutionPolicy()
+        )
 
         def _bg_run():
             try:
@@ -963,6 +969,7 @@ class Agent:
                     progress_callback=self._on_subtask_progress(msg),
                     task_id=task_id,
                     step_override=step_override,
+                    execution_policy=execution_policy,
                 )
                 print(f"  [ORCH] 后台线程执行完成 session={msg.session_key} result_len={len(result)}")
                 self._push_result(msg, result)
@@ -1091,14 +1098,15 @@ class Agent:
         request_max_tokens = self.max_tokens
         request_runtime = self.runtime
         request_stream = not is_gemini_driver(request_driver)
-        override = None
+        override = getattr(msg, "model_override", "") or None
         if not msg.is_guest:
-            try:
-                override = self._extract_model_override(msg.text)
-            except ValueError as exc:
-                yield {"type": "error", "msg": f"❌ {exc}"}
-                yield {"type": "done", "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "estimated": False}}
-                return
+            if override is None:
+                try:
+                    override = self._extract_model_override(msg.text)
+                except ValueError as exc:
+                    yield {"type": "error", "msg": f"❌ {exc}"}
+                    yield {"type": "done", "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "estimated": False}}
+                    return
             selected_model = override or str(
                 (self._config.get("task_routing", {}) or {}).get("simple_model") or ""
             )
