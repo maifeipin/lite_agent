@@ -24,6 +24,7 @@ from core.subtask_dag import Subtask, SubtaskType
 AUTHOR_PROMPT = """你负责把用户目标编译成可编辑的 TaskSpec。只输出 JSON object，不要 Markdown。
 
 硬规则由代码执行，你只能补充以下四个顶层字段：task、execution、output、on_failure。
+只返回需要修改的最小字段集合，不要复述基础草案中未变化的字段。
 不要写入密钥，不要虚构不存在的模型或能力。简单、只读、参数已完全确定的步骤优先 mode=tool；
 需要根据上游结果判断或有副作用的步骤使用 mode=agent。普通执行节点优先低成本模型，
 高价值模型只用于真正的复杂推理。plan 节点格式：
@@ -35,6 +36,11 @@ suggested_value，例如“最近30天”。没有可靠默认值时省略 sugge
 "depends_on":[],"mode":"tool|agent","capabilities":["web.search"],
 "executor":{{"preferred_model":"","model_tier":"low"}},
 "tool":{{"name":"仅 tool 节点填写实际工具名","arguments":{{}}}}}}
+
+可用工具如下。若工具能直接读取所需数据，优先生成 mode=tool 节点，不要再把该数据声明为
+用户必需输入；带默认值的工具参数可以直接采用默认值或写入 arguments。若现有草案中的
+required_inputs 已被工具取代，必须在返回结果中显式写入 required_inputs={{}} 将其移除：
+{tools}
 
 用户目标：
 {goal}
@@ -99,13 +105,15 @@ class TaskSpecRevisionConflict(ValueError):
 
 class TaskSpecService:
     def __init__(self, config: dict, skill_engine=None,
-                 store: Optional[TaskSpecStore] = None, ledger=None):
+                 store: Optional[TaskSpecStore] = None, ledger=None,
+                 request_selector=None):
         self.config = config
         self.skill_engine = skill_engine
         self.store = store or TaskSpecStore()
         self.ledger = ledger
         self.router = ModelRouter(config)
         self.llm = LLMGateway(self.router, ledger)
+        self.request_selector = request_selector
         task_cfg = config.get("task_specs", {}) or {}
         routing = config.get("task_routing", {}) or {}
         llm = config.get("llm", {}) or {}
@@ -170,10 +178,24 @@ class TaskSpecService:
             raise ValueError(f"TaskSpec author model is not configured: {selected}")
         return selected
 
+    def _author_tools(self, goal: str) -> list:
+        if self.skill_engine is None or self.request_selector is None:
+            return []
+        selected = self.request_selector.select(
+            goal, history=[], is_guest=False, max_tools=15
+        )
+        # TaskSpec authoring is not the runtime's all-tools fallback path.
+        # Unknown intent gets no schemas; recognized domains get at most the
+        # selector's bounded subset. This keeps author prompt size predictable.
+        if not selected.names:
+            return []
+        schemas = self.skill_engine.get_schemas_by_names(selected.names)
+        return [schema.get("function", {}) for schema in schemas]
+
     def _invoke_author(self, spec: dict, goal: str, model: str = "") -> tuple[dict, str]:
         selected_model = self._author_model_for_request(model)
         invoker = self.router.get_invoker(
-            selected_model, temperature=0.1, max_tokens=8192, timeout=120.0
+            selected_model, temperature=0.1, max_tokens=4096, timeout=120.0
         )
         if invoker is None:
             raise RuntimeError(
@@ -184,13 +206,15 @@ class TaskSpecService:
             draft=json.dumps(spec, ensure_ascii=False, indent=2),
             models=json.dumps(sorted(self.router.models_cfg), ensure_ascii=False),
             capabilities=json.dumps(self.capability_map, ensure_ascii=False),
+            tools=json.dumps(self._author_tools(goal), ensure_ascii=False, indent=2),
         )
         result = self.llm.invoke_sync(
             [{"role": "user", "content": prompt}],
             model=selected_model, invoker=invoker, role="task_spec_author",
             provider=self.router.get_driver(selected_model),
             session_key=f"task_spec:{spec['contract']['task_id']}",
-            source=ExecutionSource.API, max_tokens=8192, timeout=120.0,
+            source=ExecutionSource.API, max_tokens=4096, timeout=120.0,
+            max_retries=0,
         )
         return _parse_json_object(result["content"]), selected_model
 
@@ -223,6 +247,13 @@ class TaskSpecService:
         for key in ("task", "execution", "output", "on_failure"):
             if key in generated:
                 updated[key] = _merge_generated(updated[key], generated[key])
+        # An explicit required_inputs object is authoritative. Recursive merge
+        # would otherwise preserve stale blockers after a tool replaces them.
+        generated_task = generated.get("task")
+        if isinstance(generated_task, dict) and "required_inputs" in generated_task:
+            updated["task"]["required_inputs"] = copy.deepcopy(
+                generated_task["required_inputs"]
+            )
         updated = normalize_task_spec(updated)
         updated["contract"]["generated_by"] = generated_by
         if revision is not None:
@@ -393,6 +424,7 @@ class TaskSpecService:
                 provider=self.router.get_driver(self.validator_model),
                 session_key=f"task_spec:{task_id}", source=ExecutionSource.API,
                 max_tokens=4096, timeout=120.0,
+                max_retries=0,
             )
             reviewed = _parse_json_object(result["content"])
         except Exception as exc:

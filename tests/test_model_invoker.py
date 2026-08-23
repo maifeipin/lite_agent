@@ -278,6 +278,28 @@ class TestOpenAISync:
         result = invoker.invoke_sync([{"role": "user", "content": "hi"}])
         assert result["usage_total"] == 0
 
+    def test_sync_can_disable_sdk_retries_for_bounded_calls(self):
+        client = MagicMock()
+        scoped_client = MagicMock()
+        client.with_options.return_value = scoped_client
+        msg = SimpleNamespace(content="ok", tool_calls=None)
+        choice = SimpleNamespace(finish_reason="stop", message=msg)
+        scoped_client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[choice], usage=None
+        )
+        invoker = OpenAIInvoker(
+            client=client, model_name="test-model", temperature=0.3, max_tokens=256
+        )
+
+        result = invoker.invoke_sync(
+            [{"role": "user", "content": "hi"}], max_retries=0
+        )
+
+        client.with_options.assert_called_once_with(max_retries=0)
+        scoped_client.chat.completions.create.assert_called_once()
+        client.chat.completions.create.assert_not_called()
+        assert result["content"] == "ok"
+
     def test_empty_content_becomes_empty_str(self, invoker):
         """content 为 None 时返回空字符串。"""
         self._set_response(invoker, content=None)
