@@ -644,3 +644,29 @@ class TaskSpecService:
                 tool_arguments=tool.get("arguments") if isinstance(tool.get("arguments"), dict) else {},
             ))
         return subtasks
+
+    @staticmethod
+    def build_execution_policy(spec: dict):
+        """Translate an approved TaskSpec model contract into runtime policy."""
+        from core.model_policy import ExecutionPolicy, ModelLock
+
+        execution = spec.get("execution") or {}
+        model_policy = execution.get("model_policy") or {}
+        budget = execution.get("budget") or {}
+        preferred = str(model_policy.get("preferred_model") or "")
+        if preferred and model_policy.get("user_locked"):
+            lock = ModelLock.HARD
+        elif preferred:
+            lock = ModelLock.PREFERRED
+        else:
+            lock = ModelLock.AUTO
+        return ExecutionPolicy(
+            requested_model=preferred,
+            model_lock=lock,
+            lock_source="task_spec",
+            allowed_models=tuple(model_policy.get("allowed_models") or ()),
+            max_steps=int(budget.get("max_steps", 20)),
+            max_total_tokens=int(budget.get("max_total_tokens", 50000)),
+            max_wall_seconds=int(budget.get("max_wall_seconds", 900)),
+            max_parallel_tasks=int(budget.get("max_parallel_tasks", 3)),
+        )

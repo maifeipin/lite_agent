@@ -49,6 +49,18 @@ def test_task_spec_models_are_validated():
     assert any("task_specs.model_tiers.low" in message for message in errors)
 
 
+def test_duplicate_model_alias_is_rejected():
+    config = _config({
+        "doubao": _model("doubao") | {"aliases": ["fast"]},
+        "flash": _model("flash") | {"aliases": ["fast"]},
+    })
+
+    errors = [message for level, message in validate_model_config(config)
+              if level == "error"]
+
+    assert any("模型别名 'fast' 冲突" in message for message in errors)
+
+
 def test_native_gemini_can_be_default_and_simple_model():
     config = _config({
         "gemini-flash": {

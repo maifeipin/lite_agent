@@ -6,8 +6,10 @@ from unittest.mock import MagicMock
 from core.execution import ExecutionResult
 from core.model_invoker import GeminiInvoker, OpenAIInvoker
 from core.model_router import ModelRouter
+from core.model_policy import ExecutionPolicy, ModelSelector
 from core.subtask_dag import Subtask, SubtaskDAG
 from core.task_orchestrator import TaskOrchestrator
+from core.worker_agent import WorkerOutcome
 from agent import Agent
 
 
@@ -98,7 +100,10 @@ def test_planner_uses_selector_subset_in_prompt(monkeypatch):
     orch = TaskOrchestrator.__new__(TaskOrchestrator)
     orch.dag_max_steps = 30
     orch.planner_model = "planner"
-    orch.config = {"llm": {"default": "planner"}}
+    orch.config = {
+        "llm": {"default": "planner", "models": {"planner": {}}},
+        "task_routing": {"planner_model": "planner"},
+    }
     orch.router = MagicMock()
     invoker = MagicMock()
     invoker.model_name = "planner-actual"
@@ -131,7 +136,10 @@ def test_planner_shadow_keeps_full_tool_catalogue(monkeypatch):
     orch = TaskOrchestrator.__new__(TaskOrchestrator)
     orch.dag_max_steps = 30
     orch.planner_model = "planner"
-    orch.config = {"llm": {"default": "planner"}}
+    orch.config = {
+        "llm": {"default": "planner", "models": {"planner": {}}},
+        "task_routing": {"planner_model": "planner"},
+    }
     orch.router = MagicMock()
     invoker = MagicMock(model_name="planner-actual")
     invoker.invoke_sync.return_value = {
@@ -159,6 +167,7 @@ def test_explicit_model_override_supports_bracket_and_natural_alias():
     agent = Agent.__new__(Agent)
     agent._config = {"llm": {"models": {
         "gemini-flash": {}, "gemini-pro": {},
+        "doubao-pro": {"aliases": ["doubao", "豆包"]},
     }}}
 
     assert agent._extract_model_override(
@@ -167,6 +176,12 @@ def test_explicit_model_override_supports_bracket_and_natural_alias():
     assert agent._extract_model_override(
         "搜索产品 [model=gemini-pro]"
     ) == "gemini-pro"
+    assert agent._extract_model_override(
+        "用 doubao 查一下电动自行车"
+    ) == "doubao-pro"
+    assert agent._extract_model_override(
+        "使用豆包来查账单"
+    ) == "doubao-pro"
     assert agent._extract_model_override("普通聊天") is None
 
 
@@ -177,3 +192,122 @@ def test_unknown_bracket_model_is_rejected():
     import pytest
     with pytest.raises(ValueError, match="未配置模型"):
         agent._extract_model_override("执行任务 [model=not-real]")
+
+
+def test_hard_model_policy_controls_planner_and_worker_route():
+    config = {
+        "llm": {
+            "default": "glm",
+            "models": {"glm": {}, "doubao-pro": {}, "flash": {}},
+        },
+        "task_routing": {
+            "planner_model": "glm",
+            "route_rules": [{
+                "type": "text", "model": "glm", "fallback": "flash",
+                "allowed_models": ["glm", "doubao-pro", "flash"],
+            }],
+        },
+    }
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    orch.dag_max_steps = 30
+    orch.planner_model = "glm"
+    orch.config = config
+    orch.model_selector = ModelSelector(config)
+    orch.router = MagicMock()
+    invoker = MagicMock(model_name="doubao-actual")
+    invoker.invoke_sync.return_value = {
+        "content": json.dumps({"global_strategy": "", "subtasks": []}),
+        "finish_reason": "stop", "usage_total": 1,
+    }
+    orch.router.get_invoker.return_value = invoker
+    orch.router.get_driver.return_value = "ark"
+    orch.request_selector = MagicMock()
+    orch.request_selector.select.return_value = SimpleNamespace(
+        names=[], confidence="high"
+    )
+    orch.skill_engine = MagicMock()
+    orch.skill_engine.get_all_names.return_value = set()
+    policy = ExecutionPolicy.user_locked("doubao-pro")
+
+    orch._plan("research", execution_policy=policy)
+    subtask = Subtask(id="s1", name="research")
+    orch._classify_and_route([subtask], execution_policy=policy)
+
+    assert orch.router.get_invoker.call_args_list[0].args[0] == "doubao-pro"
+    assert subtask.assigned_model == "doubao-pro"
+    assert subtask.model_reason == "user:hard"
+    assert subtask.fallback_models == []
+
+
+def test_worker_factory_reuses_router_invoker():
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    orch.router = MagicMock()
+    orch.router.models_cfg = {
+        "doubao-pro": {"model": "doubao-actual", "max_steps": 8},
+    }
+    invoker = MagicMock(model_name="doubao-actual")
+    orch.router.get_invoker.return_value = invoker
+    orch.router.get_driver.return_value = "ark"
+    orch.skill_engine = MagicMock()
+    orch.ledger = None
+    orch._active_worker_max_steps = 5
+    orch._active_token_budget = 1000
+    subtask = Subtask(id="s1", name="research", assigned_model="doubao-pro")
+
+    worker = orch._make_worker(subtask, "doubao-pro")
+
+    assert worker.model_invoker is invoker
+    assert worker.max_steps == 5
+    orch.router.get_invoker.assert_called_once_with("doubao-pro")
+
+
+def test_worker_model_error_uses_only_decision_fallbacks():
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    primary = MagicMock()
+    primary.run.return_value = WorkerOutcome(
+        "primary failed", status="failed", terminal_reason="model_error"
+    )
+    fallback = MagicMock()
+    fallback.run.return_value = WorkerOutcome("fallback ok")
+    orch._make_worker = MagicMock(side_effect=[primary, fallback])
+    orch._log_and_persist = MagicMock()
+    orch.direct_tool_execution = False
+    subtask = Subtask(
+        id="s1", name="research", assigned_model="glm",
+        fallback_models=["flash"],
+    )
+    results = {}
+
+    orch._run_single_subtask(
+        subtask, {}, results, threading.Lock(), parent_execution_id="parent"
+    )
+
+    assert results["s1"]["status"] == "done"
+    assert results["s1"]["result"] == "fallback ok"
+    assert [call.args[1] for call in orch._make_worker.call_args_list] == [
+        "glm", "flash",
+    ]
+
+
+def test_hard_worker_model_error_has_no_hidden_fallback():
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    worker = MagicMock()
+    worker.run.return_value = WorkerOutcome(
+        "locked failed", status="failed", terminal_reason="model_error"
+    )
+    orch._make_worker = MagicMock(return_value=worker)
+    orch._log_and_persist = MagicMock()
+    orch.direct_tool_execution = False
+    subtask = Subtask(
+        id="s1", name="research", assigned_model="doubao-pro",
+        fallback_models=[],
+    )
+    results = {}
+
+    orch._run_single_subtask(
+        subtask, {}, results, threading.Lock(), parent_execution_id="parent"
+    )
+
+    assert results["s1"]["status"] == "failed"
+    assert "locked failed" in results["s1"]["error"]
+    orch._make_worker.assert_called_once()

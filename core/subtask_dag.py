@@ -31,6 +31,8 @@ class Subtask:
     tool_name: str = ""
     tool_arguments: dict = field(default_factory=dict)
     assigned_model: str = ""
+    model_reason: str = ""
+    fallback_models: list = field(default_factory=list)
     status: SubtaskStatus = SubtaskStatus.PENDING
     result: str = ""
     error: str = ""
@@ -162,6 +164,8 @@ class SubtaskDAG:
                 "tool_name": s.tool_name,
                 "tool_arguments": s.tool_arguments,
                 "assigned_model": s.assigned_model,
+                "model_reason": s.model_reason,
+                "fallback_models": s.fallback_models,
                 "status": s.status.value,
                 "result": str(s.result)[:1000] if s.result else "",
                 "tool_results": [{"name": tr.get("name"), "args": tr.get("args"), "result": (str(tr.get("result", ""))[:1000] if tr.get("result") else "")} for tr in s.tool_results] if s.tool_results else [],
@@ -213,6 +217,8 @@ class SubtaskDAG:
                 tool_name=item.get("tool_name", ""),
                 tool_arguments=item.get("tool_arguments", {}),
                 assigned_model=item.get("assigned_model", ""),
+                model_reason=item.get("model_reason", ""),
+                fallback_models=item.get("fallback_models", []),
                 status=SubtaskStatus(item.get("status", "pending")),
                 result=item.get("result", ""),
                 error=item.get("error", ""),
