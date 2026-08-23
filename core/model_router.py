@@ -7,6 +7,7 @@ from core.model_config import (
     is_gemini_driver,
     supports_vision,
 )
+from core.model_invoker import GeminiInvoker, OpenAIInvoker
 
 
 class ModelRouter:
@@ -113,6 +114,31 @@ class ModelRouter:
 
     def get_client(self, model_name: str) -> Optional[object]:
         return self._clients.get(model_name)
+
+    def get_invoker(self, model_name: str, **kwargs):
+        """Build the existing protocol adapter for a configured model.
+
+        Keeping this factory here prevents Planner/Worker callers from duplicating
+        driver checks while leaving routing policy in configuration.
+        """
+        client = self.get_client(model_name)
+        if client is None:
+            return None
+        cfg = self.models_cfg.get(model_name, {})
+        actual_model = cfg.get("model", model_name)
+        common = {
+            "client": client,
+            "model_name": actual_model,
+            "temperature": kwargs.get("temperature", cfg.get("temperature", 0.3)),
+            "max_tokens": kwargs.get("max_tokens", cfg.get("max_tokens", 2048)),
+            "output_recovery": cfg.get("output_recovery", {}),
+        }
+        if is_gemini_driver(self.get_driver(model_name)):
+            return GeminiInvoker(**common)
+        return OpenAIInvoker(
+            **common,
+            timeout=kwargs.get("timeout", 60.0),
+        )
 
     def supports_vision(self, model_name: str) -> bool:
         cfg = self.models_cfg.get(model_name, {})

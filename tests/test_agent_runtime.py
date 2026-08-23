@@ -89,7 +89,7 @@ class TestTextReply:
         ))
         se = MagicMock()
 
-        runtime = AgentRuntime(invoker, se, max_steps=3)
+        runtime = AgentRuntime(invoker, se, max_steps=1)
         events = list(runtime.run(
             messages=[{"role": "user", "content": "hi"}],
             tools=[],
@@ -114,7 +114,7 @@ class TestTextReply:
         ))
         se = MagicMock()
 
-        runtime = AgentRuntime(invoker, se, max_steps=3)
+        runtime = AgentRuntime(invoker, se, max_steps=1)
         events = list(runtime.run(
             messages=[{"role": "user", "content": "hi"}],
             tools=[],
@@ -126,6 +126,51 @@ class TestTextReply:
         assert done.data["content"] == ""
         assert done.data["finish_reason"] == "length"
         assert done.data["empty"] is False
+
+    def test_output_limit_retries_once_with_configured_kwargs(self):
+        invoker = MagicMock()
+        invoker.output_limit_retry_kwargs.return_value = {
+            "extra_body": {"enable_thinking": False}
+        }
+        invoker.invoke_stream.side_effect = [
+            iter(_make_stream_events(text=None, finish_reason="length")),
+            iter(_make_stream_events(text="完整答案", finish_reason="stop")),
+        ]
+        runtime = AgentRuntime(invoker, MagicMock(), max_steps=3, max_tokens=8192)
+
+        events = list(runtime.run(
+            messages=[{"role": "user", "content": "优化行程"}],
+            tools=[], ctx=_make_ctx(max_steps=3, max_output_tokens=8192),
+        ))
+
+        done = [e for e in events if e.type == RuntimeEventType.DONE][-1]
+        assert done.data["content"] == "完整答案"
+        assert invoker.invoke_stream.call_count == 2
+        assert invoker.invoke_stream.call_args_list[1].kwargs["extra_body"] == {
+            "enable_thinking": False
+        }
+
+    def test_output_limit_continuation_keeps_partial_text(self):
+        invoker = MagicMock()
+        invoker.output_limit_retry_kwargs.return_value = {
+            "thinking": {"type": "disabled"}
+        }
+        invoker.invoke_stream.side_effect = [
+            iter(_make_stream_events(text="前半段。", finish_reason="length")),
+            iter(_make_stream_events(text="后半段。", finish_reason="stop")),
+        ]
+        runtime = AgentRuntime(invoker, MagicMock(), max_steps=3, max_tokens=8192)
+
+        events = list(runtime.run(
+            messages=[{"role": "user", "content": "长报告"}],
+            tools=[], ctx=_make_ctx(max_steps=3, max_output_tokens=8192),
+        ))
+
+        done = [e for e in events if e.type == RuntimeEventType.DONE][-1]
+        assert done.data["content"] == "前半段。后半段。"
+        second_messages = invoker.invoke_stream.call_args_list[1].args[0]
+        assert second_messages[-3]["content"] == "前半段。"
+        assert "不要重复前文" in second_messages[-2]["content"]
 
 
 # ================================================================

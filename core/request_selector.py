@@ -196,7 +196,7 @@ DOMAIN_MAP: Dict[str, Dict] = {
         "explicit_patterns": None,
     },
     "web": {
-        "pattern": r"(网页|剪藏|http://|https://|剪藏.*链接)",
+        "pattern": r"(网页|剪藏|全网搜|联网搜索|网上搜索|http://|https://|剪藏.*链接)",
         "default_tools": [
             # v5: web_clip 留在 default——抓取用户显式给出的 URL 并交付 Markdown 属查询意图，
             # 缓存与 HedgeDoc 投递（>2500 字自动）属结果交付机制，不改变业务系统状态
@@ -256,6 +256,18 @@ DOMAIN_MAP: Dict[str, Dict] = {
         ],
         "explicit_intent_tools": [],
         "explicit_patterns": None,
+    },
+    "decision": {
+        "pattern": r"(多模型评判|评判委员会|委员会评估|委员会决策)",
+        "default_tools": [],
+        "explicit_intent_tools": ["ops_decision"],
+        "explicit_patterns": r"(多模型评判|评判委员会|委员会评估|委员会决策)",
+    },
+    "rss_search": {
+        "pattern": r"(RSS节点|RSS订阅|Meilisearch|Meili索引)",
+        "default_tools": ["ops_rss_node_status"],
+        "explicit_intent_tools": ["sync_meili"],
+        "explicit_patterns": r"(同步|重建.*索引|更新.*索引)",
     },
 }
 

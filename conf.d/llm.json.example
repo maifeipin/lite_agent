@@ -12,6 +12,9 @@
             "model": "deepseek-v4-flash",
             "max_tokens": 8192,
             "max_steps": 30,
+            "output_recovery": {
+                "retry_kwargs": {"extra_body": {"enable_thinking": false}}
+            },
             "tags": ["text", "fast"]
         },
         "gemini-flash": {
@@ -22,6 +25,9 @@
             "temperature": 0.3,
             "max_steps": 30,
             "proxy": "socks5h://127.0.0.1:18988",
+            "output_recovery": {
+                "retry_kwargs": {"thinking_budget": 0}
+            },
             "tags": ["text", "fast"]
         },
         "gemini-pro": {
@@ -42,6 +48,9 @@
             "max_tokens": 8192,
             "temperature": 0.2,
             "max_steps": 30,
+            "output_recovery": {
+                "retry_kwargs": {"thinking": {"type": "disabled"}}
+            },
             "tags": ["text", "complex_reasoning"]
         },
         "glm-5.2": {
@@ -52,6 +61,9 @@
             "max_tokens": 8192,
             "temperature": 0.2,
             "max_steps": 30,
+            "output_recovery": {
+                "retry_kwargs": {"thinking": {"type": "disabled"}}
+            },
             "tags": ["text", "complex_reasoning"]
         },
         "glm-5.3": {
@@ -62,6 +74,9 @@
             "max_tokens": 8192,
             "temperature": 0.2,
             "max_steps": 30,
+            "output_recovery": {
+                "retry_kwargs": {"thinking": {"type": "disabled"}}
+            },
             "tags": ["text", "complex_reasoning"]
         },
         "kimi-k3": {
