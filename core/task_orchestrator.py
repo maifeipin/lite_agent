@@ -107,11 +107,6 @@ class TaskOrchestrator:
     # ==================================================================
     #  Phase 1: 拆解
     # ==================================================================
-    def _resolve_model(self, model_key: str) -> str:
-        """Resolve config key name to actual API model name"""
-        cfg = self.router.models_cfg.get(model_key, {})
-        return cfg.get("model", model_key)
-
     def _role_invoker(self, model: str, profile_name: str,
                       policy: ExecutionPolicy, budget: ExecutionBudget = None):
         """Build a role call; the configured default is the only fallback."""
