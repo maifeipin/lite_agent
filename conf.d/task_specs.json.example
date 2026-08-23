@@ -6,13 +6,13 @@
             "author": {
                 "invoke_kwargs": {
                     "response_format": {"type": "json_object"},
-                    "thinking": {"type": "disabled"}
+                    "thinking": {"type": "auto"}
                 }
             },
             "validator": {
                 "invoke_kwargs": {
                     "response_format": {"type": "json_object"},
-                    "thinking": {"type": "disabled"}
+                    "thinking": {"type": "auto"}
                 }
             }
         }
