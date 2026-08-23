@@ -82,21 +82,32 @@ class IncomingMessage:
         # 如 钉钉的 msg_data(含sessionWebhook)、飞书的 sender open_id 等。默认 None 向后兼容。
         self.channel_payload = channel_payload or {}
         self.output_mode = output_mode
+        self._session_key = ""
+
+    @property
+    def scope_key(self) -> str:
+        """Stable channel/user identity used to find the active conversation."""
+        return f"{self.channel}:{self.user_id}"
 
     @property
     def session_key(self) -> str:
-        return f"{self.channel}:{self.user_id}"
+        return self._session_key or self.scope_key
+
+    def bind_session(self, session_key: str) -> None:
+        self._session_key = session_key
 
 
 class AgentResponse:
     """Agent 返回给通道层的标准化回复"""
 
-    def __init__(self, text: str, title: str = "", color: str = "blue", task_id: str = "", logs: list = None):
+    def __init__(self, text: str, title: str = "", color: str = "blue", task_id: str = "", logs: list = None,
+                 new_session_key: str = ""):
         self.text = text
         self.title = title
         self.color = color
         self.task_id = task_id
         self.logs = logs if logs is not None else []
+        self.new_session_key = new_session_key
 
 
 def _estimate_tokens(messages: list, completion_text: str) -> dict:
@@ -476,6 +487,9 @@ class Agent:
         造成 assistant tool_calls 与 tool 消息错位 (导致 LLM API 400 错误)。
         不同 session_key (不同用户/会话) 之间不互斥, 仍可并行。
         """
+        if not msg._session_key:
+            msg.bind_session(self.session_mgr.resolve_active_session(msg.scope_key))
+
         directive_mode, cleaned_text = self._extract_output_mode(msg.text)
         if directive_mode:
             msg.output_mode = directive_mode
@@ -636,8 +650,14 @@ class Agent:
             return reg_resp
  
         if cmd == "/new":
-            self.session_mgr.reset_session(msg.session_key)
-            return AgentResponse("🔄 会话已重置，可以开始新的对话", title="新会话", color="green")
+            new_key = self.session_mgr.reset_session(
+                msg.session_key, scope_key=msg.scope_key
+            )
+            msg.bind_session(new_key)
+            return AgentResponse(
+                f"🔄 已开启新会话\n\n会话 ID：`{new_key}`",
+                title="新会话", color="green", new_session_key=new_key,
+            )
 
         if cmd == "/status":
             info = self.session_mgr.get_session_info(msg.session_key)

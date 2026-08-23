@@ -369,6 +369,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "logs": getattr(resp, "logs", []),
                 "title": session_obj.title
             }
+        if getattr(resp, "new_session_key", ""):
+            out_data["session_key"] = resp.new_session_key
+            out_data["new_session_id"] = resp.new_session_key.removeprefix("api:")
 
         self.wfile.write(json.dumps(out_data, ensure_ascii=False).encode('utf-8'))
 
@@ -1439,6 +1442,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "total_tokens": 0
                 }
             }
+            if resp and getattr(resp, "new_session_key", ""):
+                resp_obj["session_key"] = resp.new_session_key
             self.send_response(200)
             self._send_cors_headers()
             self.send_header('Content-Type', 'application/json')

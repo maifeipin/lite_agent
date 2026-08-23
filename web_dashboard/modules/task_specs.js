@@ -40,6 +40,7 @@ registerTabModule({
         const model = exec.model_policy || {};
         const schedule = exec.schedule || {};
         const budget = exec.budget || {};
+        const output = spec.output || {};
         const statusLabels = {
             draft: '草案', review_required: '待复核', blocked: '阻断',
             needs_ack: '待确认', approved: '已通过'
@@ -62,6 +63,7 @@ registerTabModule({
                 <span class="tag">${h(exec.complexity || 'standard')}</span>
                 <span class="tag">🤖 ${h(model.preferred_model || model.recommended_tier || 'auto')}</span>
                 <span class="tag">⏱ ${h(scheduleText)}</span>
+                <span class="tag">📤 ${h(output.full_delivery || 'auto')}</span>
                 ${doc.enabled ? '<span class="tag task-enabled">调度已启用</span>' : ''}
             </div>
             <h3 class="card-title">${h(doc.name)}</h3>
@@ -130,8 +132,13 @@ registerTabModule({
                 <label>调度<select class="te-schedule-mode">${['manual','once','repeat'].map(x => `<option ${sch.mode===x?'selected':''}>${x}</option>`).join('')}</select></label>
                 <label>一次执行时间<input class="te-run-at" value="${h(sch.run_at || '')}" placeholder="ISO8601 含时区"></label>
                 <label>重复规则<input class="te-cron" value="${h(sch.cron || '')}" placeholder="09:00 或 */15 * * * *"></label>
-                <label>完整回复去向<select class="te-full-delivery">${['auto','email','hedgedoc','sqlite','inline'].map(x => `<option ${out.full_delivery===x?'selected':''}>${x}</option>`).join('')}</select></label>
-                <label>聊天窗口内容<select class="te-reply-mode">${['summary','preview'].map(x => `<option ${out.reply_mode===x?'selected':''}>${x}</option>`).join('')}</select></label>
+                <label>完整回复去向<select class="te-full-delivery">${[
+                    ['auto','自动回退'], ['email','邮件'], ['hedgedoc','HedgeDoc 公开链接'],
+                    ['sqlite','仅本地归档'], ['inline','聊天窗口完整输出']
+                ].map(([value,label]) => `<option value="${value}" ${out.full_delivery===value?'selected':''}>${label}</option>`).join('')}</select></label>
+                <label>聊天窗口内容<select class="te-reply-mode">${[
+                    ['summary','摘要'], ['preview','原文预览']
+                ].map(([value,label]) => `<option value="${value}" ${out.reply_mode===value?'selected':''}>${label}</option>`).join('')}</select></label>
                 <label>外部发布确认<input type="checkbox" class="te-publish-confirm" ${(e.approval||{}).confirmed?'checked':''}></label>
             </div>
             <fieldset><legend>能力</legend><div class="task-capabilities">${capChecks || '尚未配置 capability_map'}</div></fieldset>

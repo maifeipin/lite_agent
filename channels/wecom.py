@@ -60,16 +60,8 @@ class WeComChannel(BaseChannel):
     def broadcast(self, response) -> bool:
         """从会话库中查询所有活跃 wecom 用户并主动广播。
         依赖 vps1 上的 pushmsg 服务支持 'touser' 字段。"""
-        user_ids = []
         try:
-            with self.agent.session_mgr._connect() as conn:
-                rows = conn.execute(
-                    "SELECT DISTINCT session_key FROM sessions WHERE session_key LIKE 'wecom:%'"
-                ).fetchall()
-                for r in rows:
-                    uid = r[0].split(':', 1)[1]
-                    if uid:
-                        user_ids.append(uid)
+            user_ids = self.agent.session_mgr.list_channel_user_ids("wecom")
         except Exception as e:
             print(f"❌ [WeCom] 广播查询用户失败: {e}")
             return False
