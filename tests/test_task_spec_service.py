@@ -24,9 +24,12 @@ def _config():
     }
 
 
-def _service(tmp_path, model_output, skill_engine=None, request_selector=None):
+def _service(tmp_path, model_output, skill_engine=None, request_selector=None,
+             config=None):
+    effective_config = config or _config()
     router = MagicMock()
-    router.models_cfg = {"pro": {}, "flash": {}}
+    router.models_cfg = copy.deepcopy(effective_config["llm"]["models"])
+    router.get_fallback.return_value = None
     invoker = MagicMock()
     invoker.invoke_sync.return_value = {
         "content": json.dumps(model_output, ensure_ascii=False),
@@ -36,7 +39,7 @@ def _service(tmp_path, model_output, skill_engine=None, request_selector=None):
     router.get_invoker.return_value = invoker
     with patch("core.task_spec_service.ModelRouter", return_value=router):
         service = TaskSpecService(
-            _config(), skill_engine=skill_engine,
+            effective_config, skill_engine=skill_engine,
             store=TaskSpecStore(str(tmp_path / "specs.db")),
             request_selector=request_selector,
         )
@@ -144,6 +147,39 @@ def test_author_receives_selector_tool_schemas_and_disables_hidden_retries(tmp_p
     assert "billing_report" in prompt
     assert '"default": 3' in prompt
     assert invoker.invoke_sync.call_args.kwargs["max_retries"] == 0
+    assert invoker.invoke_sync.call_args.kwargs["max_tokens"] == 8192
+    assert "response_format" not in invoker.invoke_sync.call_args.kwargs
+    assert "thinking" not in invoker.invoke_sync.call_args.kwargs
+
+
+def test_author_call_profile_is_configurable_per_model_and_role(tmp_path):
+    config = _config()
+    config["llm"]["models"]["pro"] = {
+        "max_tokens": 12000,
+        "task_spec": {
+            "author": {
+                "max_tokens": 6000,
+                "timeout": 45,
+                "max_retries": 1,
+                "invoke_kwargs": {
+                    "response_format": {"type": "json_object"},
+                    "thinking": {"type": "disabled"},
+                },
+            },
+        },
+    }
+    service, invoker = _service(
+        tmp_path, {"task": {"required_inputs": {}}}, config=config
+    )
+
+    service.generate("查看最近的外币账单")
+
+    kwargs = invoker.invoke_sync.call_args.kwargs
+    assert kwargs["max_tokens"] == 6000
+    assert kwargs["timeout"] == 45
+    assert kwargs["max_retries"] == 1
+    assert kwargs["response_format"] == {"type": "json_object"}
+    assert kwargs["thinking"] == {"type": "disabled"}
 
 
 def test_author_does_not_inject_all_tools_for_unknown_intent(tmp_path):
@@ -160,6 +196,30 @@ def test_author_does_not_inject_all_tools_for_unknown_intent(tmp_path):
     service.generate("一个尚未映射领域的复杂目标")
 
     skill_engine.get_schemas_by_names.assert_not_called()
+
+
+def test_author_uses_configured_fallback_when_primary_json_is_truncated(tmp_path):
+    service, primary = _service(tmp_path, {})
+    fallback = MagicMock()
+    primary.invoke_sync.return_value = {
+        "content": '{"task":', "usage_total": 4096,
+        "finish_reason": "length",
+    }
+    fallback.invoke_sync.return_value = {
+        "content": json.dumps({"task": {"required_inputs": {}}}),
+        "usage_total": 120, "finish_reason": "stop",
+    }
+    service.router.get_fallback.return_value = ("flash", object())
+    service.router.get_invoker.side_effect = (
+        lambda name, **kwargs: primary if name == "pro" else fallback
+    )
+
+    generated = service.generate("查看一下最近的外币账单")
+
+    assert generated["spec"]["contract"]["generated_by"] == "flash"
+    assert generated["status"] == "draft"
+    assert primary.invoke_sync.call_count == 1
+    assert fallback.invoke_sync.call_count == 1
 
 
 def test_enrich_can_remove_inputs_replaced_by_a_direct_tool(tmp_path):
@@ -339,6 +399,30 @@ def test_validator_timeout_keeps_task_editable_and_retryable(tmp_path):
     persisted = service.store.get(manual["id"])
     assert persisted["status"] == "review_required"
     assert persisted["spec"]["validation"]["status"] == "review_required"
+
+
+def test_validator_uses_configured_fallback_when_primary_json_is_truncated(tmp_path):
+    service, primary = _service(tmp_path, {})
+    fallback = MagicMock()
+    primary.invoke_sync.return_value = {
+        "content": '{"passed":', "usage_total": 4096,
+        "finish_reason": "length",
+    }
+    fallback.invoke_sync.return_value = {
+        "content": json.dumps({"passed": True, "findings": []}),
+        "usage_total": 80, "finish_reason": "stop",
+    }
+    service.router.get_fallback.return_value = ("flash", object())
+    service.router.get_invoker.side_effect = (
+        lambda name, **kwargs: primary if name == "pro" else fallback
+    )
+    manual = service.create_manual("查看最近的外币账单")
+
+    report = service.review(manual["id"])
+
+    assert report["status"] == "approved"
+    assert primary.invoke_sync.call_count == 1
+    assert fallback.invoke_sync.call_count == 1
 
 
 def test_import_assigns_new_identity_and_requires_canonical_policy(tmp_path):
