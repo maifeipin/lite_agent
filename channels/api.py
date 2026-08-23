@@ -734,13 +734,6 @@ class ApiHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self.send_error(500, str(e))
 
-    def _send_json(self, data: dict):
-        self.send_response(200)
-        self._send_cors_headers()
-        self.send_header('Content-Type', 'application/json; charset=utf-8')
-        self.end_headers()
-        self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
-
     def _handle_auth(self):
         """登录验证：读取 htpasswd 文件校验用户名/密码。用于 Dashboard 表单登录。"""
         import hashlib, os

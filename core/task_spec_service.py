@@ -133,6 +133,31 @@ class TaskSpecService:
         spec = new_task_spec(goal, name=name)
         return self.store.save(spec, status="review_required", enabled=False)
 
+    def _save_generation_fallback(self, spec: dict, exc: Exception) -> dict:
+        """Keep the interactive workflow usable when the author model fails."""
+        error_name = type(exc).__name__
+        is_timeout = "timeout" in error_name.lower()
+        code = "AUTHOR_MODEL_TIMEOUT" if is_timeout else "AUTHOR_MODEL_FAILED"
+        message = (
+            "高价值生成模型调用超时，已创建可编辑的基础规则。"
+            if is_timeout else
+            "高价值生成模型暂时不可用，已创建可编辑的基础规则。"
+        )
+        report = self.deterministic_preflight(spec)
+        spec["contract"]["generated_by"] = "deterministic-fallback"
+        spec = self._validation(spec, "review_required", report, [finding(
+            code, message, path="/execution/plan",
+            resolution="请在页面补充执行计划和条件，然后执行高价值复核。",
+            severity="warning", overrideable=True, source="runtime",
+        )])
+        saved = self.store.save(spec, status="review_required", enabled=False)
+        saved["generation"] = {
+            "status": "fallback",
+            "code": code,
+            "message": message,
+        }
+        return saved
+
     def import_spec(self, uploaded: dict) -> dict:
         """Import an uploaded rule file without trusting its identity or policy."""
         if uploaded.get("policy") != BASE_POLICY:
@@ -154,25 +179,30 @@ class TaskSpecService:
 
     def generate(self, goal: str, name: str = "") -> dict:
         spec = new_task_spec(goal, name=name)
-        invoker = self.router.get_invoker(
-            self.author_model, temperature=0.1, max_tokens=8192, timeout=120.0
-        )
-        if invoker is None:
-            raise RuntimeError(f"TaskSpec author model unavailable: {self.author_model}")
-        prompt = AUTHOR_PROMPT.format(
-            goal=goal,
-            draft=json.dumps(spec, ensure_ascii=False, indent=2),
-            models=json.dumps(sorted(self.router.models_cfg), ensure_ascii=False),
-            capabilities=json.dumps(self.capability_map, ensure_ascii=False),
-        )
-        result = self.llm.invoke_sync(
-            [{"role": "user", "content": prompt}],
-            model=self.author_model, invoker=invoker, role="task_spec_author",
-            provider=self.router.get_driver(self.author_model),
-            session_key="task_spec:author", source=ExecutionSource.API,
-            max_tokens=8192, timeout=120.0,
-        )
-        generated = _parse_json_object(result["content"])
+        try:
+            invoker = self.router.get_invoker(
+                self.author_model, temperature=0.1, max_tokens=8192, timeout=120.0
+            )
+            if invoker is None:
+                raise RuntimeError(
+                    f"TaskSpec author model unavailable: {self.author_model}"
+                )
+            prompt = AUTHOR_PROMPT.format(
+                goal=goal,
+                draft=json.dumps(spec, ensure_ascii=False, indent=2),
+                models=json.dumps(sorted(self.router.models_cfg), ensure_ascii=False),
+                capabilities=json.dumps(self.capability_map, ensure_ascii=False),
+            )
+            result = self.llm.invoke_sync(
+                [{"role": "user", "content": prompt}],
+                model=self.author_model, invoker=invoker, role="task_spec_author",
+                provider=self.router.get_driver(self.author_model),
+                session_key="task_spec:author", source=ExecutionSource.API,
+                max_tokens=8192, timeout=120.0,
+            )
+            generated = _parse_json_object(result["content"])
+        except Exception as exc:
+            return self._save_generation_fallback(spec, exc)
         for key in ("task", "execution", "output", "on_failure"):
             if key in generated:
                 spec[key] = _merge_generated(spec[key], generated[key])

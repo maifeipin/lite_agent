@@ -74,6 +74,20 @@ def test_generated_unchanged_spec_can_be_confirmed_without_second_review(tmp_pat
     assert invoker.invoke_sync.call_count == 1
 
 
+def test_author_timeout_creates_editable_fallback_instead_of_failing(tmp_path):
+    service, invoker = _service(tmp_path, {})
+    invoker.invoke_sync.side_effect = TimeoutError("author timed out")
+
+    created = service.generate("查看一下最近的外币账单")
+
+    assert created["status"] == "review_required"
+    assert created["generation"]["status"] == "fallback"
+    assert created["generation"]["code"] == "AUTHOR_MODEL_TIMEOUT"
+    assert created["spec"]["task"]["objective"] == "查看一下最近的外币账单"
+    assert created["spec"]["validation"]["findings"][0]["severity"] == "warning"
+    assert service.store.get(created["id"]) is not None
+
+
 def test_edit_requires_review_and_validator_findings_are_overrideable(tmp_path):
     service, invoker = _service(tmp_path, {
         "passed": False,
