@@ -216,7 +216,8 @@ class TaskSpecService:
         return safe
 
     def _apply_generated(self, spec: dict, generated: dict,
-                         generated_by: str) -> tuple[dict, dict, str]:
+                         generated_by: str,
+                         revision: Optional[int] = None) -> tuple[dict, dict, str]:
         updated = copy.deepcopy(spec)
         generated = self._require_confirmation_for_suggestions(spec, generated)
         for key in ("task", "execution", "output", "on_failure"):
@@ -224,6 +225,8 @@ class TaskSpecService:
                 updated[key] = _merge_generated(updated[key], generated[key])
         updated = normalize_task_spec(updated)
         updated["contract"]["generated_by"] = generated_by
+        if revision is not None:
+            updated["contract"]["revision"] = revision
         digest = content_digest(updated)
         updated["contract"]["content_digest"] = digest
         updated["contract"]["generated_digest"] = digest
@@ -300,9 +303,9 @@ class TaskSpecService:
             return result
 
         updated, report, status = self._apply_generated(
-            starting_spec, generated, selected_model
+            starting_spec, generated, selected_model,
+            revision=starting_revision + 1,
         )
-        updated["contract"]["revision"] = starting_revision + 1
         # Serialize only the final compare-and-save. A concurrent user save wins;
         # two enrich requests cannot both overwrite the same starting revision.
         with self.store._lock:
