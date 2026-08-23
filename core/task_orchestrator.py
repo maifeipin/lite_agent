@@ -1,4 +1,5 @@
 import json
+import os
 import time
 import uuid
 import threading
@@ -6,13 +7,14 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Callable, Optional
 
-from openai import OpenAI
 from core.model_router import ModelRouter
 from core.worker_agent import WorkerAgent
 from core.skill_engine import SkillEngine
 from core.subtask_dag import Subtask, SubtaskDAG, SubtaskType, SubtaskStatus
 from core.execution import ExecutionContext, ActorType, ExecutionSource
 from core.execution_ledger import ExecutionLedger
+from core.llm_gateway import LLMGateway
+from core.request_selector import RequestSelector
 
 PLANNER_PROMPT = """你是一个任务编排专家。请将以下用户目标拆解为子任务列表。
 
@@ -32,6 +34,9 @@ PLANNER_PROMPT = """你是一个任务编排专家。请将以下用户目标拆
       "prompt": "发给执行者的具体指令",
       "depends_on": [],
       "tools_hint": ["工具名1", "工具名2"]
+      "execution_mode": "agent|tool",
+      "tool_name": "仅 execution_mode=tool 时填写的唯一工具名",
+      "tool_arguments": {{"仅确定性参数": "值"}}
     }}
   ]
 }}
@@ -59,6 +64,14 @@ PLANNER_PROMPT = """你是一个任务编排专家。请将以下用户目标拆
    不确定的才写空数组。
 5. 每个子任务 prompt 要具体、可执行"""
 
+# Direct execution is intentionally narrow: the Planner may skip a Worker LLM only
+# when all arguments are already known from the request or an upstream deterministic result.
+PLANNER_PROMPT += """
+6. 仅当节点只需调用一个工具、参数已经明确且不需要理解工具结果时，才使用
+   execution_mode=tool。分析、研判、搜索后决定下一步、动态引用上游结果等情况必须使用 agent。
+   tool 节点必须填写一个真实的 tool_name 和 JSON object tool_arguments；不确定时使用 agent。
+"""
+
 
 class TaskOrchestrator:
 
@@ -73,6 +86,7 @@ class TaskOrchestrator:
         # 共享执行账本 (旁路, 不阻断主流程)
         # TaskOrchestrator 创建父 execution，所有 Worker 子任务挂载其下
         self.ledger = ledger
+        self.llm = LLMGateway(self.router, ledger)
         routing = config.get("task_routing", {})
         default_model = config.get("llm", {}).get("default", "")
         self.planner_model = routing.get("planner_model", default_model)
@@ -82,6 +96,8 @@ class TaskOrchestrator:
         self.max_depth = routing.get("dag_max_depth", 5)
         self.dag_max_steps = routing.get("dag_max_total_steps", 30)
         self.dag_max_tokens = routing.get("dag_max_total_tokens", 200000)
+        self.direct_tool_execution = routing.get("direct_tool_execution", False)
+        self.request_selector = RequestSelector(skill_engine)
         self.executor = ThreadPoolExecutor(max_workers=self.max_parallel, thread_name_prefix="OrchWorker")
         print(f"  [ORCH] 初始化完成 planner={self.planner_model} classifier={self.classifier_model} parallel={self.max_parallel} max_steps={self.dag_max_steps} max_tokens={self.dag_max_tokens}")
 
@@ -93,21 +109,35 @@ class TaskOrchestrator:
         cfg = self.router.models_cfg.get(model_key, {})
         return cfg.get("model", model_key)
 
-    def _plan(self, goal: str, max_steps: int = None) -> tuple:
+    def _plan(self, goal: str, max_steps: int = None,
+              parent_execution_id: str = "", session_key: str = "") -> tuple:
         """返回 (subtasks: list[Subtask], global_strategy: str)"""
         if max_steps is None:
             max_steps = self.dag_max_steps
         print(f"  [ORCH:PLAN] 规划中... model={self.planner_model}")
-        planner_client = self.router.get_client(self.planner_model)
-        if not planner_client:
-            planner_client = self.router.get_client(
-                self.config.get("llm", {}).get("default", "")
-            )
+        planner_invoker = self.router.get_invoker(
+            self.planner_model, max_tokens=8192, temperature=0.2, timeout=120.0
+        )
+        if not planner_invoker:
             self.planner_model = self.config.get("llm", {}).get("default", "")
+            planner_invoker = self.router.get_invoker(
+                self.planner_model, max_tokens=8192, temperature=0.2, timeout=120.0
+            )
+        if not planner_invoker:
+            raise RuntimeError("Planner model is not available")
 
-        actual_model = self._resolve_model(self.planner_model)
+        actual_model = planner_invoker.model_name
 
-        all_tools = self.skill_engine.get_all_schemas()
+        selection = self.request_selector.select(goal)
+        selector_enabled = os.environ.get("LITE_AGENT_SELECTOR_ENABLED") == "1"
+        if selector_enabled and selection.names is not None:
+            all_tools = self.skill_engine.get_schemas_by_names(selection.names)
+        else:
+            all_tools = self.skill_engine.get_all_schemas()
+        print(
+            f"  [ORCH:PLAN] tools={len(all_tools)} selector={selection.confidence} "
+            f"enabled={selector_enabled}"
+        )
         tools_desc_lines = []
         for t in all_tools:
             fn = t["function"]
@@ -120,20 +150,27 @@ class TaskOrchestrator:
         try:
             start_t = time.time()
             print(f"  🧠 [LLM Request] 角色: Planner, 模型: {actual_model}")
-            response = planner_client.chat.completions.create(
-                model=actual_model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
+            gateway = getattr(
+                self, "llm", LLMGateway(self.router, getattr(self, "ledger", None))
+            )
+            response = gateway.invoke_sync(
+                [{"role": "user", "content": prompt}],
+                model=self.planner_model, invoker=planner_invoker,
+                role="orchestrator_planner",
+                provider=self.router.get_driver(self.planner_model),
+                session_key=session_key or getattr(self, "_active_session_key", ""),
+                parent_execution_id=(parent_execution_id or
+                                     getattr(self, "_active_parent_execution_id", "")),
+                source=ExecutionSource.ORCHESTRATOR,
                 max_tokens=8192,
                 timeout=120.0,
             )
-            print(f"  ✅ [LLM Response] 耗时: {time.time()-start_t:.2f}s, Tokens: {response.usage.total_tokens if response.usage else 0}")
-            choice = response.choices[0]
-            if choice.finish_reason == "length":
+            print(f"  ✅ [LLM Response] 耗时: {time.time()-start_t:.2f}s, Tokens: {response['usage_total']}")
+            if response["finish_reason"] == "length":
                 print(f"  ⚠️ Planner 输出达到 max_tokens 截断 (length)，直接触发降级")
                 raise ValueError("JSON output truncated due to max_tokens limit")
 
-            raw = choice.message.content
+            raw = response["content"]
             parsed = self._parse_json(raw)
             global_strategy = parsed.get("global_strategy", "")
             subtasks = []
@@ -146,6 +183,9 @@ class TaskOrchestrator:
                     prompt=item.get("prompt", ""),
                     depends_on=item.get("depends_on", []),
                     tools=item.get("tools_hint", []),
+                    execution_mode=item.get("execution_mode", "agent"),
+                    tool_name=item.get("tool_name", ""),
+                    tool_arguments=item.get("tool_arguments", {}),
                 ))
             print(f"  [ORCH:PLAN] 拆解完成: {len(subtasks)} 个子任务, strategy={len(global_strategy)} chars")
             return subtasks, global_strategy
@@ -176,7 +216,12 @@ class TaskOrchestrator:
         valid_names = self.skill_engine.get_all_names()
         for s in subtasks:
             model_name, client, tool_filter = self.router.route(s.type.value)
-            s.assigned_model = model_name
+            # A reviewed TaskSpec may pin a configured model per node. Free-form
+            # Planner output leaves assigned_model empty and follows route_rules.
+            if s.assigned_model and self.router.get_client(s.assigned_model):
+                model_name = s.assigned_model
+            else:
+                s.assigned_model = model_name
             # 工具分配: route_rule 的类型级工具集 与 planner 的 tools_hint 取并集,
             # 而非用 route_rule 覆盖 tools_hint。否则 "上传hedgedoc" 被 classify 成 code
             # 后只剩 ops_workspace_run, planner 给的 web_clip 等专用工具丢失,
@@ -204,11 +249,27 @@ class TaskOrchestrator:
     def execute(self, goal: str, session_key: str,
                 progress_callback: Optional[Callable] = None,
                 task_id: str = None,
-                step_override: int = None) -> str:
+                step_override: int = None,
+                token_override: int = None,
+                parallel_override: int = None,
+                wall_seconds_override: int = None,
+                planned_subtasks: list = None,
+                planned_strategy: str = "") -> str:
         task_id = task_id or uuid.uuid4().hex[:8]
 
         # 用户可通过 [steps=N] 后缀临时提升本次任务预算
         effective_max_steps = step_override if step_override else self.dag_max_steps
+        effective_max_tokens = token_override if token_override else self.dag_max_tokens
+        effective_parallel = min(
+            self.max_parallel,
+            parallel_override if parallel_override else self.max_parallel,
+        )
+        deadline = (
+            time.monotonic() + wall_seconds_override
+            if wall_seconds_override else None
+        )
+        self._active_worker_max_steps = effective_max_steps
+        self._active_token_budget = effective_max_tokens
         if step_override:
             print(f"  🔓 用户提升步数预算: {self.dag_max_steps} → {step_override}")
 
@@ -225,7 +286,7 @@ class TaskOrchestrator:
                 source=ExecutionSource.ORCHESTRATOR,
                 session_key=session_key,
                 max_steps=effective_max_steps,
-                token_budget=self.dag_max_tokens,
+                token_budget=effective_max_tokens,
             )
             parent_exec = self.ledger.start(
                 orch_ctx, model_name=self.planner_model,
@@ -239,10 +300,16 @@ class TaskOrchestrator:
         parent_reason = "orchestrator_exception"
 
         try:
+            self._active_parent_execution_id = parent_execution_id
+            self._active_session_key = session_key
             self.session_mgr.save_subtask_dag(session_key, task_id,
                 json.dumps({"global_strategy": "", "subtasks": []}, ensure_ascii=False), "planning")
 
-            subtasks, global_strategy = self._plan(goal, max_steps=effective_max_steps)
+            if planned_subtasks:
+                subtasks, global_strategy = planned_subtasks, planned_strategy
+                print(f"  [ORCH:PLAN] 使用已审批 TaskSpec 计划: {len(subtasks)} 个子任务")
+            else:
+                subtasks, global_strategy = self._plan(goal, max_steps=effective_max_steps)
             if not subtasks:
                 parent_status, parent_reason = "failed", "planning_failed"
                 return "❌ 任务规划失败，无法拆解目标"
@@ -292,6 +359,13 @@ class TaskOrchestrator:
             self._persist_dag(session_key, task_id, dag, force=True)
 
             while not dag.is_all_done():
+                if deadline is not None and time.monotonic() >= deadline:
+                    log_event("  ⚠️ DAG 总执行时间预算耗尽")
+                    for s in dag.subtasks.values():
+                        if s.status in (SubtaskStatus.PENDING, SubtaskStatus.RUNNING):
+                            s.status = SubtaskStatus.SKIPPED
+                            s.error = "总执行时间预算耗尽"
+                    break
                 # 全局预算限制检查
                 total_steps = sum(s.steps_used for s in dag.subtasks.values())
                 total_tokens = sum(s.token_usage for s in dag.subtasks.values())
@@ -304,8 +378,8 @@ class TaskOrchestrator:
                             s.error = f"全局步数预算耗尽，未执行 (已用 {total_steps} 步)"
                     break
 
-                if total_tokens >= self.dag_max_tokens:
-                    log_event(f"  ⚠️ DAG 全局 Token 预算耗尽 ({total_tokens}/{self.dag_max_tokens})")
+                if total_tokens >= effective_max_tokens:
+                    log_event(f"  ⚠️ DAG 全局 Token 预算耗尽 ({total_tokens}/{effective_max_tokens})")
                     for s in dag.subtasks.values():
                         if s.status == SubtaskStatus.PENDING:
                             s.status = SubtaskStatus.SKIPPED
@@ -326,7 +400,16 @@ class TaskOrchestrator:
                 if not ready:
                     break
 
-                batch = ready[:self.max_parallel]
+                batch = ready[:effective_parallel]
+                # Split the remaining global budget across this parallel batch.
+                # A single long local-model task can use the full allowance;
+                # concurrent workers cannot each claim the whole task budget.
+                self._active_worker_max_steps = max(
+                    1, (effective_max_steps - total_steps) // len(batch)
+                )
+                self._active_token_budget = max(
+                    1, (effective_max_tokens - total_tokens) // len(batch)
+                )
                 futures = []
                 results_lock = threading.Lock()
                 results = {}
@@ -355,7 +438,18 @@ class TaskOrchestrator:
                     )
                     futures.append(future)
 
-                wait(futures, timeout=self.subtask_timeout)
+                wait_timeout = self.subtask_timeout
+                if deadline is not None:
+                    wait_timeout = max(0, min(wait_timeout, deadline - time.monotonic()))
+                wait(futures, timeout=wait_timeout)
+
+                for subtask in batch:
+                    if subtask.id not in results:
+                        results[subtask.id] = {
+                            "result": "", "tool_results": [], "status": "failed",
+                            "error": "子任务执行超时", "token_usage": subtask.token_usage,
+                            "steps_used": subtask.steps_used,
+                        }
 
                 for sid, result in results.items():
                     node = dag.subtasks.get(sid)
@@ -419,6 +513,10 @@ class TaskOrchestrator:
                             log_callback: Callable = None,
                             parent_execution_id: str = ""):
         try:
+            if self._can_execute_directly(subtask):
+                return self._run_direct_tool_subtask(
+                    subtask, results, lock, log_callback, parent_execution_id
+                )
             self._log_and_persist(f"  [WORKER:{subtask.id}] 启动 model={subtask.assigned_model} allowlist={subtask.tools[:3] if subtask.tools else 'all'}...", log_callback)
 
             client = self.router.get_client(subtask.assigned_model)
@@ -427,23 +525,27 @@ class TaskOrchestrator:
                     self.config.get("llm", {}).get("default", "")
                 )
 
-            model_cfg = self.router.models_cfg.get(
+            model_cfg = dict(self.router.models_cfg.get(
                 subtask.assigned_model,
                 self.router.models_cfg.get(
                     self.config.get("llm", {}).get("default", ""), {}
                 )
-            )
+            ))
+            model_cfg["max_steps"] = int(getattr(
+                self, "_active_worker_max_steps", model_cfg.get("max_steps", 8)
+            ))
 
             worker = WorkerAgent(
                 name=f"Worker-{subtask.id}",
                 client=client,
-                model_name=subtask.assigned_model,
+                model_name=model_cfg.get("model", subtask.assigned_model),
                 model_cfg=model_cfg,
                 skill_engine=self.skill_engine,
                 tools_allowlist=subtask.tools if subtask.tools else None,
                 driver=self.router.get_driver(subtask.assigned_model),
                 log_callback=log_callback,
                 ledger=self.ledger,
+                token_budget=getattr(self, "_active_token_budget", None),
             )
             result_text, tool_results = worker.run(subtask, upstream,
                                      goal=goal, global_strategy=global_strategy,
@@ -469,17 +571,21 @@ class TaskOrchestrator:
                 fb_name, fb_client = fb
                 self._log_and_persist(f"  🔄 {subtask.id} fallback → {fb_name}", log_callback)
                 try:
-                    fb_cfg = self.router.models_cfg.get(fb_name, {})
+                    fb_cfg = dict(self.router.models_cfg.get(fb_name, {}))
+                    fb_cfg["max_steps"] = int(getattr(
+                        self, "_active_worker_max_steps", fb_cfg.get("max_steps", 8)
+                    ))
                     worker_fb = WorkerAgent(
                         name=f"Worker-{subtask.id}-fb",
                         client=fb_client,
-                        model_name=fb_name,
+                        model_name=fb_cfg.get("model", fb_name),
                         model_cfg=fb_cfg,
                         skill_engine=self.skill_engine,
                         tools_allowlist=subtask.tools if subtask.tools else None,
                         driver=self.router.get_driver(fb_name),
                         log_callback=log_callback,
                         ledger=self.ledger,
+                        token_budget=getattr(self, "_active_token_budget", None),
                     )
                     result_text, tool_results = worker_fb.run(subtask, upstream,
                                                 goal=goal, global_strategy=global_strategy,
@@ -509,6 +615,56 @@ class TaskOrchestrator:
                     "steps_used": subtask.steps_used,
                 }
 
+    def _can_execute_directly(self, subtask: Subtask) -> bool:
+        return bool(
+            self.direct_tool_execution
+            and subtask.execution_mode == "tool"
+            and subtask.tool_name
+            and subtask.tool_name in self.skill_engine.get_all_names()
+            and isinstance(subtask.tool_arguments, dict)
+            and subtask.tool_name in (subtask.tools or [subtask.tool_name])
+        )
+
+    def _run_direct_tool_subtask(self, subtask: Subtask, results: dict,
+                                 lock: threading.Lock,
+                                 log_callback: Callable = None,
+                                 parent_execution_id: str = ""):
+        """Execute an explicitly planned, self-contained one-tool node without a Worker LLM."""
+        ctx = ExecutionContext(
+            actor_id=f"Direct-{subtask.id}",
+            actor_type=ActorType.WORKER,
+            source=ExecutionSource.ORCHESTRATOR,
+            allowed_tools=frozenset([subtask.tool_name]),
+            session_key=f"direct_{subtask.id}",
+            max_steps=1,
+            max_output_tokens=0,
+            execution_id=parent_execution_id,
+        )
+        arguments = json.dumps(subtask.tool_arguments, ensure_ascii=False)
+        self._log_and_persist(
+            f"  ⚡ [DIRECT:{subtask.id}] {subtask.tool_name}", log_callback
+        )
+        result = self.skill_engine.execute_with_context(
+            ctx, subtask.tool_name, arguments
+        )
+        subtask.steps_used = 0
+        subtask.token_usage = 0
+        subtask.finished_at = time.time()
+        status = "done" if result.ok else "failed"
+        with lock:
+            results[subtask.id] = {
+                "result": result.output,
+                "tool_results": [{
+                    "name": subtask.tool_name,
+                    "args": arguments,
+                    "result": result.output,
+                }],
+                "status": status,
+                "error": "" if result.ok else result.output,
+                "token_usage": 0,
+                "steps_used": 0,
+            }
+
     def _log_and_persist(self, msg: str, log_callback: Callable = None):
         if log_callback:
             log_callback(msg)
@@ -518,12 +674,17 @@ class TaskOrchestrator:
     # ==================================================================
     #  Phase 4: 聚合
     # ==================================================================
-    def _aggregate(self, dag: SubtaskDAG, goal: str) -> str:
+    def _aggregate(self, dag: SubtaskDAG, goal: str,
+                   parent_execution_id: str = "", session_key: str = "") -> str:
         print(f"  [ORCH:AGGR] 汇总中... done={dag.progress()['done']}/{dag.progress()['total']}")
-        aggregator_client = self.router.get_client(self.planner_model)
-        if not aggregator_client:
-            aggregator_client = self.router.get_client(
-                self.config.get("llm", {}).get("default", "")
+        aggregator_model = self.planner_model
+        aggregator_invoker = self.router.get_invoker(
+            aggregator_model, max_tokens=4096, temperature=0.3, timeout=60.0
+        )
+        if not aggregator_invoker:
+            aggregator_model = self.config.get("llm", {}).get("default", "")
+            aggregator_invoker = self.router.get_invoker(
+                aggregator_model, max_tokens=4096, temperature=0.3, timeout=60.0
             )
 
         results_lines = []
@@ -550,18 +711,28 @@ class TaskOrchestrator:
 3. 发现的问题和建议（如有）"""
 
         try:
-            actual_model = self._resolve_model(self.planner_model)
+            if not aggregator_invoker:
+                raise RuntimeError("Aggregator model is not available")
+            actual_model = aggregator_invoker.model_name
             start_t = time.time()
             print(f"  🧠 [LLM Request] 角色: Aggregator, 模型: {actual_model}")
-            response = aggregator_client.chat.completions.create(
-                model=actual_model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
+            gateway = getattr(
+                self, "llm", LLMGateway(self.router, getattr(self, "ledger", None))
+            )
+            response = gateway.invoke_sync(
+                [{"role": "user", "content": prompt}],
+                model=aggregator_model, invoker=aggregator_invoker,
+                role="orchestrator_aggregator",
+                provider=self.router.get_driver(aggregator_model),
+                session_key=session_key or getattr(self, "_active_session_key", ""),
+                parent_execution_id=(parent_execution_id or
+                                     getattr(self, "_active_parent_execution_id", "")),
+                source=ExecutionSource.ORCHESTRATOR,
                 max_tokens=4096,
                 timeout=60.0,
             )
-            print(f"  ✅ [LLM Response] 耗时: {time.time()-start_t:.2f}s, Tokens: {response.usage.total_tokens if response.usage else 0}")
-            return response.choices[0].message.content
+            print(f"  ✅ [LLM Response] 耗时: {time.time()-start_t:.2f}s, Tokens: {response['usage_total']}")
+            return response["content"]
         except Exception as e:
             traceback.print_exc()
             return f"## 执行报告\n\n{results_text}\n\n> ⚠️ 聚合失败: {e}"

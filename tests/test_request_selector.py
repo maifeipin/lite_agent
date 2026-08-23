@@ -471,6 +471,32 @@ class TestAgentFeatureFlags:
 
 
 # ---------------------------------------------------------------------------
+# 新增领域映射
+# ---------------------------------------------------------------------------
+
+class TestExtendedDomains:
+
+    def test_explicit_internet_search_selects_web_tools(self, selector):
+        result = selector.select("帮我全网搜3000元电动自行车")
+        assert result.domains == ["web"]
+        assert "web_search" in result.names
+
+    def test_committee_request_selects_decision_tool(self, selector):
+        result = selector.select("请用评判委员会评估这个方案")
+        assert result.domains == ["decision"]
+        assert result.names == ["ops_decision"]
+
+    def test_rss_status_is_read_only_but_sync_is_explicit(self, selector):
+        status = selector.select("查看RSS节点状态")
+        assert "ops_rss_node_status" in status.names
+        assert status.read_only_mode is True
+
+        sync = selector.select("同步Meili索引")
+        assert "sync_meili" in sync.names
+        assert sync.read_only_mode is False
+
+
+# ---------------------------------------------------------------------------
 # 三态边界
 # ---------------------------------------------------------------------------
 

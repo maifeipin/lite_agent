@@ -4,6 +4,7 @@ AI Agent 核心 - LLM 调度与 Tool Call Loop
 
 import os
 import json
+import re
 import time
 import threading
 import traceback
@@ -16,11 +17,15 @@ from session import SessionManager
 from core.lru_cache import LRUCache
 from core.loop_detector import LoopDetector
 from core.model_invoker import OpenAIInvoker
+from core.model_config import is_gemini_driver
+from core.model_router import ModelRouter
 from core.model_event import ModelEventType
 from core.agent_runtime import AgentRuntime, RuntimeEventType
 from core.execution import ExecutionContext, ActorType, ExecutionSource
 from core.execution_ledger import ExecutionLedger
 from core.runtime_recorder import RuntimeRecorder
+from core.llm_gateway import LLMGateway
+from core.output_delivery import prepare_channel_output
 
 # 定义不可重试的大模型接口异常类型（4xx 客户端错误、鉴权、限流等）
 _NON_RETRYABLE_EXCEPTIONS = (
@@ -63,7 +68,7 @@ class IncomingMessage:
 
     def __init__(self, channel: str, user_id: str, chat_id: str,
                  message_id: str, text: str, notify_channels: list = None, is_guest: bool = False, sync_mode: bool = False,
-                 channel_payload: dict = None):
+                 channel_payload: dict = None, output_mode: str = ""):
         self.channel = channel
         self.user_id = user_id
         self.chat_id = chat_id
@@ -76,6 +81,7 @@ class IncomingMessage:
         # channel_payload: 通道层原始上下文, 供异步推送 (_push_result/send_progress) 使用
         # 如 钉钉的 msg_data(含sessionWebhook)、飞书的 sender open_id 等。默认 None 向后兼容。
         self.channel_payload = channel_payload or {}
+        self.output_mode = output_mode
 
     @property
     def session_key(self) -> str:
@@ -129,26 +135,19 @@ class Agent:
 
         # LLM 客户端
         import httpx
+        request_router = None
         if "models" in llm_cfg:
             default_model = llm_cfg.get("default", "")
             default_cfg = llm_cfg["models"].get(default_model, {})
-            proxy_url = default_cfg.get("proxy", llm_cfg.get("proxy"))
-            http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
-            self.client = OpenAI(
-                api_key=default_cfg.get("api_key", llm_cfg.get("api_key", "")),
-                base_url=default_cfg.get("base_url", llm_cfg.get("base_url", "")),
-                http_client=http_client
-            )
-            self.model = default_cfg.get("model", default_model)
-            self.model_driver = default_cfg.get("driver", "openai")
+            request_router = ModelRouter(config)
+            self.client = request_router.get_client(default_model)
+            self.model_invoker = request_router.get_invoker(default_model)
+            if self.model_invoker is None:
+                raise ValueError(f"默认模型未配置或不可用: {default_model}")
+            self.model = self.model_invoker.model_name
+            self.model_driver = request_router.get_driver(default_model)
             self.max_tokens = default_cfg.get("max_tokens", 2048)
             self.temperature = default_cfg.get("temperature", 0.3)
-            self.model_invoker = OpenAIInvoker(
-                client=self.client,
-                model_name=self.model,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-            )
         else:
             proxy_url = llm_cfg.get("proxy")
             http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
@@ -183,6 +182,8 @@ class Agent:
         # 导致 OpenAI 协议违规 (assistant tool_calls 后必须紧跟 tool 消息)
         self._session_locks = {}  # session_key -> threading.Lock
         self._session_locks_guard = threading.Lock()
+        self._request_model_router = request_router
+        self._request_model_router_lock = threading.Lock()
 
         # 技能引擎
         self.skill_engine = SkillEngine()
@@ -212,6 +213,7 @@ class Agent:
         # ExecutionLedger: 旁路执行账本 (不阻断主流程)
         # Runtime 产生事实事件 → Recorder 持久化 → SQLite
         self.ledger = ExecutionLedger()
+        self.llm = LLMGateway(ledger=self.ledger)
 
         # 记忆引擎 (跨会话长期记忆)
         self.memory = AgentMemory() if MEMORY_AVAILABLE else None
@@ -219,13 +221,13 @@ class Agent:
             # 给蒸馏注入 LLM callback —— 复用 self.client + self.model
             # 这样不用单独维护 LLM_API_KEY 环境变量，配置零硬编码
             def _distill_llm_callback(prompt: str) -> str:
-                resp = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
+                resp = self.llm.invoke_sync(
+                    [{"role": "user", "content": prompt}],
+                    invoker=self.model_invoker, role="memory_distiller",
+                    provider=self.model_driver, session_key="system:memory_distiller",
                     max_tokens=self.max_tokens,
-                    temperature=0.3,  # 蒸馏要稳定，不要发散
                 )
-                return resp.choices[0].message.content or ''
+                return resp["content"] or ''
             self.memory.set_llm(_distill_llm_callback)
             self.memory.start_distill_scheduler(interval_hours=24)
             print("  ✅ 记忆引擎已启用 (蒸馏 LLM callback 已注入)")
@@ -332,7 +334,7 @@ class Agent:
         for ch in self.channels:
             try:
                 ch_response = AgentResponse(
-                    text=self._truncate_long_message_if_needed(response.text, ch.name),
+                    text=self._prepare_output(response.text, ch.name),
                     title=response.title,
                     color=response.color,
                     task_id=response.task_id
@@ -474,6 +476,11 @@ class Agent:
         造成 assistant tool_calls 与 tool 消息错位 (导致 LLM API 400 错误)。
         不同 session_key (不同用户/会话) 之间不互斥, 仍可并行。
         """
+        directive_mode, cleaned_text = self._extract_output_mode(msg.text)
+        if directive_mode:
+            msg.output_mode = directive_mode
+            msg.text = cleaned_text
+
         lock = self._get_session_lock(msg.session_key)
         wait_start = time.time()
         with lock:
@@ -482,9 +489,34 @@ class Agent:
                 print(f"  ⏳ 会话锁等待 {wait_ms:.0f}ms session={msg.session_key}")
             response = self._handle_locked(msg)
 
-        # ---- 超长消息截断与 HedgeDoc 上传移出会话锁锁区间，解决并发锁阻塞瓶颈 ----
-        response.text = self._truncate_long_message_if_needed(response.text, msg.channel)
+        # External delivery remains outside the session lock. Async task
+        # acknowledgements are left untouched; their final result is handled by
+        # _push_result with the same request-level output mode.
+        if not response.task_id:
+            overrides = {"full_delivery": msg.output_mode} if msg.output_mode else None
+            response.text = self._prepare_output(
+                response.text, msg.channel, overrides=overrides,
+                title=response.title, session_key=msg.session_key,
+            )
         return response
+
+    @staticmethod
+    def _extract_output_mode(text: str) -> tuple[str, str]:
+        """Read one portable request directive without teaching model code UI syntax."""
+        match = re.search(
+            r"\[output=(auto|email|hedgedoc|sqlite|store|inline)\]",
+            text, flags=re.IGNORECASE,
+        )
+        if match:
+            mode = match.group(1).lower()
+            mode = "sqlite" if mode == "store" else mode
+            return mode, (text[:match.start()] + text[match.end():]).strip()
+        lowered = text.lower()
+        if "完整回复发到邮件" in text or "完整内容发送到邮件" in text:
+            return "email", text
+        if "发送到hedgedoc" in lowered or "上传到hedgedoc" in lowered:
+            return "hedgedoc", text
+        return "", text
 
     def _handle_locked(self, msg: IncomingMessage) -> AgentResponse:
         """实际处理逻辑, 调用方必须已持有 session 锁"""
@@ -518,15 +550,15 @@ class Agent:
         def _task():
             try:
                 prompt = f"请用 10 个字以内精炼概括用户的这句提问，不要包含标点符号、引号或多余前缀。提问内容：{text[:200]}"
-                res = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3,
+                res = self.llm.invoke_sync(
+                    [{"role": "user", "content": prompt}],
+                    invoker=self.model_invoker, role="title_refiner",
+                    provider=self.model_driver, session_key=session_key,
                     max_tokens=30,
                     timeout=5.0,
                 )
-                if res and res.choices and res.choices[0].message.content:
-                    cleaned = res.choices[0].message.content.strip().strip('"\'“”')
+                if res and res["content"]:
+                    cleaned = res["content"].strip().strip('"\'“”')
                     if cleaned:
                         self.session_mgr.set_title(session_key, cleaned[:20])
             except Exception as e:
@@ -534,35 +566,43 @@ class Agent:
                 print(f"  ⚠️ [TitleRefine] 标题精炼异常: {e}", file=sys.stderr)
         threading.Thread(target=_task, daemon=True, name=f"TitleRefinement-{session_key[:8]}").start()
 
-    def _truncate_long_message_if_needed(self, text: str, channel: str) -> str:
-        # API 渠道（Web/SSE 端）直接放行，不做任何截断
-        if channel == 'api':
-            return text
+    def _summarize_output(self, text: str, max_chars: int,
+                          session_key: str = "") -> str:
+        cfg = self._config.get("output_delivery", {}) or {}
+        model = str((cfg.get("long_output", {}) or {}).get("summary_model") or "")
+        if not model:
+            return ""
+        router = self._get_request_model_router()
+        invoker = router.get_invoker(model, max_tokens=512)
+        if invoker is None:
+            return ""
+        result = self.llm.invoke_sync(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "你只负责压缩完整回复。忠实保留结论、关键数字、风险和下一步；"
+                        "不要补充原文没有的信息，不要提及自己在总结。"
+                    ),
+                },
+                {"role": "user", "content": text},
+            ],
+            invoker=invoker, role="output_summarizer",
+            provider=router.get_driver(model),
+            session_key=session_key or "system:output_delivery",
+            max_tokens=512,
+        )
+        return str(result.get("content") or "")[:max_chars]
 
-        hc = self._config.get("hedgedoc", {})
-        if not hc.get("enabled"):
-            return text
-
-        # 针对渠道特性配置个性化超长阈值
-        channel_limits = {
-            "telegram": 4000,
-            "feishu": 4000,
-            "dingtalk": 2500,
-            "wecom": 2048
-        }
-        max_len = channel_limits.get(channel.lower(), 2500)
-
-        if len(text) <= max_len:
-            return text
-
-        # 调用抽离的外部工具包
-        from core.utils.hedgedoc import upload_to_hedgedoc
-        url = upload_to_hedgedoc(text, hc)
-        if url:
-            # 动态根据渠道的最大限制截断（预留 200 字符用于提示文案和 URL 链接）
-            cut_len = max_len - 200
-            return text[:cut_len] + f"\n\n... (由于字数超出平台限制，剩余内容已截断)\n\n[🔗 点击此处在 Web 网页中查看完整报告]({url})"
-        return text
+    def _prepare_output(self, text: str, channel: str, overrides: dict = None,
+                        title: str = "", session_key: str = "") -> str:
+        """Apply the shared output policy before channel transport."""
+        return prepare_channel_output(
+            text, channel, self._config, overrides=overrides, title=title,
+            summarize=lambda value, limit: self._summarize_output(
+                value, limit, session_key=session_key
+            ),
+        )
 
     # ------------------------------------------------------------------
     #  内置指令
@@ -835,6 +875,37 @@ class Agent:
         ]
         return any(kw in text for kw in keywords)
 
+    def _extract_model_override(self, text: str):
+        """Return a configured model key explicitly requested by the user.
+
+        Supported forms are deterministic: ``[model=name]`` and natural
+        ``用/使用 name`` with spaces accepted in place of hyphens.
+        """
+        models = (self._config.get("llm", {}) or {}).get("models", {}) or {}
+        bracket = re.search(r"\[model=([^\]]+)\]", text or "", re.IGNORECASE)
+        if bracket:
+            requested = bracket.group(1).strip()
+            if requested not in models:
+                raise ValueError(f"未配置模型: {requested}")
+            return requested
+        lowered = (text or "").lower()
+        for name in sorted(models, key=len, reverse=True):
+            alias = re.escape(name.lower()).replace(r"\-", r"[\s_-]+")
+            if re.search(rf"(?:用|使用|指定)\s*{alias}(?:\s|来|去|，|,|$)", lowered):
+                return name
+        return None
+
+    def _get_request_model_router(self):
+        router = self._request_model_router
+        if router is None:
+            with self._request_model_router_lock:
+                router = self._request_model_router
+                if router is None:
+                    from core.model_router import ModelRouter
+                    router = ModelRouter(self._config)
+                    self._request_model_router = router
+        return router
+
 
 
     def _run_orchestrated(self, msg: IncomingMessage) -> AgentResponse:
@@ -913,8 +984,12 @@ class Agent:
         return callback
 
     def _push_result(self, msg, result: str):
-        truncated_result = self._truncate_long_message_if_needed(result, msg.channel)
-        response = AgentResponse(truncated_result, title="🤖 多Agent执行报告", color="blue")
+        overrides = {"full_delivery": msg.output_mode} if msg.output_mode else None
+        prepared_result = self._prepare_output(
+            result, msg.channel, overrides=overrides,
+            title="多Agent执行报告", session_key=msg.session_key,
+        )
+        response = AgentResponse(prepared_result, title="🤖 多Agent执行报告", color="blue")
         for ch in self.channels:
             if msg.notify_channels is not None and ch.name not in msg.notify_channels:
                 continue
@@ -990,6 +1065,46 @@ class Agent:
         session = self.session_mgr.get_or_create(msg.session_key)
         self.session_mgr.add_message(msg.session_key, "user", msg.text)
 
+        request_invoker = self.model_invoker
+        request_model = self.model
+        request_driver = self.model_driver
+        request_max_tokens = self.max_tokens
+        request_runtime = self.runtime
+        request_stream = not is_gemini_driver(request_driver)
+        override = None
+        if not msg.is_guest:
+            try:
+                override = self._extract_model_override(msg.text)
+            except ValueError as exc:
+                yield {"type": "error", "msg": f"❌ {exc}"}
+                yield {"type": "done", "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "estimated": False}}
+                return
+            selected_model = override or str(
+                (self._config.get("task_routing", {}) or {}).get("simple_model") or ""
+            )
+            if selected_model:
+                router = self._get_request_model_router()
+                request_invoker = router.get_invoker(selected_model)
+                if request_invoker is None:
+                    yield {"type": "error", "msg": f"❌ 模型当前不可用: {selected_model}"}
+                    yield {"type": "done", "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "estimated": False}}
+                    return
+                cfg = router.models_cfg.get(selected_model, {})
+                request_model = request_invoker.model_name
+                request_driver = router.get_driver(selected_model)
+                request_max_tokens = cfg.get("max_tokens", self.max_tokens)
+                request_stream = not is_gemini_driver(request_driver)
+                request_runtime = AgentRuntime(
+                    model_invoker=request_invoker,
+                    skill_engine=self.skill_engine,
+                    max_steps=self.max_steps,
+                    max_tokens=request_max_tokens,
+                    max_retries=1,
+                    non_retryable_exceptions=_NON_RETRYABLE_EXCEPTIONS,
+                )
+                label = "MODEL OVERRIDE" if override else "COST ROUTE"
+                print(f"  🎛️ [{label}] {selected_model} -> {request_model}")
+
         # ---- 构建工具集与 guard prompts ----
         history = self.session_mgr.get_history(msg.session_key)
         tools, system_names, selector_result = self._select_request_tools(msg, history)
@@ -1006,6 +1121,12 @@ class Agent:
             skill_names=system_names,
             read_only_mode=bool(selector_result and selector_result.read_only_mode),
         )
+        if override:
+            system_content += (
+                f"\n\n用户已显式指定本次使用模型 `{override}`，必须尊重该选择。"
+                "如果你能高置信判断低成本模型完全胜任，可在最终答复末尾给出一句非阻断的成本建议；"
+                "不得自行更换本次模型，也不要要求用户再次确认后才开始。"
+            )
         if guard_prompts:
             system_content += "\n\n⚠️【数据忠实执行指令】:\n" + "\n".join(f"- {p}" for p in guard_prompts)
         if self.memory:
@@ -1027,7 +1148,7 @@ class Agent:
             return
 
         # ---- 动态超时 (Agent 负责，不进 Runtime) ----
-        is_pro = "pro" in self.model.lower() or "reasoner" in self.model.lower()
+        is_pro = "pro" in request_model.lower() or "reasoner" in request_model.lower()
         dynamic_timeout = 180.0 if is_pro else 45.0
         total_chars = sum(
             len(m["content"]) if isinstance(m.get("content"), str) else 0
@@ -1044,19 +1165,19 @@ class Agent:
             allowed_tools=allowed_tools,
             session_key=msg.session_key,
             max_steps=self.max_steps,
-            max_output_tokens=self.max_tokens,
+            max_output_tokens=request_max_tokens,
         )
 
         # ---- 启动账本记录 (旁路, 不阻断主流程) ----
         execution = self.ledger.start(
-            ctx, model_name=self.model, provider=self.model_driver,
-            stream_mode=True,
+            ctx, model_name=request_model, provider=request_driver,
+            stream_mode=request_stream,
         )
         # 将 execution_id 注入 ctx，便于下游传播 (Worker/Cron)
         import dataclasses
         ctx = dataclasses.replace(ctx, execution_id=execution.id)
 
-        print(f"  🧠 [LLM Stream] 角色: {'Guest' if msg.is_guest else 'SyncAgent'}, 模型: {self.model}")
+        print(f"  🧠 [LLM Stream] 角色: {'Guest' if msg.is_guest else 'SyncAgent'}, 模型: {request_model}")
 
         # ---- 状态追踪 ----
         terminal_error = False  # 是否已收到终止性错误事件 (ERROR/DEAD_LOOP/MAX_STEPS/TOKEN_BUDGET)
@@ -1072,12 +1193,12 @@ class Agent:
         )
 
         # ---- 消费 Runtime 事件流 (经 Recorder 包装) ----
-        runtime_iter = self.runtime.run(
+        runtime_iter = request_runtime.run(
             messages=messages,
             tools=tools,
             ctx=ctx,
             timeout=dynamic_timeout,
-            stream=True,
+            stream=request_stream,
         )
         recorder = RuntimeRecorder(self.ledger, execution.id)
         for event in recorder.wrap(runtime_iter):
@@ -1135,11 +1256,11 @@ class Agent:
                 if not usage_logged_this_step:
                     step_usage = dict(event.data)
                     self.session_mgr.log_api_usage(
-                        msg.session_key, self.model,
+                        msg.session_key, request_model,
                         step_usage.get("prompt_tokens", 0),
                         step_usage.get("completion_tokens", 0),
                         step_usage.get("total_tokens", 0),
-                        provider=self.model_driver, estimated=False,
+                        provider=request_driver, estimated=False,
                     )
                     total_usage["prompt_tokens"] += step_usage.get("prompt_tokens", 0)
                     total_usage["completion_tokens"] += step_usage.get("completion_tokens", 0)
@@ -1152,9 +1273,9 @@ class Agent:
                 if not usage_logged_this_step:
                     step_usage = _estimate_tokens(messages, step_text + step_reasoning)
                     self.session_mgr.log_api_usage(
-                        msg.session_key, self.model,
+                        msg.session_key, request_model,
                         step_usage["prompt_tokens"], step_usage["completion_tokens"], step_usage["total_tokens"],
-                        provider=self.model_driver, estimated=True,
+                        provider=request_driver, estimated=True,
                     )
                     total_usage["prompt_tokens"] += step_usage["prompt_tokens"]
                     total_usage["completion_tokens"] += step_usage["completion_tokens"]

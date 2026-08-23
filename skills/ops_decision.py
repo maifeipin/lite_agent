@@ -9,7 +9,9 @@ from typing import List, Dict, Literal, Optional
 from core.skill_engine import skill
 from core.config_loader import load_config
 from core.model_router import ModelRouter
-from core.model_config import is_gemini_driver
+from core.llm_gateway import LLMGateway
+from core.execution_ledger import ExecutionLedger
+from core.execution import ExecutionSource
 
 # =========================================================
 # 1. Schema 定义 (稳定输出协议)
@@ -70,57 +72,38 @@ def _get_task_profile(task_type: str) -> dict:
         "description": "通用决策评估"
     })
 
-def _build_decision_brief(router: ModelRouter, topic: str) -> str:
+def _build_decision_brief(gateway: LLMGateway, topic: str) -> str:
     # MVP: 如果文本超过 8000 字符，调用最快模型做统一摘要
     if len(topic) < 8000:
         return topic
     prompt = f"请提炼以下长文本的核心事实基线，用于后续公平决策投票。请包含：Key Facts, Quantitative Signals, Known Uncertainties, Source Coverage。\n\n{topic[:30000]}"
     try:
-        client = router.get_client("flash")
-        driver = router.get_driver("flash")
-        model_id = router.models_cfg.get("flash", {}).get("model", "flash")
-        
-        if is_gemini_driver(driver):
-            res = client.models.generate_content(model=model_id, contents=prompt)
-            return res.text
-        else:
-            response = client.chat.completions.create(
-                model=model_id,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            return response.choices[0].message.content
-    except Exception as e:
+        response = gateway.invoke_sync(
+            [{"role": "user", "content": prompt}],
+            model="flash", role="committee_brief",
+            session_key="committee:brief", source=ExecutionSource.DIRECT,
+            max_tokens=2048, timeout=60.0,
+        )
+        return response["content"]
+    except Exception:
         return topic[:8000] + "\n...[Truncated and Brief Failed]"
 
-def _call_model(router: ModelRouter, model_name: str, prompt: str, schema_cls) -> str:
+def _call_model(gateway: LLMGateway, model_name: str, prompt: str, schema_cls,
+                session_key: str = "") -> str:
     """并发调用大模型，并强制输出指定 Schema"""
-    client = router.get_client(model_name)
-    driver = router.get_driver(model_name)
-    if not client:
-        return '{"error": "Model client not found"}'
-        
     sys_prompt = f"You are an expert AI committee judge. You must output valid JSON matching exactly this schema:\n{schema_cls.model_json_schema()}"
-    
+
     try:
-        model_id = router.models_cfg.get(model_name, {}).get("model", model_name)
-        if is_gemini_driver(driver):
-            res = client.models.generate_content(
-                model=model_id,
-                contents=sys_prompt + "\n\n" + prompt,
-                config={"response_mime_type": "application/json"} 
-            )
-            return res.text
-        else:
-            response = client.chat.completions.create(
-                model=model_id,
-                messages=[
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={"type": "json_object"},  # Doubao/OpenAI 兼容接口需显式强制 JSON
-                timeout=60
-            )
-            return response.choices[0].message.content
+        response = gateway.invoke_sync(
+            [
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            model=model_name, role="committee_judge",
+            session_key=session_key, source=ExecutionSource.DIRECT,
+            response_format={"type": "json_object"}, timeout=60.0,
+        )
+        return response["content"]
     except Exception as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
@@ -166,6 +149,7 @@ def _calculate_std_dev(scores: List[float]) -> float:
 )
 def ops_decision(task_type: str, topic: str, session_id: str = '', trace_id: str = '') -> str:
     router = ModelRouter(load_config())
+    gateway = LLMGateway(router, ExecutionLedger())
     models = _get_models_from_config()
     if not models:
         return "🚨 未配置或获取到委员会模型 (committee.models 为空)"
@@ -173,7 +157,7 @@ def ops_decision(task_type: str, topic: str, session_id: str = '', trace_id: str
     run_id = str(uuid.uuid4())[:8]
     
     # 步骤一：预处理生成 Decision Brief
-    brief = _build_decision_brief(router, topic)
+    brief = _build_decision_brief(gateway, topic)
     prompt = f"任务配置指南与维度定义: {json.dumps(profile, ensure_ascii=False)}\n\n请严格按照 Schema 对以下简报事实进行打分和评价：\n\n{brief}"
     
     results = {}
@@ -181,7 +165,12 @@ def ops_decision(task_type: str, topic: str, session_id: str = '', trace_id: str
     
     # 步骤二：并发调用模型
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(models)) as executor:
-        future_to_model = {executor.submit(_call_model, router, m, prompt, DecisionResult): m for m in models}
+        audit_session = session_id or f"committee:{run_id}"
+        future_to_model = {
+            executor.submit(
+                _call_model, gateway, m, prompt, DecisionResult, audit_session
+            ): m for m in models
+        }
         for future in concurrent.futures.as_completed(future_to_model):
             m = future_to_model[future]
             res_str = future.result()

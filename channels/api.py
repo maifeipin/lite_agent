@@ -1,4 +1,5 @@
 import json
+import re
 import threading
 import time
 from urllib.parse import urlparse, parse_qs
@@ -71,6 +72,12 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         if not self._auth():
             return
+        if self.is_guest and (
+            req_path.startswith('/api/v1/task-specs')
+            or req_path.startswith('/api/v1/output-archive/')
+        ):
+            self.send_error(403, "Forbidden: admin access required")
+            return
         
         # 边缘节点权限隔离：仅允许 /api/report, /api/pull_task
         if getattr(self, 'is_edge', False) and req_path not in ('/api/report', '/api/pull_task'):
@@ -89,6 +96,14 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_email_html(parsed_url.query)
         elif req_path == '/api/v1/todos':
             self._handle_todos(parsed_url.query)
+        elif req_path == '/api/v1/task-specs':
+            self._handle_task_specs_get(parsed_url.query)
+        elif req_path == '/api/v1/task-specs/meta':
+            self._handle_task_specs_meta()
+        elif req_path.startswith('/api/v1/task-specs/'):
+            self._handle_task_spec_get(req_path)
+        elif req_path.startswith('/api/v1/output-archive/'):
+            self._handle_output_archive_get(req_path)
         elif req_path == '/api/v1/socks5':
             self._handle_socks5_get(parsed_url.query)
         elif req_path == '/api/v1/socks5/active':
@@ -123,6 +138,9 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         if not self._auth():
             return
+        if self.is_guest and req_path.startswith('/api/v1/task-specs'):
+            self.send_error(403, "Forbidden: TaskSpec management requires admin")
+            return
         
         # 边缘节点权限隔离：仅允许 /api/report, /api/task_result
         if getattr(self, 'is_edge', False) and req_path not in ('/api/report', '/api/task_result'):
@@ -147,6 +165,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_ocr_proxy()
         elif req_path == '/api/v1/todos':
             self._handle_post_todo()
+        elif req_path == '/api/v1/task-specs':
+            self._handle_task_spec_create()
+        elif req_path == '/api/v1/task-specs/generate':
+            self._handle_task_spec_generate()
+        elif req_path.startswith('/api/v1/task-specs/'):
+            self._handle_task_spec_action(req_path)
         elif req_path == '/api/v1/todos/brief/push':
             self._handle_post_todo_brief_push()
         elif req_path == '/api/v1/session/title':
@@ -170,8 +194,13 @@ class ApiHandler(BaseHTTPRequestHandler):
             req_path = req_path[6:]
         elif req_path == '/agent':
             req_path = '/'
+        if self.is_guest and req_path.startswith('/api/v1/task-specs'):
+            self.send_error(403, "Forbidden: TaskSpec management requires admin")
+            return
         if req_path.startswith('/api/v1/todos/'):
             self._handle_patch_todo(req_path)
+        elif req_path.startswith('/api/v1/task-specs/'):
+            self._handle_task_spec_update(req_path)
         elif req_path.startswith('/api/v1/socks5/'):
             self._handle_socks5_patch(req_path)
         else:
@@ -189,8 +218,13 @@ class ApiHandler(BaseHTTPRequestHandler):
             req_path = req_path[6:]
         elif req_path == '/agent':
             req_path = '/'
+        if self.is_guest and req_path.startswith('/api/v1/task-specs'):
+            self.send_error(403, "Forbidden: TaskSpec management requires admin")
+            return
         if req_path.startswith('/api/v1/todos/'):
             self._handle_delete_todo(req_path)
+        elif req_path.startswith('/api/v1/task-specs/'):
+            self._handle_task_spec_delete(req_path)
         elif req_path.startswith('/api/v1/socks5/'):
             self._handle_socks5_delete(req_path)
         else:
@@ -294,7 +328,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             chat_id=session_id,
             message_id=str(time.time()),
             text=text,
-            notify_channels=notify_channels
+            notify_channels=notify_channels,
+            output_mode=str(req_data.get('output_delivery') or ''),
         )
 
         agent = self.server.api_server.agent
@@ -390,6 +425,153 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         self.wfile.write(json.dumps(items, ensure_ascii=False).encode('utf-8'))
+
+    def _read_json_body(self) -> dict:
+        length = int(self.headers.get('Content-Length', 0))
+        if length <= 0:
+            raise ValueError("Empty JSON body")
+        value = json.loads(self.rfile.read(length).decode('utf-8'))
+        if not isinstance(value, dict):
+            raise ValueError("JSON body must be an object")
+        return value
+
+    def _send_json(self, value, status: int = 200):
+        body = json.dumps(value, ensure_ascii=False).encode('utf-8')
+        self.send_response(status)
+        self._send_cors_headers()
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    @property
+    def _task_specs(self):
+        return self.server.api_server.task_specs
+
+    def _handle_task_specs_get(self, query: str = ""):
+        items = self._task_specs.store.list()
+        self._send_json({"data": items, "total": len(items)})
+
+    def _handle_task_specs_meta(self):
+        from core.task_spec import BASE_POLICY, SCHEMA_VERSION, policy_digest
+        models = []
+        for name, cfg in self._task_specs.router.models_cfg.items():
+            models.append({
+                "name": name,
+                "model": cfg.get("model", name),
+                "tags": cfg.get("tags", []),
+            })
+        self._send_json({
+            "schema_version": SCHEMA_VERSION,
+            "policy": BASE_POLICY,
+            "policy_digest": policy_digest(),
+            "models": models,
+            "capabilities": self._task_specs.capability_map,
+        })
+
+    def _handle_task_spec_get(self, path: str):
+        task_id = path.rstrip('/').split('/')[-1]
+        item = self._task_specs.store.get(task_id)
+        if item is None:
+            self._send_json({"error": "TaskSpec not found"}, 404)
+            return
+        self._send_json(item)
+
+    def _handle_output_archive_get(self, path: str):
+        archive_id = path.rstrip('/').split('/')[-1]
+        if not re.fullmatch(r"[0-9a-f]{16}", archive_id):
+            self._send_json({"error": "Invalid archive id"}, 400)
+            return
+        from core.output_delivery import get_archived_output
+        item = get_archived_output(archive_id, self.server.api_server.agent._config)
+        if item is None:
+            self._send_json({"error": "Output archive not found"}, 404)
+            return
+        self._send_json(item)
+
+    def _handle_task_spec_create(self):
+        try:
+            data = self._read_json_body()
+            if isinstance(data.get("spec"), dict):
+                created = self._task_specs.import_spec(data["spec"])
+            else:
+                goal = str(data.get("goal") or "").strip()
+                if not goal:
+                    raise ValueError("goal is required")
+                created = self._task_specs.create_manual(goal, str(data.get("name") or ""))
+            self._send_json(created, 201)
+        except (ValueError, KeyError, json.JSONDecodeError) as exc:
+            self._send_json({"error": str(exc)}, 400)
+
+    def _handle_task_spec_generate(self):
+        try:
+            data = self._read_json_body()
+            goal = str(data.get("goal") or "").strip()
+            if not goal:
+                raise ValueError("goal is required")
+            result = self._task_specs.generate(goal, str(data.get("name") or ""))
+            self._send_json(result, 201)
+        except (ValueError, json.JSONDecodeError) as exc:
+            self._send_json({"error": str(exc)}, 400)
+        except Exception as exc:
+            self._send_json({"error": f"TaskSpec generation failed: {exc}"}, 500)
+
+    def _handle_task_spec_update(self, path: str):
+        task_id = path.rstrip('/').split('/')[-1]
+        try:
+            data = self._read_json_body()
+            spec = data.get("spec") if isinstance(data.get("spec"), dict) else data
+            result = self._task_specs.update(task_id, spec)
+            self._send_json(result)
+        except KeyError:
+            self._send_json({"error": "TaskSpec not found"}, 404)
+        except (ValueError, json.JSONDecodeError) as exc:
+            self._send_json({"error": str(exc)}, 400)
+
+    def _handle_task_spec_action(self, path: str):
+        parts = path.rstrip('/').split('/')
+        if len(parts) < 6:
+            self._send_json({"error": "Missing TaskSpec action"}, 400)
+            return
+        task_id, action = parts[-2], parts[-1]
+        try:
+            if action == "validate":
+                result = self._task_specs.review(task_id)
+            elif action == "confirm":
+                result = self._task_specs.confirm_generated(task_id)
+            elif action == "acknowledge":
+                data = self._read_json_body()
+                result = self._task_specs.acknowledge(task_id, str(data.get("rationale") or ""))
+            elif action == "schedule":
+                data = self._read_json_body()
+                current = self._task_specs.store.get(task_id)
+                if current is None:
+                    raise KeyError(task_id)
+                if current["status"] != "approved":
+                    raise ValueError("只有已通过校验的任务才能启用调度")
+                enabled = bool(data.get("enabled", True))
+                result = self._task_specs.store.save(
+                    current["spec"], status="approved", enabled=enabled
+                )
+            elif action == "run":
+                result = self.server.api_server.start_task_spec_run(task_id)
+            else:
+                self._send_json({"error": f"Unknown action: {action}"}, 404)
+                return
+            self._send_json(result, 202 if action == "run" else 200)
+        except KeyError:
+            self._send_json({"error": "TaskSpec not found"}, 404)
+        except (ValueError, json.JSONDecodeError) as exc:
+            self._send_json({"error": str(exc)}, 400)
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, 500)
+
+    def _handle_task_spec_delete(self, path: str):
+        task_id = path.rstrip('/').split('/')[-1]
+        if self._task_specs.store.delete(task_id):
+            self._send_json({"success": True})
+        else:
+            self._send_json({"error": "TaskSpec not found"}, 404)
 
     def _handle_sessions(self, query: str):
         """返回最近会话记录列表（来源通道、时间、Token量、模型）。"""
@@ -1202,7 +1384,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             text=text,
             notify_channels=[],
             is_guest=is_guest_mode,
-            sync_mode=True
+            sync_mode=True,
+            output_mode=str(req_data.get('output_delivery') or ''),
         )
         
         agent = self.server.api_server.agent
@@ -1468,6 +1651,101 @@ class ApiServer:
         self.auth_token = self.config.get("auth_token", "")
         self.server = None
         self._thread = None
+        from core.task_spec_service import TaskSpecService
+        self.task_specs = TaskSpecService(
+            agent._config, agent.skill_engine, ledger=agent.ledger
+        )
+        self._task_run_lock = threading.Lock()
+        self._running_task_specs = set()
+
+    @staticmethod
+    def _render_task_spec_prompt(spec: dict) -> str:
+        task = spec.get("task") or {}
+        execution = spec.get("execution") or {}
+        output = spec.get("output") or {}
+        return (
+            "请严格执行以下已审批 TaskSpec。不得扩大目标、权限或副作用范围。\n\n"
+            f"目标: {task.get('objective', '')}\n"
+            f"背景: {task.get('context', '')}\n"
+            f"约束: {json.dumps(task.get('constraints', []), ensure_ascii=False)}\n"
+            f"验收标准: {json.dumps(task.get('acceptance_criteria', []), ensure_ascii=False)}\n"
+            f"网络条件: {json.dumps(execution.get('network', {}), ensure_ascii=False)}\n"
+            f"能力: {json.dumps(execution.get('capabilities', []), ensure_ascii=False)}\n"
+            f"已审批计划: {json.dumps(execution.get('plan', []), ensure_ascii=False)}\n"
+            f"输出要求: {json.dumps(output, ensure_ascii=False)}"
+        )
+
+    def start_task_spec_run(self, task_id: str) -> dict:
+        current = self.task_specs.store.get(task_id)
+        if current is None:
+            raise KeyError(task_id)
+        if current["status"] != "approved":
+            raise ValueError("TaskSpec 尚未通过校验")
+        validated = current["spec"].get("contract", {}).get("validated_digest")
+        from core.task_spec import content_digest
+        if validated != content_digest(current["spec"]):
+            raise ValueError("TaskSpec 内容已变化，需要重新校验")
+        with self._task_run_lock:
+            if task_id in self._running_task_specs:
+                raise ValueError("TaskSpec 正在执行")
+            self._running_task_specs.add(task_id)
+        self.task_specs.store.mark_started(task_id)
+
+        def _run():
+            try:
+                from core.task_orchestrator import TaskOrchestrator
+                item = self.task_specs.store.get(task_id)
+                spec = item["spec"]
+                budget = (spec.get("execution") or {}).get("budget") or {}
+                orchestrator = TaskOrchestrator(
+                    config=self.agent._config,
+                    skill_engine=self.agent.skill_engine,
+                    session_mgr=self.agent.session_mgr,
+                    channels=self.agent.channels,
+                    ledger=self.agent.ledger,
+                )
+                planned = self.task_specs.build_subtasks(spec)
+                if planned:
+                    # Direct nodes in an approved immutable TaskSpec do not need a
+                    # Worker LLM. SkillEngine still enforces the tool allowlist.
+                    orchestrator.direct_tool_execution = True
+                result = orchestrator.execute(
+                    self._render_task_spec_prompt(spec),
+                    session_key=f"task_spec:{task_id}",
+                    task_id=f"spec_{task_id[:8]}",
+                    step_override=int(budget.get("max_steps", 20)),
+                    token_override=int(budget.get("max_total_tokens", 50000)),
+                    parallel_override=int(budget.get("max_parallel_tasks", 3)),
+                    wall_seconds_override=int(budget.get("max_wall_seconds", 900)),
+                    planned_subtasks=planned or None,
+                    planned_strategy=str((spec.get("task") or {}).get("context") or ""),
+                )
+                delivered_result = self.agent._prepare_output(
+                    result, "task", overrides=spec.get("output") or {},
+                    title=str((spec.get("task") or {}).get("name") or "TaskSpec 完整回复"),
+                    session_key=f"task_spec:{task_id}",
+                )
+                self.task_specs.store.mark_finished(task_id, True, delivered_result)
+            except Exception as exc:
+                self.task_specs.store.mark_finished(task_id, False, str(exc))
+            finally:
+                with self._task_run_lock:
+                    self._running_task_specs.discard(task_id)
+
+        threading.Thread(
+            target=_run, daemon=True, name=f"TaskSpec-{task_id[:8]}"
+        ).start()
+        return {"status": "accepted", "task_id": task_id}
+
+    def run_due_task_specs(self):
+        started = 0
+        for item in self.task_specs.store.due():
+            try:
+                self.start_task_spec_run(item["id"])
+                started += 1
+            except Exception as exc:
+                print(f"  ⚠️ [TaskSpec] 定时任务 {item['id']} 未启动: {exc}")
+        return f"TaskSpec scheduler: started={started}"
 
     def start(self):
         if not self.config.get("enabled", False):
@@ -1476,6 +1754,11 @@ class ApiServer:
 
         self.server = ThreadingHTTPServer((self.host, self.port), ApiHandler)
         self.server.api_server = self  # 给 Handler 注入引用
+
+        if not any(job.name == "task_specs_tick" for job in self.agent.cron.jobs.values()):
+            self.agent.cron.add_job(
+                "task_specs_tick", "every_minute", self.run_due_task_specs
+            )
         
         self._thread = threading.Thread(target=self.server.serve_forever, daemon=True, name="ApiServer")
         self._thread.start()
