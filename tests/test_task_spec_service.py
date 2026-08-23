@@ -103,6 +103,8 @@ def test_enrich_updates_existing_task_and_increments_revision(tmp_path):
     assert enriched["id"] == manual["id"]
     assert enriched["generation"]["status"] == "completed"
     assert enriched["spec"]["contract"]["revision"] == 2
+    assert enriched["preflight"]["revision"] == 2
+    assert enriched["spec"]["validation"]["preflight"]["revision"] == 2
     assert enriched["spec"]["contract"]["generated_by"] == "pro"
     assert enriched["spec"]["task"]["context"] == "读取已配置的账单数据源"
     assert enriched["spec"]["execution"]["model_policy"]["preferred_model"] == "flash"
