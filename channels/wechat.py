@@ -148,13 +148,8 @@ class WeChatChannel(BaseChannel):
         return self._send_segmented(talker, token or self._valid_token(talker), text or "处理中…")
 
     def broadcast(self, response: AgentResponse) -> bool:
-        users: List[str] = []
         try:
-            with self.agent.session_mgr._connect() as conn:
-                rows = conn.execute(
-                    "SELECT DISTINCT session_key FROM sessions WHERE session_key LIKE 'wechat:%'"
-                ).fetchall()
-            users = [row[0].split(":", 1)[1] for row in rows if ":" in row[0]]
+            users = self.agent.session_mgr.list_channel_user_ids("wechat")
         except Exception as exc:
             print("  [WeChat] could not query broadcast recipients: %s" % exc)
             return False
