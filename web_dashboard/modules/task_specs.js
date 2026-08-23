@@ -9,6 +9,7 @@ registerTabModule({
     _autoOpenId: null,
     _fallbackNotice: null,
     _enrichingIds: new Set(),
+    _runningPollIds: new Set(),
 
     async fetchCount() {
         try {
@@ -106,10 +107,10 @@ registerTabModule({
             </div>
             <h3 class="card-title">${h(doc.name || task.name || '未命名任务')}</h3>
             <div class="card-snippet">${h(task.objective || '')}</div>
-            <div class="task-spec-summary">Token ${h(budget.max_total_tokens || 0)} · Steps ${h(budget.max_steps || 0)} · 时长 ${h(budget.max_wall_seconds || 900)}s · ${h(last)}</div>
+            <div class="task-spec-summary">Token ${h(budget.max_total_tokens || 0)} · Steps ${h(budget.max_steps || 0)} · 时长 ${h(budget.max_wall_seconds || 900)}s · <span class="task-run-status">${h(last)}</span></div>
             ${fallbackBanner}
             ${findingHtml}
-            ${doc.last_run_result ? `<details><summary>最近运行结果</summary><pre>${h(doc.last_run_result)}</pre></details>` : ''}
+            ${doc.last_run_result && !isRunning ? `<details class="task-last-result"><summary>最近运行结果</summary><pre>${h(doc.last_run_result)}</pre></details>` : ''}
             <div class="task-spec-actions">
                 <button class="task-btn task-edit">✏ 编辑规则</button>
                 <button class="task-btn task-enrich" ${isEnriching ? 'disabled' : ''} style="background:rgba(56,189,248,0.12);border-color:rgba(56,189,248,0.3);color:#7dd3fc;">
@@ -236,7 +237,7 @@ registerTabModule({
                         ${['simple','standard','complex'].map(x => `<option value="${x}" ${e.complexity===x?'selected':''}>${x}</option>`).join('')}
                     </select>
                 </label>
-                <label>指定执行模型
+                <label>指定执行模型（任务运行时）
                     <select class="te-model">
                         <option value="">按成本等级自动选择</option>
                         ${models}
@@ -342,7 +343,7 @@ registerTabModule({
             <div class="task-spec-actions" style="margin-top:16px;">
                 <button class="task-btn task-btn-primary task-save">💾 保存规则并等待复核</button>
                 <button class="task-btn task-save-validate" style="background:#1e3a8a;border-color:#3b82f6;color:#dbeafe;">💾 保存并立即复核</button>
-                <label class="task-enrich-model-wrap">AI 完善模型（仅本次）
+                <label class="task-enrich-model-wrap" title="只用于生成或改写任务规则，不参与任务实际执行，也不会修改全局模型配置">AI 完善模型（仅本次规则编写）
                     <select class="task-enrich-model">
                         <option value="">系统默认${meta.author_model ? `：${h(meta.author_model)}` : ''}</option>
                         ${authorModelOptions}
@@ -704,6 +705,15 @@ registerTabModule({
                 updated.execution.model_policy.preferred_model = panel.querySelector('.te-model').value || undefined;
                 updated.execution.model_policy.user_locked = !!updated.execution.model_policy.preferred_model;
                 updated.execution.model_policy.recommended_tier = panel.querySelector('.te-tier').value;
+                if (updated.execution.model_policy.preferred_model) {
+                    const allowed = Array.isArray(updated.execution.model_policy.allowed_models)
+                        ? updated.execution.model_policy.allowed_models : [];
+                    if (allowed.length && !allowed.includes(updated.execution.model_policy.preferred_model)) {
+                        updated.execution.model_policy.allowed_models = [
+                            updated.execution.model_policy.preferred_model, ...allowed
+                        ];
+                    }
+                }
 
                 updated.execution.network = updated.execution.network || {};
                 updated.execution.network.mode = panel.querySelector('.te-network').value;
@@ -768,6 +778,30 @@ registerTabModule({
         const data = await r.json();
         if (!r.ok) throw new Error(data.error || `${action} 失败`);
         return data;
+    },
+
+    async _pollRun(id) {
+        const key = String(id);
+        if (this._runningPollIds.has(key)) return;
+        this._runningPollIds.add(key);
+        try {
+            // Default task wall-time is 15 minutes. Refresh only when the
+            // persisted state changes, rather than repainting old results.
+            for (let attempt = 0; attempt < 185 && this._runningPollIds.has(key); attempt += 1) {
+                await new Promise(resolve => setTimeout(resolve, 5000));
+                try {
+                    const item = await fetch(`/agent/api/v1/task-specs/${id}`, {
+                        cache: 'no-store'
+                    }).then(r => r.json());
+                    if (item.last_run_status && item.last_run_status !== 'running') {
+                        try { await performSearch(false); } catch {}
+                        return;
+                    }
+                } catch {}
+            }
+        } finally {
+            this._runningPollIds.delete(key);
+        }
     },
 
     async _enrichTask(id, model = '') {
@@ -1002,8 +1036,14 @@ registerTabModule({
                         if (!rationale.trim()) return;
                         await this._action(id, 'acknowledge', { rationale });
                     } else if (event.target.closest('.task-run')) {
+                        const runButton = event.target.closest('.task-run');
+                        runButton.disabled = true;
+                        runButton.textContent = '⏳ 执行中';
+                        card.querySelector('.task-last-result')?.remove();
+                        const runStatus = card.querySelector('.task-run-status');
+                        if (runStatus) runStatus.textContent = '执行中';
                         await this._action(id, 'run');
-                        alert('已提交执行任务，可在控制台或稍后刷新查看运行结果');
+                        this._pollRun(id);
                     } else if (event.target.closest('.task-schedule')) {
                         const enabled = !card.querySelector('.task-enabled');
                         await this._action(id, 'schedule', { enabled });
@@ -1020,6 +1060,7 @@ registerTabModule({
                     await performSearch(false);
                 } catch (ex) {
                     alert(`操作失败: ${ex.message}`);
+                    try { await performSearch(false); } catch {}
                 }
             };
             grid.addEventListener('click', this._clickHandler);
@@ -1034,5 +1075,6 @@ registerTabModule({
         this._autoOpenId = null;
         this._fallbackNotice = null;
         this._enrichingIds.clear();
+        this._runningPollIds.clear();
     }
 });
