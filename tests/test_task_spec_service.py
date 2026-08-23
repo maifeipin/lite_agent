@@ -124,6 +124,34 @@ def test_enrich_updates_existing_task_and_increments_revision(tmp_path):
     assert invoker.invoke_sync.call_count == 1
 
 
+def test_enrich_does_not_override_user_locked_runtime_model(tmp_path):
+    service, _ = _service(tmp_path, {
+        "execution": {
+            "model_policy": {
+                "preferred_model": "flash",
+                "allowed_models": ["flash"],
+                "user_locked": False,
+            },
+        },
+    })
+    manual = service.create_manual("查看一下最近的外币账单")
+    spec = manual["spec"]
+    spec["execution"]["model_policy"].update({
+        "preferred_model": "pro",
+        "allowed_models": ["pro"],
+        "user_locked": True,
+    })
+    service.store.save(spec, status=manual["status"], enabled=False)
+
+    enriched = service.enrich(manual["id"], model="flash")
+
+    policy = enriched["spec"]["execution"]["model_policy"]
+    assert policy["preferred_model"] == "pro"
+    assert policy["allowed_models"] == ["pro"]
+    assert policy["user_locked"] is True
+    assert enriched["spec"]["contract"]["generated_by"] == "flash"
+
+
 def test_author_receives_selector_tool_schemas_and_disables_hidden_retries(tmp_path):
     skill_engine = MagicMock()
     skill_engine.get_all_names.return_value = {"billing_recent", "billing_report"}
