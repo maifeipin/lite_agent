@@ -101,3 +101,26 @@ def test_enrich_action_forwards_one_time_model():
 
     task_specs.enrich.assert_called_once_with("task-1", "gemini-pro")
     assert responses == [({"id": "task-1"}, 200)]
+
+
+def test_manual_task_cannot_enable_schedule():
+    task_specs = MagicMock()
+    task_specs.store.get.return_value = {
+        "id": "task-1", "status": "approved",
+        "spec": {"execution": {"schedule": {"mode": "manual"}}},
+    }
+    handler = ApiHandler.__new__(ApiHandler)
+    handler.server = SimpleNamespace(
+        api_server=SimpleNamespace(task_specs=task_specs)
+    )
+    handler.headers = {"Content-Length": "17"}
+    handler._read_json_body = lambda: {"enabled": True}
+    responses = []
+    handler._send_json = lambda value, status=200: responses.append((value, status))
+
+    handler._handle_task_spec_action("/api/v1/task-specs/task-1/schedule")
+
+    assert responses == [({
+        "error": "手动任务没有调度时间，请先设置一次或重复计划",
+    }, 400)]
+    task_specs.store.save.assert_not_called()
