@@ -19,6 +19,7 @@ import os
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -875,6 +876,10 @@ def _build_orchestrator_with_ledger(tmp_db, engine_with_test_skills):
         session_mgr=session_mgr,
         ledger=ledger,
     )
+    orch.model_selector = MagicMock()
+    orch.model_selector.select.return_value = SimpleNamespace(
+        model="test-model", reason="test", fallback_models=()
+    )
     return orch, ledger
 
 
@@ -883,9 +888,9 @@ def test_parent_execution_planning_failure_not_running(tmp_db, engine_with_test_
     orch, ledger = _build_orchestrator_with_ledger(tmp_db, engine_with_test_skills)
 
     # mock _plan 返回空列表
-    orch._plan = lambda goal, max_steps=None: ([], "")
+    orch._plan = lambda goal, max_steps=None, **kwargs: ([], "")
     # 即便 _classify_and_route 被调用也不应到达，但保险 mock 掉
-    orch._classify_and_route = lambda subtasks: None
+    orch._classify_and_route = lambda subtasks, **kwargs: None
 
     result = orch.execute("impossible goal", "sess_planning_fail")
 
@@ -910,8 +915,8 @@ def test_parent_execution_failfast_not_running(tmp_db, engine_with_test_skills):
         Subtask(id=f"st{i}", name=f"t{i}", type=SubtaskType.TEXT, prompt="x")
         for i in range(10)
     ]
-    orch._plan = lambda goal, max_steps=None: (fake_subtasks, "")
-    orch._classify_and_route = lambda subtasks: None
+    orch._plan = lambda goal, max_steps=None, **kwargs: (fake_subtasks, "")
+    orch._classify_and_route = lambda subtasks, **kwargs: None
 
     result = orch.execute("big goal", "sess_failfast")
 
@@ -930,7 +935,7 @@ def test_parent_execution_exception_not_running(tmp_db, engine_with_test_skills)
     orch, ledger = _build_orchestrator_with_ledger(tmp_db, engine_with_test_skills)
 
     # mock _plan 抛异常
-    def boom(goal, max_steps=None):
+    def boom(goal, max_steps=None, **kwargs):
         raise RuntimeError("planner exploded")
     orch._plan = boom
 

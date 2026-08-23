@@ -6,24 +6,48 @@
     "temperature": 0.3,
     "models": {
         "flash": {
+            "aliases": ["deepseek", "ds"],
             "driver": "deepseek",
             "base_url": "https://api.deepseek.com/v1",
             "api_key": "${DEEPSEEK_API_KEY}",
             "model": "deepseek-v4-flash",
             "max_tokens": 8192,
             "max_steps": 30,
+            "profiles": {
+                "default": {
+                    "invoke_kwargs": {"extra_body": {"enable_thinking": false}}
+                },
+                "structured_json": {
+                    "timeout": 120,
+                    "max_retries": 0,
+                    "invoke_kwargs": {"response_format": {"type": "json_object"}}
+                },
+                "tool_loop": {"timeout": 60, "max_retries": 1},
+                "chat": {"timeout": 60, "max_retries": 1}
+            },
             "output_recovery": {
                 "retry_kwargs": {"extra_body": {"enable_thinking": false}}
             },
             "tags": ["text", "fast"]
         },
         "gemini-flash": {
+            "aliases": ["google-flash"],
             "driver": "gemini_native",
             "api_key": "${GEMINI_API_KEY}",
             "model": "gemini-2.5-flash",
             "max_tokens": 8192,
             "temperature": 0.3,
             "max_steps": 30,
+            "profiles": {
+                "default": {"invoke_kwargs": {"thinking_budget": 0}},
+                "structured_json": {
+                    "timeout": 120,
+                    "max_retries": 0,
+                    "invoke_kwargs": {"response_format": {"type": "json_object"}}
+                },
+                "tool_loop": {"timeout": 60, "max_retries": 1},
+                "chat": {"timeout": 60, "max_retries": 1}
+            },
             "proxy": "socks5h://127.0.0.1:18988",
             "output_recovery": {
                 "retry_kwargs": {"thinking_budget": 0}
@@ -31,16 +55,30 @@
             "tags": ["text", "fast"]
         },
         "gemini-pro": {
+            "aliases": ["google-pro"],
             "driver": "gemini_native",
             "api_key": "${GEMINI_API_KEY}",
             "model": "gemini-3.1-pro-preview",
             "max_tokens": 8192,
             "temperature": 0.1,
             "max_steps": 30,
+            "profiles": {
+                "structured_json": {
+                    "timeout": 180,
+                    "max_retries": 0,
+                    "invoke_kwargs": {
+                        "response_format": {"type": "json_object"},
+                        "thinking_budget": 0
+                    }
+                },
+                "tool_loop": {"timeout": 180, "max_retries": 1},
+                "chat": {"timeout": 180, "max_retries": 1}
+            },
             "proxy": "socks5h://127.0.0.1:18988",
             "tags": ["code", "complex_reasoning"]
         },
         "doubao-pro": {
+            "aliases": ["doubao", "豆包"],
             "driver": "ark",
             "base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
             "api_key": "${ARK_API_KEY}",
@@ -48,12 +86,25 @@
             "max_tokens": 8192,
             "temperature": 0.2,
             "max_steps": 30,
+            "profiles": {
+                "default": {
+                    "invoke_kwargs": {"thinking": {"type": "disabled"}}
+                },
+                "structured_json": {
+                    "timeout": 120,
+                    "max_retries": 0,
+                    "invoke_kwargs": {"response_format": {"type": "json_object"}}
+                },
+                "tool_loop": {"timeout": 90, "max_retries": 1},
+                "chat": {"timeout": 90, "max_retries": 1}
+            },
             "output_recovery": {
                 "retry_kwargs": {"thinking": {"type": "disabled"}}
             },
             "tags": ["text", "complex_reasoning"]
         },
         "glm-5.2": {
+            "aliases": ["glm5.2"],
             "driver": "ark",
             "base_url": "https://ark.cn-beijing.volces.com/api/plan/v3",
             "api_key": "${ARK_API_KEY}",
@@ -61,12 +112,25 @@
             "max_tokens": 8192,
             "temperature": 0.2,
             "max_steps": 30,
+            "profiles": {
+                "default": {
+                    "invoke_kwargs": {"thinking": {"type": "disabled"}}
+                },
+                "structured_json": {
+                    "timeout": 120,
+                    "max_retries": 0,
+                    "invoke_kwargs": {"response_format": {"type": "json_object"}}
+                },
+                "tool_loop": {"timeout": 90, "max_retries": 1},
+                "chat": {"timeout": 90, "max_retries": 1}
+            },
             "output_recovery": {
                 "retry_kwargs": {"thinking": {"type": "disabled"}}
             },
             "tags": ["text", "complex_reasoning"]
         },
         "glm-5.3": {
+            "aliases": ["glm5.3", "glm"],
             "driver": "ark",
             "base_url": "https://ark.cn-beijing.volces.com/api/plan/v3",
             "api_key": "${ARK_API_KEY}",
@@ -74,12 +138,25 @@
             "max_tokens": 8192,
             "temperature": 0.2,
             "max_steps": 30,
+            "profiles": {
+                "default": {
+                    "invoke_kwargs": {"thinking": {"type": "auto"}}
+                },
+                "structured_json": {
+                    "timeout": 120,
+                    "max_retries": 0,
+                    "invoke_kwargs": {"response_format": {"type": "json_object"}}
+                },
+                "tool_loop": {"timeout": 90, "max_retries": 1},
+                "chat": {"timeout": 90, "max_retries": 1}
+            },
             "output_recovery": {
                 "retry_kwargs": {"thinking": {"type": "auto"}}
             },
             "tags": ["text", "complex_reasoning"]
         },
         "kimi-k3": {
+            "aliases": ["k3", "kimi"],
             "driver": "ark",
             "base_url": "https://ark.cn-beijing.volces.com/api/plan/v3",
             "api_key": "${ARK_API_KEY}",
@@ -87,9 +164,22 @@
             "max_tokens": 8192,
             "temperature": 0.2,
             "max_steps": 30,
+            "profiles": {
+                "structured_json": {
+                    "timeout": 120,
+                    "max_retries": 0,
+                    "invoke_kwargs": {
+                        "response_format": {"type": "json_object"},
+                        "thinking": {"type": "disabled"}
+                    }
+                },
+                "tool_loop": {"timeout": 90, "max_retries": 1},
+                "chat": {"timeout": 90, "max_retries": 1}
+            },
             "tags": ["text", "complex_reasoning"]
         },
         "nvidia-glm-5.2": {
+            "aliases": ["nvidia-glm"],
             "driver": "openai",
             "base_url": "https://integrate.api.nvidia.com/v1",
             "api_key": "${NVIDIA_API_KEY}",
@@ -97,6 +187,15 @@
             "max_tokens": 16384,
             "temperature": 1.0,
             "max_steps": 30,
+            "profiles": {
+                "structured_json": {
+                    "timeout": 120,
+                    "max_retries": 0,
+                    "invoke_kwargs": {"response_format": {"type": "json_object"}}
+                },
+                "tool_loop": {"timeout": 90, "max_retries": 1},
+                "chat": {"timeout": 90, "max_retries": 1}
+            },
             "tags": ["text", "creative"]
         }
     },

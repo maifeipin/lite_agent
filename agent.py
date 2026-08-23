@@ -82,6 +82,7 @@ class IncomingMessage:
         # 如 钉钉的 msg_data(含sessionWebhook)、飞书的 sender open_id 等。默认 None 向后兼容。
         self.channel_payload = channel_payload or {}
         self.output_mode = output_mode
+        self.model_override = ""
         self._session_key = ""
 
     @property
@@ -147,18 +148,28 @@ class Agent:
         # LLM 客户端
         import httpx
         request_router = None
+        default_call_profile = {
+            "max_tokens": int(llm_cfg.get("max_tokens", 2048)),
+            "timeout": 60.0,
+            "max_retries": 1,
+            "invoke_kwargs": {},
+        }
         if "models" in llm_cfg:
             default_model = llm_cfg.get("default", "")
-            default_cfg = llm_cfg["models"].get(default_model, {})
             request_router = ModelRouter(config)
+            default_call_profile = request_router.get_call_profile(
+                default_model, "tool_loop"
+            )
             self.client = request_router.get_client(default_model)
-            self.model_invoker = request_router.get_invoker(default_model)
+            self.model_invoker = request_router.get_invoker(
+                default_model, profile="tool_loop"
+            )
             if self.model_invoker is None:
                 raise ValueError(f"默认模型未配置或不可用: {default_model}")
             self.model = self.model_invoker.model_name
             self.model_driver = request_router.get_driver(default_model)
-            self.max_tokens = default_cfg.get("max_tokens", 2048)
-            self.temperature = default_cfg.get("temperature", 0.3)
+            self.max_tokens = default_call_profile["max_tokens"]
+            self.temperature = default_call_profile["temperature"]
         else:
             proxy_url = llm_cfg.get("proxy")
             http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
@@ -217,8 +228,9 @@ class Agent:
             skill_engine=self.skill_engine,
             max_steps=self.max_steps,
             max_tokens=self.max_tokens,
-            max_retries=1,
+            max_retries=default_call_profile["max_retries"],
             non_retryable_exceptions=_NON_RETRYABLE_EXCEPTIONS,
+            call_kwargs=default_call_profile["invoke_kwargs"],
         )
 
         # ExecutionLedger: 旁路执行账本 (不阻断主流程)
@@ -535,6 +547,17 @@ class Agent:
     def _handle_locked(self, msg: IncomingMessage) -> AgentResponse:
         """实际处理逻辑, 调用方必须已持有 session 锁"""
         text = msg.text.strip()
+
+        if (
+            not msg.is_guest and text and not text.startswith("/")
+            and not text.startswith("::")
+        ):
+            try:
+                msg.model_override = self._extract_model_override(text) or ""
+            except ValueError as exc:
+                return AgentResponse(
+                    f"❌ {exc}", title="❌ 模型选择失败", color="red"
+                )
 
         session = self.session_mgr.get_or_create(msg.session_key)
 
@@ -901,19 +924,8 @@ class Agent:
         Supported forms are deterministic: ``[model=name]`` and natural
         ``用/使用 name`` with spaces accepted in place of hyphens.
         """
-        models = (self._config.get("llm", {}) or {}).get("models", {}) or {}
-        bracket = re.search(r"\[model=([^\]]+)\]", text or "", re.IGNORECASE)
-        if bracket:
-            requested = bracket.group(1).strip()
-            if requested not in models:
-                raise ValueError(f"未配置模型: {requested}")
-            return requested
-        lowered = (text or "").lower()
-        for name in sorted(models, key=len, reverse=True):
-            alias = re.escape(name.lower()).replace(r"\-", r"[\s_-]+")
-            if re.search(rf"(?:用|使用|指定)\s*{alias}(?:\s|来|去|，|,|$)", lowered):
-                return name
-        return None
+        from core.model_policy import ModelSelector
+        return ModelSelector(self._config).extract_override(text) or None
 
     def _get_request_model_router(self):
         router = self._request_model_router
@@ -930,6 +942,7 @@ class Agent:
 
     def _run_orchestrated(self, msg: IncomingMessage) -> AgentResponse:
         from core.task_orchestrator import TaskOrchestrator
+        from core.model_policy import ExecutionPolicy
         import uuid
         import re
 
@@ -953,6 +966,10 @@ class Agent:
         )
 
         task_id = uuid.uuid4().hex[:8]
+        execution_policy = (
+            ExecutionPolicy.user_locked(msg.model_override)
+            if msg.model_override else ExecutionPolicy()
+        )
 
         def _bg_run():
             try:
@@ -963,6 +980,7 @@ class Agent:
                     progress_callback=self._on_subtask_progress(msg),
                     task_id=task_id,
                     step_override=step_override,
+                    execution_policy=execution_policy,
                 )
                 print(f"  [ORCH] 后台线程执行完成 session={msg.session_key} result_len={len(result)}")
                 self._push_result(msg, result)
@@ -1091,36 +1109,52 @@ class Agent:
         request_max_tokens = self.max_tokens
         request_runtime = self.runtime
         request_stream = not is_gemini_driver(request_driver)
-        override = None
+        request_profile = {
+            "timeout": 60.0,
+            "max_retries": 1,
+            "invoke_kwargs": {},
+        }
+        if self._request_model_router is not None:
+            default_key = self._config.get("llm", {}).get("default", "")
+            request_profile = self._request_model_router.get_call_profile(
+                default_key, "tool_loop"
+            )
+        override = getattr(msg, "model_override", "") or None
         if not msg.is_guest:
-            try:
-                override = self._extract_model_override(msg.text)
-            except ValueError as exc:
-                yield {"type": "error", "msg": f"❌ {exc}"}
-                yield {"type": "done", "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "estimated": False}}
-                return
+            if override is None:
+                try:
+                    override = self._extract_model_override(msg.text)
+                except ValueError as exc:
+                    yield {"type": "error", "msg": f"❌ {exc}"}
+                    yield {"type": "done", "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "estimated": False}}
+                    return
             selected_model = override or str(
                 (self._config.get("task_routing", {}) or {}).get("simple_model") or ""
             )
             if selected_model:
                 router = self._get_request_model_router()
-                request_invoker = router.get_invoker(selected_model)
+                request_profile = router.get_call_profile(
+                    selected_model, "tool_loop"
+                )
+                request_invoker = router.get_invoker(
+                    selected_model, profile="tool_loop"
+                )
                 if request_invoker is None:
                     yield {"type": "error", "msg": f"❌ 模型当前不可用: {selected_model}"}
                     yield {"type": "done", "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "estimated": False}}
                     return
-                cfg = router.models_cfg.get(selected_model, {})
                 request_model = request_invoker.model_name
                 request_driver = router.get_driver(selected_model)
-                request_max_tokens = cfg.get("max_tokens", self.max_tokens)
+                request_max_tokens = request_profile["max_tokens"]
                 request_stream = not is_gemini_driver(request_driver)
                 request_runtime = AgentRuntime(
                     model_invoker=request_invoker,
                     skill_engine=self.skill_engine,
                     max_steps=self.max_steps,
                     max_tokens=request_max_tokens,
-                    max_retries=1,
+                    max_retries=request_profile["max_retries"],
                     non_retryable_exceptions=_NON_RETRYABLE_EXCEPTIONS,
+                    call_kwargs=request_profile["invoke_kwargs"],
                 )
                 label = "MODEL OVERRIDE" if override else "COST ROUTE"
                 print(f"  🎛️ [{label}] {selected_model} -> {request_model}")
@@ -1169,7 +1203,10 @@ class Agent:
 
         # ---- 动态超时 (Agent 负责，不进 Runtime) ----
         is_pro = "pro" in request_model.lower() or "reasoner" in request_model.lower()
-        dynamic_timeout = 180.0 if is_pro else 45.0
+        dynamic_timeout = max(
+            float(request_profile.get("timeout", 60.0)),
+            180.0 if is_pro else 45.0,
+        )
         total_chars = sum(
             len(m["content"]) if isinstance(m.get("content"), str) else 0
             for m in messages

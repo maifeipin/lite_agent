@@ -150,6 +150,23 @@ class TestTextReply:
             "enable_thinking": False
         }
 
+    def test_profile_call_kwargs_are_applied_to_every_model_step(self):
+        invoker = MagicMock()
+        invoker.invoke_sync.return_value = _make_sync_result(content="ok")
+        runtime = AgentRuntime(
+            invoker, MagicMock(), max_steps=1,
+            call_kwargs={"thinking": {"type": "disabled"}},
+        )
+
+        list(runtime.run(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[], ctx=_make_ctx(), stream=False,
+        ))
+
+        assert invoker.invoke_sync.call_args.kwargs["thinking"] == {
+            "type": "disabled"
+        }
+
     def test_output_limit_continuation_keeps_partial_text(self):
         invoker = MagicMock()
         invoker.output_limit_retry_kwargs.return_value = {

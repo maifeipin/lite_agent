@@ -79,6 +79,20 @@ def test_explicit_email_failure_does_not_publish_to_hedgedoc(tmp_path):
     assert "归档 ID" in result
 
 
+def test_explicit_sqlite_is_reported_as_requested_not_external_failure(tmp_path):
+    config = {
+        "output_delivery": {"sqlite": {"path": str(tmp_path / "archive.db")}},
+    }
+
+    result = prepare_channel_output(
+        "完整结果", "wechat", config,
+        overrides={"full_delivery": "sqlite"},
+    )
+
+    assert "已按任务设置" in result
+    assert "外部发送均不可用" not in result
+
+
 def test_summary_callback_is_used_before_link():
     config = {
         "hedgedoc": {"enabled": True},
