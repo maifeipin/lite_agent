@@ -56,6 +56,12 @@ required_inputs 已被工具取代，必须在返回结果中显式写入 requir
 REVIEW_PROMPT = """你是 TaskSpec 高价值复核者。检查计划是否足以完成原始目标、模型能力是否合适、
 步骤是否遗漏、预算是否明显不足、验收标准是否可验证。系统硬规则已由代码检查。
 
+运行时事实由代码提供，优先于猜测。不要对已由系统配置满足的条件报缺失，也不要把工具节点
+仅负责调用工具误判为缺少结果整理；所有子任务结果都会进入最终 Aggregator。
+
+运行时事实（不含密钥和具体收件地址）：
+{runtime_context}
+
 你不能产生不可覆盖的硬阻断。只输出 JSON：
 {{
   "passed": true,
@@ -135,6 +141,29 @@ class TaskSpecService:
     def deterministic_preflight(self, spec: dict) -> dict:
         tools = self.skill_engine.get_all_names() if self.skill_engine is not None else None
         return preflight(spec, self.config, self.capabilities, tools)
+
+    def _review_runtime_context(self) -> dict:
+        output_cfg = self.config.get("output_delivery", {}) or {}
+        email_cfg = output_cfg.get("email", {}) or {}
+        email_configured = bool(
+            email_cfg.get("enabled") and str(email_cfg.get("recipient") or "").strip()
+        )
+        return {
+            "output_delivery": {
+                "email": {
+                    "configured": email_configured,
+                    "recipient_source": (
+                        "server_configuration" if email_configured else "not_configured"
+                    ),
+                    "task_required_input_needed": not email_configured,
+                },
+                "sqlite_archive": {"configured": True},
+            },
+            "dag_execution": {
+                "direct_tool_node": "invokes the approved tool and records its result",
+                "final_aggregator": "always receives all node results and formats the final answer",
+            },
+        }
 
     @staticmethod
     def _validation(spec: dict, status: str, report: dict,
@@ -535,8 +564,13 @@ class TaskSpecService:
             self.store.save(spec, status="blocked", enabled=False)
             return {"status": "blocked", "preflight": hard_report, "findings": []}
 
+        review_spec = copy.deepcopy(spec)
+        review_spec.pop("validation", None)
         prompt = REVIEW_PROMPT.format(
-            spec=json.dumps(spec, ensure_ascii=False, indent=2)
+            runtime_context=json.dumps(
+                self._review_runtime_context(), ensure_ascii=False, indent=2
+            ),
+            spec=json.dumps(review_spec, ensure_ascii=False, indent=2),
         )
         try:
             reviewed = self._invoke_reviewer_model(

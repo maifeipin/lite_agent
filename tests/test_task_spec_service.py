@@ -501,6 +501,35 @@ def test_edit_requires_review_and_validator_findings_are_overrideable(tmp_path):
     assert approved["spec"]["validation"]["status"] == "approved_by_user"
 
 
+def test_validator_receives_sanitized_runtime_facts_without_stale_findings(tmp_path):
+    config = _config()
+    config["output_delivery"] = {
+        "email": {
+            "enabled": True,
+            "recipient": "private-owner@example.com",
+        },
+    }
+    service, invoker = _service(
+        tmp_path, {"passed": True, "findings": []}, config=config
+    )
+    manual = service.create_manual("发送账单报告")
+    spec = copy.deepcopy(manual["spec"])
+    spec["validation"] = {
+        "findings": [{"code": "email_recipient_missing"}],
+    }
+    service.store.save(spec, status="review_required", enabled=False)
+
+    report = service.review(manual["id"])
+
+    assert report["status"] == "approved"
+    prompt = invoker.invoke_sync.call_args.kwargs["messages"][0]["content"]
+    assert '"configured": true' in prompt
+    assert '"recipient_source": "server_configuration"' in prompt
+    assert '"final_aggregator"' in prompt
+    assert "private-owner@example.com" not in prompt
+    assert "email_recipient_missing" not in prompt
+
+
 def test_hard_preflight_prevents_model_review(tmp_path):
     service, invoker = _service(tmp_path, {"passed": True, "findings": []})
     manual = service.create_manual("test")
