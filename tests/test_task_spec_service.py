@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from core.task_spec import TaskSpecStore, content_digest
-from core.task_spec_service import TaskSpecService
+from core.task_spec_service import TaskSpecRevisionConflict, TaskSpecService
 
 
 def _config():
@@ -86,6 +86,69 @@ def test_author_timeout_creates_editable_fallback_instead_of_failing(tmp_path):
     assert created["spec"]["task"]["objective"] == "查看一下最近的外币账单"
     assert created["spec"]["validation"]["findings"][0]["severity"] == "warning"
     assert service.store.get(created["id"]) is not None
+
+
+def test_enrich_updates_existing_task_and_increments_revision(tmp_path):
+    service, invoker = _service(tmp_path, {
+        "task": {"context": "读取已配置的账单数据源"},
+        "execution": {
+            "complexity": "standard",
+            "model_policy": {"preferred_model": "flash"},
+        },
+    })
+    manual = service.create_manual("查看一下最近的外币账单")
+
+    enriched = service.enrich(manual["id"])
+
+    assert enriched["id"] == manual["id"]
+    assert enriched["generation"]["status"] == "completed"
+    assert enriched["spec"]["contract"]["revision"] == 2
+    assert enriched["spec"]["contract"]["generated_by"] == "pro"
+    assert enriched["spec"]["task"]["context"] == "读取已配置的账单数据源"
+    assert enriched["spec"]["execution"]["model_policy"]["preferred_model"] == "flash"
+    assert invoker.invoke_sync.call_count == 1
+
+
+def test_enrich_does_not_overwrite_edit_made_while_model_is_running(tmp_path):
+    service, invoker = _service(tmp_path, {
+        "task": {"context": "模型生成的背景"},
+    })
+    manual = service.create_manual("查看账单")
+
+    def edit_before_model_returns(*args, **kwargs):
+        latest = service.store.get(manual["id"])
+        edited = copy.deepcopy(latest["spec"])
+        edited["task"]["context"] = "用户刚刚填写的背景"
+        service.update(manual["id"], edited)
+        return {
+            "content": json.dumps({"task": {"context": "模型生成的背景"}}),
+            "usage_total": 10,
+            "finish_reason": "stop",
+        }
+
+    invoker.invoke_sync.side_effect = edit_before_model_returns
+
+    with pytest.raises(TaskSpecRevisionConflict, match="未覆盖当前版本"):
+        service.enrich(manual["id"])
+
+    persisted = service.store.get(manual["id"])
+    assert persisted["spec"]["task"]["context"] == "用户刚刚填写的背景"
+    assert persisted["spec"]["contract"]["revision"] == 2
+
+
+def test_enrich_timeout_keeps_existing_task_and_is_retryable(tmp_path):
+    service, invoker = _service(tmp_path, {})
+    manual = service.create_manual("查看一下最近的外币账单")
+    invoker.invoke_sync.side_effect = TimeoutError("author timed out")
+
+    result = service.enrich(manual["id"])
+
+    assert result["id"] == manual["id"]
+    assert result["generation"]["status"] == "fallback"
+    assert result["generation"]["code"] == "AUTHOR_MODEL_TIMEOUT"
+    persisted = service.store.get(manual["id"])
+    assert persisted["spec"]["contract"]["revision"] == 1
+    assert persisted["spec"]["contract"]["generated_by"] == "user"
 
 
 def test_edit_requires_review_and_validator_findings_are_overrideable(tmp_path):
