@@ -8,11 +8,13 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Callable, Optional
 
 from core.model_router import ModelRouter
-from core.worker_agent import WorkerAgent
+from core.model_policy import ExecutionPolicy, ModelLock, ModelSelector
+from core.worker_agent import WorkerAgent, WorkerOutcome
 from core.skill_engine import SkillEngine
 from core.subtask_dag import Subtask, SubtaskDAG, SubtaskType, SubtaskStatus
 from core.execution import ExecutionContext, ActorType, ExecutionSource
 from core.execution_ledger import ExecutionLedger
+from core.execution_budget import ExecutionBudget
 from core.llm_gateway import LLMGateway
 from core.request_selector import RequestSelector
 
@@ -87,6 +89,7 @@ class TaskOrchestrator:
         # TaskOrchestrator 创建父 execution，所有 Worker 子任务挂载其下
         self.ledger = ledger
         self.llm = LLMGateway(self.router, ledger)
+        self.model_selector = ModelSelector(config)
         routing = config.get("task_routing", {})
         default_model = config.get("llm", {}).get("default", "")
         self.planner_model = routing.get("planner_model", default_model)
@@ -110,19 +113,53 @@ class TaskOrchestrator:
         return cfg.get("model", model_key)
 
     def _plan(self, goal: str, max_steps: int = None,
-              parent_execution_id: str = "", session_key: str = "") -> tuple:
+              parent_execution_id: str = "", session_key: str = "",
+              execution_policy: ExecutionPolicy = None,
+              budget: ExecutionBudget = None) -> tuple:
         """返回 (subtasks: list[Subtask], global_strategy: str)"""
         if max_steps is None:
             max_steps = self.dag_max_steps
-        print(f"  [ORCH:PLAN] 规划中... model={self.planner_model}")
+        policy = execution_policy or ExecutionPolicy()
+        selector = getattr(self, "model_selector", ModelSelector(self.config))
+        decision = selector.select("planner", policy=policy)
+        planner_model = decision.model
+        print(
+            f"  [ORCH:PLAN] 规划中... model={planner_model} "
+            f"reason={decision.reason}"
+        )
+        if budget is not None and not budget.can_start():
+            raise RuntimeError("任务预算不足，无法启动 Planner")
+        planner_profile = self.router.get_call_profile(
+            planner_model, "structured_json"
+        )
+        planner_max_tokens = planner_profile["max_tokens"]
+        if budget is not None:
+            planner_max_tokens = max(
+                1, min(planner_max_tokens, budget.snapshot().remaining_tokens)
+            )
         planner_invoker = self.router.get_invoker(
-            self.planner_model, max_tokens=8192, temperature=0.2, timeout=120.0
+            planner_model, profile="structured_json",
+            max_tokens=planner_max_tokens,
         )
         if not planner_invoker:
-            self.planner_model = self.config.get("llm", {}).get("default", "")
-            planner_invoker = self.router.get_invoker(
-                self.planner_model, max_tokens=8192, temperature=0.2, timeout=120.0
-            )
+            if policy.model_lock == ModelLock.HARD:
+                raise RuntimeError(f"用户锁定模型当前不可用: {planner_model}")
+            fallback_model = self.config.get("llm", {}).get("default", "")
+            if fallback_model and fallback_model != planner_model:
+                planner_model = fallback_model
+                planner_profile = self.router.get_call_profile(
+                    planner_model, "structured_json"
+                )
+                planner_max_tokens = planner_profile["max_tokens"]
+                if budget is not None:
+                    planner_max_tokens = max(1, min(
+                        planner_max_tokens,
+                        budget.snapshot().remaining_tokens,
+                    ))
+                planner_invoker = self.router.get_invoker(
+                    planner_model, profile="structured_json",
+                    max_tokens=planner_max_tokens,
+                )
         if not planner_invoker:
             raise RuntimeError("Planner model is not available")
 
@@ -147,23 +184,28 @@ class TaskOrchestrator:
         prompt = PLANNER_PROMPT.format(goal=goal, tools_desc=tools_desc,
                                        max_steps=max_steps)
 
+        attempted = False
+        response = None
         try:
             start_t = time.time()
             print(f"  🧠 [LLM Request] 角色: Planner, 模型: {actual_model}")
             gateway = getattr(
                 self, "llm", LLMGateway(self.router, getattr(self, "ledger", None))
             )
+            attempted = True
             response = gateway.invoke_sync(
                 [{"role": "user", "content": prompt}],
-                model=self.planner_model, invoker=planner_invoker,
+                model=planner_model, invoker=planner_invoker,
                 role="orchestrator_planner",
-                provider=self.router.get_driver(self.planner_model),
+                provider=self.router.get_driver(planner_model),
                 session_key=session_key or getattr(self, "_active_session_key", ""),
                 parent_execution_id=(parent_execution_id or
                                      getattr(self, "_active_parent_execution_id", "")),
                 source=ExecutionSource.ORCHESTRATOR,
-                max_tokens=8192,
-                timeout=120.0,
+                max_tokens=planner_max_tokens,
+                timeout=planner_profile["timeout"],
+                max_retries=planner_profile["max_retries"],
+                **planner_profile["invoke_kwargs"],
             )
             print(f"  ✅ [LLM Response] 耗时: {time.time()-start_t:.2f}s, Tokens: {response['usage_total']}")
             if response["finish_reason"] == "length":
@@ -190,12 +232,20 @@ class TaskOrchestrator:
             print(f"  [ORCH:PLAN] 拆解完成: {len(subtasks)} 个子任务, strategy={len(global_strategy)} chars")
             return subtasks, global_strategy
         except Exception as e:
+            if policy.model_lock == ModelLock.HARD:
+                raise
             traceback.print_exc()
             print(f"  ⚠️ 规划失败, 降级为单任务: {e}")
             return [Subtask(
                 id="sub_0", name=goal[:40], type=SubtaskType.TEXT,
                 prompt=goal, tools=[]
             )], ""
+        finally:
+            if budget is not None and attempted:
+                budget.consume(
+                    "planner", steps=1,
+                    tokens=int((response or {}).get("usage_total", 0) or 0),
+                )
 
     def _parse_json(self, raw: str) -> dict:
         raw = raw.strip()
@@ -211,17 +261,22 @@ class TaskOrchestrator:
     # ==================================================================
     #  Phase 2: 分类 + 路由
     # ==================================================================
-    def _classify_and_route(self, subtasks: list[Subtask]):
+    def _classify_and_route(self, subtasks: list[Subtask],
+                            execution_policy: ExecutionPolicy = None):
         print(f"  [ORCH:ROUTE] 模型路由中... {len(subtasks)} 个子任务")
+        policy = execution_policy or ExecutionPolicy()
+        selector = getattr(self, "model_selector", ModelSelector(self.config))
         valid_names = self.skill_engine.get_all_names()
         for s in subtasks:
-            model_name, client, tool_filter = self.router.route(s.type.value)
-            # A reviewed TaskSpec may pin a configured model per node. Free-form
-            # Planner output leaves assigned_model empty and follows route_rules.
-            if s.assigned_model and self.router.get_client(s.assigned_model):
-                model_name = s.assigned_model
-            else:
-                s.assigned_model = model_name
+            decision = selector.select(
+                "worker", subtask_type=s.type.value, policy=policy,
+                preferred_model=s.assigned_model,
+            )
+            model_name = decision.model
+            tool_filter = selector.route_tools(s.type.value)
+            s.assigned_model = model_name
+            s.model_reason = decision.reason
+            s.fallback_models = list(decision.fallback_models)
             # 工具分配: route_rule 的类型级工具集 与 planner 的 tools_hint 取并集,
             # 而非用 route_rule 覆盖 tools_hint。否则 "上传hedgedoc" 被 classify 成 code
             # 后只剩 ops_workspace_run, planner 给的 web_clip 等专用工具丢失,
@@ -241,7 +296,10 @@ class TaskOrchestrator:
                     merged = [t for t in merged if t in valid_names]
                 s.tools = merged
             tools_str = f" tools={s.tools}" if s.tools else ""
-            print(f"  [ORCH:ROUTE]   {s.id} type={s.type.value} → model={model_name}{tools_str}")
+            print(
+                f"  [ORCH:ROUTE]   {s.id} type={s.type.value} → "
+                f"model={model_name} reason={decision.reason}{tools_str}"
+            )
 
     # ==================================================================
     #  Phase 3: 调度执行
@@ -254,22 +312,46 @@ class TaskOrchestrator:
                 parallel_override: int = None,
                 wall_seconds_override: int = None,
                 planned_subtasks: list = None,
-                planned_strategy: str = "") -> str:
+                planned_strategy: str = "",
+                execution_policy: ExecutionPolicy = None) -> str:
         task_id = task_id or uuid.uuid4().hex[:8]
+        execution_policy = execution_policy or ExecutionPolicy()
 
-        # 用户可通过 [steps=N] 后缀临时提升本次任务预算
-        effective_max_steps = step_override if step_override else self.dag_max_steps
-        effective_max_tokens = token_override if token_override else self.dag_max_tokens
+        # Explicit call arguments win over the request policy; config remains
+        # the fallback.  Zero/negative values are normalized by ExecutionBudget.
+        effective_max_steps = (
+            step_override if step_override is not None
+            else execution_policy.max_steps
+            if execution_policy.max_steps is not None
+            else self.dag_max_steps
+        )
+        effective_max_tokens = (
+            token_override if token_override is not None
+            else execution_policy.max_total_tokens
+            if execution_policy.max_total_tokens is not None
+            else self.dag_max_tokens
+        )
+        requested_parallel = (
+            parallel_override if parallel_override is not None
+            else execution_policy.max_parallel_tasks
+            if execution_policy.max_parallel_tasks is not None
+            else self.max_parallel
+        )
         effective_parallel = min(
             self.max_parallel,
-            parallel_override if parallel_override else self.max_parallel,
+            max(1, int(requested_parallel)),
+        )
+        effective_wall_seconds = (
+            wall_seconds_override if wall_seconds_override is not None
+            else execution_policy.max_wall_seconds
         )
         deadline = (
-            time.monotonic() + wall_seconds_override
-            if wall_seconds_override else None
+            time.monotonic() + max(1, int(effective_wall_seconds))
+            if effective_wall_seconds is not None else None
         )
-        self._active_worker_max_steps = effective_max_steps
-        self._active_token_budget = effective_max_tokens
+        budget = ExecutionBudget(effective_max_steps, effective_max_tokens)
+        effective_max_steps = budget.max_steps
+        effective_max_tokens = budget.max_tokens
         if step_override:
             print(f"  🔓 用户提升步数预算: {self.dag_max_steps} → {step_override}")
 
@@ -280,6 +362,9 @@ class TaskOrchestrator:
         # ---- 启动父 execution (供所有 Worker 子任务挂载) ----
         parent_execution_id = ""
         if self.ledger is not None:
+            planner_decision = self.model_selector.select(
+                "planner", policy=execution_policy
+            )
             orch_ctx = ExecutionContext(
                 actor_id=session_key,
                 actor_type=ActorType.USER,
@@ -289,7 +374,7 @@ class TaskOrchestrator:
                 token_budget=effective_max_tokens,
             )
             parent_exec = self.ledger.start(
-                orch_ctx, model_name=self.planner_model,
+                orch_ctx, model_name=planner_decision.model,
                 provider="orchestrator", stream_mode=False,
             )
             parent_execution_id = parent_exec.id
@@ -309,7 +394,11 @@ class TaskOrchestrator:
                 subtasks, global_strategy = planned_subtasks, planned_strategy
                 print(f"  [ORCH:PLAN] 使用已审批 TaskSpec 计划: {len(subtasks)} 个子任务")
             else:
-                subtasks, global_strategy = self._plan(goal, max_steps=effective_max_steps)
+                subtasks, global_strategy = self._plan(
+                    goal, max_steps=effective_max_steps,
+                    execution_policy=execution_policy,
+                    budget=budget,
+                )
             if not subtasks:
                 parent_status, parent_reason = "failed", "planning_failed"
                 return "❌ 任务规划失败，无法拆解目标"
@@ -317,7 +406,9 @@ class TaskOrchestrator:
             if global_strategy:
                 print(f"  🧭 全局战略: {global_strategy[:120]}...")
 
-            self._classify_and_route(subtasks)
+            self._classify_and_route(
+                subtasks, execution_policy=execution_policy
+            )
 
             # Plan B: Fail-Fast — 规划期估算步数，仅拦截明显离谱的规划 (1.5x 弹性)
             # 因为 Planner 已感知预算并主动精简，运行期还有硬截断兜底，规划期不充当二次裁判。
@@ -366,9 +457,10 @@ class TaskOrchestrator:
                             s.status = SubtaskStatus.SKIPPED
                             s.error = "总执行时间预算耗尽"
                     break
-                # 全局预算限制检查
-                total_steps = sum(s.steps_used for s in dag.subtasks.values())
-                total_tokens = sum(s.token_usage for s in dag.subtasks.values())
+                # Planner / Workers / Aggregator share one request-scoped budget.
+                current_budget = budget.snapshot()
+                total_steps = current_budget.used_steps
+                total_tokens = current_budget.used_tokens
 
                 if total_steps >= effective_max_steps:
                     log_event(f"  ⚠️ DAG 全局步数预算耗尽 ({total_steps}/{effective_max_steps})")
@@ -404,12 +496,18 @@ class TaskOrchestrator:
                 # Split the remaining global budget across this parallel batch.
                 # A single long local-model task can use the full allowance;
                 # concurrent workers cannot each claim the whole task budget.
-                self._active_worker_max_steps = max(
-                    1, (effective_max_steps - total_steps) // len(batch)
+                worker_max_steps, worker_token_budget = budget.worker_share(
+                    len(batch), reserve_steps=1
                 )
-                self._active_token_budget = max(
-                    1, (effective_max_tokens - total_tokens) // len(batch)
-                )
+                if worker_max_steps < 1 or worker_token_budget < 1:
+                    log_event(
+                        "  ⚠️ DAG 全局预算仅够生成总结，未启动新 Worker"
+                    )
+                    for s in dag.subtasks.values():
+                        if s.status == SubtaskStatus.PENDING:
+                            s.status = SubtaskStatus.SKIPPED
+                            s.error = "全局预算不足，未执行"
+                    break
                 futures = []
                 results_lock = threading.Lock()
                 results = {}
@@ -434,7 +532,8 @@ class TaskOrchestrator:
                     future = self.executor.submit(
                         self._run_single_subtask,
                         subtask, upstream, results, results_lock, goal, global_strategy, log_event,
-                        parent_execution_id,
+                        parent_execution_id, worker_max_steps,
+                        worker_token_budget,
                     )
                     futures.append(future)
 
@@ -460,6 +559,10 @@ class TaskOrchestrator:
                         node.error = result.get("error", "")
                         node.token_usage = result.get("token_usage", 0)
                         node.steps_used = result.get("steps_used", 0)
+                        budget.consume(
+                            "worker", steps=node.steps_used,
+                            tokens=node.token_usage,
+                        )
 
                 if dag.has_failure():
                     failed = [sid for sid, s in dag.subtasks.items()
@@ -479,11 +582,19 @@ class TaskOrchestrator:
 
             log_event(f"  ✅ 编排任务 [{task_id}] 所有子任务执行完毕")
             log_event(f"  [ORCH:AGGR] 正在生成最终总结报告...")
-            final_result = self._aggregate(dag, goal)
+            final_result = self._aggregate(
+                dag, goal, execution_policy=execution_policy, budget=budget,
+            )
             dag.final_result = final_result or "(总结完成，无额外返回内容)"
             dag.is_aggregated = True
             self._persist_dag(session_key, task_id, dag, force=True)
             log_event(f"  ✅ 总结报告生成完毕")
+            usage = budget.snapshot()
+            log_event(
+                f"  💰 总预算: steps={usage.used_steps}/{usage.max_steps} "
+                f"tokens={usage.used_tokens}/{usage.max_tokens} "
+                f"roles={budget.usage_by_role()}"
+            )
 
             # 正常完成: 根据子任务整体结果决定终态
             all_done = all(s.status in (SubtaskStatus.DONE, SubtaskStatus.SKIPPED)
@@ -511,7 +622,9 @@ class TaskOrchestrator:
                             results: dict, lock: threading.Lock,
                             goal: str = "", global_strategy: str = "",
                             log_callback: Callable = None,
-                            parent_execution_id: str = ""):
+                            parent_execution_id: str = "",
+                            worker_max_steps: int = None,
+                            worker_token_budget: int = None):
         try:
             if self._can_execute_directly(subtask):
                 return self._run_direct_tool_subtask(
@@ -519,90 +632,64 @@ class TaskOrchestrator:
                 )
             self._log_and_persist(f"  [WORKER:{subtask.id}] 启动 model={subtask.assigned_model} allowlist={subtask.tools[:3] if subtask.tools else 'all'}...", log_callback)
 
-            client = self.router.get_client(subtask.assigned_model)
-            if not client:
-                client = self.router.get_client(
-                    self.config.get("llm", {}).get("default", "")
+            fallback_attempted = False
+            try:
+                worker = self._make_worker(
+                    subtask, subtask.assigned_model, log_callback,
+                    max_steps=worker_max_steps,
+                    token_budget=worker_token_budget,
                 )
-
-            model_cfg = dict(self.router.models_cfg.get(
-                subtask.assigned_model,
-                self.router.models_cfg.get(
-                    self.config.get("llm", {}).get("default", ""), {}
+                outcome = worker.run(
+                    subtask, upstream, goal=goal,
+                    global_strategy=global_strategy,
+                    parent_execution_id=parent_execution_id,
                 )
-            ))
-            model_cfg["max_steps"] = int(getattr(
-                self, "_active_worker_max_steps", model_cfg.get("max_steps", 8)
-            ))
-
-            worker = WorkerAgent(
-                name=f"Worker-{subtask.id}",
-                client=client,
-                model_name=model_cfg.get("model", subtask.assigned_model),
-                model_cfg=model_cfg,
-                skill_engine=self.skill_engine,
-                tools_allowlist=subtask.tools if subtask.tools else None,
-                driver=self.router.get_driver(subtask.assigned_model),
-                log_callback=log_callback,
-                ledger=self.ledger,
-                token_budget=getattr(self, "_active_token_budget", None),
-            )
-            result_text, tool_results = worker.run(subtask, upstream,
-                                     goal=goal, global_strategy=global_strategy,
-                                     parent_execution_id=parent_execution_id)
+            except Exception as primary_error:
+                if not subtask.fallback_models:
+                    raise
+                self._log_and_persist(
+                    f"  ⚠️ {subtask.id} 主模型不可用: {primary_error}",
+                    log_callback,
+                )
+                fallback_attempted = True
+                outcome = self._run_worker_fallbacks(
+                    subtask, upstream, goal, global_strategy,
+                    log_callback, parent_execution_id,
+                    worker_max_steps, worker_token_budget,
+                )
+                if outcome is None:
+                    raise
+            if outcome.status != "done":
+                if (
+                    outcome.terminal_reason == "model_error"
+                    and not fallback_attempted
+                ):
+                    fallback = self._run_worker_fallbacks(
+                        subtask, upstream, goal, global_strategy,
+                        log_callback, parent_execution_id,
+                        worker_max_steps, worker_token_budget,
+                    )
+                    if fallback is not None:
+                        outcome = fallback
+                if outcome.status != "done":
+                    raise RuntimeError(
+                        f"{outcome.terminal_reason}: {outcome.content}"
+                    )
             subtask.finished_at = time.time()
 
             with lock:
                 results[subtask.id] = {
-                    "result": result_text,
-                    "tool_results": tool_results,
+                    "result": outcome.content,
+                    "tool_results": outcome.tool_results,
                     "status": "done",
                     "token_usage": subtask.token_usage,
                     "steps_used": subtask.steps_used,
                 }
-            self._log_and_persist(f"  [WORKER:{subtask.id}] 完成 steps={subtask.steps_used} tokens={subtask.token_usage} result_len={len(result_text)}", log_callback)
+            self._log_and_persist(f"  [WORKER:{subtask.id}] 完成 steps={subtask.steps_used} tokens={subtask.token_usage} result_len={len(outcome.content)}", log_callback)
         except Exception as e:
             traceback.print_exc()
             error_text = str(e)
             self._log_and_persist(f"  ❌ {subtask.id} 失败: {error_text}", log_callback)
-
-            fb = self.router.get_fallback(subtask.assigned_model, subtask.type.value)
-            if fb and fb[0] != subtask.assigned_model:
-                fb_name, fb_client = fb
-                self._log_and_persist(f"  🔄 {subtask.id} fallback → {fb_name}", log_callback)
-                try:
-                    fb_cfg = dict(self.router.models_cfg.get(fb_name, {}))
-                    fb_cfg["max_steps"] = int(getattr(
-                        self, "_active_worker_max_steps", fb_cfg.get("max_steps", 8)
-                    ))
-                    worker_fb = WorkerAgent(
-                        name=f"Worker-{subtask.id}-fb",
-                        client=fb_client,
-                        model_name=fb_cfg.get("model", fb_name),
-                        model_cfg=fb_cfg,
-                        skill_engine=self.skill_engine,
-                        tools_allowlist=subtask.tools if subtask.tools else None,
-                        driver=self.router.get_driver(fb_name),
-                        log_callback=log_callback,
-                        ledger=self.ledger,
-                        token_budget=getattr(self, "_active_token_budget", None),
-                    )
-                    result_text, tool_results = worker_fb.run(subtask, upstream,
-                                                goal=goal, global_strategy=global_strategy,
-                                                parent_execution_id=parent_execution_id)
-                    subtask.finished_at = time.time()
-                    with lock:
-                        results[subtask.id] = {
-                            "result": result_text,
-                            "tool_results": tool_results,
-                            "status": "done",
-                            "token_usage": subtask.token_usage,
-                            "steps_used": subtask.steps_used,
-                        }
-                    return
-                except Exception as e_fb:
-                    traceback.print_exc()
-                    self._log_and_persist(f"  ❌ Fallback 也失败: {e_fb}", log_callback)
 
             subtask.finished_at = time.time()
             with lock:
@@ -614,6 +701,89 @@ class TaskOrchestrator:
                     "token_usage": subtask.token_usage,
                     "steps_used": subtask.steps_used,
                 }
+
+    def _make_worker(self, subtask: Subtask, model_name: str,
+                     log_callback: Callable = None,
+                     max_steps: int = None,
+                     token_budget: int = None) -> WorkerAgent:
+        model_cfg = dict(self.router.models_cfg.get(model_name, {}))
+        if not model_cfg:
+            raise RuntimeError(f"Worker model is not configured: {model_name}")
+        profile = self.router.get_call_profile(model_name, "tool_loop")
+        if max_steps is None:
+            max_steps = getattr(
+                self, "_active_worker_max_steps", model_cfg.get("max_steps", 8)
+            )
+        if token_budget is None:
+            token_budget = getattr(self, "_active_token_budget", None)
+        model_cfg["max_steps"] = max(1, int(max_steps))
+        model_cfg["max_tokens"] = profile["max_tokens"]
+        model_cfg["temperature"] = profile["temperature"]
+        invoker = self.router.get_invoker(model_name, profile="tool_loop")
+        if invoker is None:
+            raise RuntimeError(f"Worker model is not available: {model_name}")
+        return WorkerAgent(
+            name=f"Worker-{subtask.id}",
+            client=None,
+            model_name=invoker.model_name,
+            model_cfg=model_cfg,
+            skill_engine=self.skill_engine,
+            tools_allowlist=subtask.tools if subtask.tools else None,
+            driver=self.router.get_driver(model_name),
+            log_callback=log_callback,
+            ledger=self.ledger,
+            token_budget=token_budget,
+            invoker=invoker,
+            max_retries=profile["max_retries"],
+            call_timeout=profile["timeout"],
+            call_kwargs=profile["invoke_kwargs"],
+        )
+
+    def _run_worker_fallbacks(self, subtask: Subtask, upstream: dict,
+                              goal: str, global_strategy: str,
+                              log_callback: Callable,
+                              parent_execution_id: str,
+                              worker_max_steps: int = None,
+                              worker_token_budget: int = None) -> Optional[WorkerOutcome]:
+        last_outcome = None
+        for fallback_model in subtask.fallback_models:
+            self._log_and_persist(
+                f"  🔄 {subtask.id} fallback → {fallback_model}", log_callback
+            )
+            try:
+                remaining_steps = (
+                    max(0, worker_max_steps - subtask.steps_used)
+                    if worker_max_steps is not None else None
+                )
+                remaining_tokens = (
+                    max(0, worker_token_budget - subtask.token_usage)
+                    if worker_token_budget is not None else None
+                )
+                if remaining_steps == 0 or remaining_tokens == 0:
+                    return WorkerOutcome(
+                        "⚠️ Worker fallback 预算已耗尽",
+                        status="failed", terminal_reason="token_budget",
+                    )
+                worker = self._make_worker(
+                    subtask, fallback_model, log_callback,
+                    max_steps=remaining_steps,
+                    token_budget=remaining_tokens,
+                )
+                last_outcome = worker.run(
+                    subtask, upstream, goal=goal,
+                    global_strategy=global_strategy,
+                    parent_execution_id=parent_execution_id,
+                )
+                if last_outcome.status == "done":
+                    return last_outcome
+                if last_outcome.terminal_reason != "model_error":
+                    return last_outcome
+            except Exception as exc:
+                last_outcome = WorkerOutcome(
+                    f"❌ Fallback 执行失败: {exc}", status="failed",
+                    terminal_reason="worker_exception",
+                )
+        return last_outcome
 
     def _can_execute_directly(self, subtask: Subtask) -> bool:
         return bool(
@@ -675,17 +845,44 @@ class TaskOrchestrator:
     #  Phase 4: 聚合
     # ==================================================================
     def _aggregate(self, dag: SubtaskDAG, goal: str,
-                   parent_execution_id: str = "", session_key: str = "") -> str:
+                   parent_execution_id: str = "", session_key: str = "",
+                   execution_policy: ExecutionPolicy = None,
+                   budget: ExecutionBudget = None) -> str:
         print(f"  [ORCH:AGGR] 汇总中... done={dag.progress()['done']}/{dag.progress()['total']}")
-        aggregator_model = self.planner_model
+        policy = execution_policy or ExecutionPolicy()
+        selector = getattr(self, "model_selector", ModelSelector(self.config))
+        decision = selector.select("aggregator", policy=policy)
+        aggregator_model = decision.model
+        aggregator_profile = self.router.get_call_profile(
+            aggregator_model, "chat"
+        )
+        aggregator_max_tokens = aggregator_profile["max_tokens"]
+        if budget is not None:
+            aggregator_max_tokens = max(
+                1, min(aggregator_max_tokens, budget.snapshot().remaining_tokens)
+            )
         aggregator_invoker = self.router.get_invoker(
-            aggregator_model, max_tokens=4096, temperature=0.3, timeout=60.0
+            aggregator_model, profile="chat",
+            max_tokens=aggregator_max_tokens,
         )
         if not aggregator_invoker:
-            aggregator_model = self.config.get("llm", {}).get("default", "")
-            aggregator_invoker = self.router.get_invoker(
-                aggregator_model, max_tokens=4096, temperature=0.3, timeout=60.0
-            )
+            if policy.model_lock != ModelLock.HARD:
+                fallback_model = self.config.get("llm", {}).get("default", "")
+                if fallback_model and fallback_model != aggregator_model:
+                    aggregator_model = fallback_model
+                    aggregator_profile = self.router.get_call_profile(
+                        aggregator_model, "chat"
+                    )
+                    aggregator_max_tokens = aggregator_profile["max_tokens"]
+                    if budget is not None:
+                        aggregator_max_tokens = max(1, min(
+                            aggregator_max_tokens,
+                            budget.snapshot().remaining_tokens,
+                        ))
+                    aggregator_invoker = self.router.get_invoker(
+                        aggregator_model, profile="chat",
+                        max_tokens=aggregator_max_tokens,
+                    )
 
         results_lines = []
         for s in dag.subtasks.values():
@@ -696,6 +893,12 @@ class TaskOrchestrator:
             results_lines.append(f"### {status_label} {s.name} [{s.type.value}]\n{body[:2000]}")
 
         results_text = "\n\n".join(results_lines)
+
+        if budget is not None and not budget.can_start():
+            return (
+                f"## 执行报告\n\n{results_text}\n\n"
+                "> ⚠️ 总预算已耗尽，未再调用模型生成二次总结。"
+            )
 
         prompt = f"""请根据以下子任务执行结果，对原始目标做最终总结。
 
@@ -710,15 +913,21 @@ class TaskOrchestrator:
 2. 各子任务结果摘要
 3. 发现的问题和建议（如有）"""
 
+        attempted = False
+        response = None
         try:
             if not aggregator_invoker:
                 raise RuntimeError("Aggregator model is not available")
             actual_model = aggregator_invoker.model_name
             start_t = time.time()
-            print(f"  🧠 [LLM Request] 角色: Aggregator, 模型: {actual_model}")
+            print(
+                f"  🧠 [LLM Request] 角色: Aggregator, 模型: {actual_model}, "
+                f"reason={decision.reason}"
+            )
             gateway = getattr(
                 self, "llm", LLMGateway(self.router, getattr(self, "ledger", None))
             )
+            attempted = True
             response = gateway.invoke_sync(
                 [{"role": "user", "content": prompt}],
                 model=aggregator_model, invoker=aggregator_invoker,
@@ -728,14 +937,22 @@ class TaskOrchestrator:
                 parent_execution_id=(parent_execution_id or
                                      getattr(self, "_active_parent_execution_id", "")),
                 source=ExecutionSource.ORCHESTRATOR,
-                max_tokens=4096,
-                timeout=60.0,
+                max_tokens=aggregator_max_tokens,
+                timeout=aggregator_profile["timeout"],
+                max_retries=aggregator_profile["max_retries"],
+                **aggregator_profile["invoke_kwargs"],
             )
             print(f"  ✅ [LLM Response] 耗时: {time.time()-start_t:.2f}s, Tokens: {response['usage_total']}")
             return response["content"]
         except Exception as e:
             traceback.print_exc()
             return f"## 执行报告\n\n{results_text}\n\n> ⚠️ 聚合失败: {e}"
+        finally:
+            if budget is not None and attempted:
+                budget.consume(
+                    "aggregator", steps=1,
+                    tokens=int((response or {}).get("usage_total", 0) or 0),
+                )
 
     # ==================================================================
     #  持久化

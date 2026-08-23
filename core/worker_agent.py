@@ -1,5 +1,6 @@
 import json
 import traceback
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 from core.agent_runtime import AgentRuntime, RuntimeEvent, RuntimeEventType
 from core.execution import ExecutionContext, ExecutionSource, ActorType
@@ -11,6 +12,19 @@ from core.model_config import is_gemini_driver, supports_vision
 from core.model_invoker import OpenAIInvoker, GeminiInvoker
 
 
+@dataclass
+class WorkerOutcome:
+    content: str
+    tool_results: list = field(default_factory=list)
+    status: str = "done"
+    terminal_reason: str = "completed"
+
+    def __iter__(self):
+        # Preserve the historical ``reply, tools = worker.run(...)`` API.
+        yield self.content
+        yield self.tool_results
+
+
 class WorkerAgent:
 
     def __init__(self, name: str, client, model_name: str,
@@ -18,7 +32,10 @@ class WorkerAgent:
                  tools_allowlist: list = None, driver: str = "openai",
                  log_callback: Callable = None,
                  ledger: Optional[ExecutionLedger] = None,
-                 token_budget: Optional[int] = None):
+                 token_budget: Optional[int] = None,
+                 invoker=None, max_retries: int = 1,
+                 call_timeout: float = 60.0,
+                 call_kwargs: Optional[dict] = None):
         self.name = name
         self.client = client
         self.model_name = model_name
@@ -31,11 +48,16 @@ class WorkerAgent:
         self.max_tokens = model_cfg.get("max_tokens", 2048)
         self.temperature = model_cfg.get("temperature", 0.3)
         self.token_budget = token_budget
+        self.max_retries = max(0, int(max_retries))
+        self.call_timeout = max(1.0, float(call_timeout))
+        self.call_kwargs = dict(call_kwargs or {})
 
         # ExecutionLedger: 旁路执行账本 (可选, 由调用方注入)
         self.ledger = ledger
 
-        if is_gemini_driver(driver):
+        if invoker is not None:
+            self.model_invoker = invoker
+        elif is_gemini_driver(driver):
             self.model_invoker = GeminiInvoker(
                 client=client,
                 model_name=model_name,
@@ -190,10 +212,14 @@ class WorkerAgent:
             skill_engine=self.skill_engine,
             max_steps=self.max_steps,
             max_tokens=self.max_tokens,
+            max_retries=self.max_retries,
+            call_kwargs=self.call_kwargs,
         )
 
         try:
-            runtime_iter = runtime.run(messages, tools, ctx, stream=False)
+            runtime_iter = runtime.run(
+                messages, tools, ctx, timeout=self.call_timeout, stream=False
+            )
             # 经 Recorder 包装 (若 ledger 可用)
             if execution is not None:
                 recorder = RuntimeRecorder(self.ledger, execution.id)
@@ -235,19 +261,34 @@ class WorkerAgent:
                         reply = "(空回复 - 安全过滤)"
                     elif not reply:
                         reply = "(空回复)"
-                    return reply, extracted_tools
+                    return WorkerOutcome(reply, extracted_tools)
 
                 elif event.type == RuntimeEventType.ERROR:
-                    return f"❌ {event.data.get('msg', '执行失败')}", extracted_tools
+                    return WorkerOutcome(
+                        f"❌ {event.data.get('msg', '执行失败')}",
+                        extracted_tools, status="failed",
+                        terminal_reason="model_error",
+                    )
 
                 elif event.type == RuntimeEventType.DEAD_LOOP:
-                    return event.data.get("msg", "⚠️ 死循环检测"), extracted_tools
+                    return WorkerOutcome(
+                        event.data.get("msg", "⚠️ 死循环检测"),
+                        extracted_tools, status="failed",
+                        terminal_reason="dead_loop",
+                    )
 
                 elif event.type == RuntimeEventType.MAX_STEPS:
-                    return "⚠️ 子任务执行步骤过多，已自动终止", extracted_tools
+                    return WorkerOutcome(
+                        "⚠️ 子任务执行步骤过多，已自动终止",
+                        extracted_tools, status="failed",
+                        terminal_reason="max_steps",
+                    )
 
                 elif event.type == RuntimeEventType.TOKEN_BUDGET_EXCEEDED:
-                    return "⚠️ Token 预算已耗尽", extracted_tools
+                    return WorkerOutcome(
+                        "⚠️ Token 预算已耗尽", extracted_tools,
+                        status="failed", terminal_reason="token_budget",
+                    )
 
         except Exception as e:
             traceback.print_exc()
@@ -255,13 +296,19 @@ class WorkerAgent:
             if execution is not None:
                 self.ledger.finish(execution.id, status="failed",
                                    terminal_reason="worker_exception")
-            return f"❌ 执行失败: {e}", extracted_tools
+            return WorkerOutcome(
+                f"❌ 执行失败: {e}", extracted_tools,
+                status="failed", terminal_reason="worker_exception",
+            )
 
         # 正常退出但未收到 DONE (不应发生): 标记 ledger 为 succeeded 兜底
         if execution is not None:
             self.ledger.finish(execution.id, status="succeeded",
                                terminal_reason="no_terminal_event")
-        return "⚠️ 子任务执行异常终止", extracted_tools
+        return WorkerOutcome(
+            "⚠️ 子任务执行异常终止", extracted_tools,
+            status="failed", terminal_reason="no_terminal_event",
+        )
 
     def _supports_vision(self) -> bool:
         return supports_vision(self.model_cfg.get("tags", []))

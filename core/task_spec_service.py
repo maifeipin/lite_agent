@@ -204,12 +204,23 @@ class TaskSpecService:
     def _call_profile(self, model: str, role: str) -> dict:
         """Resolve TaskSpec call limits without imposing one profile on all models."""
         model_cfg = self.router.models_cfg.get(model, {}) or {}
+        generic_profile = self.router.get_call_profile(
+            model, "structured_json"
+        )
+        if not isinstance(generic_profile, dict):
+            generic_profile = {}
         model_profile = model_cfg.get("task_spec") or {}
         setting_profile = (
             (self.task_cfg.get("model_options") or {}).get(model) or {}
         )
-        role_cfg = {}
-        invoke_kwargs = {}
+        role_cfg = {
+            key: copy.deepcopy(generic_profile[key])
+            for key in ("max_tokens", "timeout", "max_retries")
+            if key in generic_profile
+        }
+        invoke_kwargs = copy.deepcopy(
+            generic_profile.get("invoke_kwargs") or {}
+        )
         for layer in (
             model_profile.get("default") or {},
             model_profile.get(role) or {},
@@ -644,3 +655,29 @@ class TaskSpecService:
                 tool_arguments=tool.get("arguments") if isinstance(tool.get("arguments"), dict) else {},
             ))
         return subtasks
+
+    @staticmethod
+    def build_execution_policy(spec: dict):
+        """Translate an approved TaskSpec model contract into runtime policy."""
+        from core.model_policy import ExecutionPolicy, ModelLock
+
+        execution = spec.get("execution") or {}
+        model_policy = execution.get("model_policy") or {}
+        budget = execution.get("budget") or {}
+        preferred = str(model_policy.get("preferred_model") or "")
+        if preferred and model_policy.get("user_locked"):
+            lock = ModelLock.HARD
+        elif preferred:
+            lock = ModelLock.PREFERRED
+        else:
+            lock = ModelLock.AUTO
+        return ExecutionPolicy(
+            requested_model=preferred,
+            model_lock=lock,
+            lock_source="task_spec",
+            allowed_models=tuple(model_policy.get("allowed_models") or ()),
+            max_steps=int(budget.get("max_steps", 20)),
+            max_total_tokens=int(budget.get("max_total_tokens", 50000)),
+            max_wall_seconds=int(budget.get("max_wall_seconds", 900)),
+            max_parallel_tasks=int(budget.get("max_parallel_tasks", 3)),
+        )
