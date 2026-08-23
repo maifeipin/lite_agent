@@ -204,7 +204,19 @@ class TaskSpecService:
     def _call_profile(self, model: str, role: str) -> dict:
         """Resolve TaskSpec call limits without imposing one profile on all models."""
         model_cfg = self.router.models_cfg.get(model, {}) or {}
-        role_cfg = ((model_cfg.get("task_spec") or {}).get(role) or {})
+        role_cfg = copy.deepcopy(
+            (model_cfg.get("task_spec") or {}).get(role) or {}
+        )
+        override_cfg = (
+            ((self.task_cfg.get("model_options") or {}).get(model) or {})
+            .get(role) or {}
+        )
+        base_invoke_kwargs = copy.deepcopy(role_cfg.get("invoke_kwargs") or {})
+        role_cfg.update(copy.deepcopy(override_cfg))
+        base_invoke_kwargs.update(copy.deepcopy(
+            override_cfg.get("invoke_kwargs") or {}
+        ))
+        role_cfg["invoke_kwargs"] = base_invoke_kwargs
         default_tokens = int(model_cfg.get("max_tokens", 8192) or 8192)
         max_tokens = int(role_cfg.get(
             "max_tokens",

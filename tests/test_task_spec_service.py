@@ -182,6 +182,35 @@ def test_author_call_profile_is_configurable_per_model_and_role(tmp_path):
     assert kwargs["thinking"] == {"type": "disabled"}
 
 
+def test_task_spec_settings_can_override_model_with_dotted_name(tmp_path):
+    config = _config()
+    config["llm"]["models"] = {
+        "glm-5.3": {"max_tokens": 8192},
+        "flash": {"max_tokens": 4096},
+    }
+    config["llm"]["default"] = "glm-5.3"
+    config["task_specs"]["author_model"] = "glm-5.3"
+    config["task_specs"]["model_options"] = {
+        "glm-5.3": {
+            "author": {
+                "max_tokens": 7000,
+                "invoke_kwargs": {
+                    "response_format": {"type": "json_object"},
+                },
+            },
+        },
+    }
+    service, invoker = _service(
+        tmp_path, {"task": {"required_inputs": {}}}, config=config
+    )
+
+    service.generate("查看最近的外币账单")
+
+    kwargs = invoker.invoke_sync.call_args.kwargs
+    assert kwargs["max_tokens"] == 7000
+    assert kwargs["response_format"] == {"type": "json_object"}
+
+
 def test_author_does_not_inject_all_tools_for_unknown_intent(tmp_path):
     skill_engine = MagicMock()
     selector = MagicMock()
