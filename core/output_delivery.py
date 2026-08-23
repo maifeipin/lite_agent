@@ -242,7 +242,16 @@ def prepare_channel_output(text: str, channel: str, config: dict,
     elif destination == "email":
         suffix = f"\n\n完整回复已发送到配置邮箱（发送通道：{location}）。"
     elif destination == "sqlite":
-        suffix = f"\n\n外部发送均不可用，完整回复已保存到本地 SQLite（归档 ID：{location}）。"
+        if policy["full_delivery"] == "sqlite":
+            suffix = (
+                f"\n\n已按任务设置将完整回复保存到本地 SQLite"
+                f"（归档 ID：{location}）。"
+            )
+        else:
+            suffix = (
+                f"\n\n外部发送均不可用，完整回复已回退保存到本地 "
+                f"SQLite（归档 ID：{location}）。"
+            )
     else:
         # Session history still owns the original complete reply. This is the
         # final transport-only fallback if local archive creation also fails.
