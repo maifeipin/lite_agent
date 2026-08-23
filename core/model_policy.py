@@ -124,13 +124,20 @@ class ModelSelector:
         policy = policy or ExecutionPolicy()
         rule = self._route_rule(subtask_type) if role == "worker" else {}
 
-        allowed_sets = []
-        if policy.allowed_models:
-            allowed_sets.append(set(policy.allowed_models))
+        policy_allowed = list(policy.allowed_models) or None
         route_allowed = rule.get("allowed_models")
-        if isinstance(route_allowed, list):
-            allowed_sets.append(set(route_allowed))
-        allowed = set.intersection(*allowed_sets) if allowed_sets else None
+        route_allowed = route_allowed if isinstance(route_allowed, list) else None
+        if policy_allowed is not None and route_allowed is not None:
+            allowed_names = [
+                name for name in policy_allowed if name in set(route_allowed)
+            ]
+        elif policy_allowed is not None:
+            allowed_names = policy_allowed
+        elif route_allowed is not None:
+            allowed_names = route_allowed
+        else:
+            allowed_names = None
+        allowed = set(allowed_names) if allowed_names is not None else None
 
         requested = ""
         if policy.requested_model:
@@ -184,7 +191,7 @@ class ModelSelector:
 
         if not self._allowed(selected, allowed):
             selected = next(
-                (name for name in (allowed or ()) if name in self.models), ""
+                (name for name in (allowed_names or ()) if name in self.models), ""
             )
             reason = "allowed:first"
         if not selected or selected not in self.models:
