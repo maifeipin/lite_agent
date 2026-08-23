@@ -115,3 +115,20 @@ def test_disjoint_policy_and_route_allowlists_block_selection():
 
     with pytest.raises(ModelPolicyError, match="没有可用"):
         selector.select("worker", subtask_type="code", policy=policy)
+
+
+def test_allowed_model_fallback_preserves_policy_order():
+    config = _config()
+    config["task_routing"]["route_rules"].append({
+        "type": "data_analysis",
+        "model": "not-allowed",
+        "allowed_models": ["glm", "doubao-pro"],
+    })
+    selector = ModelSelector(config)
+    policy = ExecutionPolicy(allowed_models=("doubao-pro", "glm"))
+
+    decision = selector.select(
+        "worker", subtask_type="data_analysis", policy=policy
+    )
+
+    assert decision.model == "doubao-pro"

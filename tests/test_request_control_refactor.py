@@ -311,3 +311,31 @@ def test_hard_worker_model_error_has_no_hidden_fallback():
     assert results["s1"]["status"] == "failed"
     assert "locked failed" in results["s1"]["error"]
     orch._make_worker.assert_called_once()
+
+
+def test_unavailable_primary_worker_uses_declared_fallback():
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    fallback = MagicMock()
+    fallback.run.return_value = WorkerOutcome("fallback ok")
+    orch._make_worker = MagicMock(side_effect=[
+        RuntimeError("primary unavailable"), fallback,
+    ])
+    orch._log_and_persist = MagicMock()
+    orch.direct_tool_execution = False
+    subtask = Subtask(
+        id="s1", name="research", assigned_model="glm",
+        fallback_models=["flash"],
+    )
+    results = {}
+
+    orch._run_single_subtask(
+        subtask, {}, results, threading.Lock(),
+        parent_execution_id="parent", worker_max_steps=5,
+        worker_token_budget=1000,
+    )
+
+    assert results["s1"]["status"] == "done"
+    assert results["s1"]["result"] == "fallback ok"
+    assert [call.args[1] for call in orch._make_worker.call_args_list] == [
+        "glm", "flash",
+    ]
