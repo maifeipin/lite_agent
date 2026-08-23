@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from core.model_router import ModelRouter
+from core.model_policy import ModelSelector
 from core.llm_gateway import LLMGateway
 from core.execution import ExecutionSource
 from core.task_spec import (
@@ -122,6 +123,7 @@ class TaskSpecService:
         self.store = store or TaskSpecStore()
         self.ledger = ledger
         self.router = ModelRouter(config)
+        self.model_selector = ModelSelector(config)
         self.llm = LLMGateway(self.router, ledger)
         self.request_selector = request_selector
         task_cfg = config.get("task_specs", {}) or {}
@@ -230,50 +232,13 @@ class TaskSpecService:
         schemas = self.skill_engine.get_schemas_by_names(selected.names)
         return [schema.get("function", {}) for schema in schemas]
 
-    def _call_profile(self, model: str, role: str) -> dict:
-        """Resolve TaskSpec call limits without imposing one profile on all models."""
-        model_cfg = self.router.models_cfg.get(model, {}) or {}
-        generic_profile = self.router.get_call_profile(
-            model, "structured_json"
-        )
-        if not isinstance(generic_profile, dict):
-            generic_profile = {}
-        model_profile = model_cfg.get("task_spec") or {}
-        setting_profile = (
-            (self.task_cfg.get("model_options") or {}).get(model) or {}
-        )
-        role_cfg = {
-            key: copy.deepcopy(generic_profile[key])
-            for key in ("max_tokens", "timeout", "max_retries")
-            if key in generic_profile
-        }
-        invoke_kwargs = copy.deepcopy(
-            generic_profile.get("invoke_kwargs") or {}
-        )
-        for layer in (
-            model_profile.get("default") or {},
-            model_profile.get(role) or {},
-            setting_profile.get("default") or {},
-            setting_profile.get(role) or {},
-        ):
-            layer = copy.deepcopy(layer)
-            invoke_kwargs.update(layer.pop("invoke_kwargs", {}) or {})
-            role_cfg.update(layer)
-        role_cfg["invoke_kwargs"] = invoke_kwargs
-        default_tokens = int(model_cfg.get("max_tokens", 8192) or 8192)
-        max_tokens = int(role_cfg.get(
-            "max_tokens",
-            self.task_cfg.get(f"{role}_max_tokens", default_tokens),
-        ))
-        timeout = float(role_cfg.get(
-            "timeout",
-            self.task_cfg.get(f"{role}_timeout", 120.0),
-        ))
-        max_retries = int(role_cfg.get(
-            "max_retries",
-            self.task_cfg.get(f"{role}_max_retries", 0),
-        ))
-        invoke_kwargs = copy.deepcopy(role_cfg.get("invoke_kwargs") or {})
+    def _call_profile(self, model: str) -> dict:
+        """Resolve author/reviewer calls from the model's structured profile."""
+        profile = self.router.get_call_profile(model, "structured_json") or {}
+        max_tokens = int(profile.get("max_tokens", 2048))
+        timeout = float(profile.get("timeout", 120.0))
+        max_retries = int(profile.get("max_retries", 0))
+        invoke_kwargs = copy.deepcopy(profile.get("invoke_kwargs") or {})
         for reserved in ("max_tokens", "timeout", "max_retries"):
             invoke_kwargs.pop(reserved, None)
         return {
@@ -285,7 +250,7 @@ class TaskSpecService:
 
     def _invoke_author_model(self, prompt: str, spec: dict,
                              selected_model: str) -> dict:
-        profile = self._call_profile(selected_model, "author")
+        profile = self._call_profile(selected_model)
         invoker = self.router.get_invoker(
             selected_model, temperature=0.1,
             max_tokens=profile["max_tokens"], timeout=profile["timeout"],
@@ -321,12 +286,12 @@ class TaskSpecService:
         try:
             return self._invoke_author_model(prompt, spec, selected_model), selected_model
         except Exception as primary_error:
-            fallback = self.router.get_fallback(
+            fallbacks = self.model_selector.fallback_models(
                 selected_model, SubtaskType.TEXT.value
             )
-            if not fallback or fallback[0] == selected_model:
+            if not fallbacks:
                 raise
-            fallback_model = fallback[0]
+            fallback_model = fallbacks[0]
             try:
                 return self._invoke_author_model(
                     prompt, spec, fallback_model
@@ -530,7 +495,7 @@ class TaskSpecService:
 
     def _invoke_reviewer_model(self, prompt: str, task_id: str,
                                selected_model: str) -> dict:
-        profile = self._call_profile(selected_model, "validator")
+        profile = self._call_profile(selected_model)
         invoker = self.router.get_invoker(
             selected_model, temperature=0.1,
             max_tokens=profile["max_tokens"], timeout=profile["timeout"],
@@ -577,13 +542,13 @@ class TaskSpecService:
                 prompt, task_id, self.validator_model
             )
         except Exception as exc:
-            fallback = self.router.get_fallback(
+            fallbacks = self.model_selector.fallback_models(
                 self.validator_model, SubtaskType.TEXT.value
             )
-            if fallback and fallback[0] != self.validator_model:
+            if fallbacks:
                 try:
                     reviewed = self._invoke_reviewer_model(
-                        prompt, task_id, fallback[0]
+                        prompt, task_id, fallbacks[0]
                     )
                     exc = None
                 except Exception as fallback_error:

@@ -16,9 +16,6 @@ class ModelRouter:
     def __init__(self, config: dict):
         llm_cfg = config.get("llm", {})
         self.models_cfg: dict[str, dict] = llm_cfg.get("models", {})
-        self.default_model = llm_cfg.get("default", "")
-        routing = config.get("task_routing", {})
-        self.rules: list[dict] = routing.get("route_rules", [])
         self._clients: dict[str, object] = {}
         self._drivers: dict[str, str] = {}
         self._init_clients()
@@ -67,51 +64,6 @@ class ModelRouter:
 
     def get_driver(self, model_name: str) -> str:
         return self._drivers.get(model_name, DRIVER_OPENAI)
-
-    def route(self, subtask_type: str) -> tuple[str, object, list[str]]:
-        for rule in self.rules:
-            if rule.get("type") == subtask_type:
-                tools = rule.get("tools", [])
-                primary = rule.get("model", "")
-                fallback = rule.get("fallback", "")
-                allowed = rule.get("allowed_models")
-
-                # allowed_models 是强制边界，不是 UI 元数据。
-                # 没有该字段的历史规则保持原有 primary/fallback 行为。
-                candidates = [primary, fallback]
-                if isinstance(allowed, list):
-                    candidates.extend(allowed)
-                    candidates = [name for name in candidates if name in allowed]
-                seen = set()
-                for model_name in candidates:
-                    if not model_name or model_name in seen:
-                        continue
-                    seen.add(model_name)
-                    client = self._clients.get(model_name)
-                    if client is not None:
-                        if model_name != primary:
-                            print(
-                                f"  ⚠️ 路由 {subtask_type} 的主模型 {primary!r} 不可用，"
-                                f"自动选择允许范围内的 {model_name!r}"
-                            )
-                        return (model_name, client, tools)
-                return (primary, None, tools)
-        default_client = self._clients.get(self.default_model)
-        return (self.default_model, default_client, [])
-
-    def get_fallback(self, model_name: str, subtask_type: str = "") -> Optional[tuple[str, object]]:
-        for rule in self.rules:
-            if subtask_type and rule.get("type") != subtask_type:
-                continue
-            if rule.get("model") == model_name and rule.get("fallback"):
-                fb_name = rule["fallback"]
-                allowed = rule.get("allowed_models")
-                if isinstance(allowed, list) and fb_name not in allowed:
-                    continue
-                fb_client = self._clients.get(fb_name)
-                if fb_client:
-                    return (fb_name, fb_client)
-        return None
 
     def get_client(self, model_name: str) -> Optional[object]:
         return self._clients.get(model_name)

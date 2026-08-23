@@ -114,6 +114,13 @@ class ModelSelector:
     def route_tools(self, subtask_type: str) -> list[str]:
         return list(self._route_rule(subtask_type).get("tools") or [])
 
+    def fallback_models(self, model: str, subtask_type: str = "") -> tuple[str, ...]:
+        """Return configured fallbacks using the same rule boundary as select()."""
+        rule = self._route_rule(subtask_type)
+        allowed = rule.get("allowed_models")
+        allowed_set = set(allowed) if isinstance(allowed, list) else None
+        return self._fallbacks(rule, model, allowed_set)
+
     @staticmethod
     def _allowed(name: str, allowed: Optional[set[str]]) -> bool:
         return bool(name and (allowed is None or name in allowed))

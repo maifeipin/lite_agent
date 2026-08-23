@@ -17,6 +17,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from core.subtask_dag import Subtask, SubtaskType
+from core.model_policy import ModelSelector
 
 _passed = 0
 _failed = 0
@@ -32,26 +33,25 @@ def check(name, cond):
         print(f"  FAIL {name}")
 
 
-class FakeRouter:
-    """模拟 ModelRouter.route: 按 type 返回 (model, client, tool_filter)"""
-    def __init__(self, rules):
-        self.rules = rules  # {type: (model, tools)}
-
-    def route(self, subtask_type):
-        rule = self.rules.get(subtask_type, ("default_model", []))
-        return (rule[0], None, rule[1])
-
-
 def make_subtask(sid, stype, tools_hint):
     return Subtask(id=sid, name=sid, type=stype, prompt="p", depends_on=[], tools=tools_hint)
 
 
 def run_route(subtasks, router_rules):
     """复刻 _classify_and_route 的并集逻辑 (与 task_orchestrator.py 保持一致)"""
-    router = FakeRouter(router_rules)
+    selector = ModelSelector({
+        "llm": {"default": "default_model", "models": {
+            model: {} for model, _ in router_rules.values()
+        }},
+        "task_routing": {"route_rules": [
+            {"type": kind, "model": model, "tools": tools}
+            for kind, (model, tools) in router_rules.items()
+        ]},
+    })
     for s in subtasks:
-        model_name, client, tool_filter = router.route(s.type.value)
-        s.assigned_model = model_name
+        decision = selector.select("worker", subtask_type=s.type.value)
+        s.assigned_model = decision.model
+        tool_filter = selector.route_tools(s.type.value)
         if tool_filter or s.tools:
             merged = list(tool_filter or [])
             for t in (s.tools or []):

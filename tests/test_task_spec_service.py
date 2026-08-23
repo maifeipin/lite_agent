@@ -15,7 +15,9 @@ def _config():
             "default": "pro",
             "models": {"pro": {}, "flash": {}},
         },
-        "task_routing": {"planner_model": "pro"},
+        "task_routing": {"planner_model": "pro", "route_rules": [
+            {"type": "text", "model": "pro", "fallback": "flash"},
+        ]},
         "task_specs": {
             "author_model": "pro",
             "validator_model": "pro",
@@ -29,7 +31,6 @@ def _service(tmp_path, model_output, skill_engine=None, request_selector=None,
     effective_config = config or _config()
     router = MagicMock()
     router.models_cfg = copy.deepcopy(effective_config["llm"]["models"])
-    router.get_fallback.return_value = None
     router.get_call_profile.return_value = {
         "temperature": 0.3,
         "max_tokens": 8192,
@@ -191,8 +192,8 @@ def test_author_call_profile_is_configurable_per_model_and_role(tmp_path):
     config = _config()
     config["llm"]["models"]["pro"] = {
         "max_tokens": 12000,
-        "task_spec": {
-            "author": {
+        "profiles": {
+            "structured_json": {
                 "max_tokens": 6000,
                 "timeout": 45,
                 "max_retries": 1,
@@ -206,6 +207,7 @@ def test_author_call_profile_is_configurable_per_model_and_role(tmp_path):
     service, invoker = _service(
         tmp_path, {"task": {"required_inputs": {}}}, config=config
     )
+    service.router.get_call_profile.return_value = config["llm"]["models"]["pro"]["profiles"]["structured_json"]
 
     service.generate("查看最近的外币账单")
 
@@ -252,19 +254,18 @@ def test_task_spec_settings_can_override_model_with_dotted_name(tmp_path):
     }
     config["llm"]["default"] = "glm-5.3"
     config["task_specs"]["author_model"] = "glm-5.3"
-    config["task_specs"]["model_options"] = {
-        "glm-5.3": {
-            "author": {
-                "max_tokens": 7000,
-                "invoke_kwargs": {
-                    "response_format": {"type": "json_object"},
-                },
+    config["llm"]["models"]["glm-5.3"]["profiles"] = {
+        "structured_json": {
+            "max_tokens": 7000,
+            "invoke_kwargs": {
+                "response_format": {"type": "json_object"},
             },
         },
     }
     service, invoker = _service(
         tmp_path, {"task": {"required_inputs": {}}}, config=config
     )
+    service.router.get_call_profile.return_value = config["llm"]["models"]["glm-5.3"]["profiles"]["structured_json"]
 
     service.generate("查看最近的外币账单")
 
@@ -277,32 +278,30 @@ def test_task_spec_profile_merges_model_default_and_role_overrides(tmp_path):
     config = _config()
     config["llm"]["models"]["pro"] = {
         "max_tokens": 12000,
-        "task_spec": {
-            "default": {
+        "profiles": {
+            "structured_json": {
                 "max_tokens": 6000,
+                "timeout": 45,
                 "invoke_kwargs": {
                     "response_format": {"type": "json_object"},
                     "thinking": {"type": "disabled"},
                 },
             },
-            "author": {
-                "timeout": 45,
-                "invoke_kwargs": {"thinking": {"type": "auto"}},
-            },
         },
     }
-    config["task_specs"]["model_options"] = {
-        "pro": {
-            "default": {
-                "max_retries": 1,
-                "invoke_kwargs": {"temperature_hint": "stable"},
-            },
-            "author": {"max_tokens": 7000},
+    config["llm"]["models"]["pro"]["profiles"]["structured_json"].update({
+        "max_tokens": 7000,
+        "max_retries": 1,
+        "invoke_kwargs": {
+            "response_format": {"type": "json_object"},
+            "thinking": {"type": "auto"},
+            "temperature_hint": "stable",
         },
-    }
+    })
     service, invoker = _service(
         tmp_path, {"task": {"required_inputs": {}}}, config=config
     )
+    service.router.get_call_profile.return_value = config["llm"]["models"]["pro"]["profiles"]["structured_json"]
 
     service.generate("查看最近的外币账单")
 
@@ -342,7 +341,6 @@ def test_author_uses_configured_fallback_when_primary_json_is_truncated(tmp_path
         "content": json.dumps({"task": {"required_inputs": {}}}),
         "usage_total": 120, "finish_reason": "stop",
     }
-    service.router.get_fallback.return_value = ("flash", object())
     service.router.get_invoker.side_effect = (
         lambda name, **kwargs: primary if name == "pro" else fallback
     )
@@ -574,7 +572,6 @@ def test_validator_uses_configured_fallback_when_primary_json_is_truncated(tmp_p
         "content": json.dumps({"passed": True, "findings": []}),
         "usage_total": 80, "finish_reason": "stop",
     }
-    service.router.get_fallback.return_value = ("flash", object())
     service.router.get_invoker.side_effect = (
         lambda name, **kwargs: primary if name == "pro" else fallback
     )

@@ -14,7 +14,7 @@ def test_rollback_setting_restores_write_by_audit_id(tmp_path, monkeypatch):
 
     try:
         config_loader.write_setting(
-            "task_specs.author_max_tokens", 8192, operator="test"
+            "llm.models.pro.profiles.structured_json.max_tokens", 8192, operator="test"
         )
         db_path = tmp_path / "data" / "settings.db"
         with sqlite3.connect(str(db_path)) as conn:
@@ -27,7 +27,7 @@ def test_rollback_setting_restores_write_by_audit_id(tmp_path, monkeypatch):
         with sqlite3.connect(str(db_path)) as conn:
             setting = conn.execute(
                 "SELECT value FROM settings WHERE key=?",
-                ("task_specs.author_max_tokens",),
+                ("llm.models.pro.profiles.structured_json.max_tokens",),
             ).fetchone()
             rollback = conn.execute(
                 "SELECT action FROM audit_log ORDER BY id DESC LIMIT 1"
