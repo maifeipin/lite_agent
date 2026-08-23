@@ -112,6 +112,29 @@ class TaskOrchestrator:
         cfg = self.router.models_cfg.get(model_key, {})
         return cfg.get("model", model_key)
 
+    def _role_invoker(self, model: str, profile_name: str,
+                      policy: ExecutionPolicy, budget: ExecutionBudget = None):
+        """Build a role call; the configured default is the only fallback."""
+        profile = self.router.get_call_profile(model, profile_name)
+        max_tokens = profile["max_tokens"]
+        if budget is not None:
+            max_tokens = max(1, min(max_tokens, budget.snapshot().remaining_tokens))
+        invoker = self.router.get_invoker(
+            model, profile=profile_name, max_tokens=max_tokens
+        )
+        if invoker is not None or policy.model_lock == ModelLock.HARD:
+            return model, profile, max_tokens, invoker
+        fallback = self.config.get("llm", {}).get("default", "")
+        if not fallback or fallback == model:
+            return model, profile, max_tokens, None
+        profile = self.router.get_call_profile(fallback, profile_name)
+        max_tokens = profile["max_tokens"]
+        if budget is not None:
+            max_tokens = max(1, min(max_tokens, budget.snapshot().remaining_tokens))
+        return fallback, profile, max_tokens, self.router.get_invoker(
+            fallback, profile=profile_name, max_tokens=max_tokens
+        )
+
     def _plan(self, goal: str, max_steps: int = None,
               parent_execution_id: str = "", session_key: str = "",
               execution_policy: ExecutionPolicy = None,
@@ -129,38 +152,12 @@ class TaskOrchestrator:
         )
         if budget is not None and not budget.can_start():
             raise RuntimeError("任务预算不足，无法启动 Planner")
-        planner_profile = self.router.get_call_profile(
-            planner_model, "structured_json"
-        )
-        planner_max_tokens = planner_profile["max_tokens"]
-        if budget is not None:
-            planner_max_tokens = max(
-                1, min(planner_max_tokens, budget.snapshot().remaining_tokens)
-            )
-        planner_invoker = self.router.get_invoker(
-            planner_model, profile="structured_json",
-            max_tokens=planner_max_tokens,
+        planner_model, planner_profile, planner_max_tokens, planner_invoker = self._role_invoker(
+            planner_model, "structured_json", policy, budget
         )
         if not planner_invoker:
             if policy.model_lock == ModelLock.HARD:
                 raise RuntimeError(f"用户锁定模型当前不可用: {planner_model}")
-            fallback_model = self.config.get("llm", {}).get("default", "")
-            if fallback_model and fallback_model != planner_model:
-                planner_model = fallback_model
-                planner_profile = self.router.get_call_profile(
-                    planner_model, "structured_json"
-                )
-                planner_max_tokens = planner_profile["max_tokens"]
-                if budget is not None:
-                    planner_max_tokens = max(1, min(
-                        planner_max_tokens,
-                        budget.snapshot().remaining_tokens,
-                    ))
-                planner_invoker = self.router.get_invoker(
-                    planner_model, profile="structured_json",
-                    max_tokens=planner_max_tokens,
-                )
-        if not planner_invoker:
             raise RuntimeError("Planner model is not available")
 
         actual_model = planner_invoker.model_name
@@ -853,36 +850,9 @@ class TaskOrchestrator:
         selector = getattr(self, "model_selector", ModelSelector(self.config))
         decision = selector.select("aggregator", policy=policy)
         aggregator_model = decision.model
-        aggregator_profile = self.router.get_call_profile(
-            aggregator_model, "chat"
+        aggregator_model, aggregator_profile, aggregator_max_tokens, aggregator_invoker = self._role_invoker(
+            aggregator_model, "chat", policy, budget
         )
-        aggregator_max_tokens = aggregator_profile["max_tokens"]
-        if budget is not None:
-            aggregator_max_tokens = max(
-                1, min(aggregator_max_tokens, budget.snapshot().remaining_tokens)
-            )
-        aggregator_invoker = self.router.get_invoker(
-            aggregator_model, profile="chat",
-            max_tokens=aggregator_max_tokens,
-        )
-        if not aggregator_invoker:
-            if policy.model_lock != ModelLock.HARD:
-                fallback_model = self.config.get("llm", {}).get("default", "")
-                if fallback_model and fallback_model != aggregator_model:
-                    aggregator_model = fallback_model
-                    aggregator_profile = self.router.get_call_profile(
-                        aggregator_model, "chat"
-                    )
-                    aggregator_max_tokens = aggregator_profile["max_tokens"]
-                    if budget is not None:
-                        aggregator_max_tokens = max(1, min(
-                            aggregator_max_tokens,
-                            budget.snapshot().remaining_tokens,
-                        ))
-                    aggregator_invoker = self.router.get_invoker(
-                        aggregator_model, profile="chat",
-                        max_tokens=aggregator_max_tokens,
-                    )
 
         results_lines = []
         for s in dag.subtasks.values():
