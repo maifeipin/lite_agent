@@ -440,12 +440,19 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, value, status: int = 200):
         body = json.dumps(value, ensure_ascii=False).encode('utf-8')
-        self.send_response(status)
-        self._send_cors_headers()
-        self.send_header('Content-Type', 'application/json; charset=utf-8')
-        self.send_header('Content-Length', str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return True
+        except (BrokenPipeError, ConnectionResetError):
+            # The work may have completed after a browser refresh. Do not turn a
+            # successful persisted operation into a second, impossible response.
+            self._quiet = True
+            return False
 
     @property
     def _task_specs(self):
@@ -507,17 +514,24 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, 400)
 
     def _handle_task_spec_generate(self):
+        """Compatibility endpoint: persist first; AI enrichment is explicit."""
         try:
             data = self._read_json_body()
             goal = str(data.get("goal") or "").strip()
             if not goal:
                 raise ValueError("goal is required")
-            result = self._task_specs.generate(goal, str(data.get("name") or ""))
+            result = self._task_specs.create_manual(
+                goal, str(data.get("name") or "")
+            )
+            result["generation"] = {
+                "status": "not_started",
+                "message": "基础规则已创建；AI 完善为可选步骤",
+            }
             self._send_json(result, 201)
         except (ValueError, json.JSONDecodeError) as exc:
             self._send_json({"error": str(exc)}, 400)
         except Exception as exc:
-            self._send_json({"error": f"TaskSpec generation failed: {exc}"}, 500)
+            self._send_json({"error": f"TaskSpec creation failed: {exc}"}, 500)
 
     def _handle_task_spec_update(self, path: str):
         task_id = path.rstrip('/').split('/')[-1]
@@ -532,13 +546,17 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, 400)
 
     def _handle_task_spec_action(self, path: str):
+        from core.task_spec_service import TaskSpecRevisionConflict
+
         parts = path.rstrip('/').split('/')
         if len(parts) < 6:
             self._send_json({"error": "Missing TaskSpec action"}, 400)
             return
         task_id, action = parts[-2], parts[-1]
         try:
-            if action == "validate":
+            if action == "enrich":
+                result = self._task_specs.enrich(task_id)
+            elif action == "validate":
                 result = self._task_specs.review(task_id)
             elif action == "confirm":
                 result = self._task_specs.confirm_generated(task_id)
@@ -564,6 +582,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send_json(result, 202 if action == "run" else 200)
         except KeyError:
             self._send_json({"error": "TaskSpec not found"}, 404)
+        except TaskSpecRevisionConflict as exc:
+            self._send_json({"error": str(exc), "code": "REVISION_CONFLICT"}, 409)
         except (ValueError, json.JSONDecodeError) as exc:
             self._send_json({"error": str(exc)}, 400)
         except Exception as exc:
