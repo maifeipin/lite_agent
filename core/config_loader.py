@@ -312,7 +312,7 @@ def rollback_setting(audit_id: int, operator: str = "system") -> bool:
         cursor = conn.cursor()
         cursor.execute("BEGIN IMMEDIATE")
         
-        conn.execute("SELECT action, target_key, old_value, new_value FROM audit_log WHERE id=?", (audit_id,))
+        cursor.execute("SELECT action, target_key, old_value, new_value FROM audit_log WHERE id=?", (audit_id,))
         row = cursor.fetchone()
         if not row:
             raise ValueError(f"Audit ID {audit_id} not found.")
