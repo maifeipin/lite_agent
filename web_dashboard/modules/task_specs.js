@@ -786,9 +786,9 @@ registerTabModule({
         if (this._runningPollIds.has(key)) return;
         this._runningPollIds.add(key);
         try {
-            // Default task wall-time is 15 minutes. Refresh only when the
-            // persisted state changes, rather than repainting old results.
-            for (let attempt = 0; attempt < 185 && this._runningPollIds.has(key); attempt += 1) {
+            // One sequential poller per task; long-running local-model jobs
+            // remain observable without creating overlapping requests.
+            while (this._runningPollIds.has(key)) {
                 await new Promise(resolve => setTimeout(resolve, 5000));
                 try {
                     const item = await fetch(`/agent/api/v1/task-specs/${id}`, {
