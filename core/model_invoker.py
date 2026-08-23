@@ -112,7 +112,10 @@ class OpenAIInvoker(ModelInvoker):
                     **kwargs) -> dict:
         call_kwargs = self._build_call_kwargs(messages, tools, stream=False, **kwargs)
         start_t = time.time()
-        response = self.client.chat.completions.create(**call_kwargs)
+        client = self.client
+        if "max_retries" in kwargs and hasattr(client, "with_options"):
+            client = client.with_options(max_retries=int(kwargs["max_retries"]))
+        response = client.chat.completions.create(**call_kwargs)
 
         choice = response.choices[0]
         tool_calls = []
@@ -221,9 +224,10 @@ class GeminiInvoker(ModelInvoker):
             thinking_config=self._thinking_config(types, kwargs),
         )
 
-        max_retries = 3
+        retry_count = max(0, int(kwargs.get("max_retries", 2)))
+        max_attempts = retry_count + 1
         response = None
-        for attempt in range(max_retries):
+        for attempt in range(max_attempts):
             try:
                 response = self.client.models.generate_content(
                     model=self.model_name,
@@ -232,7 +236,7 @@ class GeminiInvoker(ModelInvoker):
                 )
                 break
             except Exception as e:
-                if "429" in str(e) and attempt < max_retries - 1:
+                if "429" in str(e) and attempt < max_attempts - 1:
                     print(f"  ⚠️ [Rate Limit] hit 429, sleeping 35s...")
                     time.sleep(35)
                 else:
