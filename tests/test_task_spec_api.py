@@ -74,6 +74,7 @@ def test_enrich_revision_conflict_is_returned_as_http_409():
     handler.server = SimpleNamespace(
         api_server=SimpleNamespace(task_specs=task_specs)
     )
+    handler.headers = {"Content-Length": "0"}
     responses = []
     handler._send_json = lambda value, status=200: responses.append((value, status))
 
@@ -82,3 +83,21 @@ def test_enrich_revision_conflict_is_returned_as_http_409():
     assert responses == [({
         "error": "用户版本已变化", "code": "REVISION_CONFLICT",
     }, 409)]
+
+
+def test_enrich_action_forwards_one_time_model():
+    task_specs = MagicMock()
+    task_specs.enrich.return_value = {"id": "task-1"}
+    handler = ApiHandler.__new__(ApiHandler)
+    handler.server = SimpleNamespace(
+        api_server=SimpleNamespace(task_specs=task_specs)
+    )
+    handler.headers = {"Content-Length": "24"}
+    handler._read_json_body = lambda: {"model": "gemini-pro"}
+    responses = []
+    handler._send_json = lambda value, status=200: responses.append((value, status))
+
+    handler._handle_task_spec_action("/api/v1/task-specs/task-1/enrich")
+
+    task_specs.enrich.assert_called_once_with("task-1", "gemini-pro")
+    assert responses == [({"id": "task-1"}, 200)]
