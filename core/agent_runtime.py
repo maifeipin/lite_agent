@@ -128,6 +128,9 @@ class AgentRuntime:
 
         state = RuntimeState(messages=list(messages))
         total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        accumulated_content = ""
+        length_recovery_used = False
+        recovery_kwargs = {}
 
         # 过滤 tools：只把 ctx.allowed_tools 允许的工具传给模型
         effective_tools = self._filter_tools(tools, ctx)
@@ -164,12 +167,12 @@ class AgentRuntime:
                 if stream:
                     yield from self._consume_stream(
                         state, effective_tools, step_usage, tool_calls_acc, timeout,
-                        effective_max_tokens,
+                        effective_max_tokens, call_overrides=recovery_kwargs,
                     )
                 else:
                     yield from self._consume_sync(
                         state, effective_tools, step_usage, tool_calls_acc,
-                        effective_max_tokens,
+                        effective_max_tokens, call_overrides=recovery_kwargs,
                     )
             except Exception as e:
                 yield RuntimeEvent(type=RuntimeEventType.ERROR,
@@ -204,6 +207,27 @@ class AgentRuntime:
             # ---- 无工具调用 -> 最终回复 ----
             if not tool_calls_acc:
                 content = state.text_content.strip()
+                can_recover_length = (
+                    str(state.finish_reason).lower() == "length"
+                    and not length_recovery_used
+                    and step + 1 < effective_max_steps
+                )
+                if can_recover_length:
+                    length_recovery_used = True
+                    get_retry_kwargs = getattr(
+                        self.model_invoker, "output_limit_retry_kwargs", None
+                    )
+                    configured = get_retry_kwargs() if callable(get_retry_kwargs) else {}
+                    recovery_kwargs = configured if isinstance(configured, dict) else {}
+                    if content:
+                        accumulated_content += content
+                        state.messages.append({"role": "assistant", "content": content})
+                        state.messages.append({
+                            "role": "user",
+                            "content": "请从中断处继续，只补充未完成部分，不要重复前文，直接给出答案。",
+                        })
+                    continue
+                content = accumulated_content + content
                 # empty 仅反映 invoker 的显式标记（如 Gemini 安全过滤/无候选），
                 # 不与 content 是否为空合并；普通空响应由调用方根据 content 自行判定
                 # 先持久化到 state.messages，再 yield DONE，避免消费者提前 return 导致终态丢失
@@ -321,7 +345,8 @@ class AgentRuntime:
 
     def _consume_stream(self, state: RuntimeState, tools: list,
                         step_usage: dict, tool_calls_acc: dict,
-                        timeout: float, max_tokens: int) -> Iterator[RuntimeEvent]:
+                        timeout: float, max_tokens: int,
+                        call_overrides: dict = None) -> Iterator[RuntimeEvent]:
         """流式消费 ModelEvent 流，支持首字前重试。
 
         重试语义：
@@ -339,6 +364,7 @@ class AgentRuntime:
             try:
                 for event in self.model_invoker.invoke_stream(
                     state.messages, tools, timeout=timeout, max_tokens=max_tokens,
+                    **(call_overrides or {}),
                 ):
                     if event.type == ModelEventType.TEXT:
                         has_output = True
@@ -399,9 +425,13 @@ class AgentRuntime:
 
     def _consume_sync(self, state: RuntimeState, tools: list,
                       step_usage: dict, tool_calls_acc: dict,
-                      max_tokens: int) -> Iterator[RuntimeEvent]:
+                      max_tokens: int,
+                      call_overrides: dict = None) -> Iterator[RuntimeEvent]:
         """同步消费 invoke_sync 返回的 dict，转换为 RuntimeEvent。"""
-        result = self.model_invoker.invoke_sync(state.messages, tools, max_tokens=max_tokens)
+        result = self.model_invoker.invoke_sync(
+            state.messages, tools, max_tokens=max_tokens,
+            **(call_overrides or {}),
+        )
 
         content = result.get("content", "")
         if content:

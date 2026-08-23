@@ -17,7 +17,8 @@ class WorkerAgent:
                  model_cfg: dict, skill_engine: SkillEngine,
                  tools_allowlist: list = None, driver: str = "openai",
                  log_callback: Callable = None,
-                 ledger: Optional[ExecutionLedger] = None):
+                 ledger: Optional[ExecutionLedger] = None,
+                 token_budget: Optional[int] = None):
         self.name = name
         self.client = client
         self.model_name = model_name
@@ -29,6 +30,7 @@ class WorkerAgent:
         self.max_steps = model_cfg.get("max_steps", 8)
         self.max_tokens = model_cfg.get("max_tokens", 2048)
         self.temperature = model_cfg.get("temperature", 0.3)
+        self.token_budget = token_budget
 
         # ExecutionLedger: 旁路执行账本 (可选, 由调用方注入)
         self.ledger = ledger
@@ -39,6 +41,7 @@ class WorkerAgent:
                 model_name=model_name,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
+                output_recovery=model_cfg.get("output_recovery", {}),
             )
         else:
             self.model_invoker = OpenAIInvoker(
@@ -46,6 +49,7 @@ class WorkerAgent:
                 model_name=model_name,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
+                output_recovery=model_cfg.get("output_recovery", {}),
             )
 
     def _log(self, msg: str):
@@ -167,6 +171,7 @@ class WorkerAgent:
             session_key=f"worker_{self.name}",
             max_steps=self.max_steps,
             max_output_tokens=self.max_tokens,
+            token_budget=self.token_budget,
         )
 
         # 启动账本记录 (旁路, 不阻断主流程)

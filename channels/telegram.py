@@ -164,16 +164,8 @@ class TelegramChannel(BaseChannel):
 
     def broadcast(self, response: AgentResponse) -> bool:
         """从会话库中查询所有活跃 telegram 用户并主动广播"""
-        chat_ids = []
         try:
-            with self.agent.session_mgr._connect() as conn:
-                rows = conn.execute(
-                    "SELECT DISTINCT session_key FROM sessions WHERE session_key LIKE 'telegram:%'"
-                ).fetchall()
-                for r in rows:
-                    cid = r[0].split(':', 1)[1]
-                    if cid:
-                        chat_ids.append(cid)
+            chat_ids = self.agent.session_mgr.list_channel_user_ids("telegram")
         except Exception as e:
             print(f"❌ [Telegram] 广播查询用户失败: {e}")
             return False

@@ -14,10 +14,22 @@ class ModelInvoker(ABC):
     """模型调用抽象基类。"""
 
     def __init__(self, model_name: str, temperature: float = 0.3,
-                 max_tokens: int = 2048):
+                 max_tokens: int = 2048, output_recovery: Optional[dict] = None):
         self.model_name = model_name
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.output_recovery = dict(output_recovery or {})
+
+    @staticmethod
+    def normalize_finish_reason(value) -> str:
+        reason = getattr(value, "name", value) or "stop"
+        normalized = str(reason).lower()
+        if normalized in {"length", "max_tokens", "max_output_tokens"}:
+            return "length"
+        return normalized
+
+    def output_limit_retry_kwargs(self) -> dict:
+        return dict(self.output_recovery.get("retry_kwargs") or {})
 
     @abstractmethod
     def invoke_stream(self, messages: list, tools: Optional[list] = None,
@@ -38,8 +50,9 @@ class OpenAIInvoker(ModelInvoker):
     """OpenAI 兼容协议调用器（流式 + 同步）。"""
 
     def __init__(self, client, model_name: str, temperature: float = 0.3,
-                 max_tokens: int = 2048, timeout: float = 60.0):
-        super().__init__(model_name, temperature, max_tokens)
+                 max_tokens: int = 2048, timeout: float = 60.0,
+                 output_recovery: Optional[dict] = None):
+        super().__init__(model_name, temperature, max_tokens, output_recovery)
         self.client = client
         self.timeout = timeout
 
@@ -68,7 +81,7 @@ class OpenAIInvoker(ModelInvoker):
                         continue
                     choice0 = chunk.choices[0]
                     if getattr(choice0, "finish_reason", None):
-                        _finish_reason = choice0.finish_reason
+                        _finish_reason = self.normalize_finish_reason(choice0.finish_reason)
                     delta = choice0.delta
                     if not delta:
                         continue
@@ -116,8 +129,10 @@ class OpenAIInvoker(ModelInvoker):
         return {
             "content": choice.message.content or "",
             "tool_calls": tool_calls,
-            "finish_reason": choice.finish_reason,
+            "finish_reason": self.normalize_finish_reason(choice.finish_reason),
             "usage_total": response.usage.total_tokens if response.usage else 0,
+            "prompt_tokens": getattr(response.usage, "prompt_tokens", 0) if response.usage else 0,
+            "completion_tokens": getattr(response.usage, "completion_tokens", 0) if response.usage else 0,
             "empty": False,
         }
 
@@ -134,17 +149,30 @@ class OpenAIInvoker(ModelInvoker):
         if stream:
             call_kwargs["stream_options"] = {"include_usage": True}
 
+        has_requested_thinking = "thinking" in kwargs
+        requested_thinking = kwargs.get("thinking")
+        requested_extra_body = kwargs.get("extra_body") or {}
+        has_explicit_recovery = has_requested_thinking or bool(requested_extra_body)
         is_pro = "pro" in self.model_name.lower() or "reasoner" in self.model_name.lower()
-        if is_pro:
+        if has_explicit_recovery:
+            call_kwargs["extra_body"] = dict(requested_extra_body)
+            if has_requested_thinking:
+                call_kwargs["extra_body"]["thinking"] = requested_thinking
+        elif is_pro:
             call_kwargs["reasoning_effort"] = "high"
             call_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
-        else:
+        if not is_pro or has_explicit_recovery:
             call_kwargs["temperature"] = self.temperature
             call_kwargs["max_tokens"] = kwargs.get("max_tokens", self.max_tokens)
 
         if tools:
             call_kwargs["tools"] = tools
             call_kwargs["tool_choice"] = "auto"
+
+        # Kept provider-neutral at the Gateway boundary; OpenAI-compatible
+        # endpoints use this to enforce structured committee/reviewer output.
+        if kwargs.get("response_format"):
+            call_kwargs["response_format"] = kwargs["response_format"]
 
         call_kwargs["timeout"] = kwargs.get("timeout", self.timeout)
         return call_kwargs
@@ -159,8 +187,8 @@ class GeminiInvoker(ModelInvoker):
     """
 
     def __init__(self, client, model_name: str, temperature: float = 0.3,
-                 max_tokens: int = 2048):
-        super().__init__(model_name, temperature, max_tokens)
+                 max_tokens: int = 2048, output_recovery: Optional[dict] = None):
+        super().__init__(model_name, temperature, max_tokens, output_recovery)
         self.client = client
 
     def invoke_stream(self, messages: list, tools: Optional[list] = None,
@@ -187,6 +215,10 @@ class GeminiInvoker(ModelInvoker):
             temperature=self.temperature,
             max_output_tokens=kwargs.get("max_tokens", self.max_tokens),
             tools=[tool_config] if tool_config else None,
+            response_mime_type=(
+                "application/json" if kwargs.get("response_format") else None
+            ),
+            thinking_config=self._thinking_config(types, kwargs),
         )
 
         max_retries = 3
@@ -207,3 +239,11 @@ class GeminiInvoker(ModelInvoker):
                     raise
 
         return gemini_response_to_unified(response)
+
+    @staticmethod
+    def _thinking_config(types, kwargs):
+        if "thinking_budget" in kwargs:
+            return types.ThinkingConfig(thinking_budget=kwargs["thinking_budget"])
+        if kwargs.get("thinking_level"):
+            return types.ThinkingConfig(thinking_level=kwargs["thinking_level"])
+        return None

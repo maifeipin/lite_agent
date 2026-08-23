@@ -111,24 +111,18 @@ def validate_model_config(config: dict) -> list[tuple[str, str]]:
         if name and name not in models:
             _error(f"{label} 引用了不存在的模型: {name!r}")
 
-    # 同步聊天 / Planner / Aggregator 目前只走 OpenAI-compatible 调用路径
-    def _check_openai_role(label: str, name):
-        if name and name in models and is_gemini_driver(models[name].get("driver", "")):
-            _error(f"{label} ({name!r}) 使用了 gemini_native，但该角色当前只支持 OpenAI-compatible 调用路径")
-
     default = llm.get("default", "")
     if not default:
         _error("llm.default 未配置")
     else:
         _check_ref("llm.default", default)
-        _check_openai_role("llm.default", default)
 
     planner = routing.get("planner_model", "")
     if planner:
         _check_ref("task_routing.planner_model", planner)
-        _check_openai_role("task_routing.planner_model", planner)
 
     _check_ref("task_routing.classifier_model", routing.get("classifier_model"))
+    _check_ref("task_routing.simple_model", routing.get("simple_model"))
 
     # 3. 路由规则校验
     for rule in (routing.get("route_rules") or []):
@@ -151,6 +145,17 @@ def validate_model_config(config: dict) -> list[tuple[str, str]]:
     # 4. committee 引用
     for name in (config.get("committee", {}).get("models") or []):
         _check_ref("committee.models", name)
+
+    # 5. TaskSpec author/reviewer and manually configured cost tiers
+    task_specs = config.get("task_specs", {}) or {}
+    _check_ref("task_specs.author_model", task_specs.get("author_model"))
+    _check_ref("task_specs.validator_model", task_specs.get("validator_model"))
+    for tier, names in (task_specs.get("model_tiers") or {}).items():
+        if not isinstance(names, list):
+            _error(f"task_specs.model_tiers.{tier} 必须是模型名数组")
+            continue
+        for name in names:
+            _check_ref(f"task_specs.model_tiers.{tier}", name)
 
     return issues
 

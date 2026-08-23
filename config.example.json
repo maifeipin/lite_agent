@@ -8,6 +8,21 @@
         "max_steps_per_goal": 30,
         "daily_token_limit": 5000000
     },
+    "task_specs": {
+        "author_model": "glm-5.3",
+        "validator_model": "glm-5.3",
+        "model_tiers": {
+            "low": ["flash", "gemini-flash"],
+            "standard": ["glm-5.3", "kimi-k3"],
+            "high": ["gemini-pro", "doubao-pro"]
+        },
+        "capability_map": {
+            "web.search": ["web_search"],
+            "web.fetch": ["ops_web_fetch"],
+            "system.inspect": ["ops_sys_status", "ops_read_logs", "ops_read_journal"],
+            "workspace.execute": ["ops_workspace_run"]
+        }
+    },
     "security": {
         "allowed_users": [],
         "sandbox_paths": [

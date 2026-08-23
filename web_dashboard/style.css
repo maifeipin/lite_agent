@@ -1829,6 +1829,30 @@ body {
 .edit-row .edit-desc { flex: 3; min-width: 200px; }
 
 .cron-tag { background: hsl(270, 50%, 30%); color: #dcd; }
+
+/* Complex TaskSpec manager */
+.task-create-bar { display:flex; gap:10px; width:100%; align-items:center; flex-wrap:wrap; }
+.task-create-bar textarea { flex:1; min-width:280px; min-height:54px; resize:vertical; }
+.task-create-bar button, .task-btn { border:1px solid rgba(255,255,255,.14); background:rgba(255,255,255,.07); color:inherit; border-radius:7px; padding:7px 10px; cursor:pointer; }
+.task-create-bar button:disabled, .task-btn:disabled { opacity:.45; cursor:wait; }
+.task-create-status, .task-editor-errors { color:#f5b96b; font-size:.85rem; }
+.task-spec-summary { color:#9ca3af; font-size:.82rem; margin:10px 0; }
+.task-spec-actions { display:flex; gap:7px; flex-wrap:wrap; margin-top:12px; }
+.task-enabled { background:#164e3a; color:#7ff0b2; }
+.task-status-blocked { background:#5b2025; color:#ffb4b4; }
+.task-status-approved { background:#164e3a; color:#7ff0b2; }
+.task-status-needs_ack, .task-status-review_required { background:#594315; color:#ffe09a; }
+.task-spec-card details pre { max-height:220px; overflow:auto; white-space:pre-wrap; font-size:.78rem; }
+.task-editor { margin-top:14px; padding:14px; border:1px solid rgba(255,255,255,.12); border-radius:9px; background:rgba(0,0,0,.16); }
+.task-editor label { display:flex; flex-direction:column; gap:5px; color:#b8beca; font-size:.78rem; margin-bottom:10px; }
+.task-editor input, .task-editor select, .task-editor textarea { width:100%; box-sizing:border-box; background:#10141c; color:#e5e7eb; border:1px solid #303746; border-radius:6px; padding:8px; }
+.task-editor textarea { min-height:70px; resize:vertical; }
+.task-editor-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:8px 12px; }
+.task-policy-note { padding:8px 10px; margin-bottom:12px; border-radius:6px; background:#172033; color:#9db7e8; font-size:.78rem; }
+.task-capabilities { display:flex; gap:12px; flex-wrap:wrap; }
+.task-capabilities label { display:block; margin:0; }
+.task-capabilities input { width:auto; }
+.task-plan-json { min-height:150px !important; font-family:'JetBrains Mono',monospace; font-size:.75rem; }
 .tag-project { background: hsl(180, 50%, 25%); color: #adf; }
 
 /* Completed Todos Collapsible Section */
@@ -2070,5 +2094,4 @@ body {
     background: rgba(99, 102, 241, 0.3);
     color: #fff;
 }
-
 
