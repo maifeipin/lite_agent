@@ -54,7 +54,15 @@ registerTabModule({
         };
         const scheduleText = schedule.mode === 'once' ? `一次 ${schedule.run_at || ''}` :
             schedule.mode === 'repeat' ? `重复 ${schedule.cron || ''}` : '手动';
-        const last = doc.last_run_status ? `${doc.last_run_status} ${doc.last_run_at || ''}` : '尚未运行';
+        const runStatusLabels = {
+            running: '执行中', succeeded: '执行成功', failed: '执行失败',
+            interrupted: '执行被重启中断'
+        };
+        const last = doc.last_run_status ?
+            `${runStatusLabels[doc.last_run_status] || doc.last_run_status} ${doc.last_run_at || ''}` :
+            '尚未运行';
+        const isRunning = doc.last_run_status === 'running';
+        const canSchedule = schedule.mode === 'once' || schedule.mode === 'repeat';
 
         // Findings format
         const validation = spec.validation || {};
@@ -94,7 +102,7 @@ registerTabModule({
                 <span class="tag">⏱ ${h(scheduleText)}</span>
                 <span class="tag">📤 ${h(deliveryLabels[output.full_delivery] || output.full_delivery || 'auto')}</span>
                 ${deliveryWarn}
-                ${doc.enabled ? '<span class="tag task-enabled">调度已启用</span>' : ''}
+                ${doc.enabled && canSchedule ? '<span class="tag task-enabled">调度已启用</span>' : ''}
             </div>
             <h3 class="card-title">${h(doc.name || task.name || '未命名任务')}</h3>
             <div class="card-snippet">${h(task.objective || '')}</div>
@@ -111,7 +119,7 @@ registerTabModule({
                 ${doc.status === 'draft' ? '<button class="task-btn task-btn-primary task-confirm">✓ 确认草案</button>' : ''}
                 ${doc.status === 'review_required' || doc.status === 'blocked' ? '<button class="task-btn task-btn-primary task-validate">🔍 高价值复核</button>' : ''}
                 ${doc.status === 'needs_ack' ? '<button class="task-btn task-ack" style="background:#78350f;color:#fef08a;">⚠ 接受建议风险</button><button class="task-btn task-validate">🔍 重新复核</button>' : ''}
-                ${doc.status === 'approved' ? '<button class="task-btn task-btn-primary task-run">▶ 立即执行</button><button class="task-btn task-schedule">⏰ '+(doc.enabled ? '暂停调度' : '启用调度')+'</button>' : ''}
+                ${doc.status === 'approved' ? `<button class="task-btn task-btn-primary task-run" ${isRunning ? 'disabled' : ''}>${isRunning ? '⏳ 执行中' : '▶ 立即执行'}</button>${canSchedule ? `<button class="task-btn task-schedule">⏰ ${doc.enabled ? '暂停调度' : '启用调度'}</button>` : ''}` : ''}
                 <button class="task-btn task-delete" title="删除任务">🗑</button>
             </div>
             <div class="task-editor" style="display:${isAutoOpen ? 'block' : 'none'}"></div>

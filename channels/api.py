@@ -589,6 +589,12 @@ class ApiHandler(BaseHTTPRequestHandler):
                 if current["status"] != "approved":
                     raise ValueError("只有已通过校验的任务才能启用调度")
                 enabled = bool(data.get("enabled", True))
+                schedule_mode = (
+                    ((current["spec"].get("execution") or {}).get("schedule") or {})
+                    .get("mode", "manual")
+                )
+                if enabled and schedule_mode == "manual":
+                    raise ValueError("手动任务没有调度时间，请先设置一次或重复计划")
                 result = self._task_specs.store.save(
                     current["spec"], status="approved", enabled=enabled
                 )
@@ -1692,6 +1698,7 @@ class ApiServer:
             agent._config, agent.skill_engine, ledger=agent.ledger,
             request_selector=getattr(agent, "request_selector", None),
         )
+        self.task_specs.store.recover_interrupted()
         self._task_run_lock = threading.Lock()
         self._running_task_specs = set()
 
@@ -1712,7 +1719,7 @@ class ApiServer:
             f"输出要求: {json.dumps(output, ensure_ascii=False)}"
         )
 
-    def start_task_spec_run(self, task_id: str) -> dict:
+    def start_task_spec_run(self, task_id: str, scheduled: bool = False) -> dict:
         current = self.task_specs.store.get(task_id)
         if current is None:
             raise KeyError(task_id)
@@ -1726,7 +1733,7 @@ class ApiServer:
             if task_id in self._running_task_specs:
                 raise ValueError("TaskSpec 正在执行")
             self._running_task_specs.add(task_id)
-        self.task_specs.store.mark_started(task_id)
+        self.task_specs.store.mark_started(task_id, scheduled=scheduled)
 
         def _run():
             try:
@@ -1778,7 +1785,7 @@ class ApiServer:
         started = 0
         for item in self.task_specs.store.due():
             try:
-                self.start_task_spec_run(item["id"])
+                self.start_task_spec_run(item["id"], scheduled=True)
                 started += 1
             except Exception as exc:
                 print(f"  ⚠️ [TaskSpec] 定时任务 {item['id']} 未启动: {exc}")
