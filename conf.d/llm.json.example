@@ -77,20 +77,6 @@
             "output_recovery": {
                 "retry_kwargs": {"thinking": {"type": "disabled"}}
             },
-            "task_spec": {
-                "author": {
-                    "invoke_kwargs": {
-                        "response_format": {"type": "json_object"},
-                        "thinking": {"type": "disabled"}
-                    }
-                },
-                "validator": {
-                    "invoke_kwargs": {
-                        "response_format": {"type": "json_object"},
-                        "thinking": {"type": "disabled"}
-                    }
-                }
-            },
             "tags": ["text", "complex_reasoning"]
         },
         "kimi-k3": {
