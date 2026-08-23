@@ -258,7 +258,7 @@ class TaskSpecService:
         current = self.store.get(task_id)
         if current is None:
             raise KeyError(task_id)
-        spec = current["spec"]
+        spec = normalize_task_spec(current["spec"])
         hard_report = self.deterministic_preflight(spec)
         if hard_report["status"] != "ready":
             spec = self._validation(spec, "blocked", hard_report)
@@ -280,14 +280,36 @@ class TaskSpecService:
         prompt = REVIEW_PROMPT.format(
             spec=json.dumps(spec, ensure_ascii=False, indent=2)
         )
-        result = self.llm.invoke_sync(
-            [{"role": "user", "content": prompt}],
-            model=self.validator_model, invoker=invoker, role="task_spec_validator",
-            provider=self.router.get_driver(self.validator_model),
-            session_key=f"task_spec:{task_id}", source=ExecutionSource.API,
-            max_tokens=4096, timeout=120.0,
-        )
-        reviewed = _parse_json_object(result["content"])
+        try:
+            result = self.llm.invoke_sync(
+                [{"role": "user", "content": prompt}],
+                model=self.validator_model, invoker=invoker, role="task_spec_validator",
+                provider=self.router.get_driver(self.validator_model),
+                session_key=f"task_spec:{task_id}", source=ExecutionSource.API,
+                max_tokens=4096, timeout=120.0,
+            )
+            reviewed = _parse_json_object(result["content"])
+        except Exception as exc:
+            error_name = type(exc).__name__
+            is_timeout = "timeout" in error_name.lower()
+            code = "VALIDATOR_MODEL_TIMEOUT" if is_timeout else "VALIDATOR_MODEL_FAILED"
+            message = (
+                "高价值复核模型调用超时，请稍后重试。"
+                if is_timeout else "高价值复核模型暂时不可用，请稍后重试。"
+            )
+            unavailable = finding(
+                code, message, path="/validation",
+                resolution="任务草案已保留，可稍后再次点击高价值复核。",
+                severity="warning", overrideable=False, source="runtime",
+            )
+            spec = self._validation(
+                spec, "review_required", hard_report, [unavailable]
+            )
+            self.store.save(spec, status="review_required", enabled=False)
+            return {
+                "status": "review_required", "preflight": hard_report,
+                "findings": [unavailable],
+            }
         findings = []
         allowed_severity = {"suggestion", "warning", "needs_ack"}
         for raw in reviewed.get("findings") or []:

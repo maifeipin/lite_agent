@@ -135,6 +135,20 @@ def test_hard_preflight_prevents_model_review(tmp_path):
     assert persisted["spec"]["validation"]["preflight"]["status"] == "blocked"
 
 
+def test_validator_timeout_keeps_task_editable_and_retryable(tmp_path):
+    service, invoker = _service(tmp_path, {})
+    manual = service.create_manual("查看外币账单")
+    invoker.invoke_sync.side_effect = TimeoutError("validator timed out")
+
+    report = service.review(manual["id"])
+
+    assert report["status"] == "review_required"
+    assert report["findings"][0]["code"] == "VALIDATOR_MODEL_TIMEOUT"
+    persisted = service.store.get(manual["id"])
+    assert persisted["status"] == "review_required"
+    assert persisted["spec"]["validation"]["status"] == "review_required"
+
+
 def test_import_assigns_new_identity_and_requires_canonical_policy(tmp_path):
     service, _ = _service(tmp_path, {"passed": True, "findings": []})
     original = service.create_manual("uploaded goal")["spec"]
