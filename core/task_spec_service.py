@@ -330,10 +330,25 @@ class TaskSpecService:
                          generated_by: str,
                          revision: Optional[int] = None) -> tuple[dict, dict, str]:
         updated = copy.deepcopy(spec)
+        current_model_policy = copy.deepcopy(
+            (spec.get("execution") or {}).get("model_policy") or {}
+        )
         generated = self._require_confirmation_for_suggestions(spec, generated)
         for key in ("task", "execution", "output", "on_failure"):
             if key in generated:
                 updated[key] = _merge_generated(updated[key], generated[key])
+        # The enrichment model authors the rule; it must not override a runtime
+        # model that the user explicitly locked in the editor.
+        if (current_model_policy.get("user_locked")
+                and current_model_policy.get("preferred_model")):
+            merged_policy = updated.setdefault("execution", {}).setdefault(
+                "model_policy", {}
+            )
+            merged_policy["preferred_model"] = current_model_policy["preferred_model"]
+            merged_policy["user_locked"] = True
+            merged_policy["allowed_models"] = copy.deepcopy(
+                current_model_policy.get("allowed_models") or []
+            )
         # An explicit required_inputs object is authoritative. Recursive merge
         # would otherwise preserve stale blockers after a tool replaces them.
         generated_task = generated.get("task")
