@@ -109,6 +109,7 @@ def test_summary_callback_is_used_before_link():
 
 def test_email_provider_order_reuses_ops_mail_accounts(tmp_path):
     (tmp_path / "mail_client.py").write_text("# marker", encoding="utf-8")
+    (tmp_path / "email-config.local.json").write_text("{}", encoding="utf-8")
     accounts = [
         {"provider": "gmail", "account": "g@example"},
         {"provider": "163", "account": "n@example"},
@@ -124,7 +125,17 @@ def test_email_provider_order_reuses_ops_mail_accounts(tmp_path):
             raise OSError("qq unavailable")
         return smtp
 
-    mail_client = SimpleNamespace(load_accounts=lambda: accounts)
+    observed_candidates = []
+
+    def load_accounts():
+        observed_candidates.extend(mail_client.CONFIG_CANDIDATES)
+        assert all(path.startswith(str(tmp_path)) for path in observed_candidates)
+        return accounts
+
+    mail_client = SimpleNamespace(
+        CONFIG_CANDIDATES=["email-config.local.json", "email-config.json"],
+        load_accounts=load_accounts,
+    )
     mail_connect = SimpleNamespace(
         is_graph_api=lambda _account: False,
         connect_smtp=connect,
@@ -142,4 +153,7 @@ def test_email_provider_order_reuses_ops_mail_accounts(tmp_path):
 
     assert provider == "163"
     assert attempted == ["qq", "163"]
+    assert mail_client.CONFIG_CANDIDATES == [
+        "email-config.local.json", "email-config.json"
+    ]
     smtp.send_message.assert_called_once()

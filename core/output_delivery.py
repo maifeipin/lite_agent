@@ -11,6 +11,7 @@ import importlib
 import os
 import sqlite3
 import sys
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Callable, Optional
@@ -28,6 +29,7 @@ DEFAULT_CHANNEL_LIMITS = {
     "wechat": 2000,
 }
 VALID_FULL_DELIVERY = {"auto", "email", "hedgedoc", "sqlite", "inline"}
+_MAIL_CONFIG_LOCK = threading.Lock()
 
 
 def resolve_output_policy(config: dict, overrides: dict = None) -> dict:
@@ -124,7 +126,24 @@ def _send_email(text: str, config: dict, title: str = "") -> str:
         sys.path.insert(0, script_dir)
     mail_client = importlib.import_module("mail_client")
     mail_connect = importlib.import_module("mail_connect")
-    accounts = list(mail_client.load_accounts() or [])
+    # The reused ops_mail module defines config candidates relative to its
+    # process cwd. Lite Agent runs from a different project directory, so make
+    # those candidates absolute without changing the process-wide cwd.
+    with _MAIL_CONFIG_LOCK:
+        original_candidates = getattr(mail_client, "CONFIG_CANDIDATES", None)
+        if isinstance(original_candidates, list):
+            mail_client.CONFIG_CANDIDATES = [
+                value if os.path.isabs(value) else os.path.join(script_dir, value)
+                for value in original_candidates
+            ]
+        try:
+            accounts = list(mail_client.load_accounts() or [])
+        except SystemExit:
+            print("  ⚠️ [OutputDelivery] 邮件账号配置加载失败")
+            return ""
+        finally:
+            if isinstance(original_candidates, list):
+                mail_client.CONFIG_CANDIDATES = original_candidates
     provider_order = list(
         email_cfg.get("provider_order") or ["qq", "163", "outlook", "gmail"]
     )
