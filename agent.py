@@ -148,18 +148,28 @@ class Agent:
         # LLM 客户端
         import httpx
         request_router = None
+        default_call_profile = {
+            "max_tokens": int(llm_cfg.get("max_tokens", 2048)),
+            "timeout": 60.0,
+            "max_retries": 1,
+            "invoke_kwargs": {},
+        }
         if "models" in llm_cfg:
             default_model = llm_cfg.get("default", "")
-            default_cfg = llm_cfg["models"].get(default_model, {})
             request_router = ModelRouter(config)
+            default_call_profile = request_router.get_call_profile(
+                default_model, "tool_loop"
+            )
             self.client = request_router.get_client(default_model)
-            self.model_invoker = request_router.get_invoker(default_model)
+            self.model_invoker = request_router.get_invoker(
+                default_model, profile="tool_loop"
+            )
             if self.model_invoker is None:
                 raise ValueError(f"默认模型未配置或不可用: {default_model}")
             self.model = self.model_invoker.model_name
             self.model_driver = request_router.get_driver(default_model)
-            self.max_tokens = default_cfg.get("max_tokens", 2048)
-            self.temperature = default_cfg.get("temperature", 0.3)
+            self.max_tokens = default_call_profile["max_tokens"]
+            self.temperature = default_call_profile["temperature"]
         else:
             proxy_url = llm_cfg.get("proxy")
             http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
@@ -218,8 +228,9 @@ class Agent:
             skill_engine=self.skill_engine,
             max_steps=self.max_steps,
             max_tokens=self.max_tokens,
-            max_retries=1,
+            max_retries=default_call_profile["max_retries"],
             non_retryable_exceptions=_NON_RETRYABLE_EXCEPTIONS,
+            call_kwargs=default_call_profile["invoke_kwargs"],
         )
 
         # ExecutionLedger: 旁路执行账本 (不阻断主流程)
@@ -1098,6 +1109,16 @@ class Agent:
         request_max_tokens = self.max_tokens
         request_runtime = self.runtime
         request_stream = not is_gemini_driver(request_driver)
+        request_profile = {
+            "timeout": 60.0,
+            "max_retries": 1,
+            "invoke_kwargs": {},
+        }
+        if self._request_model_router is not None:
+            default_key = self._config.get("llm", {}).get("default", "")
+            request_profile = self._request_model_router.get_call_profile(
+                default_key, "tool_loop"
+            )
         override = getattr(msg, "model_override", "") or None
         if not msg.is_guest:
             if override is None:
@@ -1112,23 +1133,28 @@ class Agent:
             )
             if selected_model:
                 router = self._get_request_model_router()
-                request_invoker = router.get_invoker(selected_model)
+                request_profile = router.get_call_profile(
+                    selected_model, "tool_loop"
+                )
+                request_invoker = router.get_invoker(
+                    selected_model, profile="tool_loop"
+                )
                 if request_invoker is None:
                     yield {"type": "error", "msg": f"❌ 模型当前不可用: {selected_model}"}
                     yield {"type": "done", "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "estimated": False}}
                     return
-                cfg = router.models_cfg.get(selected_model, {})
                 request_model = request_invoker.model_name
                 request_driver = router.get_driver(selected_model)
-                request_max_tokens = cfg.get("max_tokens", self.max_tokens)
+                request_max_tokens = request_profile["max_tokens"]
                 request_stream = not is_gemini_driver(request_driver)
                 request_runtime = AgentRuntime(
                     model_invoker=request_invoker,
                     skill_engine=self.skill_engine,
                     max_steps=self.max_steps,
                     max_tokens=request_max_tokens,
-                    max_retries=1,
+                    max_retries=request_profile["max_retries"],
                     non_retryable_exceptions=_NON_RETRYABLE_EXCEPTIONS,
+                    call_kwargs=request_profile["invoke_kwargs"],
                 )
                 label = "MODEL OVERRIDE" if override else "COST ROUTE"
                 print(f"  🎛️ [{label}] {selected_model} -> {request_model}")
@@ -1177,7 +1203,10 @@ class Agent:
 
         # ---- 动态超时 (Agent 负责，不进 Runtime) ----
         is_pro = "pro" in request_model.lower() or "reasoner" in request_model.lower()
-        dynamic_timeout = 180.0 if is_pro else 45.0
+        dynamic_timeout = max(
+            float(request_profile.get("timeout", 60.0)),
+            180.0 if is_pro else 45.0,
+        )
         total_chars = sum(
             len(m["content"]) if isinstance(m.get("content"), str) else 0
             for m in messages

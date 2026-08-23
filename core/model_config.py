@@ -116,6 +116,41 @@ def validate_model_config(config: dict) -> list[tuple[str, str]]:
         for tag in (cfg.get("tags") or []):
             if tag not in KNOWN_CAPABILITIES:
                 _warning(f"模型 {name!r} 含未知能力标签 {tag!r}")
+        profiles = cfg.get("profiles") or {}
+        if not isinstance(profiles, dict):
+            _error(f"模型 {name!r} 的 profiles 必须是对象")
+            profiles = {}
+        for profile_name, profile in profiles.items():
+            if not isinstance(profile, dict):
+                _error(
+                    f"模型 {name!r} 的 profile {profile_name!r} 必须是对象"
+                )
+                continue
+            invoke_kwargs = profile.get("invoke_kwargs", {})
+            if not isinstance(invoke_kwargs, dict):
+                _error(
+                    f"模型 {name!r} 的 profile {profile_name!r}.invoke_kwargs "
+                    "必须是对象"
+                )
+            for key in ("max_tokens", "timeout"):
+                if key in profile:
+                    try:
+                        if float(profile[key]) <= 0:
+                            raise ValueError
+                    except (TypeError, ValueError):
+                        _error(
+                            f"模型 {name!r} 的 profile {profile_name!r}."
+                            f"{key} 必须是正数"
+                        )
+            if "max_retries" in profile:
+                try:
+                    if int(profile["max_retries"]) < 0:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    _error(
+                        f"模型 {name!r} 的 profile {profile_name!r}."
+                        "max_retries 必须是非负整数"
+                    )
 
     for names in missing_api_keys.values():
         if len(names) == 1:

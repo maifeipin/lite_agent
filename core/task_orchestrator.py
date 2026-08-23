@@ -129,14 +129,17 @@ class TaskOrchestrator:
         )
         if budget is not None and not budget.can_start():
             raise RuntimeError("任务预算不足，无法启动 Planner")
-        planner_max_tokens = 8192
+        planner_profile = self.router.get_call_profile(
+            planner_model, "structured_json"
+        )
+        planner_max_tokens = planner_profile["max_tokens"]
         if budget is not None:
             planner_max_tokens = max(
                 1, min(planner_max_tokens, budget.snapshot().remaining_tokens)
             )
         planner_invoker = self.router.get_invoker(
-            planner_model, max_tokens=planner_max_tokens,
-            temperature=0.2, timeout=120.0
+            planner_model, profile="structured_json",
+            max_tokens=planner_max_tokens,
         )
         if not planner_invoker:
             if policy.model_lock == ModelLock.HARD:
@@ -144,9 +147,18 @@ class TaskOrchestrator:
             fallback_model = self.config.get("llm", {}).get("default", "")
             if fallback_model and fallback_model != planner_model:
                 planner_model = fallback_model
+                planner_profile = self.router.get_call_profile(
+                    planner_model, "structured_json"
+                )
+                planner_max_tokens = planner_profile["max_tokens"]
+                if budget is not None:
+                    planner_max_tokens = max(1, min(
+                        planner_max_tokens,
+                        budget.snapshot().remaining_tokens,
+                    ))
                 planner_invoker = self.router.get_invoker(
-                    planner_model, max_tokens=planner_max_tokens,
-                    temperature=0.2, timeout=120.0
+                    planner_model, profile="structured_json",
+                    max_tokens=planner_max_tokens,
                 )
         if not planner_invoker:
             raise RuntimeError("Planner model is not available")
@@ -191,7 +203,9 @@ class TaskOrchestrator:
                                      getattr(self, "_active_parent_execution_id", "")),
                 source=ExecutionSource.ORCHESTRATOR,
                 max_tokens=planner_max_tokens,
-                timeout=120.0,
+                timeout=planner_profile["timeout"],
+                max_retries=planner_profile["max_retries"],
+                **planner_profile["invoke_kwargs"],
             )
             print(f"  ✅ [LLM Response] 耗时: {time.time()-start_t:.2f}s, Tokens: {response['usage_total']}")
             if response["finish_reason"] == "length":
@@ -695,6 +709,7 @@ class TaskOrchestrator:
         model_cfg = dict(self.router.models_cfg.get(model_name, {}))
         if not model_cfg:
             raise RuntimeError(f"Worker model is not configured: {model_name}")
+        profile = self.router.get_call_profile(model_name, "tool_loop")
         if max_steps is None:
             max_steps = getattr(
                 self, "_active_worker_max_steps", model_cfg.get("max_steps", 8)
@@ -702,7 +717,9 @@ class TaskOrchestrator:
         if token_budget is None:
             token_budget = getattr(self, "_active_token_budget", None)
         model_cfg["max_steps"] = max(1, int(max_steps))
-        invoker = self.router.get_invoker(model_name)
+        model_cfg["max_tokens"] = profile["max_tokens"]
+        model_cfg["temperature"] = profile["temperature"]
+        invoker = self.router.get_invoker(model_name, profile="tool_loop")
         if invoker is None:
             raise RuntimeError(f"Worker model is not available: {model_name}")
         return WorkerAgent(
@@ -717,6 +734,9 @@ class TaskOrchestrator:
             ledger=self.ledger,
             token_budget=token_budget,
             invoker=invoker,
+            max_retries=profile["max_retries"],
+            call_timeout=profile["timeout"],
+            call_kwargs=profile["invoke_kwargs"],
         )
 
     def _run_worker_fallbacks(self, subtask: Subtask, upstream: dict,
@@ -833,23 +853,35 @@ class TaskOrchestrator:
         selector = getattr(self, "model_selector", ModelSelector(self.config))
         decision = selector.select("aggregator", policy=policy)
         aggregator_model = decision.model
-        aggregator_max_tokens = 4096
+        aggregator_profile = self.router.get_call_profile(
+            aggregator_model, "chat"
+        )
+        aggregator_max_tokens = aggregator_profile["max_tokens"]
         if budget is not None:
             aggregator_max_tokens = max(
                 1, min(aggregator_max_tokens, budget.snapshot().remaining_tokens)
             )
         aggregator_invoker = self.router.get_invoker(
-            aggregator_model, max_tokens=aggregator_max_tokens,
-            temperature=0.3, timeout=60.0
+            aggregator_model, profile="chat",
+            max_tokens=aggregator_max_tokens,
         )
         if not aggregator_invoker:
             if policy.model_lock != ModelLock.HARD:
                 fallback_model = self.config.get("llm", {}).get("default", "")
                 if fallback_model and fallback_model != aggregator_model:
                     aggregator_model = fallback_model
+                    aggregator_profile = self.router.get_call_profile(
+                        aggregator_model, "chat"
+                    )
+                    aggregator_max_tokens = aggregator_profile["max_tokens"]
+                    if budget is not None:
+                        aggregator_max_tokens = max(1, min(
+                            aggregator_max_tokens,
+                            budget.snapshot().remaining_tokens,
+                        ))
                     aggregator_invoker = self.router.get_invoker(
-                        aggregator_model, max_tokens=aggregator_max_tokens,
-                        temperature=0.3, timeout=60.0
+                        aggregator_model, profile="chat",
+                        max_tokens=aggregator_max_tokens,
                     )
 
         results_lines = []
@@ -906,7 +938,9 @@ class TaskOrchestrator:
                                      getattr(self, "_active_parent_execution_id", "")),
                 source=ExecutionSource.ORCHESTRATOR,
                 max_tokens=aggregator_max_tokens,
-                timeout=60.0,
+                timeout=aggregator_profile["timeout"],
+                max_retries=aggregator_profile["max_retries"],
+                **aggregator_profile["invoke_kwargs"],
             )
             print(f"  ✅ [LLM Response] 耗时: {time.time()-start_t:.2f}s, Tokens: {response['usage_total']}")
             return response["content"]

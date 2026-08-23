@@ -113,6 +113,10 @@ def test_aggregator_does_not_call_model_after_budget_is_exhausted():
         model="glm", reason="test"
     )
     orch.router = MagicMock()
+    orch.router.get_call_profile.return_value = {
+        "temperature": 0.3, "max_tokens": 4096, "timeout": 60.0,
+        "max_retries": 1, "invoke_kwargs": {},
+    }
     orch.llm = MagicMock()
     node = Subtask(id="s1", name="one", result="done")
     node.status = SubtaskStatus.DONE

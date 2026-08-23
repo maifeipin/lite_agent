@@ -33,7 +33,9 @@ class WorkerAgent:
                  log_callback: Callable = None,
                  ledger: Optional[ExecutionLedger] = None,
                  token_budget: Optional[int] = None,
-                 invoker=None):
+                 invoker=None, max_retries: int = 1,
+                 call_timeout: float = 60.0,
+                 call_kwargs: Optional[dict] = None):
         self.name = name
         self.client = client
         self.model_name = model_name
@@ -46,6 +48,9 @@ class WorkerAgent:
         self.max_tokens = model_cfg.get("max_tokens", 2048)
         self.temperature = model_cfg.get("temperature", 0.3)
         self.token_budget = token_budget
+        self.max_retries = max(0, int(max_retries))
+        self.call_timeout = max(1.0, float(call_timeout))
+        self.call_kwargs = dict(call_kwargs or {})
 
         # ExecutionLedger: 旁路执行账本 (可选, 由调用方注入)
         self.ledger = ledger
@@ -207,10 +212,14 @@ class WorkerAgent:
             skill_engine=self.skill_engine,
             max_steps=self.max_steps,
             max_tokens=self.max_tokens,
+            max_retries=self.max_retries,
+            call_kwargs=self.call_kwargs,
         )
 
         try:
-            runtime_iter = runtime.run(messages, tools, ctx, stream=False)
+            runtime_iter = runtime.run(
+                messages, tools, ctx, timeout=self.call_timeout, stream=False
+            )
             # 经 Recorder 包装 (若 ledger 可用)
             if execution is not None:
                 recorder = RuntimeRecorder(self.ledger, execution.id)
