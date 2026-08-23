@@ -483,6 +483,13 @@ class ApiHandler(BaseHTTPRequestHandler):
                 (self._task_specs.config.get("task_specs", {}) or {})
                 .get("model_tiers", {}) or {}
             ),
+            "tools": [
+                schema.get("function", {})
+                for schema in (
+                    self._task_specs.skill_engine.get_all_schemas()
+                    if self._task_specs.skill_engine is not None else []
+                )
+            ],
         })
 
     def _handle_task_spec_get(self, path: str):
@@ -1682,7 +1689,8 @@ class ApiServer:
         self._thread = None
         from core.task_spec_service import TaskSpecService
         self.task_specs = TaskSpecService(
-            agent._config, agent.skill_engine, ledger=agent.ledger
+            agent._config, agent.skill_engine, ledger=agent.ledger,
+            request_selector=getattr(agent, "request_selector", None),
         )
         self._task_run_lock = threading.Lock()
         self._running_task_specs = set()

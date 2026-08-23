@@ -2174,6 +2174,10 @@ body {
     grid-template-columns: 2fr 1fr;
     gap: 8px;
 }
+.step-tool-wrap {
+    grid-template-columns: minmax(180px, 1fr) minmax(240px, 1.5fr);
+    gap: 8px;
+}
 .task-plan-json {
     min-height: 160px !important;
     font-family: 'JetBrains Mono', monospace;

@@ -175,6 +175,22 @@ def test_t08_guest_schemas_filtering(engine_with_test_skills):
     assert "test_raise" not in guest_names
 
 
+def test_skill_schema_preserves_declared_parameter_default(engine):
+    @skill(
+        name="test_with_default",
+        description="带默认值的测试工具",
+        params={"months": {"type": "integer", "default": 3}},
+    )
+    def test_with_default(months=3):
+        return months
+
+    schema = engine.get_schemas_by_names(["test_with_default"])[0]
+    months = schema["function"]["parameters"]["properties"]["months"]
+
+    assert months["default"] == 3
+    assert "months" not in schema["function"]["parameters"]["required"]
+
+
 # ================================================================
 #  T09: 死循环检测 → 驱动 LoopDetector 生产路径
 # ================================================================
