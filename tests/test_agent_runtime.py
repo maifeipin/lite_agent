@@ -768,6 +768,7 @@ class TestRuntimeEventImmutability:
             "STEP_START", "TEXT", "REASONING", "TOOL_CALLS_READY",
             "TOOL_CALL", "TOOL_RESULT", "USAGE", "STEP_END", "DONE",
             "ERROR", "DEAD_LOOP", "MAX_STEPS", "TOKEN_BUDGET_EXCEEDED",
+            "BUDGET_DECISION", "CONTEXT_COMPACTED",
         }
 
 

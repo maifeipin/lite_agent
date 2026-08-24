@@ -24,6 +24,12 @@ from enum import Enum, auto
 from types import MappingProxyType
 from typing import Any, Iterator, Optional
 
+from core.adaptive_budget import (
+    AdaptiveBudgetPolicy,
+    AdaptiveStepController,
+    BudgetAction,
+    compact_messages,
+)
 from core.execution import ExecutionContext, ExecutionResult, ExecutionSource, ActorType
 from core.loop_detector import LoopDetector
 from core.model_event import ModelEvent, ModelEventType
@@ -48,6 +54,8 @@ class RuntimeEventType(Enum):
     DEAD_LOOP = auto()        # 死循环熔断 {tool_name}
     MAX_STEPS = auto()        # 超出最大步数 {max_steps}
     TOKEN_BUDGET_EXCEEDED = auto()  # Token 预算耗尽 {budget, used}
+    BUDGET_DECISION = auto()  # 自适应租约/重规划/收尾决定
+    CONTEXT_COMPACTED = auto()  # 模型输入使用有界证据视图
 
 
 @dataclass(frozen=True)
@@ -98,7 +106,9 @@ class AgentRuntime:
                  max_steps: int = 8, max_tokens: int = 2048,
                  max_retries: int = 1, non_retryable_exceptions: tuple = (),
                  call_kwargs: Optional[dict] = None,
-                 gateway: Optional[LLMGateway] = None):
+                 gateway: Optional[LLMGateway] = None,
+                 adaptive_policy: Optional[AdaptiveBudgetPolicy] = None,
+                 budget_reviewer=None):
         self.model_invoker = model_invoker
         self.skill_engine = skill_engine
         self.max_steps = max_steps
@@ -110,6 +120,8 @@ class AgentRuntime:
         # construct provider adapters themselves. All runtime dispatch still
         # passes through the gateway boundary.
         self.gateway = gateway or LLMGateway()
+        self.adaptive_policy = adaptive_policy or AdaptiveBudgetPolicy()
+        self.budget_reviewer = budget_reviewer
 
     def run(self, messages: list, tools: list,
             ctx: ExecutionContext,
@@ -133,8 +145,20 @@ class AgentRuntime:
         effective_max_steps = min(self.max_steps, ctx.max_steps)
         effective_max_tokens = min(self.max_tokens, ctx.max_output_tokens)
         token_budget = ctx.token_budget
+        policy = self.adaptive_policy
+        user_messages = [
+            message.get("content", "") for message in messages
+            if message.get("role") == "user"
+            and isinstance(message.get("content"), str)
+        ]
+        controller = AdaptiveStepController(
+            effective_max_steps,
+            policy,
+            goal=user_messages[-1] if user_messages else "",
+        )
 
         state = RuntimeState(messages=list(messages))
+        base_message_count = len(state.messages)
         total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         accumulated_content = ""
         length_recovery_used = False
@@ -143,7 +167,31 @@ class AgentRuntime:
         # 过滤 tools：只把 ctx.allowed_tools 允许的工具传给模型
         effective_tools = self._filter_tools(tools, ctx)
 
-        for step in range(effective_max_steps):
+        step = 0
+        while step < effective_max_steps:
+            next_step = step + 1
+            decision = controller.before_step(
+                next_step, reviewer=self.budget_reviewer
+            )
+            if decision.action == BudgetAction.EXHAUSTED:
+                break
+            if decision.action not in (BudgetAction.EXECUTE,):
+                yield RuntimeEvent(
+                    type=RuntimeEventType.BUDGET_DECISION,
+                    data={
+                        "action": decision.action.value,
+                        "reason": decision.reason,
+                        "lease_limit": decision.lease_limit,
+                        "hard_steps": effective_max_steps,
+                    },
+                )
+            if decision.instruction:
+                state.messages.append({
+                    "role": "user",
+                    "content": f"[执行控制]\n{decision.instruction}",
+                })
+
+            finalizing = decision.action == BudgetAction.FINALIZE
             state.step = step
 
             # Token 预算前置检查
@@ -159,7 +207,12 @@ class AgentRuntime:
 
             yield RuntimeEvent(
                 type=RuntimeEventType.STEP_START,
-                data={"step": step + 1, "max_steps": effective_max_steps},
+                data={
+                    "step": next_step,
+                    "max_steps": effective_max_steps,
+                    "lease_limit": controller.lease_limit,
+                    "finalizing": finalizing,
+                },
             )
 
             # ---- 调用模型 ----
@@ -170,17 +223,37 @@ class AgentRuntime:
             state.empty = False
             state.tool_calls = []
             tool_calls_acc = {}  # {index: {id, name, arguments, provider_metadata}}
+            model_messages = state.messages
+            if controller.enabled:
+                model_messages = compact_messages(
+                    state.messages,
+                    base_message_count=base_message_count,
+                    board=controller.board,
+                    max_chars=policy.max_context_chars,
+                    recent_tool_rounds=policy.recent_tool_rounds,
+                )
+                if model_messages is not state.messages:
+                    yield RuntimeEvent(
+                        type=RuntimeEventType.CONTEXT_COMPACTED,
+                        data={
+                            "messages_before": len(state.messages),
+                            "messages_after": len(model_messages),
+                        },
+                    )
+            call_tools = [] if finalizing else effective_tools
 
             try:
                 if stream:
                     yield from self._consume_stream(
-                        state, effective_tools, step_usage, tool_calls_acc, timeout,
+                        state, call_tools, step_usage, tool_calls_acc, timeout,
                         effective_max_tokens, call_overrides=recovery_kwargs,
+                        input_messages=model_messages,
                     )
                 else:
                     yield from self._consume_sync(
-                        state, effective_tools, step_usage, tool_calls_acc,
+                        state, call_tools, step_usage, tool_calls_acc,
                         effective_max_tokens, call_overrides=recovery_kwargs,
+                        input_messages=model_messages,
                     )
             except Exception as e:
                 yield RuntimeEvent(type=RuntimeEventType.ERROR,
@@ -196,7 +269,7 @@ class AgentRuntime:
 
             yield RuntimeEvent(
                 type=RuntimeEventType.STEP_END,
-                data={"step": step + 1, "usage": step_usage, "finish_reason": state.finish_reason},
+                data={"step": next_step, "usage": step_usage, "finish_reason": state.finish_reason},
             )
 
             # Token 预算后置检查：本步消耗后超限 -> 熔断，不执行有副作用的工具
@@ -218,7 +291,7 @@ class AgentRuntime:
                 can_recover_length = (
                     str(state.finish_reason).lower() == "length"
                     and not length_recovery_used
-                    and step + 1 < effective_max_steps
+                    and next_step < effective_max_steps
                 )
                 if can_recover_length:
                     length_recovery_used = True
@@ -234,6 +307,7 @@ class AgentRuntime:
                             "role": "user",
                             "content": "请从中断处继续，只补充未完成部分，不要重复前文，直接给出答案。",
                         })
+                    step += 1
                     continue
                 content = accumulated_content + content
                 # empty 仅反映 invoker 的显式标记（如 Gemini 安全过滤/无候选），
@@ -245,6 +319,28 @@ class AgentRuntime:
                                          "usage_total": total_usage["total_tokens"],
                                          "finish_reason": state.finish_reason,
                                          "empty": state.empty})
+                return
+
+            # Finalization never executes a late tool call. Providers normally
+            # cannot call tools when none are supplied, but this keeps the hard
+            # boundary deterministic for non-conforming adapters.
+            if finalizing:
+                content = accumulated_content + state.text_content.strip()
+                if not content:
+                    content = (
+                        "已停止继续调用工具。现有证据不足以生成可靠的完整结论，"
+                        "请补充必要信息或提高任务预算后继续。"
+                    )
+                state.messages.append({"role": "assistant", "content": content})
+                yield RuntimeEvent(
+                    type=RuntimeEventType.DONE,
+                    data={
+                        "content": content,
+                        "usage_total": total_usage["total_tokens"],
+                        "finish_reason": "finalized",
+                        "empty": False,
+                    },
+                )
                 return
 
             # ---- 有工具调用 ----
@@ -338,7 +434,16 @@ class AgentRuntime:
                     },
                 )
 
+                controller.record_tool_result(
+                    step=next_step,
+                    tool_name=tc["name"],
+                    arguments=tc["arguments"],
+                    ok=ok,
+                    output=output,
+                )
+
             # 工具结果已回传，进入下一轮
+            step += 1
 
         # 超出最大步数
         warning = "⚠️ 任务执行步骤过多，已自动终止。请尝试拆分为更小的任务。"
@@ -354,7 +459,8 @@ class AgentRuntime:
     def _consume_stream(self, state: RuntimeState, tools: list,
                         step_usage: dict, tool_calls_acc: dict,
                         timeout: float, max_tokens: int,
-                        call_overrides: dict = None) -> Iterator[RuntimeEvent]:
+                        call_overrides: dict = None,
+                        input_messages: list = None) -> Iterator[RuntimeEvent]:
         """流式消费 ModelEvent 流，支持首字前重试。
 
         重试语义：
@@ -373,7 +479,8 @@ class AgentRuntime:
                 invocation_kwargs = dict(self.call_kwargs)
                 invocation_kwargs.update(call_overrides or {})
                 for event in self.gateway.invoke_stream(
-                    state.messages, tools, invoker=self.model_invoker,
+                    input_messages or state.messages, tools,
+                    invoker=self.model_invoker,
                     timeout=timeout, max_tokens=max_tokens,
                     **invocation_kwargs,
                 ):
@@ -437,12 +544,14 @@ class AgentRuntime:
     def _consume_sync(self, state: RuntimeState, tools: list,
                       step_usage: dict, tool_calls_acc: dict,
                       max_tokens: int,
-                      call_overrides: dict = None) -> Iterator[RuntimeEvent]:
+                      call_overrides: dict = None,
+                      input_messages: list = None) -> Iterator[RuntimeEvent]:
         """同步消费 invoke_sync 返回的 dict，转换为 RuntimeEvent。"""
         invocation_kwargs = dict(self.call_kwargs)
         invocation_kwargs.update(call_overrides or {})
         result = self.gateway.invoke_sync(
-            state.messages, tools, invoker=self.model_invoker, max_tokens=max_tokens,
+            input_messages or state.messages, tools,
+            invoker=self.model_invoker, max_tokens=max_tokens,
             **invocation_kwargs,
         )
 

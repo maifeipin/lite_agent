@@ -1,0 +1,11 @@
+{
+    "enabled": true,
+    "simple_hard_steps": 60,
+    "initial_steps": 8,
+    "lease_steps": 6,
+    "finalization_reserve": 1,
+    "low_yield_streak": 3,
+    "low_result_chars": 80,
+    "max_context_chars": 24000,
+    "recent_tool_rounds": 2
+}

@@ -3,6 +3,7 @@ import traceback
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 from core.agent_runtime import AgentRuntime, RuntimeEvent, RuntimeEventType
+from core.adaptive_budget import AdaptiveBudgetPolicy
 from core.execution import ExecutionContext, ExecutionSource, ActorType
 from core.execution_ledger import ExecutionLedger
 from core.runtime_recorder import RuntimeRecorder
@@ -35,7 +36,8 @@ class WorkerAgent:
                  token_budget: Optional[int] = None,
                  invoker=None, max_retries: int = 1,
                  call_timeout: float = 60.0,
-                 call_kwargs: Optional[dict] = None):
+                 call_kwargs: Optional[dict] = None,
+                 adaptive_policy: Optional[AdaptiveBudgetPolicy] = None):
         self.name = name
         self.client = client
         self.model_name = model_name
@@ -51,6 +53,7 @@ class WorkerAgent:
         self.max_retries = max(0, int(max_retries))
         self.call_timeout = max(1.0, float(call_timeout))
         self.call_kwargs = dict(call_kwargs or {})
+        self.adaptive_policy = adaptive_policy or AdaptiveBudgetPolicy()
 
         # ExecutionLedger: 旁路执行账本 (可选, 由调用方注入)
         self.ledger = ledger
@@ -214,11 +217,12 @@ class WorkerAgent:
             max_tokens=self.max_tokens,
             max_retries=self.max_retries,
             call_kwargs=self.call_kwargs,
+            adaptive_policy=self.adaptive_policy,
         )
 
         try:
             runtime_iter = runtime.run(
-                messages, tools, ctx, timeout=self.call_timeout, stream=False
+                messages, tools, ctx, timeout=self.call_timeout, stream=False,
             )
             # 经 Recorder 包装 (若 ledger 可用)
             if execution is not None:
@@ -230,6 +234,13 @@ class WorkerAgent:
             for event in event_iter:
                 if event.type == RuntimeEventType.STEP_START:
                     subtask.steps_used += 1
+
+                elif event.type == RuntimeEventType.BUDGET_DECISION:
+                    self._log(
+                        f"  🧩 [{self.name}] {event.data.get('action')} "
+                        f"({event.data.get('reason')}) lease="
+                        f"{event.data.get('lease_limit')}/{self.max_steps}"
+                    )
 
                 elif event.type == RuntimeEventType.USAGE:
                     subtask.token_usage += event.data.get("total_tokens", 0)

@@ -49,6 +49,7 @@ cp conf.d/llm.json.example conf.d/llm.json
 cp conf.d/task_routing.json.example conf.d/task_routing.json
 cp conf.d/committee.json.example conf.d/committee.json
 cp conf.d/output_delivery.json.example conf.d/output_delivery.json
+cp conf.d/adaptive_execution.json.example conf.d/adaptive_execution.json
 ```
 
 ### 个人微信 iLink（可选）

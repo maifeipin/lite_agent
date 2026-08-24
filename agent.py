@@ -21,6 +21,7 @@ from core.model_config import is_gemini_driver
 from core.model_router import ModelRouter
 from core.model_event import ModelEventType
 from core.agent_runtime import AgentRuntime, RuntimeEventType
+from core.adaptive_budget import AdaptiveBudgetPolicy
 from core.execution import ExecutionContext, ActorType, ExecutionSource
 from core.execution_ledger import ExecutionLedger
 from core.runtime_recorder import RuntimeRecorder
@@ -216,6 +217,11 @@ class Agent:
 
         # 安全限制
         self.max_steps = session_cfg.get("max_steps_per_goal", 30)
+        self.adaptive_policy = AdaptiveBudgetPolicy.from_config(config)
+        self.hard_max_steps = (
+            max(self.max_steps, self.adaptive_policy.simple_hard_steps)
+            if self.adaptive_policy.enabled else self.max_steps
+        )
         self.daily_token_limit = session_cfg.get("daily_token_limit", 500000)
         self._dead_loop_counter = LRUCache(maxsize=200)  # session_key -> {tool_fingerprint -> count}
         self.orch_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="AgentOrch")
@@ -226,11 +232,12 @@ class Agent:
         self.runtime = AgentRuntime(
             model_invoker=self.model_invoker,
             skill_engine=self.skill_engine,
-            max_steps=self.max_steps,
+            max_steps=self.hard_max_steps,
             max_tokens=self.max_tokens,
             max_retries=default_call_profile["max_retries"],
             non_retryable_exceptions=_NON_RETRYABLE_EXCEPTIONS,
             call_kwargs=default_call_profile["invoke_kwargs"],
+            adaptive_policy=self.adaptive_policy,
         )
 
         # ExecutionLedger: 旁路执行账本 (不阻断主流程)
@@ -1150,11 +1157,12 @@ class Agent:
                 request_runtime = AgentRuntime(
                     model_invoker=request_invoker,
                     skill_engine=self.skill_engine,
-                    max_steps=self.max_steps,
+                    max_steps=self.hard_max_steps,
                     max_tokens=request_max_tokens,
                     max_retries=request_profile["max_retries"],
                     non_retryable_exceptions=_NON_RETRYABLE_EXCEPTIONS,
                     call_kwargs=request_profile["invoke_kwargs"],
+                    adaptive_policy=self.adaptive_policy,
                 )
                 label = "MODEL OVERRIDE" if override else "COST ROUTE"
                 print(f"  🎛️ [{label}] {selected_model} -> {request_model}")
@@ -1221,7 +1229,7 @@ class Agent:
             source=ExecutionSource.STREAM,
             allowed_tools=allowed_tools,
             session_key=msg.session_key,
-            max_steps=self.max_steps,
+            max_steps=self.hard_max_steps,
             max_output_tokens=request_max_tokens,
         )
 
@@ -1268,6 +1276,22 @@ class Agent:
                 usage_logged_this_step = False
                 step_text = ""
                 step_reasoning = ""
+
+            elif t == RuntimeEventType.BUDGET_DECISION:
+                print(
+                    "  🧩 [Adaptive] "
+                    f"{event.data.get('action')} "
+                    f"({event.data.get('reason')}) "
+                    f"lease={event.data.get('lease_limit')}/"
+                    f"{event.data.get('hard_steps')}"
+                )
+
+            elif t == RuntimeEventType.CONTEXT_COMPACTED:
+                print(
+                    "  🧰 [Context] "
+                    f"{event.data.get('messages_before')} → "
+                    f"{event.data.get('messages_after')} messages"
+                )
 
             elif t == RuntimeEventType.TEXT:
                 step_text += event.data

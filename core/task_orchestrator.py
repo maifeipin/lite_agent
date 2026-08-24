@@ -17,6 +17,7 @@ from core.execution_ledger import ExecutionLedger
 from core.execution_budget import ExecutionBudget
 from core.llm_gateway import LLMGateway
 from core.request_selector import RequestSelector
+from core.adaptive_budget import AdaptiveBudgetPolicy
 
 PLANNER_PROMPT = """你是一个任务编排专家。请将以下用户目标拆解为子任务列表。
 
@@ -101,6 +102,7 @@ class TaskOrchestrator:
         self.dag_max_tokens = routing.get("dag_max_total_tokens", 200000)
         self.direct_tool_execution = routing.get("direct_tool_execution", False)
         self.request_selector = RequestSelector(skill_engine)
+        self.adaptive_policy = AdaptiveBudgetPolicy.from_config(config)
         self.executor = ThreadPoolExecutor(max_workers=self.max_parallel, thread_name_prefix="OrchWorker")
         print(f"  [ORCH] 初始化完成 planner={self.planner_model} classifier={self.classifier_model} parallel={self.max_parallel} max_steps={self.dag_max_steps} max_tokens={self.dag_max_tokens}")
 
@@ -729,6 +731,9 @@ class TaskOrchestrator:
             max_retries=profile["max_retries"],
             call_timeout=profile["timeout"],
             call_kwargs=profile["invoke_kwargs"],
+            adaptive_policy=getattr(
+                self, "adaptive_policy", AdaptiveBudgetPolicy()
+            ),
         )
 
     def _run_worker_fallbacks(self, subtask: Subtask, upstream: dict,
