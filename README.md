@@ -52,6 +52,8 @@ cp conf.d/output_delivery.json.example conf.d/output_delivery.json
 cp conf.d/adaptive_execution.json.example conf.d/adaptive_execution.json
 ```
 
+自适应执行的观察指标和暂缓事项见 [docs/adaptive-execution-followups.md](docs/adaptive-execution-followups.md)。
+
 ### 个人微信 iLink（可选）
 
 在 `config.json` 的 `channels` 下开启配置（凭据由扫码生成，不要写进配置文件）：
