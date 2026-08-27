@@ -30,6 +30,7 @@ _BDPAN_CATEGORIES = {
     "halo": "halo",
     "hedgedoc": "hedgedoc",
     "vaultwarden": "vaultwarden",
+    "webmusic_media": "webmusic_media",
 }
 
 # 上传日志文件路径
@@ -40,6 +41,7 @@ _BDPAN_SYNC_LOG = os.path.join(_BASE_DIR, "data", "bdpan_sync.log")
 _BDPAN_REMOTE_SUBDIRS = [
     "lite-agent/data", "lite-agent/meilisearch", "lite-agent/rsslite",
     "lite-agent/halo", "lite-agent/hedgedoc", "lite-agent/vaultwarden",
+    "lite-agent/webmusic_media",
 ]
 
 # ==========================================
@@ -370,17 +372,23 @@ def _bdpan_sync_dir(backup_dir):
         except Exception:
             pass
 
-    files = sorted(os.listdir(backup_dir))
+    files = []
+    for root, _, names in os.walk(backup_dir):
+        for fname in names:
+            files.append((os.path.join(root, fname), os.path.relpath(os.path.join(root, fname), backup_dir)))
+    files.sort(key=lambda item: item[1])
     uploads, skipped, failed = [], [], []
-    for fname in files:
-        if not fname.endswith(".zip"):
+    for fpath, relative_name in files:
+        fname = os.path.basename(relative_name)
+        if not (fname.endswith(".zip") or fname.endswith(".dump")):
             continue
-        fpath = os.path.join(backup_dir, fname)
         if not os.path.isfile(fpath):
             continue
 
         # 根据文件名前缀确定远端子目录
         remote_subdir = None
+        if relative_name.startswith("webmusic_media/"):
+            remote_subdir = "lite-agent/webmusic_media"
         for prefix, category in [("data_", "data"), ("meilisearch_", "meilisearch"),
             ("rsslite_", "rsslite"), ("halo_", "halo"),
             ("hedgedoc_", "hedgedoc"), ("vaultwarden_", "vaultwarden")]:
@@ -504,12 +512,34 @@ def do_backup() -> str:
         "meilisearch": "Missing",
         "hedgedoc": "Missing",
         "halo": "Missing",
+        "webmusic_media_postgres": "Missing",
     }
     backup_files = []  # [(zip_path, remote_subdir), ...]
     total_size_mb = 0
 
     import tempfile
     import shutil
+
+    # WebMusic MEDIA PostgreSQL：通过 vps1 -> MEDIA 的 SSH 流式 pg_dump，
+    # 不停止 WebMusic 服务；单独目录保存并由百度网盘同步器单独归类。
+    try:
+        media_dir = os.path.join(backup_dir, "webmusic_media")
+        os.makedirs(media_dir, exist_ok=True)
+        media_dump = os.path.join(media_dir, f"webmusic_postgres_{timestamp}.dump")
+        with open(media_dump, "wb") as dump_file:
+            subprocess.run(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "media",
+                 "docker", "exec", "webmusic-postgres", "pg_dump", "-U", "postgres", "-d", "webmusic", "-Fc"],
+                stdout=dump_file, stderr=subprocess.PIPE, timeout=900, check=True
+            )
+        if os.path.getsize(media_dump) == 0:
+            raise RuntimeError("empty pg_dump output")
+        total_size_mb += os.path.getsize(media_dump) / (1024 * 1024)
+        backup_files.append((media_dump, "webmusic_media"))
+        checklist["webmusic_media_postgres"] = "OK"
+        print(f"  [webmusic_media] PostgreSQL dump: {os.path.getsize(media_dump) // 1024} KB")
+    except Exception as e:
+        print(f"  [webmusic_media] PostgreSQL dump failed: {e}")
 
     # Halo mtime 增量检测：读取上次备份时记录的 mtime
     # 通过 docker exec 获取（liteagent 无法直接访问 /root/.halo/）
