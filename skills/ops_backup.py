@@ -528,7 +528,10 @@ def do_backup() -> str:
         media_dump = os.path.join(media_dir, f"webmusic_postgres_{timestamp}.dump")
         with open(media_dump, "wb") as dump_file:
             subprocess.run(
-                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "media",
+                ["ssh", "-i", "/home/liteagent/.ssh/id_ed25519_lite_agent",
+                 "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+                 "-o", "UserKnownHostsFile=/home/liteagent/.ssh/known_hosts", "-o", "StrictHostKeyChecking=yes",
+                 "-l", "root", "media",
                  "docker", "exec", "webmusic-postgres", "pg_dump", "-U", "postgres", "-d", "webmusic", "-Fc"],
                 stdout=dump_file, stderr=subprocess.PIPE, timeout=900, check=True
             )
