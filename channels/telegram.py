@@ -1,38 +1,68 @@
-import json, time, subprocess, threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlsplit
+
+import httpx
+
 from channels.base import BaseChannel
 from agent import IncomingMessage, AgentResponse
 
 
 class TelegramChannel(BaseChannel):
-    """Telegram 通道 — Long Polling via subprocess+curl (socks5h)"""
+    """Telegram 通道 — 通过进程内 HTTP 客户端执行 Long Polling。"""
 
-    def __init__(self, config: dict, agent):
+    def __init__(self, config: dict, agent, http_client=None):
         super().__init__('telegram', config, agent)
         self.bot_token = config.get('bot_token', '')
         self.proxy = config.get('proxy', 'socks5h://127.0.0.1:18988')
-        self.base_url = f'https://api.telegram.org/bot{self.bot_token}'
+        self._owns_http_client = http_client is None
+        self._http = http_client or httpx.Client(
+            proxy=self.proxy or None,
+            timeout=httpx.Timeout(45.0),
+            trust_env=False,
+        )
         self.running = False
         self.offset = 0
         self.executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="TelegramWorker")
 
-    def _curl(self, method: str, data: dict = None) -> dict:
-        url = f'{self.base_url}/{method}'
-        cmd = ['curl', '-x', self.proxy, '-k', '-s', '-m', '40', url]
-        if data:
-            cmd += ['-H', 'Content-Type: application/json', '-d', json.dumps(data)]
+    def _api_url(self, method: str) -> str:
+        return f'https://api.telegram.org/bot{self.bot_token}/{method}'
+
+    def _safe_proxy_label(self) -> str:
+        """返回不含用户名和密码的代理端点描述。"""
+        if not self.proxy:
+            return 'direct'
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
-            if r.stdout.strip():
-                return json.loads(r.stdout)
-        except Exception as e:
-            print(f'  ❌ [Telegram] {method} error: {e}')
+            parsed = urlsplit(self.proxy)
+            if not parsed.scheme or not parsed.hostname:
+                return 'configured proxy'
+            host = parsed.hostname
+            if ':' in host:
+                host = f'[{host}]'
+            port = f':{parsed.port}' if parsed.port is not None else ''
+            return f'{parsed.scheme}://{host}{port}'
+        except (TypeError, ValueError):
+            return 'configured proxy'
+
+    def _request(self, method: str, data: dict = None) -> dict:
+        """调用 Bot API；异常日志不包含 token、请求 URL 或代理凭据。"""
+        try:
+            response = self._http.post(self._api_url(method), json=data or {})
+            if response.status_code >= 400:
+                print(f'  ❌ [Telegram] {method} HTTP {response.status_code}')
+                return {}
+            payload = response.json()
+            if isinstance(payload, dict):
+                return payload
+            print(f'  ❌ [Telegram] {method} returned an invalid payload')
+        except Exception as exc:
+            print(f'  ❌ [Telegram] {method} request failed ({type(exc).__name__})')
         return {}
 
     def _poll_loop(self):
-        print(f'  📡 Telegram 通道就绪 (Long Polling @ {self.proxy})')
+        print(f'  📡 Telegram 通道就绪 (Long Polling @ {self._safe_proxy_label()})')
         while self.running:
-            updates = self._curl('getUpdates', {
+            updates = self._request('getUpdates', {
                 'offset': self.offset, 'timeout': 30,
                 'allowed_updates': ['message']
             })
@@ -93,18 +123,23 @@ class TelegramChannel(BaseChannel):
         self._send_msg(chat_id, "🤔 收到图片，正在调用视觉大模型进行全版面结构化解析...")
         try:
             file_id = photo_array[-1]['file_id']
-            file_info = self._curl('getFile', {'file_id': file_id})
+            file_info = self._request('getFile', {'file_id': file_id})
             if not file_info.get('ok'):
                 self._send_msg(chat_id, "❌ 获取图片信息失败")
                 return
             
             file_path = file_info['result']['file_path']
             url = f'https://api.telegram.org/file/bot{self.bot_token}/{file_path}'
-            
-            import subprocess, requests, os
-            cmd = ['curl', '-x', self.proxy, '-k', '-s', url]
-            r = subprocess.run(cmd, capture_output=True)
-            image_bytes = r.stdout
+
+            import os
+            import requests
+
+            download = self._http.get(url)
+            if download.status_code >= 400:
+                print(f'  ❌ [Telegram] photo download HTTP {download.status_code}')
+                self._send_msg(chat_id, "❌ 下载图片失败")
+                return
+            image_bytes = download.content
             if not image_bytes:
                 self._send_msg(chat_id, "❌ 下载图片失败")
                 return
@@ -122,10 +157,9 @@ class TelegramChannel(BaseChannel):
                 self._send_msg(chat_id, f"📄 **视觉模型提取结果**:\n\n{markdown[:4000]}")
             else:
                 self._send_msg(chat_id, f"❌ OCR 服务异常: {res.text}")
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            self._send_msg(chat_id, f"❌ 处理图片异常: {e}")
+        except Exception as exc:
+            print(f'  ❌ [Telegram] photo processing failed ({type(exc).__name__})')
+            self._send_msg(chat_id, "❌ 处理图片异常")
 
     def start(self):
         if not self.bot_token:
@@ -136,6 +170,8 @@ class TelegramChannel(BaseChannel):
 
     def stop(self):
         self.running = False
+        if self._owns_http_client:
+            self._http.close()
 
     def send_response(self, chat_id: str, resp: AgentResponse) -> bool:
         text = resp.text
@@ -197,11 +233,11 @@ class TelegramChannel(BaseChannel):
         return chat_id or None
 
     def _send_msg(self, chat_id: str, text: str) -> bool:
-        r = self._curl('sendMessage', {
+        r = self._request('sendMessage', {
             'chat_id': chat_id, 'text': text, 'parse_mode': 'Markdown'
         })
         if not r.get('ok'):
-            r = self._curl('sendMessage', {
+            r = self._request('sendMessage', {
                 'chat_id': chat_id, 'text': text
             })
         return bool(r.get('ok'))
