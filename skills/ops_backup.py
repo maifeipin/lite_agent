@@ -384,6 +384,10 @@ def _bdpan_sync_dir(backup_dir):
             continue
         if not os.path.isfile(fpath):
             continue
+        # 避免空文件阻断百度网盘上传流程
+        if os.path.getsize(fpath) == 0:
+            failed.append((fname, "本地文件大小为 0 字节，跳过上传"))
+            continue
 
         # 根据文件名前缀确定远端子目录
         remote_subdir = None
@@ -536,12 +540,18 @@ def do_backup() -> str:
                 stdout=dump_file, stderr=subprocess.PIPE, timeout=900, check=True
             )
         if os.path.getsize(media_dump) == 0:
+            os.remove(media_dump)
             raise RuntimeError("empty pg_dump output")
         total_size_mb += os.path.getsize(media_dump) / (1024 * 1024)
         backup_files.append((media_dump, "webmusic_media"))
         checklist["webmusic_media_postgres"] = "OK"
         print(f"  [webmusic_media] PostgreSQL dump: {os.path.getsize(media_dump) // 1024} KB")
     except Exception as e:
+        if 'media_dump' in locals() and os.path.exists(media_dump) and os.path.getsize(media_dump) == 0:
+            try:
+                os.remove(media_dump)
+            except Exception:
+                pass
         print(f"  [webmusic_media] PostgreSQL dump failed: {e}")
 
     # Halo mtime 增量检测：读取上次备份时记录的 mtime
