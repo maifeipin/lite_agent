@@ -29,3 +29,7 @@ vps*.json
 *.db
 *.sqlite
 docs/
+.env.bak*
+*.bak
+*.bak.*
+*.pre-compat-cutover
