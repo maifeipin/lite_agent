@@ -354,9 +354,9 @@
     },
     "hedgedoc": {
         "enabled": true,
-        "internal_url": "http://127.0.0.1:3030",
+        "internal_url": "http://127.0.0.1:3031",
         "public_url": "https://md.maifeipin.com",
-        "email": "bot2@bot.com",
+        "email": "liteagent@maifeipin.com",
         "password": "${HEDGEDOC_PASSWORD}"
     },
     "rssadapter": {
