@@ -2549,3 +2549,83 @@ body {
     background: rgba(99, 102, 241, 0.3);
     color: #fff;
 }
+
+/* ============ Meeting live detail (会议直播详情) ============ */
+.meeting-live-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+.meeting-live-brief {
+    margin: 0 0 10px;
+    padding: 8px 12px;
+    border-left: 3px solid rgba(255, 255, 255, 0.15);
+    color: var(--text-muted);
+    font-size: 13px;
+    line-height: 1.6;
+}
+.meeting-live-hint {
+    margin: 0 0 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+    font-style: italic;
+}
+.meeting-live-hint:empty {
+    display: none;
+}
+.meeting-live-feed {
+    max-height: 46vh;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-right: 4px;
+}
+.meeting-live-empty {
+    color: var(--text-muted);
+    font-size: 13px;
+}
+.meeting-event {
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    padding: 8px 10px;
+    background: rgba(255, 255, 255, 0.02);
+}
+.meeting-event-head {
+    font-size: 13px;
+}
+.meeting-event-time {
+    color: var(--text-muted);
+    font-size: 12px;
+    margin-left: 6px;
+}
+.meeting-event-body {
+    margin-top: 4px;
+    font-size: 13px;
+    line-height: 1.6;
+    word-break: break-word;
+}
+.meeting-event-human {
+    border-color: rgba(99, 102, 241, 0.45);
+    background: rgba(99, 102, 241, 0.08);
+}
+.meeting-speak {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.meeting-speak input {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text-primary);
+    font-size: 13px;
+    box-sizing: border-box;
+}
+.meeting-speak input:focus {
+    outline: none;
+    border-color: var(--accent);
+}

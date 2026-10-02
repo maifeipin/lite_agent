@@ -9,6 +9,14 @@ from contextlib import closing
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from types import SimpleNamespace
+
+# ---- 会审会议长轮询（P0）与派生在线状态（P1）----
+_REVIEW_MAX_WAIT = 25.0      # 秒；须小于 nginx proxy_read_timeout
+_REVIEW_ONLINE_WINDOW = 90   # 秒；窗口内该席位有轮询即视为在线
+_REVIEW_WAITERS = {}         # (meeting_id, seat) -> True；单席位同时只允许一个挂起
+_REVIEW_WAITERS_LOCK = threading.Lock()
+_REVIEW_LAST_POLL = {}       # (meeting_id, seat) -> 最近轮询 epoch（易变状态，不入 audit 链）
 
 class ApiHandler(BaseHTTPRequestHandler):
     """
@@ -524,6 +532,94 @@ class ApiHandler(BaseHTTPRequestHandler):
         request_host = (self.headers.get('Host') or '').split(':', 1)[0].lower()
         return request_host in {expected, '127.0.0.1', 'localhost'}
 
+    @staticmethod
+    def _review_default_owner_hash(db_path: Path, room) -> str:
+        """管理员从 Dashboard 发起会议时，复用/预置本机主持人审批密钥（0600）。
+
+        原始密钥只留在本机 owner.key，decide 仍需持该文件人工审批。
+        """
+        key_path = db_path.parent / 'owner.key'
+        if key_path.exists():
+            return room.sha(key_path.read_text(encoding='utf-8').strip())
+        return room.new_owner_key(str(key_path))
+
+    def _review_long_wait(self, db_path: Path, meeting_id: str, since: int,
+                          wait: float, seat: str | None):
+        """P0 长轮询挂起：独立 autocommit 只读连接轮询 DB（CLI 跨进程写入同样可见）。
+
+        唤醒条件：有新事件 / 会议终态（approved/rejected）或已归档 / 超时。
+        每席位同时只允许一个挂起请求（第二个立即 409）；admin 不受限。
+        """
+        from core import review_meeting_api as access
+
+        key = None
+        if seat is not None:
+            key = (meeting_id, seat)
+            with _REVIEW_WAITERS_LOCK:
+                if key in _REVIEW_WAITERS:
+                    raise access.ReviewAPIError('该席位已有挂起的轮询请求', 409)
+                _REVIEW_WAITERS[key] = True
+        try:
+            deadline = time.monotonic() + wait
+            uri = f'file:{db_path}?mode=ro'
+            with closing(sqlite3.connect(uri, uri=True, isolation_level=None, timeout=30)) as probe:
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return
+                    row = probe.execute(
+                        "SELECT (SELECT COALESCE(MAX(seq),0) FROM events WHERE meeting_id=?),"
+                        " (SELECT state FROM meetings WHERE id=?),"
+                        " (SELECT archived_at FROM meetings WHERE id=?)",
+                        (meeting_id, meeting_id, meeting_id)).fetchone()
+                    if row[0] > since:
+                        return  # 新事件
+                    if row[1] is None or row[1] in ('approved', 'rejected') or row[2] is not None:
+                        return  # 终态即醒
+                    time.sleep(min(0.5, remaining))
+        finally:
+            if key is not None:
+                with _REVIEW_WAITERS_LOCK:
+                    _REVIEW_WAITERS.pop(key, None)
+
+    def _review_enrich(self, result: dict, db, room, meeting_id: str,
+                       seat: str | None, is_admin: bool):
+        """P1：附加 hint（state×角色×轮次的纯函数）与派生在线状态（不入 audit 链）。"""
+        now = time.time()
+        for p in result.get('participants', []):
+            seen = _REVIEW_LAST_POLL.get((meeting_id, p['name']))
+            p['last_poll_at'] = int(seen) if seen else None
+            p['online'] = bool(seen and now - seen <= _REVIEW_ONLINE_WINDOW)
+        result['hint'] = self._review_hint(db, room, meeting_id, result, seat, is_admin)
+
+    @staticmethod
+    def _review_hint(db, room, meeting_id: str, snap: dict,
+                     seat: str | None, is_admin: bool) -> str:
+        state = snap.get('state')
+        if snap.get('archived_at'):
+            return '会议已归档，仅供查阅'
+        if state in ('approved', 'rejected'):
+            return '会议已裁决' + ('，可 leave 离场' if not is_admin else '')
+        if is_admin:
+            if state == 'awaiting_approval':
+                return '议题待你人工裁决：review-meeting decide --confirm（仅人类可执行）'
+            if state == 'changes_requested':
+                return '已要求修改：resume 发布新 brief 后讨论继续'
+            return '讨论进行中：可在记录弹窗插话引导；全员提交后可 advance 推进轮次'
+        if state == 'awaiting_approval':
+            return '等待主持人人工裁决，无需动作'
+        if state == 'changes_requested':
+            return '主持人要求修改，等待新 brief 恢复讨论'
+        row = room.get(db, meeting_id)
+        done = room.submitted(db, meeting_id, row['round'])
+        if seat in done:
+            pending = [p['name'] for p in snap.get('participants', []) if p['name'] not in done]
+            tail = f'，等待：{"、".join(pending)}' if pending else '，全员已齐，等待主持人推进轮次'
+            return f'本轮已提交正式意见{tail}；可用 comments 自由交流'
+        if row['round'] >= 2:
+            return '请提交本轮正式意见（reviews）：第 2 轮起必须 responds_to_seq 回应一位评委此前发言'
+        return '请阅读 brief 与他人发言，提交本轮正式意见（reviews）'
+
     def _handle_review_meeting_api(self, method: str, path: str, query: str):
         """Meeting capabilities bypass generic API auth only inside this exact route group."""
         from core import review_meeting_api as access
@@ -534,7 +630,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
 
         route = re.fullmatch(
-            r'/api/v1/review-meetings(?:/([0-9a-f]{12})(?:/(invite|invites|join|reviews|comments|leave))?)?',
+            r'/api/v1/review-meetings(?:/([0-9a-f]{12})(?:/(invite|invites|join|reviews|comments|leave|advance|waive))?)?',
             path)
         if route is None:
             self._review_json({'error': 'Not Found'}, 404)
@@ -549,10 +645,11 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            if ((method == 'POST' and action in (None, 'invites'))
+            if ((method == 'POST' and action in (None, 'invites', 'advance', 'waive'))
                     and not self._review_admin()):
-                raise access.ReviewAPIError('仅主持人可创建会议或更新邀请', 403)
-            payload = self._review_body() if method == 'POST' and action != 'leave' else {}
+                raise access.ReviewAPIError('仅主持人可创建会议、更新邀请或推进轮次', 403)
+            payload = (self._review_body() if method == 'POST' and action not in ('leave', 'advance')
+                       else {})
             db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
             with closing(room.connect(db_path)) as db:
                 access.ensure_tables(db)
@@ -560,9 +657,12 @@ class ApiHandler(BaseHTTPRequestHandler):
                     if method == 'POST':
                         db.execute('BEGIN IMMEDIATE')
                     if method == 'POST' and meeting_id is None:
+                        owner_key_hash = payload.get('owner_key_hash')
+                        if owner_key_hash is None:
+                            owner_key_hash = self._review_default_owner_hash(db_path, room)
                         result = access.create(
                             db, title=payload.get('title'), brief=payload.get('brief'),
-                            owner_key_hash=payload.get('owner_key_hash'),
+                            owner_key_hash=owner_key_hash,
                             invite_ttl_seconds=payload.get('invite_ttl_seconds', access.INVITE_TTL_DEFAULT))
                         result['invite_url'] = self._review_invite_url(result['id'], result.pop('invite_token'))
                         status = 201
@@ -575,13 +675,45 @@ class ApiHandler(BaseHTTPRequestHandler):
                     elif method == 'POST' and action == 'join':
                         result = access.join(db, meeting_id, payload.get('invite_token'), payload.get('label', 'agent'))
                         status = 201
+                    elif method == 'GET' and meeting_id is None:
+                        if not self._review_admin():
+                            raise access.ReviewAPIError('仅主持人可查看会议列表', 403)
+                        rows = db.execute(
+                            "SELECT id,title,state,round,created_at,updated_at,archived_at"
+                            " FROM meetings ORDER BY updated_at DESC LIMIT 200").fetchall()
+                        result = {'meetings': [dict(r) for r in rows]}
+                        status = 200
                     elif method == 'GET' and meeting_id and action is None:
-                        value = (parse_qs(query).get('since') or ['0'])[0]
+                        qs = parse_qs(query)
+                        value = (qs.get('since') or ['0'])[0]
                         try:
                             since = int(value)
                         except ValueError as exc:
                             raise access.ReviewAPIError('since 必须为非负整数') from exc
-                        result = access.show(db, meeting_id, self._review_bearer(), since)
+                        if since < 0:
+                            raise access.ReviewAPIError('since 必须为非负整数')
+                        wait_value = (qs.get('wait') or ['0'])[0]
+                        try:
+                            wait = float(wait_value)
+                        except ValueError as exc:
+                            raise access.ReviewAPIError('wait 必须为非负秒数') from exc
+                        if wait < 0:
+                            raise access.ReviewAPIError('wait 必须为非负秒数')
+                        wait = min(wait, _REVIEW_MAX_WAIT)
+                        is_admin = self._review_admin()
+                        seat = None
+                        if not is_admin:
+                            seat = access.authenticate(db, meeting_id, self._review_bearer())
+                            _REVIEW_LAST_POLL[(meeting_id, seat)] = time.time()
+                        if wait > 0:
+                            db.rollback()  # 结束挂起前的读视图
+                            self._review_long_wait(db_path, meeting_id, since, wait, seat)
+                            db.rollback()  # 唤醒后以新读视图取快照
+                        if is_admin:
+                            result = room.snapshot(db, meeting_id, since=since, full=True)
+                        else:
+                            result = access.show(db, meeting_id, self._review_bearer(), since)
+                        self._review_enrich(result, db, room, meeting_id, seat, is_admin)
                         status = 200
                     elif method == 'POST' and action == 'reviews':
                         result = access.review(
@@ -589,10 +721,36 @@ class ApiHandler(BaseHTTPRequestHandler):
                             payload.get('position'), payload.get('responds_to_seq'))
                         status = 201
                     elif method == 'POST' and action == 'comments':
-                        result = access.comment(
-                            db, meeting_id, self._review_bearer(), payload.get('text'),
-                            payload.get('responds_to_seq'))
+                        if self._review_admin():
+                            text = (payload.get('text') or '').strip()
+                            if not text:
+                                raise access.ReviewAPIError('评论内容不能为空', 400)
+                            ref = payload.get('responds_to_seq')
+                            if ref is not None and (isinstance(ref, bool)
+                                                    or not isinstance(ref, int) or ref <= 0):
+                                raise access.ReviewAPIError('responds_to_seq 必须为正整数', 400)
+                            row = room.get(db, meeting_id)
+                            room.require_open(row)
+                            event = room.append(db, row, 'human', 'comment',
+                                                {'text': text, 'responds_to_seq': ref})
+                            result = {'id': meeting_id, 'event_seq': event['seq'],
+                                      'round': event['round'], 'actor': 'human'}
+                        else:
+                            result = access.comment(
+                                db, meeting_id, self._review_bearer(), payload.get('text'),
+                                payload.get('responds_to_seq'))
                         status = 201
+                    elif method == 'POST' and action == 'advance':
+                        result = room.execute(db, SimpleNamespace(action='advance', id=meeting_id))
+                        status = 200
+                    elif method == 'POST' and action == 'waive':
+                        names = payload.get('names', '')
+                        if isinstance(names, list):
+                            names = ','.join(str(n) for n in names)
+                        result = room.execute(db, SimpleNamespace(
+                            action='waive', id=meeting_id,
+                            participants=str(names), reason=str(payload.get('reason') or '')))
+                        status = 200
                     elif method == 'POST' and action == 'leave':
                         result = access.leave(db, meeting_id, self._review_bearer())
                         status = 200

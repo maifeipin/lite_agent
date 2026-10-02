@@ -100,6 +100,9 @@ registerTabModule({
             html += `<button class="todo-btn todo-btn-status todo-btn-reset" data-id="${h(doc.id)}" data-status="pending" title="重新打开任务">↩ 重新打开</button>`;
             html += `<button class="todo-btn todo-btn-status todo-btn-start" data-id="${h(doc.id)}" data-status="active" title="重新开始">▶ 重新开始</button>`;
         }
+        if (!isDone) {
+            html += `<button class="todo-btn todo-btn-meeting" data-id="${h(doc.id)}" title="就此待办发起会审会议，生成邀请链接">📣 会议</button>`;
+        }
         html += `<button class="todo-btn todo-btn-toggle-edit" data-id="${h(doc.id)}" title="编辑时间和周期">✏ 编辑</button>`;
         html += `<button class="todo-btn todo-btn-del" data-id="${h(doc.id)}" title="永久删除">🗑 删除</button>`;
         html += `</div>`;
@@ -233,6 +236,7 @@ registerTabModule({
                 const saveEdit  = e.target.closest('.todo-btn-save-edit');
                 const cancelEdit = e.target.closest('.todo-btn-cancel-edit');
                 const delBtn    = e.target.closest('.todo-btn-del');
+                const meetBtn   = e.target.closest('.todo-btn-meeting');
 
                 if (statusBtn) {
                     const id = statusBtn.getAttribute('data-id');
@@ -298,6 +302,50 @@ registerTabModule({
                     delBtn.disabled = true;
                     await fetch(`/agent/api/v1/todos/${id}`, { method: 'DELETE' });
                     performSearch(false);
+                } else if (meetBtn) {
+                    const id = meetBtn.getAttribute('data-id');
+                    const doc = (typeof state !== 'undefined' ? state.results : [])
+                        .find(d => String(d.id) === String(id)) || {};
+                    const title = doc.title
+                        || meetBtn.closest('.todo-card')?.querySelector('.card-title')?.textContent
+                        || '待办会议';
+                    const briefLines = [`待办事项：${title}`];
+                    if (doc.project) briefLines.push(`项目：${doc.project}`);
+                    if (doc.due_at) briefLines.push(`到期：${doc.due_at.slice(0, 16).replace('T', ' ')}`);
+                    if (doc.description) briefLines.push(`描述：${doc.description}`);
+
+                    meetBtn.disabled = true;
+                    try {
+                        const resp = await fetch('/agent/api/v1/review-meetings', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ title, brief: briefLines.join('\n') }),
+                        });
+                        const data = await resp.json();
+                        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+                        const url = data.invite_url;
+                        let copied = false;
+                        try { await navigator.clipboard.writeText(url); copied = true; } catch {}
+                        showModal({
+                            title: '会议已创建',
+                            icon: '📣',
+                            content: `<p>议题：<b>${h(title)}</b></p>` +
+                                `<p>${copied ? '✅ 邀请链接已复制到剪贴板，直接粘贴给参会方即可。'
+                                             : '⚠️ 自动复制失败，请手动复制下方链接。'}</p>`,
+                            input: { value: url },
+                            buttons: [
+                                { text: '再次复制', class: 'modal-btn-primary', onClick: async ({ close }) => {
+                                    try { await navigator.clipboard.writeText(url); } catch {}
+                                    close();
+                                } },
+                                { text: '关闭' },
+                            ],
+                        });
+                    } catch (err) {
+                        showModal({ title: '发起会议失败', icon: '⚠️', content: `<p>${h(err.message)}</p>` });
+                    } finally {
+                        meetBtn.disabled = false;
+                    }
                 }
             };
             grid.addEventListener('click', this._clickHandler);
