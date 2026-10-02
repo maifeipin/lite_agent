@@ -83,6 +83,7 @@ class ReviewMeetingAPITests(unittest.TestCase):
         status, first = self.request("POST", f"/{mid}/join", {"invite_token": invite, "label": "Cursor"})
         self.assertEqual(status, 201)
         self.assertEqual(first["participant"], "cursor")
+        self.assertIn("驻留轮询", first["protocol"])
         status, second = self.request("POST", f"/{mid}/join", {"invite_token": invite, "label": "Cursor"})
         self.assertEqual(status, 201)
         self.assertEqual(second["participant"], "cursor-2")
@@ -435,11 +436,22 @@ class ReviewMeetingAPITests(unittest.TestCase):
         return resp.status, json.loads(body) if body else {}
 
     def test_review_host_allowlist_rejects_foreign_host(self):
-        """Requests arriving via the legacy mail/agent entry (which overwrites
-        Authorization with the admin token) must be refused with 421."""
-        status, body = self._raw_get_with_host("mail.maifeipin.com")
+        """Hosts outside the allowlist (base_url host + configured extras +
+        localhost) must be refused with 421."""
+        status, body = self._raw_get_with_host("evil.example.com")
         self.assertEqual(status, 421)
         self.assertIn("not allowed", body.get("error", "").lower())
+
+    def test_review_host_allowlist_accepts_configured_extra_hosts(self):
+        """review_meeting_allowed_hosts extends the allowlist (e.g. the
+        dashboard origin mail.maifeipin.com); unlisted hosts stay 421."""
+        self.server.api_server.config["review_meeting_allowed_hosts"] = ["mail.maifeipin.com"]
+        _, created = self.create()
+        path = f"/{created['id']}/invite"
+        status, _ = self._raw_get_with_host("mail.maifeipin.com", path)
+        self.assertEqual(status, 200)
+        status, _ = self._raw_get_with_host("other.example.com", path)
+        self.assertEqual(status, 421)
 
     def test_review_host_allowlist_accepts_configured_domain(self):
         """The configured review_meeting_base_url host (edge entry) is accepted."""

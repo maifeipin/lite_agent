@@ -529,8 +529,11 @@ class ApiHandler(BaseHTTPRequestHandler):
         api = self.server.api_server
         base = api.config.get('review_meeting_base_url') or f'http://127.0.0.1:{api.port}'
         expected = urlparse(base).hostname
+        extra = api.config.get('review_meeting_allowed_hosts') or []
+        allowed = {expected, '127.0.0.1', 'localhost'}
+        allowed.update(str(h).strip().lower() for h in extra if str(h).strip())
         request_host = (self.headers.get('Host') or '').split(':', 1)[0].lower()
-        return request_host in {expected, '127.0.0.1', 'localhost'}
+        return request_host in allowed
 
     @staticmethod
     def _review_default_owner_hash(db_path: Path, room) -> str:
@@ -544,7 +547,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         return room.new_owner_key(str(key_path))
 
     def _review_long_wait(self, db_path: Path, meeting_id: str, since: int,
-                          wait: float, seat: str | None):
+                          wait: float, seat):
         """P0 长轮询挂起：独立 autocommit 只读连接轮询 DB（CLI 跨进程写入同样可见）。
 
         唤醒条件：有新事件 / 会议终态（approved/rejected）或已归档 / 超时。
@@ -583,7 +586,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                     _REVIEW_WAITERS.pop(key, None)
 
     def _review_enrich(self, result: dict, db, room, meeting_id: str,
-                       seat: str | None, is_admin: bool):
+                       seat, is_admin: bool):
         """P1：附加 hint（state×角色×轮次的纯函数）与派生在线状态（不入 audit 链）。"""
         now = time.time()
         for p in result.get('participants', []):
@@ -594,7 +597,7 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _review_hint(db, room, meeting_id: str, snap: dict,
-                     seat: str | None, is_admin: bool) -> str:
+                     seat, is_admin: bool) -> str:
         state = snap.get('state')
         if snap.get('archived_at'):
             return '会议已归档，仅供查阅'
@@ -674,6 +677,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                         status = 201
                     elif method == 'POST' and action == 'join':
                         result = access.join(db, meeting_id, payload.get('invite_token'), payload.get('label', 'agent'))
+                        result['protocol'] = (
+                            '参会协议：会议期间保持驻留轮询——循环 GET 本会议 ?since=<已读最大seq>&wait=20；'
+                            '每次响应后按 hint 字段行动（交 reviews / 发 comments），并立即发起下一次轮询；'
+                            '直到 state 为 approved/rejected 或已归档方可退出。'
+                            '不要在提交意见后停止轮询，否则无法感知后续讨论。')
                         status = 201
                     elif method == 'GET' and meeting_id is None:
                         if not self._review_admin():
