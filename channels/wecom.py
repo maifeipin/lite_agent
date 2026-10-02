@@ -1,4 +1,5 @@
 import urllib.request, json
+import secrets
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from urllib.parse import urlparse, parse_qs
@@ -13,6 +14,7 @@ class WeComChannel(BaseChannel):
         super().__init__('wecom', config, agent)
         self.push_url = config.get('push_url', 'http://127.0.0.1:6969/send_message')
         self.push_token = config.get('push_token', '')
+        self.bridge_secret = config.get('bridge_secret', '')
         self.listen_port = config.get('listen_port', 8899)
         self._httpd = None
         self.executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="WeComWorker")
@@ -162,17 +164,32 @@ class WeComChannel(BaseChannel):
 def _make_handler(channel):
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
-            length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(length).decode('utf-8')
+            secret = channel.bridge_secret
+            supplied = self.headers.get('X-Bridge-Secret', '')
+            if not isinstance(secret, str) or not secret:
+                self.send_error(503, 'Bridge authentication is not configured')
+                return
+            if not secrets.compare_digest(supplied.encode(), secret.encode()):
+                self.send_error(401, 'Unauthorized')
+                return
             try:
+                length = int(self.headers.get('Content-Length', 0))
+                if not 0 < length <= 65536:
+                    raise ValueError('Invalid body size')
+                self.connection.settimeout(10)
+                body = self.rfile.read(length).decode('utf-8')
                 data = json.loads(body)
-                text = data.get('text', '').strip()
-                user_id = data.get('user', 'unknown')
+                text = data.get('text', '')
+                user_id = data.get('user')
+                if not isinstance(text, str) or not isinstance(user_id, str) or not user_id.strip():
+                    raise ValueError('Invalid message identity')
+                text = text.strip()
                 if text:
                     # 将实际处理丢入线程池，避免阻塞 HTTP 响应
                     channel.executor.submit(channel._feed_message, text, user_id)
             except Exception as e:
-                print(f"  ⚠️ 企业微信消息解析失败: {e}")
+                self.send_error(400, 'Invalid bridge message')
+                return
             self.send_response(200)
             self.end_headers()
 

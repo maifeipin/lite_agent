@@ -93,18 +93,10 @@ class TelegramChannel(BaseChannel):
 
                 text = msg['text']
 
-                admin_id = self.config.get('admin_chat_id')
-                is_guest = False
-                if admin_id:
-                    if chat_id != str(admin_id):
-                        is_guest = True
-                else:
-                    # fail-closed: 未配置 admin 时, 所有外部用户按访客处理 (无 admin 权限), 而非 fail-open 全员管理员
-                    is_guest = True
-                    print("⚠️ [Telegram] admin_chat_id is not configured! All incoming users treated as guest (no admin rights).")
+                is_guest = not self._is_owner_message(msg)
 
                 incoming = IncomingMessage(
-                    channel='telegram', user_id=chat_id, chat_id=chat_id,
+                    channel='telegram', user_id=str(msg.get('from', {}).get('id', 'unknown')), chat_id=chat_id,
                     message_id=telegram_msg_id, text=text,
                     is_guest=is_guest
                 )
@@ -172,6 +164,13 @@ class TelegramChannel(BaseChannel):
         self.running = False
         if self._owns_http_client:
             self._http.close()
+
+    def _is_owner_message(self, message: dict) -> bool:
+        # Old private-chat configurations remain valid: private chat ID == user ID.
+        owner = str(self.config.get('admin_user_id') or self.config.get('admin_chat_id') or '')
+        sender = message.get('from') or {}
+        return bool(owner.isdecimal() and message.get('chat', {}).get('type') == 'private'
+                    and str(sender.get('id', '')) == owner and not sender.get('is_bot', False))
 
     def send_response(self, chat_id: str, resp: AgentResponse) -> bool:
         text = resp.text

@@ -1,5 +1,7 @@
 # 共享评审会议 v2
 
+权限加固后的默认行为与下文旧共享邀请协议不同：新会议采用一次性单席位邀请，共管凭据限定单会议，推进需 expected_round。部署与客户端迁移请先阅读 [权限与通知部署说明](REVIEW_MEETING_SECURITY.md)。下文多人复用同一邀请仅适用于显式开启 review_allow_legacy_invites 的旧兼容模式，默认关闭。
+
 ## 一个链接入会（HTTP API）
 
 现在可以由主持人创建空名单会议，得到**同一个临时邀请链接**，贴给所有能联网并发 HTTP 请求的 IDE agent。它们入会时填写可选的 `label`（如 Cursor、Qwen Code、WorkBuddy）；系统自动规范化、处理重名并分配席位，不再需要主持人逐个指定 ID。原 CLI 和旧会议仍可继续使用。
@@ -117,6 +119,8 @@ ssh vps1 'cd /home/liteagent/lite_agent && python3 scripts/review_meeting.py dec
 `approve` 可改为 `revise` 或 `reject`，确认串也同步改变。`revise` 后由主持人运行 `resume --id <会议ID> --brief-file revised_proposal.md`，提交新版完整提案并开下一轮；新旧提案均写入审计事件。`approve/reject` 后可运行 `archive`。申请审批和正式决定是不同事件；不得把模型的“支持”当成人类批准。
 
 ## 导入、导出、归档
+
+烟测或议题撤回可由持有人类审批凭据的主持人直接撤会，不需要为清理数据补写评委意见：`cancel --id <id> --note-file reason.md --owner-key-file <人工凭据文件> --confirm cancel:<id>`。撤会记录为独立的 `human/cancelled` 事件，状态进入 `rejected`，同时撤销会议邀请及会话 token，再用 `archive` 归档。`cancel` 不暴露给参会技能或 HTTP API，也不产生会审通过记录。
 
 ```bash
 python3 scripts/review_meeting.py export --id <会议ID> --file meeting-v2.json

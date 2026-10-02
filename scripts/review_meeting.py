@@ -68,6 +68,12 @@ def connect(path: Path) -> sqlite3.Connection:
         name TEXT NOT NULL, invited_round INTEGER NOT NULL,
         PRIMARY KEY(meeting_id,name)
       );
+      CREATE TABLE IF NOT EXISTS meeting_notification_outbox (
+        meeting_id TEXT NOT NULL REFERENCES meetings(id), event_seq INTEGER NOT NULL,
+        state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt INTEGER NOT NULL DEFAULT 0, delivered_channel TEXT,
+        PRIMARY KEY(meeting_id,event_seq)
+      );
       CREATE TABLE IF NOT EXISTS events (
         meeting_id TEXT NOT NULL REFERENCES meetings(id),
         seq INTEGER NOT NULL, round INTEGER NOT NULL, actor TEXT NOT NULL,
@@ -171,7 +177,21 @@ def snapshot(db: sqlite3.Connection, mid: str, *, since: int = 0, full: bool = F
     if full:
         if since == 0:
             result["brief"] = row["brief"]
-        result["events"] = events(db, mid, since)
+        # Bound public snapshots without truncating canonical audit/export reads.
+        page = []
+        size = 0
+        candidates = db.execute('SELECT * FROM events WHERE meeting_id=? AND seq>? ORDER BY seq LIMIT 101', (mid, since)).fetchall()
+        for source in candidates[:100]:
+            item = dict(source)
+            item['body'] = json.loads(item['body'])
+            item_size = len(canonical(item).encode('utf-8'))
+            if page and size + item_size > 256_000:
+                break
+            page.append(item)
+            size += item_size
+        result["events"] = page
+        result['has_more'] = len(candidates) > len(page)
+        result['next_since'] = page[-1]['seq'] if page else since
         result["since"] = since
     else:
         result["last_seq"] = db.execute("SELECT COALESCE(MAX(seq),0) FROM events WHERE meeting_id=?", (mid,)).fetchone()[0]
@@ -434,8 +454,22 @@ def execute(db: sqlite3.Connection, a: argparse.Namespace) -> dict:
         if len(voices) < 2 or not replies:
             raise ValueError("至少需要两位独立评委和一条第 2 轮交叉回应")
         summary = read_file(a.summary_file)
-        append(db, row, "system", "approval_requested", {"summary": summary, "summary_sha256": sha(summary)})
+        approval = append(db, row, "system", "approval_requested", {"summary": summary, "summary_sha256": sha(summary)})
+        db.execute('INSERT INTO meeting_notification_outbox(meeting_id,event_seq) VALUES(?,?)', (mid, approval['seq']))
         db.execute("UPDATE meetings SET state=? WHERE id=?", (WAITING, mid))
+        return snapshot(db, mid)
+    if a.action == "cancel":
+        if row["state"] in FINAL or row["archived_at"] is not None:
+            raise ValueError("只能撤销尚未裁决且未归档的会议")
+        check_owner(row, key_file=a.owner_key_file, token_stdin=a.owner_token_stdin,
+                    confirm=a.confirm, decision="cancel")
+        note = read_file(a.note_file)
+        append(db, row, "human", "cancelled", {"note": note})
+        db.execute("UPDATE meetings SET state=? WHERE id=?", ("rejected", mid))
+        for table in ("meeting_invites", "meeting_sessions", "meeting_seat_grants", "meeting_cohosts"):
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                db.execute(f"UPDATE {table} SET revoked_at=? WHERE meeting_id=? AND revoked_at IS NULL",
+                           (int(time.time()), mid))
         return snapshot(db, mid)
     if a.action == "decide":
         if row["state"] != WAITING or row["archived_at"] is not None:
@@ -491,7 +525,7 @@ def parser() -> argparse.ArgumentParser:
     old_owner.add_argument("--owner-key-file")
     old_owner.add_argument("--owner-key-hash")
     for name in ("status", "show", "verify", "export", "invite", "guide", "join", "leave", "comment", "submit",
-                 "import-audit", "waive", "advance", "request-approval", "decide", "resume", "archive"):
+                 "import-audit", "waive", "advance", "request-approval", "decide", "cancel", "resume", "archive"):
         s = sub.add_parser(name)
         s.add_argument("--id", required=True)
         if name == "show":
@@ -511,13 +545,14 @@ def parser() -> argparse.ArgumentParser:
             s.add_argument("--summary-file", required=True)
         if name == "resume":
             s.add_argument("--brief-file", required=True, help="人工要求修改后的新版完整提案")
-        if name == "decide":
-            s.add_argument("--decision", choices=("approve", "revise", "reject"), required=True)
+        if name in {"decide", "cancel"}:
+            if name == "decide":
+                s.add_argument("--decision", choices=("approve", "revise", "reject"), required=True)
             s.add_argument("--note-file", required=True)
             owner_decide = s.add_mutually_exclusive_group(required=True)
             owner_decide.add_argument("--owner-key-file", help="本机 0600 审批凭据")
             owner_decide.add_argument("--owner-token-stdin", action="store_true", help="从标准输入读取一行审批凭据；避免放入命令参数")
-            s.add_argument("--confirm", required=True, help="<decision>:<id>")
+            s.add_argument("--confirm", required=True, help="cancel:<id>" if name == "cancel" else "<decision>:<id>")
     return p
 
 

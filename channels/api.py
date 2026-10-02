@@ -20,6 +20,8 @@ _REVIEW_WAITERS_LOCK = threading.Lock()
 _REVIEW_AUTH_ATTEMPTS = {}
 _REVIEW_AUTH_LOCK = threading.Lock()
 _REVIEW_LAST_POLL = {}       # (meeting_id, seat) -> 最近轮询 epoch（易变状态，不入 audit 链）
+_REVIEW_POLL_SLOTS = threading.BoundedSemaphore(64)
+_REVIEW_REQUESTS = {}
 
 class ApiHandler(BaseHTTPRequestHandler):
     """
@@ -29,6 +31,10 @@ class ApiHandler(BaseHTTPRequestHandler):
         if getattr(self, '_quiet', False):
             return
         super().log_message(format, *args)
+
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(15)
     
     def _send_cors_headers(self):
         path = urlparse(self.path).path
@@ -64,14 +70,19 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.is_edge = False
         
         if not auth_token and not guest_token and not edge_token:
-            return True
+            self.send_error(503, "API authentication is not configured")
+            return False
             
         auth_header = self.headers.get('Authorization')
         if not auth_header or not auth_header.startswith('Bearer '):
             self.send_error(401, "Unauthorized")
             return False
             
-        token = auth_header.split(' ')[1]
+        parts = auth_header.split(' ')
+        if len(parts) != 2 or not parts[1]:
+            self.send_error(401, "Unauthorized")
+            return False
+        token = parts[1]
         
         if auth_token and token == auth_token:
             self.is_guest = False
@@ -104,6 +115,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
 
         if not self._auth():
+            return
+        if self.is_guest and req_path not in ('/v1/models', '/api/v1/task/stream'):
+            self.send_error(403, 'Forbidden: guest access is limited to chat and own task stream')
             return
         if self.is_guest and (
             req_path.startswith('/api/v1/task-specs')
@@ -175,6 +189,9 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         if not self._auth():
             return
+        if self.is_guest and req_path not in ('/api/v1/chat', '/api/v1/task', '/v1/chat/completions'):
+            self.send_error(403, 'Forbidden: guest access is limited to chat')
+            return
         if self.is_guest and req_path.startswith('/api/v1/task-specs'):
             self.send_error(403, "Forbidden: TaskSpec management requires admin")
             return
@@ -226,6 +243,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         if not self._auth():
             return
+        if self.is_guest or self.is_edge:
+            self.send_error(403, 'Forbidden: admin access required')
+            return
         req_path = parsed_url.path
         if req_path.startswith('/agent/'):
             req_path = req_path[6:]
@@ -249,6 +269,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_error(403, "Forbidden")
             return
         if not self._auth():
+            return
+        if self.is_guest or self.is_edge:
+            self.send_error(403, 'Forbidden: admin access required')
             return
         req_path = parsed_url.path
         if req_path.startswith('/agent/'):
@@ -339,9 +362,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"detail": str(e)}).encode('utf-8'))
 
     def _handle_chat_or_task(self):
-        content_length = int(self.headers.get('Content-Length', 0))
-        if content_length == 0:
-            self.send_error(400, "Bad Request: Empty body")
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+        except ValueError:
+            content_length = 0
+        if not 0 < content_length <= 65536:
+            self.send_error(400, "Bad Request: body must be 1..65536 bytes")
             return
             
         body = self.rfile.read(content_length)
@@ -353,11 +379,20 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         session_id = req_data.get('session_id')
         text = req_data.get('text')
-        if not session_id or not text:
+        if (not isinstance(session_id, str) or not 1 <= len(session_id) <= 128
+                or session_id.startswith('guest/') or not isinstance(text, str) or not text.strip()):
             self.send_error(400, "Bad Request: Missing session_id or text")
             return
+        if self.is_guest:
+            session_id = 'guest/' + session_id
 
         notify_channels = req_data.get('notify_channels', [])
+        if self.is_guest:
+            notify_channels = ['api']
+        elif not isinstance(notify_channels, list) or any(
+                not isinstance(name, str) for name in notify_channels):
+            self.send_error(400, "notify_channels must be a list of channel names")
+            return
 
         from agent import IncomingMessage
         msg = IncomingMessage(
@@ -367,6 +402,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             message_id=str(time.time()),
             text=text,
             notify_channels=notify_channels,
+            is_guest=self.is_guest,
             output_mode=str(req_data.get('output_delivery') or ''),
         )
 
@@ -556,6 +592,21 @@ class ApiHandler(BaseHTTPRequestHandler):
         return (base.rstrip('/') + f'/agent/api/v1/review-meetings/{meeting_id}/invite'
                 + f'#invite={token}')
 
+    def _review_operator(self, meeting_id, action='read'):
+        if self._review_admin():
+            return 'host'
+        if not meeting_id:
+            return None
+        from core import review_meeting_api as access
+        from scripts import review_meeting as room
+        db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
+        try:
+            with closing(sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)) as db:
+                db.row_factory = sqlite3.Row
+                return access.cohost_actor(db, meeting_id, self._review_bearer(), action)
+        except sqlite3.Error:
+            return None
+
     def _review_host_allowed(self) -> bool:
         api = self.server.api_server
         base = api.config.get('review_meeting_base_url') or f'http://127.0.0.1:{api.port}'
@@ -586,11 +637,14 @@ class ApiHandler(BaseHTTPRequestHandler):
         """
         from core import review_meeting_api as access
 
+        if not _REVIEW_POLL_SLOTS.acquire(blocking=False):
+            raise access.ReviewAPIError('长轮询并发已满，请稍后重试', 429)
         key = None
         if seat is not None:
             key = (meeting_id, seat)
             with _REVIEW_WAITERS_LOCK:
                 if key in _REVIEW_WAITERS:
+                    _REVIEW_POLL_SLOTS.release()
                     raise access.ReviewAPIError('该席位已有挂起的轮询请求', 409)
                 _REVIEW_WAITERS[key] = True
         try:
@@ -612,6 +666,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                         return  # 终态即醒
                     time.sleep(min(0.5, remaining))
         finally:
+            _REVIEW_POLL_SLOTS.release()
             if key is not None:
                 with _REVIEW_WAITERS_LOCK:
                     _REVIEW_WAITERS.pop(key, None)
@@ -624,6 +679,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             seen = _REVIEW_LAST_POLL.get((meeting_id, p['name']))
             p['last_poll_at'] = int(seen) if seen else None
             p['online'] = bool(seen and now - seen <= _REVIEW_ONLINE_WINDOW)
+            grant = db.execute('SELECT participant_id,metadata FROM meeting_seat_grants WHERE meeting_id=? AND participant=?',
+                               (meeting_id, p['name'])).fetchone()
+            if grant:
+                p['participant_id'] = grant['participant_id']
+                p['metadata'] = json.loads(grant['metadata'])
+                p['identity_source'] = 'self-reported'
         result['hint'] = self._review_hint(db, room, meeting_id, result, seat, is_admin)
 
     @staticmethod
@@ -658,6 +719,22 @@ class ApiHandler(BaseHTTPRequestHandler):
         """Meeting capabilities bypass generic API auth only inside this exact route group."""
         from core import review_meeting_api as access
         from scripts import review_meeting as room
+        api = self.server.api_server
+
+        now = time.monotonic()
+        client = self.client_address[0]
+        with _REVIEW_AUTH_LOCK:
+            for ip in list(_REVIEW_REQUESTS):
+                if not _REVIEW_REQUESTS[ip] or now - _REVIEW_REQUESTS[ip][-1] >= 60:
+                    del _REVIEW_REQUESTS[ip]
+            hits = [t for t in _REVIEW_REQUESTS.get(client, []) if now - t < 60]
+            limited = len(hits) >= 120 or (client not in _REVIEW_REQUESTS and len(_REVIEW_REQUESTS) >= 2048)
+            if not limited:
+                hits.append(now)
+                _REVIEW_REQUESTS[client] = hits
+        if limited:
+            self._review_json({'error': '会议请求过于频繁'}, 429)
+            return
 
         if not self._review_host_allowed():
             self._review_json({'error': 'Meeting API host is not allowed'}, 421)
@@ -681,7 +758,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
 
         route = re.fullmatch(
-            r'/api/v1/review-meetings(?:/([0-9a-f]{12})(?:/(invite|invites|join|reviews|comments|leave|advance|waive))?)?',
+            r'/api/v1/review-meetings(?:/([0-9a-f]{12})(?:/(invite|invites|join|reviews|comments|leave|advance|waive|cohosts|revoke-cohost|revoke-seat|request-approval|recover))?)?',
             path)
         if route is None:
             self._review_json({'error': 'Not Found'}, 404)
@@ -696,10 +773,13 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            if ((method == 'POST' and action in (None, 'invites', 'advance', 'waive'))
+            if ((method == 'POST' and action in (None, 'cohosts', 'revoke-cohost'))
                     and not self._review_admin()):
+                raise access.ReviewAPIError('仅主持人可创建会议或授权共管', 403)
+            if ((method == 'POST' and action in ('invites', 'advance', 'waive', 'revoke-seat', 'request-approval'))
+                    and not self._review_operator(meeting_id, action)):
                 raise access.ReviewAPIError('仅主持人可创建会议、更新邀请或推进轮次', 403)
-            payload = (self._review_body() if method == 'POST' and action not in ('leave', 'advance')
+            payload = (self._review_body() if method == 'POST' and action != 'leave'
                        else {})
             db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
             with closing(room.connect(db_path)) as db:
@@ -707,6 +787,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                 with db:
                     if method == 'POST':
                         db.execute('BEGIN IMMEDIATE')
+                        if action in ('invites', 'advance', 'waive', 'revoke-seat', 'request-approval'):
+                            actor = self._review_operator(meeting_id, action)
+                            if not actor:
+                                raise access.ReviewAPIError('共管授权无效或已撤销', 403)
+                            room.append(db, room.get(db, meeting_id), actor, 'management_action', {'action': action})
                     if method == 'POST' and meeting_id is None:
                         owner_key_hash = payload.get('owner_key_hash')
                         if owner_key_hash is None:
@@ -714,23 +799,43 @@ class ApiHandler(BaseHTTPRequestHandler):
                         result = access.create(
                             db, title=payload.get('title'), brief=payload.get('brief'),
                             owner_key_hash=owner_key_hash,
-                            invite_ttl_seconds=payload.get('invite_ttl_seconds', access.INVITE_TTL_DEFAULT))
+                            invite_ttl_seconds=payload.get('invite_ttl_seconds', access.INVITE_TTL_DEFAULT),
+                            legacy=api.config.get('review_allow_legacy_invites') is True)
                         result['invite_url'] = self._review_invite_url(result['id'], result.pop('invite_token'))
                         status = 201
                     elif method == 'POST' and action == 'invites':
-                        result = access.issue_invite(
-                            db, meeting_id, payload.get('invite_ttl_seconds', access.INVITE_TTL_DEFAULT))
+                        result = access.issue_seat_invite(
+                            db, meeting_id, payload.get('label', 'agent'), payload.get('invite_ttl_seconds', access.INVITE_TTL_DEFAULT))
                         result['id'] = meeting_id
                         result['invite_url'] = self._review_invite_url(meeting_id, result.pop('invite_token'))
                         status = 201
                     elif method == 'POST' and action == 'join':
-                        result = access.join(db, meeting_id, payload.get('invite_token'), payload.get('label', 'agent'))
+                        result = access.join(db, meeting_id, payload.get('invite_token'), payload.get('label', 'agent'),
+                                             allow_legacy=api.config.get('review_allow_legacy_invites') is True,
+                                             metadata=payload.get('metadata'), recovery_hash=payload.get('recovery_hash'))
                         result['protocol'] = (
                             '参会协议：会议期间保持驻留轮询——循环 GET 本会议 ?since=<已读最大seq>&wait=20；'
                             '每次响应后按 hint 字段行动（交 reviews / 发 comments），并立即发起下一次轮询；'
                             '直到 state 为 approved/rejected 或已归档方可退出。'
                             '不要在提交意见后停止轮询，否则无法感知后续讨论。')
                         status = 201
+                    elif method == 'POST' and action == 'recover':
+                        result = access.recover_seat(db, meeting_id, payload.get('participant_id'), payload.get('recovery_secret'))
+                        status = 200
+                    elif method == 'POST' and action == 'cohosts':
+                        result = access.issue_cohost(db, meeting_id)
+                        status = 201
+                    elif method == 'POST' and action in ('revoke-cohost', 'revoke-seat'):
+                        result = access.revoke_capability(db, meeting_id, payload.get('operator_id' if action == 'revoke-cohost' else 'participant_id'), cohost=action == 'revoke-cohost')
+                        status = 200
+                    elif method == 'POST' and action == 'request-approval':
+                        import tempfile
+                        summary = access._text(payload.get('summary'), 'summary')
+                        with tempfile.TemporaryDirectory(prefix='meeting_approval_') as directory:
+                            summary_file = Path(directory) / 'summary.md'
+                            summary_file.write_text(summary, encoding='utf-8')
+                            result = room.execute(db, SimpleNamespace(action='request-approval', id=meeting_id, summary_file=str(summary_file)))
+                        status = 200
                     elif method == 'GET' and meeting_id is None:
                         if not self._review_admin():
                             raise access.ReviewAPIError('仅主持人可查看会议列表', 403)
@@ -756,7 +861,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                         if not math.isfinite(wait) or wait < 0:
                             raise access.ReviewAPIError('wait 必须为非负秒数')
                         wait = min(wait, _REVIEW_MAX_WAIT)
-                        is_admin = self._review_admin()
+                        is_admin = bool(self._review_operator(meeting_id))
                         seat = None
                         if not is_admin:
                             seat = access.authenticate(db, meeting_id, self._review_bearer())
@@ -770,7 +875,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                             db.rollback()  # 结束挂起前的读视图
                             self._review_long_wait(db_path, meeting_id, since, wait, seat)
                             db.rollback()  # 唤醒后以新读视图取快照
-                        if is_admin and not self._review_admin():
+                        if is_admin and not self._review_operator(meeting_id):
                             raise access.ReviewAPIError('主持人会话无效或已过期', 401)
                         if is_admin:
                             result = room.snapshot(db, meeting_id, since=since, full=True)
@@ -784,26 +889,32 @@ class ApiHandler(BaseHTTPRequestHandler):
                             payload.get('position'), payload.get('responds_to_seq'))
                         status = 201
                     elif method == 'POST' and action == 'comments':
-                        if self._review_admin():
-                            text = (payload.get('text') or '').strip()
-                            if not text:
-                                raise access.ReviewAPIError('评论内容不能为空', 400)
+                        operator = self._review_operator(meeting_id, 'comments')
+                        if operator:
+                            text = access._text(payload.get('text'), 'text')
+                            access.check_write_budget(db, meeting_id, 'human' if operator == 'host' else operator)
                             ref = payload.get('responds_to_seq')
                             if ref is not None and (isinstance(ref, bool)
                                                     or not isinstance(ref, int) or ref <= 0):
                                 raise access.ReviewAPIError('responds_to_seq 必须为正整数', 400)
                             row = room.get(db, meeting_id)
-                            room.require_open(row)
-                            event = room.append(db, row, 'human', 'comment',
+                            if not (operator == 'host' and row['state'] == room.WAITING
+                                    and row['archived_at'] is None):
+                                room.require_open(row)
+                            event = room.append(db, row, 'human' if operator == 'host' else operator, 'comment',
                                                 {'text': text, 'responds_to_seq': ref})
                             result = {'id': meeting_id, 'event_seq': event['seq'],
-                                      'round': event['round'], 'actor': 'human'}
+                                      'round': event['round'], 'actor': event['actor']}
                         else:
                             result = access.comment(
                                 db, meeting_id, self._review_bearer(), payload.get('text'),
                                 payload.get('responds_to_seq'))
                         status = 201
                     elif method == 'POST' and action == 'advance':
+                        expected = payload.get('expected_round')
+                        row = room.get(db, meeting_id)
+                        if isinstance(expected, bool) or not isinstance(expected, int) or expected != row['round']:
+                            raise access.ReviewAPIError('expected_round 与当前轮次不一致', 409)
                         result = room.execute(db, SimpleNamespace(action='advance', id=meeting_id))
                         status = 200
                     elif method == 'POST' and action == 'waive':
@@ -1499,6 +1610,11 @@ class ApiHandler(BaseHTTPRequestHandler):
         if not task_id or not session_id:
             self.send_error(400, "Bad Request: Missing task_id or session_id")
             return
+        if session_id.startswith('guest/'):
+            self.send_error(400, 'Use the original session_id, not a reserved namespace')
+            return
+        if self.is_guest:
+            session_id = 'guest/' + session_id
 
         self.send_response(200)
         self._send_cors_headers()
@@ -1796,10 +1912,12 @@ class ApiHandler(BaseHTTPRequestHandler):
         is_guest_mode = getattr(self, "is_guest", False)
         
         if client_user:
-            session_id = f"oai_u_{client_user}"
+            session_id = f"oai_{'guest' if is_guest_mode else 'admin'}_u_{client_user}"
         else:
             role_name = "guest" if is_guest_mode else "admin"
             session_id = f"oai_{role_name}"
+        if is_guest_mode:
+            session_id = 'guest/' + session_id
             
         from agent import IncomingMessage
         msg = IncomingMessage(

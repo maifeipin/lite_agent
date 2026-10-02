@@ -116,7 +116,8 @@ class FeishuChannel(BaseChannel):
                 chat_id=message.chat_id or '',
                 message_id=msg_id,
                 text=text,
-                is_guest=is_guest
+                is_guest=is_guest,
+                channel_payload={'chat_type': chat_type}
             )
             
             # 异步处理消息，避免阻塞导致飞书重传

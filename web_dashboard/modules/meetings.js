@@ -117,7 +117,9 @@ registerTabModule({
     _headHtml(snap) {
         const meta = this._stateMeta[snap.state] || { icon: '⚪', text: snap.state };
         const participants = (snap.participants || [])
-            .map(p => (p.online ? '🟢 ' : '⚪ ') + p.name).join('、') || '（暂无）';
+            .map(p => (p.online ? '🟢 ' : '⚪ ') + p.name +
+                (p.metadata ? ' [' + [p.metadata.client, p.metadata.model, p.metadata.session_label]
+                    .filter(Boolean).join(' · ') + '，自报]' : '')).join('、') || '（暂无）';
         const missing = snap.missing || [];
         let html = `<span class="tag status-tag">${meta.icon} ${meta.text}</span>` +
             `<span class="tag">R${snap.round}</span>` +
@@ -157,11 +159,11 @@ registerTabModule({
             `<div class="meeting-live-feed" id="meeting-live-feed">` +
             (events.map(ev => this._eventHtml(ev)).join('') || '<p class="meeting-live-empty">（暂无会议事件）</p>') +
             `</div>` +
-            `<div class="meeting-speak" id="meeting-speak" style="${snap.state === 'open' ? '' : 'display:none'}">` +
+            `<div class="meeting-speak" id="meeting-speak" style="${['open', 'awaiting_approval'].includes(snap.state) && !snap.archived_at ? '' : 'display:none'}">` +
             `<input type="text" id="meeting-speak-input" maxlength="2000" ` +
             `placeholder="以主持人身份插话（写入审计链，actor=human）… Enter 发送">` +
             `</div></div>`;
-        showModal({ title: `会议记录 · ${snap.title}`, icon: '📣', content: bodyHtml, width: '720px' });
+        showModal({ title: `会议记录 · ${h(snap.title)}`, icon: '📣', content: bodyHtml, width: '720px' });
 
         const overlay = document.querySelector('.universal-modal-overlay');
         const feed = overlay.querySelector('#meeting-live-feed');
@@ -183,7 +185,7 @@ registerTabModule({
             }
             head.innerHTML = this._headHtml(d);
             hintEl.textContent = d.hint || '';
-            speakBox.style.display = d.state === 'open' ? '' : 'none';
+            speakBox.style.display = ['open', 'awaiting_approval'].includes(d.state) && !d.archived_at ? '' : 'none';
         };
         const isFinal = (d) => d.archived_at || d.state === 'approved' || d.state === 'rejected';
 

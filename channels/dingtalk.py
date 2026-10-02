@@ -186,6 +186,32 @@ class DingTalkChannel(BaseChannel):
             return False
         return self.send_response(msg_data, response)
 
+    def send_to(self, user_id: str, response: AgentResponse) -> bool:
+        """Private proactive delivery; never substitute a group/broadcast target."""
+        if not isinstance(user_id, str) or not user_id or any(c in user_id for c in ',;\n'):
+            return False
+        import urllib.request
+        try:
+            req = urllib.request.Request(
+                'https://api.dingtalk.com/v1.0/oauth2/accessToken',
+                data=json.dumps({'appKey': self.client_id, 'appSecret': self.client_secret}).encode(),
+                headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req, timeout=10) as result:
+                token = json.load(result).get('accessToken')
+            if not token:
+                return False
+            req = urllib.request.Request(
+                'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend',
+                data=json.dumps({'robotCode': self.client_id, 'userIds': [user_id],
+                                 'msgKey': 'sampleMarkdown', 'msgParam': json.dumps({
+                                     'title': response.title or '会议通知', 'text': response.text})}).encode(),
+                headers={'Content-Type': 'application/json', 'x-acs-dingtalk-access-token': token})
+            with urllib.request.urlopen(req, timeout=10) as result:
+                return bool(json.load(result).get('processQueryKey'))
+        except Exception as exc:
+            print(f'  [DingTalk] private delivery failed ({type(exc).__name__})')
+            return False
+
     def broadcast(self, response: AgentResponse) -> bool:
         """从会话库中查询所有活跃钉钉用户并主动广播 (oToMessages/batchSend)"""
         try:

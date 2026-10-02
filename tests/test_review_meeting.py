@@ -92,6 +92,24 @@ class ReviewMeetingTests(unittest.TestCase):
         finally:
             other.close()
 
+    def test_owner_can_cancel_unfinished_meeting_without_review_votes(self):
+        mid = self.create()
+        note = self._file("cancel.md", "Smoke cleanup; no substantive decision")
+        with self.assertRaisesRegex(ValueError, "确认串"):
+            self.act("cancel", id=mid, owner_key_file=self.owner, owner_token_stdin=False,
+                     confirm=f"reject:{mid}", note_file=note)
+        result = self.act("cancel", id=mid, owner_key_file=self.owner, owner_token_stdin=False,
+                          confirm=f"cancel:{mid}", note_file=note)
+        self.assertEqual(result["state"], "rejected")
+        self.assertEqual(room.events(self.db, mid)[-1]["kind"], "cancelled")
+        self.assertFalse(any(e["kind"] in {"review", "approval_requested", "decision"}
+                             for e in room.events(self.db, mid)))
+        self.act("archive", id=mid)
+        self.assertTrue(self.act("verify", id=mid)["valid"])
+        with self.assertRaisesRegex(ValueError, "未裁决"):
+            self.act("cancel", id=mid, owner_key_file=self.owner, owner_token_stdin=False,
+                     confirm=f"cancel:{mid}", note_file=note)
+
     def test_tampered_export_is_rejected(self):
         mid = self.create()
         bundle = room.export_bundle(self.db, mid)

@@ -10,6 +10,7 @@ import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+import sqlite3
 from openai import OpenAI
 import openai
 from session import SessionManager
@@ -506,6 +507,16 @@ class Agent:
         造成 assistant tool_calls 与 tool 消息错位 (导致 LLM API 400 错误)。
         不同 session_key (不同用户/会话) 之间不互斥, 仍可并行。
         """
+        from core.meeting_channel_commands import handle as meeting_command
+        try:
+            meeting_reply = meeting_command(self._config, msg)
+        except (ValueError, OSError) as exc:
+            meeting_reply = f'会议操作未完成：{exc}'
+        except sqlite3.Error:
+            meeting_reply = '会议数据库暂不可用，请稍后重试；本次操作未确认成功。'
+        if meeting_reply is not None:
+            # Capability URLs and confirmation codes must never be auto-published.
+            return AgentResponse(meeting_reply, title='会议操作', color='blue')
         if not msg._session_key:
             msg.bind_session(self.session_mgr.resolve_active_session(msg.scope_key))
 

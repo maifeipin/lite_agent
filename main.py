@@ -233,6 +233,8 @@ def main():
 
     # 将所有激活的通道实例绑定到 Agent，以便后续广播
     agent.channels = channels
+    from core.review_meeting_notifications import start_notifier
+    start_notifier(agent, config)
 
     # 微信 iLink 无凭据/失效时的跨通道提醒；微信本身不能作为提醒目标。
     if wx_channel is not None:

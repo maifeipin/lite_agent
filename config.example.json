@@ -66,6 +66,7 @@
             "enabled": true,
             "push_url": "http://127.0.0.1:6969/send_message",
             "push_token": "${WECOM_PUSH_TOKEN}",
+            "bridge_secret": "${WECOM_BRIDGE_SECRET}",
             "listen_port": 8899,
             "admin_userid": "ChenLi"
         },
@@ -341,6 +342,10 @@
         }
     ],
     "service_name": "lite-agent",
+    "review_meeting_notifications": {
+        "enabled": false,
+        "owner_channels": ["feishu", "dingtalk", "wechat"]
+    },
     "halo": {
         "url": "http://127.0.0.1:8090",
         "username": "admin",

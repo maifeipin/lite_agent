@@ -23,6 +23,7 @@ class ReviewMeetingAPITests(unittest.TestCase):
     def setUp(self):
         with api_module._REVIEW_AUTH_LOCK:
             api_module._REVIEW_AUTH_ATTEMPTS.clear()
+            api_module._REVIEW_REQUESTS.clear()
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.db_path = Path(self.temp.name) / "meetings.sqlite3"
@@ -38,6 +39,7 @@ class ReviewMeetingAPITests(unittest.TestCase):
         self.server.api_server = SimpleNamespace(
             auth_token="admin-secret",
             config={"guest_token": "guest-secret",
+                    "review_allow_legacy_invites": True,
                     "review_meeting_base_url": f"http://127.0.0.1:{self.server.server_port}"},
             port=self.server.server_port,
         )
@@ -66,6 +68,92 @@ class ReviewMeetingAPITests(unittest.TestCase):
         return self.request("POST", body={
             "title": "Code review", "brief": "Review local diff and discuss.",
             "owner_key_hash": room.sha("human-only-secret")}, token="admin-secret")
+
+    def test_secure_default_invite_cannot_be_reused_or_impersonated(self):
+        self.server.api_server.config['review_allow_legacy_invites'] = False
+        _, created = self.create()
+        mid = created['id']
+        invite = created['invite_url'].split('#invite=')[1]
+        secret = 'r' * 43
+        body = {'invite_token': invite, 'label': 'attacker-chosen',
+                'metadata': {'client': 'Codex', 'model': 'self-reported'},
+                'recovery_hash': room.sha(secret)}
+        status, joined = self.request('POST', f'/{mid}/join', body)
+        self.assertEqual(status, 201)
+        self.assertEqual(joined['participant'], 'agent')
+        self.assertEqual(self.request('POST', f'/{mid}/join', body)[0], 409)
+        status, recovered = self.request('POST', f'/{mid}/recover', {
+            'participant_id': joined['participant_id'], 'recovery_secret': secret})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.request('GET', f'/{mid}', token=joined['session_token'])[0], 401)
+        self.assertEqual(self.request('GET', f'/{mid}', token=recovered['session_token'])[0], 200)
+        self.assertEqual(self.request('POST', f'/{mid}/leave', token=recovered['session_token'])[0], 200)
+        self.assertEqual(self.request('POST', f'/{mid}/recover', {
+            'participant_id': joined['participant_id'], 'recovery_secret': secret})[0], 401)
+        _, new_invite = self.request('POST', f'/{mid}/invites', {'label': 'agent'}, token='admin-secret')
+        _, new_join = self.request('POST', f'/{mid}/join', {'invite_token': new_invite['invite_url'].split('#invite=')[1]})
+        self.assertNotEqual(new_join['participant'], joined['participant'])
+        self.assertNotEqual(new_join['participant_id'], joined['participant_id'])
+
+    def test_cohost_is_scoped_revocable_and_cannot_redelegate(self):
+        self.server.api_server.config['review_allow_legacy_invites'] = False
+        _, created = self.create()
+        _, other = self.create()
+        mid = created['id']
+        _, grant = self.request('POST', f'/{mid}/cohosts', {}, token='admin-secret')
+        token = grant['cohost_token']
+        self.assertEqual(self.request('GET', f'/{mid}', token=token)[0], 200)
+        self.assertEqual(self.request('GET', f"/{other['id']}", token=token)[0], 401)
+        self.assertEqual(self.request('GET', token=token)[0], 403)
+        self.assertEqual(self.request('POST', body={'title': 'x', 'brief': 'y'}, token=token)[0], 403)
+        self.assertEqual(self.request('POST', f'/{mid}/cohosts', {}, token=token)[0], 403)
+        self.assertEqual(self.request('POST', f'/{mid}/advance', {'expected_round': 1}, token=token)[0], 200)
+        self.assertEqual(self.request('POST', f'/{mid}/advance', {'expected_round': 1}, token=token)[0], 409)
+        self.assertEqual(self.request('POST', f'/{mid}/comments', {'text': 'cohost speaks'}, token=token)[0], 201)
+        _, snap = self.request('GET', f'/{mid}', token=token)
+        self.assertEqual(snap['events'][-1]['actor'], grant['operator_id'])
+        self.assertEqual(self.request('POST', f'/{mid}/revoke-cohost', {'operator_id': grant['operator_id']}, token='admin-secret')[0], 200)
+        self.assertEqual(self.request('GET', f'/{mid}', token=token)[0], 401)
+
+    def test_legacy_invite_rejected_without_explicit_compatibility(self):
+        _, created = self.create()
+        self.server.api_server.config['review_allow_legacy_invites'] = False
+        invite = created['invite_url'].split('#invite=')[1]
+        self.assertEqual(self.request('POST', f"/{created['id']}/join", {'invite_token': invite})[0], 401)
+
+    def test_concurrent_single_seat_claim_has_exactly_one_winner(self):
+        from concurrent.futures import ThreadPoolExecutor
+        self.server.api_server.config['review_allow_legacy_invites'] = False
+        _, created = self.create()
+        mid = created['id']
+        invite = created['invite_url'].split('#invite=')[1]
+        def claim():
+            return self.request('POST', f'/{mid}/join', {'invite_token': invite})[0]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: claim(), range(2)))
+        self.assertEqual(sorted(results), [201, 409])
+        with closing(room.connect(self.db_path)) as db:
+            self.assertEqual(len(room.people(db, mid)), 1)
+
+    def test_cohost_longpoll_cannot_read_after_revocation(self):
+        self.server.api_server.config['review_allow_legacy_invites'] = False
+        _, created = self.create()
+        mid = created['id']
+        _, grant = self.request('POST', f'/{mid}/cohosts', {}, token='admin-secret')
+        _, snap = self.request('GET', f'/{mid}', token=grant['cohost_token'])
+        last = snap['events'][-1]['seq']
+        output = []
+        worker = threading.Thread(target=lambda: output.append(self.request(
+            'GET', f'/{mid}?since={last}&wait=2', token=grant['cohost_token'])))
+        worker.start()
+        try:
+            time.sleep(0.15)
+            self.assertEqual(self.request('POST', f'/{mid}/revoke-cohost', {
+                'operator_id': grant['operator_id']}, token='admin-secret')[0], 200)
+        finally:
+            worker.join(timeout=4)
+        self.assertTrue(output)
+        self.assertEqual(output[0][0], 401)
 
     def join(self, mid, invite, label):
         status, joined = self.request("POST", f"/{mid}/join",
@@ -213,13 +301,13 @@ class ReviewMeetingAPITests(unittest.TestCase):
         self.assertEqual(status, 201)
         fresh = rotated["invite_url"].split("#invite=", 1)[1]
         self.assertNotEqual(old, fresh)
-        self.assertEqual(self.request("GET", f"/{mid}", token=old_session)[0], 401)
+        self.assertEqual(self.request("GET", f"/{mid}", token=old_session)[0], 200)
         self.assertEqual(self.request("POST", f"/{mid}/join", {
-            "invite_token": old})[0], 401)
+            "invite_token": old})[0], 201)
         status, resumed = self.request("POST", f"/{mid}/join", {
             "invite_token": fresh, "label": "codex"})
         self.assertEqual(status, 201)
-        self.assertEqual(resumed["participant"], "codex")
+        self.assertNotEqual(resumed["participant"], "codex")
 
     def test_list_meetings_admin_only(self):
         self.assertEqual(self.request("GET", token="guest-secret")[0], 403)
@@ -301,6 +389,18 @@ class ReviewMeetingAPITests(unittest.TestCase):
         self.assertIn("开放讨论", body["error"])
 
     # ---- P0 长轮询 ----
+    def test_only_human_host_can_comment_while_awaiting_approval(self):
+        _, created = self.create()
+        mid = created['id']
+        _, cohost = self.request('POST', f'/{mid}/cohosts', {}, token='admin-secret')
+        with closing(room.connect(self.db_path)) as db:
+            with db:
+                db.execute("UPDATE meetings SET state='awaiting_approval' WHERE id=?", (mid,))
+        status, body = self.request('POST', f'/{mid}/comments', {'text':'人工补充意见'}, token='admin-secret')
+        self.assertEqual(status, 201)
+        self.assertEqual(body['actor'], 'human')
+        self.assertEqual(self.request('POST', f'/{mid}/comments', {'text':'共管不可继续讨论'}, token=cohost['cohost_token'])[0], 400)
+
     def _poller(self, path, token, out, timeout=15):
         out.append(self.request("GET", path, token=token, timeout=timeout))
 
@@ -422,13 +522,13 @@ class ReviewMeetingAPITests(unittest.TestCase):
         self.assertEqual(self.request("POST", f"/{mid}/reviews", {
             "position": "support", "text": "ok"}, token=codex)[0], 201)
         # trae 未交且未注明缺席：不可推进
-        self.assertEqual(self.request("POST", f"/{mid}/advance", token="admin-secret")[0], 400)
+        self.assertEqual(self.request("POST", f"/{mid}/advance", {"expected_round": 1}, token="admin-secret")[0], 400)
         status, _ = self.request("POST", f"/{mid}/waive", {
             "names": "trae", "reason": "无响应"}, token="admin-secret")
         self.assertEqual(status, 200)
         self.assertEqual(self.request("POST", f"/{mid}/waive", {
             "names": "nobody", "reason": "x"}, token="admin-secret")[0], 400)
-        status, snap = self.request("POST", f"/{mid}/advance", token="admin-secret")
+        status, snap = self.request("POST", f"/{mid}/advance", {"expected_round": 1}, token="admin-secret")
         self.assertEqual(status, 200)
         self.assertEqual(snap["round"], 2)
         _, snap = self.request("GET", f"/{mid}", token="admin-secret")
@@ -540,7 +640,7 @@ class ReviewMeetingAPITests(unittest.TestCase):
         self.assertEqual(self.request("GET", token=seat)[0], 403)
         self.assertEqual(self.request("POST", f"/{mid}/advance", token=seat)[0], 403)
         self.assertEqual(self.request("POST", f"/{mid}/waive", {"names": ["codex"], "reason": "scope test"}, token=token)[0], 200)
-        self.assertEqual(self.request("POST", f"/{mid}/advance", token=token)[0], 200)
+        self.assertEqual(self.request("POST", f"/{mid}/advance", {"expected_round": 1}, token=token)[0], 200)
         self.assertEqual(self.request("POST", f"/{mid}/comments", {"text": "Host comment"}, token=token)[0], 201)
         conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
         try:
@@ -561,7 +661,8 @@ class ReviewMeetingAPITests(unittest.TestCase):
                 db.execute("UPDATE review_host_sessions SET expires_at=? WHERE token_hash=?", (int(time.time()), room.sha(other)))
         self.assertEqual(self.request("GET", token=other)[0], 403)
         self.assertEqual(self.request("POST", "/logout", {}, token=seat)[0], 401)
-        self.assertEqual(self.request("GET", f"/{mid}", token=seat)[0], 401)
+        # Issuing an independent seat invitation does not revoke unrelated sessions.
+        self.assertEqual(self.request("GET", f"/{mid}", token=seat)[0], 200)
 
     def test_login_rate_limit_counts_invalid_attempts(self):
         for _ in range(10):
