@@ -1,10 +1,14 @@
 import json
+import os
 import re
+import secrets
+import sqlite3
 import threading
 import time
+from contextlib import closing
+from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from agent import IncomingMessage
 
 class ApiHandler(BaseHTTPRequestHandler):
     """
@@ -64,6 +68,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             req_path = req_path[6:]
         elif req_path == '/agent':
             req_path = '/'
+
+        if req_path.startswith('/api/v1/review-meetings'):
+            self._handle_review_meeting_api('GET', req_path, parsed_url.query)
+            return
 
         # 仪表盘 API 无需认证（仅返回注册表指令列表，无敏感数据）
         if req_path == '/api/v1/dashboard':
@@ -130,6 +138,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             req_path = req_path[6:]
         elif req_path == '/agent':
             req_path = '/'
+
+        if req_path.startswith('/api/v1/review-meetings'):
+            self._handle_review_meeting_api('POST', req_path, parsed_url.query)
+            return
 
         # 登录接口无需认证
         if req_path == '/api/v1/auth':
@@ -322,6 +334,7 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         notify_channels = req_data.get('notify_channels', [])
 
+        from agent import IncomingMessage
         msg = IncomingMessage(
             channel='api',
             user_id=session_id,
@@ -453,6 +466,145 @@ class ApiHandler(BaseHTTPRequestHandler):
             # successful persisted operation into a second, impossible response.
             self._quiet = True
             return False
+
+    def _review_json(self, value, status: int = 200):
+        body = json.dumps(value, ensure_ascii=False).encode('utf-8')
+        try:
+            self.send_response(status)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Referrer-Policy', 'no-referrer')
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            self._quiet = True
+
+    def _review_body(self) -> dict:
+        try:
+            size = int(self.headers.get('Content-Length', '0'))
+        except ValueError as exc:
+            raise ValueError('Content-Length 无效') from exc
+        if size <= 0 or size > 65536:
+            raise ValueError('JSON 请求体必须为 1 到 65536 字节')
+        try:
+            value = json.loads(self.rfile.read(size).decode('utf-8'))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError('JSON 请求体无效') from exc
+        if not isinstance(value, dict):
+            raise ValueError('JSON 请求体必须是对象')
+        return value
+
+    def _review_bearer(self) -> str:
+        authorization = self.headers.get('Authorization', '')
+        if not authorization.startswith('Bearer ') or authorization.count(' ') != 1:
+            return ''
+        return authorization[7:]
+
+    def _review_admin(self) -> bool:
+        token = self.server.api_server.auth_token
+        return bool(token and secrets.compare_digest(self._review_bearer(), token))
+
+    def _review_invite_url(self, meeting_id: str, token: str) -> str:
+        api = self.server.api_server
+        base = api.config.get('review_meeting_base_url') or f'http://127.0.0.1:{api.port}'
+        parsed = urlparse(base)
+        if (parsed.scheme not in ('http', 'https') or not parsed.netloc or parsed.username
+                or parsed.password or parsed.query or parsed.fragment or parsed.path not in ('', '/')
+                or (parsed.scheme == 'http' and parsed.hostname not in ('127.0.0.1', 'localhost'))):
+            raise ValueError('review_meeting_base_url 必须是 HTTPS 地址或本机 HTTP 地址')
+        return (base.rstrip('/') + f'/agent/api/v1/review-meetings/{meeting_id}/invite'
+                + f'#invite={token}')
+
+    def _review_host_allowed(self) -> bool:
+        api = self.server.api_server
+        base = api.config.get('review_meeting_base_url') or f'http://127.0.0.1:{api.port}'
+        expected = urlparse(base).hostname
+        request_host = (self.headers.get('Host') or '').split(':', 1)[0].lower()
+        return request_host in {expected, '127.0.0.1', 'localhost'}
+
+    def _handle_review_meeting_api(self, method: str, path: str, query: str):
+        """Meeting capabilities bypass generic API auth only inside this exact route group."""
+        from core import review_meeting_api as access
+        from scripts import review_meeting as room
+
+        if not self._review_host_allowed():
+            self._review_json({'error': 'Meeting API host is not allowed'}, 421)
+            return
+
+        route = re.fullmatch(
+            r'/api/v1/review-meetings(?:/([0-9a-f]{12})(?:/(invite|invites|join|reviews|comments|leave))?)?',
+            path)
+        if route is None:
+            self._review_json({'error': 'Not Found'}, 404)
+            return
+        meeting_id, action = route.groups()
+        if method == 'GET' and action == 'invite':
+            self._review_json({
+                'meeting_id': meeting_id,
+                'join_endpoint': f'/agent/api/v1/review-meetings/{meeting_id}/join',
+                'usage': '把链接中的 invite 值作为 POST JSON 的 invite_token；可选 label 为 IDE 名称。'
+            })
+            return
+
+        try:
+            if ((method == 'POST' and action in (None, 'invites'))
+                    and not self._review_admin()):
+                raise access.ReviewAPIError('仅主持人可创建会议或更新邀请', 403)
+            payload = self._review_body() if method == 'POST' and action != 'leave' else {}
+            db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
+            with closing(room.connect(db_path)) as db:
+                access.ensure_tables(db)
+                with db:
+                    if method == 'POST':
+                        db.execute('BEGIN IMMEDIATE')
+                    if method == 'POST' and meeting_id is None:
+                        result = access.create(
+                            db, title=payload.get('title'), brief=payload.get('brief'),
+                            owner_key_hash=payload.get('owner_key_hash'),
+                            invite_ttl_seconds=payload.get('invite_ttl_seconds', access.INVITE_TTL_DEFAULT))
+                        result['invite_url'] = self._review_invite_url(result['id'], result.pop('invite_token'))
+                        status = 201
+                    elif method == 'POST' and action == 'invites':
+                        result = access.issue_invite(
+                            db, meeting_id, payload.get('invite_ttl_seconds', access.INVITE_TTL_DEFAULT))
+                        result['id'] = meeting_id
+                        result['invite_url'] = self._review_invite_url(meeting_id, result.pop('invite_token'))
+                        status = 201
+                    elif method == 'POST' and action == 'join':
+                        result = access.join(db, meeting_id, payload.get('invite_token'), payload.get('label', 'agent'))
+                        status = 201
+                    elif method == 'GET' and meeting_id and action is None:
+                        value = (parse_qs(query).get('since') or ['0'])[0]
+                        try:
+                            since = int(value)
+                        except ValueError as exc:
+                            raise access.ReviewAPIError('since 必须为非负整数') from exc
+                        result = access.show(db, meeting_id, self._review_bearer(), since)
+                        status = 200
+                    elif method == 'POST' and action == 'reviews':
+                        result = access.review(
+                            db, meeting_id, self._review_bearer(), payload.get('text'),
+                            payload.get('position'), payload.get('responds_to_seq'))
+                        status = 201
+                    elif method == 'POST' and action == 'comments':
+                        result = access.comment(
+                            db, meeting_id, self._review_bearer(), payload.get('text'),
+                            payload.get('responds_to_seq'))
+                        status = 201
+                    elif method == 'POST' and action == 'leave':
+                        result = access.leave(db, meeting_id, self._review_bearer())
+                        status = 200
+                    else:
+                        raise access.ReviewAPIError('Not Found', 404)
+            self._review_json(result, status)
+        except access.ReviewAPIError as exc:
+            self._review_json({'error': str(exc)}, exc.status)
+        except ValueError as exc:
+            self._review_json({'error': str(exc)}, 400)
+        except (OSError, sqlite3.Error):
+            self._review_json({'error': '会审室存储暂不可用'}, 503)
 
     @property
     def _task_specs(self):
@@ -1416,6 +1568,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             role_name = "guest" if is_guest_mode else "admin"
             session_id = f"oai_{role_name}"
             
+        from agent import IncomingMessage
         msg = IncomingMessage(
             channel='api',
             user_id=session_id,

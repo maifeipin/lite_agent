@@ -781,15 +781,28 @@ class Agent:
             except Exception as e:
                 return AgentResponse(f"自检失败: {e}", title="⚠️", color="red")
 
+        if cmd == "/tools" or (cmd == "/help" and args):
+            page = int(args[-1]) if args and args[-1].isdigit() else 1
+            query_parts = args[:-1] if args and args[-1].isdigit() else args
+            query = " ".join(query_parts)
+            try:
+                catalogue = self.skill_engine.list_skills_page(
+                    query=query, page=page, page_size=10, is_guest=msg.is_guest
+                )
+            except ValueError as exc:
+                catalogue = str(exc)
+            return AgentResponse(catalogue, title="🧰 工具清单", color="turquoise")
+
         if cmd == "/help":
             if msg.is_guest:
-                skills_list = self.skill_engine.list_skills(is_guest=True)
+                skills_list = self.skill_engine.list_skills_page(page_size=6, is_guest=True)
                 help_text = f"""**内置指令:**
 `/new` - 重置会话
 `/status` - 查看会话状态
 `/history` - 查看最近对话
 `/stop` - 终止当前任务
 `/help` - 显示帮助
+`/tools [关键词] [页码]` - 搜索并分页查看当前已加载的工具
 `/ai` - 强行调用 AI（例如：`/ai 网页剪藏 https://example.com`）
 
 **任务模式 (双冒号指令):**
@@ -804,13 +817,14 @@ class Agent:
 例如: "帮我剪藏这个网页" / "帮我查询相关的公开数据"
 如果查询步骤较多，可以先用 `::goal` 锁定目标"""
             else:
-                skills_list = self.skill_engine.list_skills(is_guest=False)
+                skills_list = self.skill_engine.list_skills_page(page_size=6, is_guest=False)
                 help_text = f"""**内置指令:**
 `/new` - 重置会话
 `/status` - 查看会话状态
 `/history` - 查看最近对话
 `/stop` - 终止当前任务
 `/help` - 显示帮助
+`/tools [关键词] [页码]` - 搜索并分页查看当前已加载的工具
 `/balance` - 查询大模型账户余额
 `/memory_stats` - 查看记忆池状态
 `/memory_persona` - 查看个人画像 / `confirm <序号>` 升格待确认条目

@@ -376,6 +376,37 @@ class SkillEngine:
             lines.append(f"- **{name}**({param_str}): {desc}")
         return "\n".join(lines) if lines else "(无可用工具)"
 
+    def list_skills_page(self, query: str = "", page: int = 1,
+                         page_size: int = 10, is_guest: bool = False) -> str:
+        """按当前注册表搜索并分页展示工具，避免 IM 通道截断完整清单。"""
+        if page < 1 or page_size < 1:
+            raise ValueError("页码和每页数量必须大于 0")
+        term = query.strip().casefold()
+        matches = []
+        for name, info in sorted(_skill_registry.items()):
+            if is_guest and not info["policy"].guest_ok:
+                continue
+            description = info["schema"]["function"]["description"]
+            searchable = " ".join([name, description, *(info.get("tags") or [])]).casefold()
+            if not term or term in searchable:
+                matches.append((name, description))
+        if not matches:
+            return f"没有找到与 `{query}` 匹配的可用工具。"
+        pages = (len(matches) + page_size - 1) // page_size
+        if page > pages:
+            return f"页码超出范围：共 {pages} 页。"
+        start = (page - 1) * page_size
+        heading = f"可用工具 {len(matches)} 项 · 第 {page}/{pages} 页"
+        if query:
+            heading += f" · 搜索 `{query}`"
+        lines = [heading]
+        for name, description in matches[start:start + page_size]:
+            brief = " ".join(description.split())[:90]
+            lines.append(f"- **{name}** — {brief}")
+        if pages > 1:
+            lines.append("发送 `/tools [关键词] [页码]` 查看其他页。")
+        return "\n".join(lines)
+
     def list_skills_filtered(self, names: list) -> str:
         """列出指定名称的技能
 

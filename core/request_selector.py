@@ -263,6 +263,21 @@ DOMAIN_MAP: Dict[str, Dict] = {
         "explicit_intent_tools": ["ops_decision"],
         "explicit_patterns": r"(多模型评判|评判委员会|委员会评估|委员会决策)",
     },
+    "review_meeting": {
+        "pattern": r"(会审|评审会议|评审会|review[_ -]?meeting)",
+        "default_tools": ["ops_review_meeting_status", "ops_review_meeting_show"],
+        "explicit_intent_tools": [
+            "ops_review_meeting_join", "ops_review_meeting_leave",
+            "ops_review_meeting_submit", "ops_review_meeting_comment",
+        ],
+        "explicit_patterns": r"(入会|加入|离会|退出|提交|发言|评论|回复|补充)",
+        "explicit_routes": [
+            (r"入会|加入", ["ops_review_meeting_join"]),
+            (r"离会|退出", ["ops_review_meeting_leave"]),
+            (r"提交.*(?:意见|评审)|(?<!补充)发言", ["ops_review_meeting_submit"]),
+            (r"评论|回复|补充", ["ops_review_meeting_comment"]),
+        ],
+    },
     "rss_search": {
         "pattern": r"(RSS节点|RSS订阅|Meilisearch|Meili索引)",
         "default_tools": ["ops_rss_node_status"],
