@@ -1,7 +1,7 @@
 """Narrow, short-lived HTTP capabilities for review meetings.
 
 The invitation can only create a meeting seat. Each seat receives its own
-temporary token, which can only read and write that one open meeting.
+temporary token: reads remain available after discussion freezes; writes require open.
 """
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ INVITE_TTL_DEFAULT = 24 * 60 * 60
 INVITE_TTL_MIN = 5 * 60
 INVITE_TTL_MAX = 7 * 24 * 60 * 60
 SESSION_TTL = 24 * 60 * 60
+HOST_SESSION_TTL = 3600
 MAX_PARTICIPANTS = 32
 MAX_TEXT = 20_000
 
@@ -42,9 +43,39 @@ def ensure_tables(db) -> None:
         revoked_at INTEGER,
         FOREIGN KEY(meeting_id,participant) REFERENCES participants(meeting_id,name)
       );
+      CREATE TABLE IF NOT EXISTS review_host_sessions (
+        token_hash TEXT PRIMARY KEY, username TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role='host'), expires_at INTEGER NOT NULL, revoked_at INTEGER
+      );
       CREATE INDEX IF NOT EXISTS meeting_sessions_seat
         ON meeting_sessions(meeting_id,participant);
     """)
+
+
+def issue_host_session(db, username: str, *, now=None) -> dict:
+    now = int(time.time()) if now is None else now
+    token = secrets.token_urlsafe(32)
+    db.execute("DELETE FROM review_host_sessions WHERE expires_at<=? OR revoked_at IS NOT NULL", (now,))
+    db.execute("INSERT INTO review_host_sessions VALUES(?,?,'host',?,NULL)",
+               (room.sha(token), username, now + HOST_SESSION_TTL))
+    return {"review_token": token, "review_token_expires_at": now + HOST_SESSION_TTL,
+            "scope": "review-meetings:host"}
+
+
+def is_host_session(db, token, *, now=None) -> bool:
+    if not isinstance(token, str) or not 32 <= len(token) <= 128:
+        return False
+    now = int(time.time()) if now is None else now
+    row = db.execute("SELECT role,expires_at,revoked_at FROM review_host_sessions WHERE token_hash=?",
+                     (room.sha(token),)).fetchone()
+    return bool(row and row["role"] == "host" and row["expires_at"] > now and row["revoked_at"] is None)
+
+
+def revoke_host_session(db, token) -> None:
+    if not is_host_session(db, token):
+        raise ReviewAPIError("主持人会话无效或已过期", 401)
+    db.execute("UPDATE review_host_sessions SET revoked_at=? WHERE token_hash=?",
+               (int(time.time()), room.sha(token)))
 
 
 def _ttl(value) -> int:
@@ -153,7 +184,10 @@ def join(db, meeting_id: str, invite_token: str, label: str = "agent",
 
 
 def authenticate(db, meeting_id: str, token: str, *, now: int | None = None) -> str:
-    _open(db, meeting_id)
+    try:
+        room.get(db, meeting_id)
+    except ValueError as exc:
+        raise ReviewAPIError(str(exc), 404) from exc
     now = int(time.time()) if now is None else now
     if not isinstance(token, str) or not 32 <= len(token) <= 128:
         raise ReviewAPIError("会话凭据无效或已过期", 401)
@@ -176,6 +210,7 @@ def show(db, meeting_id: str, token: str, since: int = 0) -> dict:
 def _write(db, action: str, meeting_id: str, token: str, text: str,
            responds_to_seq: int | None = None, position: str | None = None) -> dict:
     actor = authenticate(db, meeting_id, token)
+    _open(db, meeting_id)
     text = _text(text, "text")
     if responds_to_seq is not None and (isinstance(responds_to_seq, bool)
                                          or not isinstance(responds_to_seq, int) or responds_to_seq <= 0):
@@ -202,7 +237,13 @@ def comment(db, meeting_id: str, token: str, text: str,
 
 def leave(db, meeting_id: str, token: str, *, now: int | None = None) -> dict:
     actor = authenticate(db, meeting_id, token, now=now)
-    result = room.execute(db, SimpleNamespace(action="leave", id=meeting_id, participant=actor))
+    row = room.get(db, meeting_id)
+    if row["state"] in ("approved", "rejected") or row["archived_at"]:
+        event = room.append(db, row, actor, "left", {})
+        result = {"id": meeting_id, "participant": actor, "state": "left",
+                  "changed": True, "event_seq": event["seq"]}
+    else:
+        result = room.execute(db, SimpleNamespace(action="leave", id=meeting_id, participant=actor))
     db.execute("UPDATE meeting_sessions SET revoked_at=? WHERE token_hash=?", (
         int(time.time()) if now is None else now, room.sha(token)))
     return result

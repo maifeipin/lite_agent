@@ -116,7 +116,8 @@
         const btn = document.getElementById('login-btn');
 
         // 如果已有有效 session，直接跳转
-        if (sessionStorage.getItem('dashboard_auth') === 'ok') {
+        if (sessionStorage.getItem('dashboard_auth') === 'ok' && sessionStorage.getItem('review_token')
+                && Number(sessionStorage.getItem('review_token_expires_at')) > Date.now() / 1000) {
             window.location.href = '/';
         }
 
@@ -136,7 +137,9 @@
                     body: JSON.stringify({ username, password }),
                 });
                 const d = await r.json();
-                if (d.success) {
+                if (d.success && d.review_token && d.scope === 'review-meetings:host') {
+                    sessionStorage.setItem('review_token', d.review_token);
+                    sessionStorage.setItem('review_token_expires_at', String(d.review_token_expires_at));
                     sessionStorage.setItem('dashboard_auth', 'ok');
                     window.location.href = '/';
                 } else {

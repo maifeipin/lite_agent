@@ -14,12 +14,15 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from channels.api import ApiHandler
+from channels import api as api_module
 from core import review_meeting_api as access
 from scripts import review_meeting as room
 
 
 class ReviewMeetingAPITests(unittest.TestCase):
     def setUp(self):
+        with api_module._REVIEW_AUTH_LOCK:
+            api_module._REVIEW_AUTH_ATTEMPTS.clear()
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.db_path = Path(self.temp.name) / "meetings.sqlite3"
@@ -180,7 +183,21 @@ class ReviewMeetingAPITests(unittest.TestCase):
                 result = room.execute(db, SimpleNamespace(
                     action="request-approval", id=mid, summary_file=str(summary)))
             self.assertEqual(result["state"], "awaiting_approval")
-        self.assertEqual(self.request("GET", f"/{mid}", token=qwen_token)[0], 403)
+        self.assertEqual(self.request("GET", f"/{mid}", token=qwen_token)[0], 200)
+        key = Path(self.temp.name) / "owner.key"
+        key.write_text("human-only-secret")
+        key.chmod(0o600)
+        with closing(room.connect(self.db_path)) as db:
+            with db:
+                room.execute(db, SimpleNamespace(action="decide", id=mid, decision="approve",
+                    note_file=str(summary), owner_key_file=str(key), owner_token_stdin=False,
+                    confirm="approve:" + mid))
+        status, approved = self.request("GET", f"/{mid}", token=qwen_token)
+        self.assertEqual(status, 200)
+        self.assertEqual(approved["state"], "approved")
+        self.assertEqual(self.request("POST", f"/{mid}/leave", token=qwen_token)[0], 200)
+        with closing(room.connect(self.db_path)) as db:
+            self.assertTrue(room.check_chain(room.events(db, mid), mid)["valid"])
 
     def test_explicit_invite_ttl_and_rotation(self):
         _, created = self.create()
@@ -468,6 +485,179 @@ class ReviewMeetingAPITests(unittest.TestCase):
                      "127.0.0.1", f"127.0.0.1:{self.server.server_port}"):
             status, _ = self._raw_get_with_host(host, path)
             self.assertEqual(status, 200, f"host {host!r} should be allowed")
+
+    def _auth_request(self, body, origin="https://mail.maifeipin.com"):
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        try:
+            conn.request("POST", "/agent/api/v1/auth", json.dumps(body),
+                         {"Content-Type": "application/json", "Origin": origin})
+            response = conn.getresponse()
+            return response.status, json.loads(response.read()), dict(response.getheaders())
+        finally:
+            conn.close()
+
+    def _host_token(self):
+        with closing(room.connect(self.db_path)) as db:
+            access.ensure_tables(db)
+            with db:
+                return access.issue_host_session(db, "host")["review_token"]
+
+    def test_login_issues_only_scoped_hashed_session(self):
+        passwd = Path(self.temp.name) / "htpasswd"
+        passwd.write_text("host:" + "{SHA}" + __import__("base64").b64encode(
+            __import__("hashlib").sha1(b"correct password").digest()).decode() + "\n")
+        self.server.api_server.config["dashboard_htpasswd_path"] = str(passwd)
+        status, body, headers = self._auth_request({"username": "host", "password": "correct password"})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["scope"], "review-meetings:host")
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(headers["Access-Control-Allow-Origin"], "https://mail.maifeipin.com")
+        token = body["review_token"]
+        self.assertNotIn("admin-secret", json.dumps(body))
+        self.assertAlmostEqual(body["review_token_expires_at"], time.time() + 3600, delta=2)
+        with closing(room.connect(self.db_path)) as db:
+            row = db.execute("SELECT * FROM review_host_sessions").fetchone()
+            self.assertEqual(row["token_hash"], room.sha(token))
+            self.assertNotEqual(row["token_hash"], token)
+        self.assertEqual(self.request("GET", token=token)[0], 200)
+        self.assertEqual(row["role"], "host")
+        with patch.object(access, "issue_host_session", side_effect=__import__("sqlite3").OperationalError("storage failed")):
+            failed_status, failed_body, _ = self._auth_request({"username": "host", "password": "correct password"})
+        self.assertEqual(failed_status, 503)
+        self.assertNotIn("review_token", failed_body)
+        self.assertEqual(self._auth_request({"username": "host", "password": "wrong"})[0], 401)
+        self.assertEqual(self._auth_request(["not", "an", "object"])[0], 400)
+        self.assertEqual(self._auth_request({"username": 9, "password": "wrong"})[0], 401)
+        _, _, denied = self._auth_request({"username": "host", "password": "wrong"}, "https://evil.example")
+        self.assertNotIn("Access-Control-Allow-Origin", denied)
+
+    def test_host_session_management_scope_expiry_and_revocation(self):
+        token = self._host_token()
+        status, created = self.request("POST", body={"title": "Scoped", "brief": "Scoped host"}, token=token)
+        self.assertEqual(status, 201)
+        mid = created["id"]
+        seat = self.join(mid, created["invite_url"].split("#invite=")[1], "codex")
+        self.assertEqual(self.request("GET", token=seat)[0], 403)
+        self.assertEqual(self.request("POST", f"/{mid}/advance", token=seat)[0], 403)
+        self.assertEqual(self.request("POST", f"/{mid}/waive", {"names": ["codex"], "reason": "scope test"}, token=token)[0], 200)
+        self.assertEqual(self.request("POST", f"/{mid}/advance", token=token)[0], 200)
+        self.assertEqual(self.request("POST", f"/{mid}/comments", {"text": "Host comment"}, token=token)[0], 201)
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
+        try:
+            conn.request("GET", "/agent/api/v1/sessions", headers={"Authorization": "Bearer " + token})
+            r = conn.getresponse()
+            self.assertEqual(r.status, 403)
+            r.read()
+        finally:
+            conn.close()
+        self.assertEqual(self.request("POST", f"/{mid}/decide", {"decision": "approve"}, token=token)[0], 404)
+        self.assertEqual(self.request("POST", f"/{mid}/invites", {}, token=token)[0], 201)
+        self.assertEqual(self.request("POST", "/logout", {}, token=token)[0], 200)
+        self.assertEqual(self.request("GET", token=token)[0], 403)
+        self.assertEqual(self.request("POST", "/logout", {}, token=token)[0], 401)
+        other = self._host_token()
+        with closing(room.connect(self.db_path)) as db:
+            with db:
+                db.execute("UPDATE review_host_sessions SET expires_at=? WHERE token_hash=?", (int(time.time()), room.sha(other)))
+        self.assertEqual(self.request("GET", token=other)[0], 403)
+        self.assertEqual(self.request("POST", "/logout", {}, token=seat)[0], 401)
+        self.assertEqual(self.request("GET", f"/{mid}", token=seat)[0], 401)
+
+    def test_login_rate_limit_counts_invalid_attempts(self):
+        for _ in range(10):
+            self.assertEqual(self._auth_request({"username": "", "password": ""})[0], 401)
+        self.assertEqual(self._auth_request({"username": "", "password": ""})[0], 429)
+
+    def test_seat_reads_frozen_final_and_archived_states_but_cannot_write(self):
+        _, created = self.create()
+        mid = created["id"]
+        token = self.join(mid, created["invite_url"].split("#invite=")[1], "codex")
+        for state in ("awaiting_approval", "changes_requested", "approved", "rejected"):
+            with closing(room.connect(self.db_path)) as db:
+                with db:
+                    db.execute("UPDATE meetings SET state=? WHERE id=?", (state, mid))
+            status, snapshot = self.request("GET", f"/{mid}", token=token)
+            self.assertEqual(status, 200)
+            self.assertEqual(snapshot["state"], state)
+            self.assertTrue(snapshot["hint"])
+            self.assertEqual(self.request("POST", f"/{mid}/comments", {"text": "Cannot write"}, token=token)[0], 403)
+            self.assertEqual(self.request("POST", f"/{mid}/reviews", {"position": "support", "text": "Cannot write"}, token=token)[0], 403)
+        with closing(room.connect(self.db_path)) as db:
+            with db:
+                db.execute("UPDATE meetings SET archived_at=? WHERE id=?", (int(time.time()), mid))
+        self.assertEqual(self.request("GET", f"/{mid}", token=token)[0], 200)
+        self.assertEqual(self.request("POST", f"/{mid}/leave", token=token)[0], 200)
+        self.assertEqual(self.request("GET", f"/{mid}", token=token)[0], 401)
+
+    def test_seat_longpoll_observes_terminal_transition_and_releases_slot(self):
+        _, created = self.create()
+        mid = created["id"]
+        token = self.join(mid, created["invite_url"].split("#invite=")[1], "codex")
+        _, snapshot = self.request("GET", f"/{mid}", token=token)
+        seq = max(e["seq"] for e in snapshot["events"])
+        result = []
+        worker = threading.Thread(target=lambda: result.append(self.request(
+            "GET", f"/{mid}?since={seq}&wait=2", token=token)))
+        worker.start()
+        time.sleep(0.2)
+        with closing(room.connect(self.db_path)) as db:
+            with db:
+                db.execute("UPDATE meetings SET state='approved' WHERE id=?", (mid,))
+        worker.join(4)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(result[0][0], 200)
+        self.assertEqual(result[0][1]["state"], "approved")
+        self.assertNotIn((mid, "codex"), api_module._REVIEW_WAITERS)
+        self.assertEqual(self.request("GET", f"/{mid}?since={seq}&wait=1", token=token)[0], 200)
+
+    def test_waived_seat_is_not_pending_in_hint(self):
+        _, created = self.create()
+        mid = created["id"]
+        invite = created["invite_url"].split("#invite=")[1]
+        token = self.join(mid, invite, "codex")
+        self.join(mid, invite, "qwen")
+        self.assertEqual(self.request("POST", f"/{mid}/reviews", {"position": "revise", "text": "Ready"}, token=token)[0], 201)
+        self.assertEqual(self.request("POST", f"/{mid}/waive", {"names": ["qwen"], "reason": "Absent"}, token="admin-secret")[0], 200)
+        _, snapshot = self.request("GET", f"/{mid}", token=token)
+        self.assertEqual(snapshot["missing"], [])
+        self.assertNotIn("qwen", snapshot["hint"])
+        self.assertIn("全员已齐", snapshot["hint"])
+
+    def test_non_finite_wait_is_invalid(self):
+        _, created = self.create()
+        for value in ("nan", "inf", "-inf"):
+            self.assertEqual(self.request("GET", f"/{created['id']}?wait={value}", token="admin-secret")[0], 400)
+
+    def test_host_longpoll_rechecks_revoked_session_before_response(self):
+        token = self._host_token()
+        _, created = self.create()
+        mid = created["id"]
+        _, snapshot = self.request("GET", f"/{mid}", token=token)
+        seq = max(e["seq"] for e in snapshot["events"])
+        results = []
+        worker = threading.Thread(target=lambda: results.append(self.request(
+            "GET", f"/{mid}?since={seq}&wait=1", token=token)))
+        worker.start()
+        time.sleep(0.2)
+        self.assertEqual(self.request("POST", "/logout", {}, token=token)[0], 200)
+        worker.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(results[0][0], 401)
+
+    def test_meeting_cors_preflight_allows_dashboard_not_other_origins(self):
+        for origin, allowed in (("https://mail.maifeipin.com", True), ("https://evil.example", False)):
+            conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
+            try:
+                conn.request("OPTIONS", "/agent/api/v1/review-meetings", headers={
+                    "Origin": origin, "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "Authorization,Content-Type"})
+                response = conn.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.getheader("Access-Control-Allow-Origin"), origin if allowed else None)
+                self.assertIn("Authorization", response.getheader("Access-Control-Allow-Headers"))
+                response.read()
+            finally:
+                conn.close()
 
 
 if __name__ == "__main__":

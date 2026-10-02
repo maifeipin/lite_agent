@@ -316,7 +316,7 @@ registerTabModule({
 
                     meetBtn.disabled = true;
                     try {
-                        const resp = await fetch('/agent/api/v1/review-meetings', {
+                        const resp = await ReviewMeetingAPI.fetch('/agent/api/v1/review-meetings', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ title, brief: briefLines.join('\n') }),

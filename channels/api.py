@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 import secrets
@@ -16,6 +17,8 @@ _REVIEW_MAX_WAIT = 25.0      # 秒；须小于 nginx proxy_read_timeout
 _REVIEW_ONLINE_WINDOW = 90   # 秒；窗口内该席位有轮询即视为在线
 _REVIEW_WAITERS = {}         # (meeting_id, seat) -> True；单席位同时只允许一个挂起
 _REVIEW_WAITERS_LOCK = threading.Lock()
+_REVIEW_AUTH_ATTEMPTS = {}
+_REVIEW_AUTH_LOCK = threading.Lock()
 _REVIEW_LAST_POLL = {}       # (meeting_id, seat) -> 最近轮询 epoch（易变状态，不入 audit 链）
 
 class ApiHandler(BaseHTTPRequestHandler):
@@ -28,7 +31,21 @@ class ApiHandler(BaseHTTPRequestHandler):
         super().log_message(format, *args)
     
     def _send_cors_headers(self):
-        self.send_header('Access-Control-Allow-Origin', '*')
+        path = urlparse(self.path).path
+        if path.startswith('/agent/'):
+            path = path[6:]
+        if path == '/api/v1/auth' or path.startswith('/api/v1/review-meetings'):
+            origin = self.headers.get('Origin')
+            api = self.server.api_server
+            base = api.config.get('review_meeting_base_url') or f'http://127.0.0.1:{api.port}'
+            parsed = urlparse(base)
+            allowed = {api.config.get('review_dashboard_origin', 'https://mail.maifeipin.com'),
+                       f'{parsed.scheme}://{parsed.netloc}'}
+            if origin in allowed:
+                self.send_header('Access-Control-Allow-Origin', origin)
+            self.send_header('Vary', 'Origin')
+        else:
+            self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type')
 
@@ -508,11 +525,25 @@ class ApiHandler(BaseHTTPRequestHandler):
         authorization = self.headers.get('Authorization', '')
         if not authorization.startswith('Bearer ') or authorization.count(' ') != 1:
             return ''
-        return authorization[7:]
+        value = authorization[7:]
+        return value if value.isascii() and len(value) <= 128 else ''
 
     def _review_admin(self) -> bool:
         token = self.server.api_server.auth_token
-        return bool(token and secrets.compare_digest(self._review_bearer(), token))
+        bearer = self._review_bearer()
+        if token and secrets.compare_digest(bearer, token):
+            return True
+        if not 32 <= len(bearer) <= 128:
+            return False
+        from core import review_meeting_api as access
+        from scripts import review_meeting as room
+        db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
+        try:
+            with closing(sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)) as db:
+                db.row_factory = sqlite3.Row
+                return access.is_host_session(db, bearer)
+        except sqlite3.Error:
+            return False
 
     def _review_invite_url(self, meeting_id: str, token: str) -> str:
         api = self.server.api_server
@@ -616,7 +647,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         row = room.get(db, meeting_id)
         done = room.submitted(db, meeting_id, row['round'])
         if seat in done:
-            pending = [p['name'] for p in snap.get('participants', []) if p['name'] not in done]
+            pending = room.missing(db, row)
             tail = f'，等待：{"、".join(pending)}' if pending else '，全员已齐，等待主持人推进轮次'
             return f'本轮已提交正式意见{tail}；可用 comments 自由交流'
         if row['round'] >= 2:
@@ -630,6 +661,23 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         if not self._review_host_allowed():
             self._review_json({'error': 'Meeting API host is not allowed'}, 421)
+            return
+
+        if method == 'POST' and path == '/api/v1/review-meetings/logout':
+            try:
+                self._review_body()
+                db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
+                with closing(room.connect(db_path)) as db:
+                    access.ensure_tables(db)
+                    with db:
+                        access.revoke_host_session(db, self._review_bearer())
+                self._review_json({'success': True})
+            except access.ReviewAPIError as exc:
+                self._review_json({'error': str(exc)}, exc.status)
+            except ValueError as exc:
+                self._review_json({'error': str(exc)}, 400)
+            except (OSError, sqlite3.Error):
+                self._review_json({'error': '会审室存储暂不可用'}, 503)
             return
 
         route = re.fullmatch(
@@ -705,18 +753,25 @@ class ApiHandler(BaseHTTPRequestHandler):
                             wait = float(wait_value)
                         except ValueError as exc:
                             raise access.ReviewAPIError('wait 必须为非负秒数') from exc
-                        if wait < 0:
+                        if not math.isfinite(wait) or wait < 0:
                             raise access.ReviewAPIError('wait 必须为非负秒数')
                         wait = min(wait, _REVIEW_MAX_WAIT)
                         is_admin = self._review_admin()
                         seat = None
                         if not is_admin:
                             seat = access.authenticate(db, meeting_id, self._review_bearer())
-                            _REVIEW_LAST_POLL[(meeting_id, seat)] = time.time()
+                            now = time.time()
+                            with _REVIEW_WAITERS_LOCK:
+                                for key in list(_REVIEW_LAST_POLL):
+                                    if now - _REVIEW_LAST_POLL[key] > _REVIEW_ONLINE_WINDOW * 2:
+                                        del _REVIEW_LAST_POLL[key]
+                                _REVIEW_LAST_POLL[(meeting_id, seat)] = now
                         if wait > 0:
                             db.rollback()  # 结束挂起前的读视图
                             self._review_long_wait(db_path, meeting_id, since, wait, seat)
                             db.rollback()  # 唤醒后以新读视图取快照
+                        if is_admin and not self._review_admin():
+                            raise access.ReviewAPIError('主持人会话无效或已过期', 401)
                         if is_admin:
                             result = room.snapshot(db, meeting_id, since=since, full=True)
                         else:
@@ -1098,26 +1153,34 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def _handle_auth(self):
         """登录验证：读取 htpasswd 文件校验用户名/密码。用于 Dashboard 表单登录。"""
-        import hashlib, os
-        content_length = int(self.headers.get('Content-Length', 0))
-        if content_length == 0:
-            self.send_error(400, "Bad Request: Empty body")
+        now = time.monotonic()
+        client = self.client_address[0]  # Do not trust arbitrary X-Forwarded-For.
+        with _REVIEW_AUTH_LOCK:
+            for key in list(_REVIEW_AUTH_ATTEMPTS):
+                if not _REVIEW_AUTH_ATTEMPTS[key] or now - _REVIEW_AUTH_ATTEMPTS[key][-1] >= 60:
+                    del _REVIEW_AUTH_ATTEMPTS[key]
+            hits = [t for t in _REVIEW_AUTH_ATTEMPTS.get(client, []) if now - t < 60]
+            limited = len(hits) >= 10 or (client not in _REVIEW_AUTH_ATTEMPTS and len(_REVIEW_AUTH_ATTEMPTS) >= 2048)
+            if not limited:
+                hits.append(now)
+                _REVIEW_AUTH_ATTEMPTS[client] = hits
+        if limited:
+            self._review_json({'success': False, 'error': '登录请求过多，请稍后重试'}, 429)
             return
         try:
-            body = json.loads(self.rfile.read(content_length).decode('utf-8'))
-        except json.JSONDecodeError:
-            self.send_error(400, "Bad Request: Invalid JSON")
+            body = self._review_body()
+        except ValueError as exc:
+            self._review_json({'success': False, 'error': str(exc)}, 400)
             return
-
-        username = (body.get('username') or '').strip()
-        password = (body.get('password') or '')
-
-        if not username or not password:
+        username = body.get('username')
+        password = body.get('password')
+        if not isinstance(username, str) or not isinstance(password, str) or not username.strip() or not password:
             self._send_auth_fail('账号和密码不能为空')
             return
+        username = username.strip()
 
         # 读取 htpasswd 文件
-        htpasswd_path = '/etc/nginx/conf.d/dashboard.htpasswd'
+        htpasswd_path = self.server.api_server.config.get('dashboard_htpasswd_path', '/etc/nginx/conf.d/dashboard.htpasswd')
         if not os.path.exists(htpasswd_path):
             self._send_auth_fail('服务端配置错误')
             return
@@ -1133,17 +1196,21 @@ class ApiHandler(BaseHTTPRequestHandler):
                         continue
 
                     if self._verify_htpasswd(password, pwd_hash):
-                        self.send_response(200)
-                        self._send_cors_headers()
-                        self.send_header('Content-Type', 'application/json; charset=utf-8')
-                        self.end_headers()
-                        self.wfile.write(json.dumps({'success': True}, ensure_ascii=False).encode('utf-8'))
+                        from core import review_meeting_api as access
+                        from scripts import review_meeting as room
+                        db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
+                        with closing(room.connect(db_path)) as db:
+                            access.ensure_tables(db)
+                            with db:
+                                session = access.issue_host_session(db, username)
+                        self._review_json({'success': True, **session})
                         return
                     else:
                         self._send_auth_fail('账号或密码错误')
                         return
-        except Exception:
-            pass
+        except (OSError, sqlite3.Error):
+            self._review_json({'success': False, 'error': '登录服务暂不可用'}, 503)
+            return
 
         self._send_auth_fail('账号或密码错误')
 

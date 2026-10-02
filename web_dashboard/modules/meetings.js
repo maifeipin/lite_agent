@@ -26,7 +26,7 @@ registerTabModule({
     },
 
     async _fetchList() {
-        const r = await fetch('/agent/api/v1/review-meetings');
+        const r = await ReviewMeetingAPI.fetch('/agent/api/v1/review-meetings');
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const d = await r.json();
         return d.meetings || [];
@@ -132,13 +132,17 @@ registerTabModule({
 
     async _showDetail(meetingId) {
         this._stopLive();
+        const ctrl = new AbortController();
+        this._liveAbort = ctrl;
         let snap;
         try {
-            const r = await fetch(`/agent/api/v1/review-meetings/${meetingId}`);
+            const r = await ReviewMeetingAPI.fetch(`/agent/api/v1/review-meetings/${meetingId}`, { signal: ctrl.signal });
             const d = await r.json();
             if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+            if (ctrl.signal.aborted) return;
             snap = d;
         } catch (err) {
+            if (ctrl.signal.aborted) return;
             showModal({ title: '读取会议失败', icon: '⚠️', content: `<p>${h(err.message)}</p>` });
             return;
         }
@@ -183,17 +187,23 @@ registerTabModule({
         };
         const isFinal = (d) => d.archived_at || d.state === 'approved' || d.state === 'rejected';
 
+        const observer = new MutationObserver(() => {
+            if (!document.body.contains(overlay)) ctrl.abort();
+        });
+        observer.observe(document.body, { childList: true });
         const loop = async () => {
-            const ctrl = new AbortController();
-            this._liveAbort = ctrl;
+            if (isFinal(snap)) return;
             const backoff = () => new Promise(res => setTimeout(res, 4000));
-            while (document.body.contains(feed)) {
+            while (!ctrl.signal.aborted && document.body.contains(feed)) {
                 let d;
                 try {
-                    const r = await fetch(pollUrl(), { signal: ctrl.signal });
-                    d = await r.json();
+                    const r = await ReviewMeetingAPI.fetch(pollUrl(), { signal: ctrl.signal });
+                    d = await r.json().catch(() => ({ error: 'HTTP ' + r.status }));
                     if (!r.ok) {
-                        if (r.status === 400 || r.status === 404) return;
+                        if ([400, 401, 403, 404, 421].includes(r.status)) {
+                            hintEl.textContent = `直播已停止：${d.error || 'HTTP ' + r.status}`;
+                            return;
+                        }
                         await backoff();
                         continue;
                     }
@@ -206,7 +216,7 @@ registerTabModule({
                 if (isFinal(d)) return;  // 终态停止轮询
             }
         };
-        loop();
+        loop().finally(() => observer.disconnect());
 
         input.addEventListener('keydown', async (e) => {
             if (e.key !== 'Enter') return;
@@ -215,7 +225,7 @@ registerTabModule({
             if (!text) return;
             input.value = '';
             try {
-                const r = await fetch(`/agent/api/v1/review-meetings/${meetingId}/comments`, {
+                const r = await ReviewMeetingAPI.fetch(`/agent/api/v1/review-meetings/${meetingId}/comments`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ text }),
