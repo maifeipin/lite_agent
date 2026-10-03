@@ -39,6 +39,21 @@ ssh vps1 "$ENVV; cd $VPS_WORK && python3 step2a_export.py --days $DAYS && python
 echo "===== 2. scp rss_all.jsonl vps1 -> Mac ====="
 scp vps1:"$VPS_WORK/rss_all.jsonl" "$MAC_WORK/rss_all.jsonl"
 
+echo "===== 2.5. 检查 NAS 挂载路径自愈与磁盘探活 ====="
+if [ ! -d "$MAC_WORK/topic_model" ] || [ ! -f "$MAC_WORK/embeddings.npy" ]; then
+  echo "⚠️ NAS 路径不可达，尝试自动唤醒挂载 smb://DSM918.local/DataSync..."
+  osascript -e 'mount volume "smb://DSM918.local/DataSync"' 2>/dev/null || true
+  sleep 4
+fi
+# 真实 I/O 探活（唤醒可能处于休眠状态的 NAS 硬盘，避免仅 stat 元数据假活）
+if [ -d "$MAC_WORK/topic_model" ] && [ -f "$MAC_WORK/embeddings.npy" ]; then
+  dd if="$MAC_WORK/embeddings.npy" of=/dev/null bs=1k count=1 2>/dev/null || true
+fi
+if [ ! -d "$MAC_WORK/topic_model" ] || [ ! -f "$MAC_WORK/embeddings.npy" ]; then
+  echo "❌ 错误: NAS 挂载卷不可达 ($MAC_WORK/topic_model 或 embeddings.npy 缺失)，中止本次执行！" >&2
+  exit 1
+fi
+
 echo "===== 3. Mac: classify_cluster --mode $MODE ====="
 cd "$MAC_WORK" && { source bertopic_env/bin/activate 2>/dev/null || true; } && python "$SCRIPTS/classify_cluster.py" --mode "$MODE"
 

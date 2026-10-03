@@ -166,7 +166,11 @@ def get_embeddings(docs, ids):
             full[i] = new_emb[nc]; nc += 1
 
     # 存对齐缓存(剪孤儿, 与当前 ids 完全对齐; 下次无新文则直接命中)
-    np.save(EMB, full)
+    # 通过 realpath 确保写入 NAS 真实同级目录的临时文件，再原子 rename，防止网络抖动损坏已有缓存
+    real_emb = os.path.realpath(EMB)
+    tmp_emb = real_emb[:-4] + ".tmp.npy" if real_emb.endswith(".npy") else real_emb + ".tmp"
+    np.save(tmp_emb, full)
+    os.replace(tmp_emb, real_emb)
     json.dump(ids, open(IDS, "w"))
     print("  saved cache: {} (weekly, cached={} new={})".format(
         full.shape, len(id2row), n_new), flush=True)
@@ -231,9 +235,52 @@ def main():
                 info = tm.get_topic_info()
                 reps = tm.topic_representations_
                 # 保存 per-category 模型供 daily transform (pickle 文件, 不预建目录)
-                mdir = "{}/{}".format(MODEL_ROOT, cat)
-                tm.save(mdir, save_embedding_model=False)
-                print("  saved model -> {}".format(mdir), flush=True)
+                # 用 realpath 确保在 NAS 真实同级目录原子 rename，防止写入中断损坏已有可用模型
+                # 交换兼容文件/目录两种保存形态(当前 BERTopic 产出单文件, 直接 replace 已够用,
+                # 但换新版本后 save 可能改产目录, rename 到非空目录会 ENOTEMPTY)。
+                # 中断语义: 进程级中断下, 成功上位前上一代始终以 real 或 .old 保留,
+                # 上位成功后才删除上一代。NAS 掉电的持久性取决于 SMB flush 顺序, 不在此承诺。
+                import shutil
+
+                def _rm_required(path):
+                    """必成清理: 失败则中止本轮, 不触碰现役。"""
+                    if os.path.isdir(path):
+                        shutil.rmtree(path)
+                    elif os.path.exists(path):
+                        os.remove(path)
+
+                def _rm_best_effort(path):
+                    """尽力清理: 仅在现役已安全时调用, 失败只告警。"""
+                    try:
+                        _rm_required(path)
+                    except OSError as e:
+                        print("  warn: 清理 {} 失败: {}".format(path, e), flush=True)
+
+                real_root = os.path.realpath(MODEL_ROOT)
+                real_mdir = os.path.join(real_root, cat)
+                tmp_mdir = real_mdir + ".tmp"
+                old_mdir = real_mdir + ".old"
+                # 0. 恢复: 上轮在两次 rename 之间中断(real 缺失)且 .old 仍在, 先让上一代
+                #    复位为 real; 此后清理/保存失败均中止且不触碰现役。两次 rename 之间
+                #    仍有短暂缺失窗口, 若在该窗口中断, daily 降级持续到下轮第 0 步恢复
+                if not os.path.exists(real_mdir) and os.path.exists(old_mdir):
+                    os.rename(old_mdir, real_mdir)
+                _rm_required(tmp_mdir)                       # 残留不清干净则中止, 目录形态防新旧混入
+                tm.save(tmp_mdir, save_embedding_model=False)
+                _rm_required(old_mdir)                       # 让位目标必须为空, 失败则中止, 现役不动
+                if os.path.exists(real_mdir):
+                    os.rename(real_mdir, old_mdir)           # 现役让位
+                try:
+                    os.rename(tmp_mdir, real_mdir)           # 新版上位
+                except OSError as promote_err:
+                    if os.path.exists(old_mdir) and not os.path.exists(real_mdir):
+                        try:
+                            os.rename(old_mdir, real_mdir)   # 回滚完成后 daily 无感; 回滚前中断则缺失至下轮恢复
+                        except OSError:
+                            pass                            # 回滚也失败则保留 .old, 下轮第 0 步再恢复
+                    raise promote_err
+                _rm_best_effort(old_mdir)                    # 新版已安全, 尽力清理, 失败仅告警
+                print("  saved model -> {}".format(real_mdir), flush=True)
             n_topics = len(info[info.Topic != -1])
             outlier = int(info[info.Topic == -1]["Count"].sum()) if (-1 in set(info.Topic)) else 0
             print("  -> {} topics, outlier {} ({:.1f}%)".format(n_topics, outlier, 100 * outlier / n), flush=True)
@@ -268,7 +315,17 @@ def main():
                 topics = [-1] * n
             else:
                 if cat not in loaded:
-                    loaded[cat] = BERTopic.load(mdir)
+                    try:
+                        loaded[cat] = BERTopic.load(mdir)
+                    except Exception as e:
+                        print("  model load FAILED {}: {} -> all -1".format(cat, e), flush=True)
+                        topics = [-1] * n
+                        per_cat_stats[cat] = {"n": n, "topic_dist": {-1: n}}
+                        for k, t in enumerate(topics):
+                            did = docs[idxs[k]]["id"]
+                            doc_category[did] = cat
+                            doc_topic[did] = "{}::{}".format(cat, int(t))
+                        continue
                 try:
                     topics, _ = loaded[cat].transform(texts, embeddings=em)
                 except Exception as e:
