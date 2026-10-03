@@ -57,6 +57,14 @@ class ReviewToolCatalogueTests(unittest.TestCase):
         self.assertEqual(selector.select("加入会审室", is_guest=True).names, [])
         self.assertEqual(selector.select("请用评判委员会评估方案").names, ["ops_decision"])
 
+    def test_invitation_exposes_join_without_granting_approval(self):
+        selector = RequestSelector(StubEngine())
+        selected = selector.select('会议操作 https://example.com/agent/api/v1/review-meetings/0123456789ab/invite#invite=token')
+        self.assertIn('ops_review_meeting_join', selected.names)
+        self.assertFalse(selected.read_only_mode)
+        self.assertNotIn('ops_review_meeting_submit', selected.names)
+        self.assertEqual(selector.select('评审会议 #invite=token', is_guest=True).names, [])
+
 
 if __name__ == "__main__":
     unittest.main()

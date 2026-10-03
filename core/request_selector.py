@@ -270,9 +270,9 @@ DOMAIN_MAP: Dict[str, Dict] = {
             "ops_review_meeting_join", "ops_review_meeting_leave",
             "ops_review_meeting_submit", "ops_review_meeting_comment",
         ],
-        "explicit_patterns": r"(入会|加入|离会|退出|提交|发言|评论|回复|补充)",
+        "explicit_patterns": r"(入会|加入|#invite=|离会|退出|提交|发言|评论|回复|补充)",
         "explicit_routes": [
-            (r"入会|加入", ["ops_review_meeting_join"]),
+            (r"入会|加入|#invite=", ["ops_review_meeting_join"]),
             (r"离会|退出", ["ops_review_meeting_leave"]),
             (r"提交.*(?:意见|评审)|(?<!补充)发言", ["ops_review_meeting_submit"]),
             (r"评论|回复|补充", ["ops_review_meeting_comment"]),

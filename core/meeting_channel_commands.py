@@ -28,11 +28,17 @@ def handle(config, msg, db_path=None):
     action = parts[1] if len(parts) > 1 else 'help'
     args = parts[2] if len(parts) > 2 else ''
     if action == 'help':
-        return ('/meeting create 标题 | 议题\n/meeting invite 会议ID 席位名称\n'
+        return ('/meeting create 标题 | 议题\n/meeting invite 会议ID 席位名称\n/meeting join 完整邀请链接\n'
                 '/meeting cohost 会议ID\n/meeting revoke-cohost 会议ID operator_id\n'
                 '/meeting revoke-seat 会议ID participant_id\n/meeting status 会议ID\n'
                 '/meeting decide 会议ID approve|revise|reject\n/meeting cancel 会议ID\n'
                 '/meeting confirm 确认码\n最终批准只记录裁决，不自动执行方案。')
+    if action == 'join':
+        from skills.ops_review_meeting import invitation_parts, claim_invitation
+        mid, token = invitation_parts(args)
+        joined = json.loads(claim_invitation(mid, token, db_path=db_path))
+        return (f'已入会：{mid}；席位：{joined["participant"]}。\n'
+                '入会尚未提交意见。请继续发送：读取该会议议题，复核代码并提交本轮正式评审意见。')
     path = Path(db_path or os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
     with closing(room.connect(path)) as db:
         access.ensure_tables(db)
@@ -66,8 +72,12 @@ def handle(config, msg, db_path=None):
                     return value if len(value) <= limit else value[:limit] + '…（已截取）'
                 names = '、'.join(p['name'] for p in snap['participants']) or '暂无已领取席位'
                 missing = '、'.join(snap['missing']) or '无'
+                reviews = db.execute("SELECT seq,actor,body FROM events WHERE meeting_id=? AND round=? AND kind='review' ORDER BY seq",
+                                     (mid, snap['round'])).fetchall()
+                submitted = '、'.join(f'{r["actor"]}：{json.loads(r["body"]).get("position", "")}（事件 {r["seq"]}）' for r in reviews) or '暂无'
                 return (f'会议 {mid}：{compact(snap["title"], 100)}\n状态：{snap["state"]}；第 {snap["round"]} 轮\n'
                         f'参会：{compact(names, 200)}\n未提交：{compact(missing, 200)}\n'
+                        f'本轮意见：{compact(submitted, 200)}\n'
                         f'裁决摘要：{compact(summary, 800)}\n完整记录请通过会议 API 或仪表盘查看。')
             elif action in ('decide', 'cancel'):
                 fields = args.split()
@@ -114,4 +124,5 @@ def handle(config, msg, db_path=None):
                 if urlsplit(base).scheme != 'https' or not urlsplit(base).netloc:
                     raise ValueError('会议公网地址必须配置为 HTTPS')
                 result['invite_url'] = f'{base}/agent/api/v1/review-meetings/{result["id"]}/invite#invite={result.pop("invite_token")}'
+                result['usage'] = '每位评委使用独立链接。lite_agent 频道私聊可发送 /meeting join <完整邀请链接>，再要求读取议题并提交正式评审意见；其他代理需 POST /join。'
             return json.dumps(result, ensure_ascii=False)
