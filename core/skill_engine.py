@@ -433,6 +433,10 @@ class SkillEngine:
         """返回已注册技能数量"""
         return len(_skill_registry)
 
+    def is_read_only(self, name: str) -> bool:
+        info = _skill_registry.get(name)
+        return bool(info and info['policy'].side_effect is False)
+
     def is_guest_ok(self, skill_name: str) -> bool:
         """检查指定技能是否允许访客调用"""
         info = _skill_registry.get(skill_name)

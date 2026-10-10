@@ -66,5 +66,17 @@
     "direct_tool_execution": false,
     "dag_max_depth": 5,
     "dag_max_total_steps": 30,
-    "dag_max_total_tokens": 200000
+    "dag_max_total_tokens": 200000,
+    "budget_control": {
+        "finalization_reserve_ratio": 0.1,
+        "finalization_reserve_max_tokens": 8000,
+        "request_estimate_margin": 1.25
+    },
+    "billing_workflow": {
+        "enabled": true,
+        "max_total_tokens": 60000,
+        "analysis_max_calls": 2,
+        "analysis_max_output_tokens": 2048,
+        "detail_limit": 20
+    }
 }

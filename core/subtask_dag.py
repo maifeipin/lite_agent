@@ -168,7 +168,7 @@ class SubtaskDAG:
                 "fallback_models": s.fallback_models,
                 "status": s.status.value,
                 "result": str(s.result)[:1000] if s.result else "",
-                "tool_results": [{"name": tr.get("name"), "args": tr.get("args"), "result": (str(tr.get("result", ""))[:1000] if tr.get("result") else "")} for tr in s.tool_results] if s.tool_results else [],
+                "tool_results": [{"name": tr.get("name"), "args": tr.get("args"), "evidence_ref": tr.get('evidence_ref', ''), "result": (str(tr.get("result", ""))[:1000] if tr.get("result") else "")} for tr in s.tool_results] if s.tool_results else [],
                 "error": s.error,
                 "token_usage": s.token_usage,
                 "steps_used": s.steps_used,

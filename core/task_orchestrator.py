@@ -15,6 +15,7 @@ from core.subtask_dag import Subtask, SubtaskDAG, SubtaskType, SubtaskStatus
 from core.execution import ExecutionContext, ActorType, ExecutionSource
 from core.execution_ledger import ExecutionLedger
 from core.execution_budget import ExecutionBudget
+from core.task_result import TaskResult
 from core.llm_gateway import LLMGateway
 from core.request_selector import RequestSelector
 from core.adaptive_budget import AdaptiveBudgetPolicy
@@ -90,6 +91,8 @@ class TaskOrchestrator:
         # TaskOrchestrator 创建父 execution，所有 Worker 子任务挂载其下
         self.ledger = ledger
         self.llm = LLMGateway(self.router, ledger)
+        control = (config.get('task_routing') or {}).get('budget_control') or {}
+        self.llm.estimate_margin = float(control.get('request_estimate_margin', 1.25))
         self.model_selector = ModelSelector(config)
         routing = config.get("task_routing", {})
         default_model = config.get("llm", {}).get("default", "")
@@ -109,6 +112,20 @@ class TaskOrchestrator:
     # ==================================================================
     #  Phase 1: 拆解
     # ==================================================================
+    def execute_result(self, goal, session_key, **kwargs):
+        from core.billing_workflow import BillingWorkflow
+        workflow = BillingWorkflow(self.config, self.router, self.ledger)
+        if workflow.matches(goal) and not kwargs.get('planned_subtasks'):
+            result = workflow.run(goal, session_key, kwargs.get('execution_policy'))
+            self.session_mgr.save_subtask_dag(session_key, kwargs.get('task_id') or uuid.uuid4().hex[:8],
+                json.dumps({'workflow': 'billing', 'status': result.status,
+                            'final_result': result.content, 'usage': result.usage,
+                            'delivery': result.delivery}, ensure_ascii=False), result.status)
+            return result
+        self.last_result = None
+        content = self.execute(goal, session_key, **kwargs)
+        return self.last_result or TaskResult(status='failed', content=content)
+
     def _role_invoker(self, model: str, profile_name: str,
                       policy: ExecutionPolicy, budget: ExecutionBudget = None):
         """Build a role call; the configured default is the only fallback."""
@@ -235,7 +252,7 @@ class TaskOrchestrator:
                 prompt=goal, tools=[]
             )], ""
         finally:
-            if budget is not None and attempted:
+            if budget is not None and attempted and not isinstance(getattr(self, 'llm', None), LLMGateway):
                 budget.consume(
                     "planner", steps=1,
                     tokens=int((response or {}).get("usage_total", 0) or 0),
@@ -344,6 +361,12 @@ class TaskOrchestrator:
             if effective_wall_seconds is not None else None
         )
         budget = ExecutionBudget(effective_max_steps, effective_max_tokens)
+        self._active_budget = budget
+        if isinstance(getattr(self, 'llm', None), LLMGateway):
+            self.llm.budget = budget
+        control = (getattr(self, 'config', {}).get('task_routing') or {}).get('budget_control') or {}
+        final_reserve = min(int(control.get('finalization_reserve_max_tokens', 8000)),
+                            int(effective_max_tokens * float(control.get('finalization_reserve_ratio', 0.10))))
         effective_max_steps = budget.max_steps
         effective_max_tokens = budget.max_tokens
         if step_override:
@@ -491,7 +514,10 @@ class TaskOrchestrator:
                 # A single long local-model task can use the full allowance;
                 # concurrent workers cannot each claim the whole task budget.
                 worker_max_steps, worker_token_budget = budget.worker_share(
-                    len(batch), reserve_steps=1
+                    len(batch), reserve_steps=1,
+                    pending_workers=sum(s.status == SubtaskStatus.PENDING and
+                                        not self._can_execute_directly(s) for s in dag.subtasks.values()),
+                    reserve_tokens=final_reserve,
                 )
                 if worker_max_steps < 1 or worker_token_budget < 1:
                     log_event(
@@ -553,10 +579,8 @@ class TaskOrchestrator:
                         node.error = result.get("error", "")
                         node.token_usage = result.get("token_usage", 0)
                         node.steps_used = result.get("steps_used", 0)
-                        budget.consume(
-                            "worker", steps=node.steps_used,
-                            tokens=node.token_usage,
-                        )
+                        if not result.get('budget_accounted'):
+                            budget.consume('worker', steps=node.steps_used, tokens=node.token_usage)
 
                 if dag.has_failure():
                     failed = [sid for sid, s in dag.subtasks.items()
@@ -591,15 +615,22 @@ class TaskOrchestrator:
             )
 
             # 正常完成: 根据子任务整体结果决定终态
-            all_done = all(s.status in (SubtaskStatus.DONE, SubtaskStatus.SKIPPED)
+            all_done = all(s.status == SubtaskStatus.DONE
                            for s in dag.subtasks.values())
             any_failed = any(s.status == SubtaskStatus.FAILED
                              for s in dag.subtasks.values())
-            if any_failed and not all_done:
-                parent_status, parent_reason = "failed", "subtask_failed"
+            if not all_done:
+                parent_status, parent_reason = "failed", "subtask_incomplete"
             else:
                 parent_status, parent_reason = "succeeded", "orchestrated"
 
+            self.last_result = TaskResult(
+                status='succeeded' if all_done else 'partial' if dag.progress()['done'] else 'failed',
+                content=dag.final_result,
+                failed_nodes=[s.name for s in dag.subtasks.values() if s.status == SubtaskStatus.FAILED],
+                skipped_nodes=[s.name for s in dag.subtasks.values() if s.status == SubtaskStatus.SKIPPED],
+                usage={'total_tokens': usage.used_tokens, 'max_tokens': usage.max_tokens},
+            )
             return dag.final_result
         except Exception:
             parent_status, parent_reason = "failed", "orchestrator_exception"
@@ -619,6 +650,7 @@ class TaskOrchestrator:
                             parent_execution_id: str = "",
                             worker_max_steps: int = None,
                             worker_token_budget: int = None):
+        outcome = None
         try:
             if self._can_execute_directly(subtask):
                 return self._run_direct_tool_subtask(
@@ -678,6 +710,7 @@ class TaskOrchestrator:
                     "status": "done",
                     "token_usage": subtask.token_usage,
                     "steps_used": subtask.steps_used,
+                    "budget_accounted": getattr(self, '_active_budget', None) is not None,
                 }
             self._log_and_persist(f"  [WORKER:{subtask.id}] 完成 steps={subtask.steps_used} tokens={subtask.token_usage} result_len={len(outcome.content)}", log_callback)
         except Exception as e:
@@ -688,12 +721,13 @@ class TaskOrchestrator:
             subtask.finished_at = time.time()
             with lock:
                 results[subtask.id] = {
-                    "result": "",
-                    "tool_results": [],
+                    "result": outcome.content if outcome else "",
+                    "tool_results": outcome.tool_results if outcome else [],
                     "status": "failed",
                     "error": error_text,
                     "token_usage": subtask.token_usage,
                     "steps_used": subtask.steps_used,
+                    "budget_accounted": getattr(self, '_active_budget', None) is not None,
                 }
 
     def _make_worker(self, subtask: Subtask, model_name: str,
@@ -734,6 +768,9 @@ class TaskOrchestrator:
             adaptive_policy=getattr(
                 self, "adaptive_policy", AdaptiveBudgetPolicy()
             ),
+            execution_budget=getattr(self, '_active_budget', None),
+            estimate_margin=float((getattr(self, 'config', {}).get('task_routing', {}).get('budget_control') or {}).get('request_estimate_margin', 1.25)),
+            evidence_config=getattr(self, 'config', {}),
         )
 
     def _run_worker_fallbacks(self, subtask: Subtask, upstream: dict,
@@ -784,7 +821,7 @@ class TaskOrchestrator:
 
     def _can_execute_directly(self, subtask: Subtask) -> bool:
         return bool(
-            self.direct_tool_execution
+            getattr(self, 'direct_tool_execution', False)
             and subtask.execution_mode == "tool"
             and subtask.tool_name
             and subtask.tool_name in self.skill_engine.get_all_names()
@@ -860,9 +897,17 @@ class TaskOrchestrator:
                 "❌" if s.status == SubtaskStatus.FAILED else "⏭️"
             )
             body = s.result or s.error or "(无输出)"
+            if s.error and s.error != body:
+                body = f'失败原因：{s.error}\n\n已有输出：{body}'
+            refs = [tr.get('evidence_ref') for tr in s.tool_results if tr.get('evidence_ref')]
+            if refs:
+                body += '\n\n已保存工具证据：' + ', '.join(refs)
             results_lines.append(f"### {status_label} {s.name} [{s.type.value}]\n{body[:2000]}")
 
         results_text = "\n\n".join(results_lines)
+
+        if any(s.status != SubtaskStatus.DONE for s in dag.subtasks.values()):
+            return f'## 执行报告\n\n任务未全部完成，以下包含失败原因和已收集证据。\n\n{results_text}'
 
         if budget is not None and not budget.can_start():
             return (
@@ -918,7 +963,7 @@ class TaskOrchestrator:
             traceback.print_exc()
             return f"## 执行报告\n\n{results_text}\n\n> ⚠️ 聚合失败: {e}"
         finally:
-            if budget is not None and attempted:
+            if budget is not None and attempted and not isinstance(getattr(self, 'llm', None), LLMGateway):
                 budget.consume(
                     "aggregator", steps=1,
                     tokens=int((response or {}).get("usage_total", 0) or 0),

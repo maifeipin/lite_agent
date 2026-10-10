@@ -35,6 +35,7 @@ from core.loop_detector import LoopDetector
 from core.model_event import ModelEvent, ModelEventType
 from core.model_invoker import ModelInvoker
 from core.llm_gateway import LLMGateway
+from core.execution_budget import BudgetAdmissionError, estimate_input_tokens
 from core.skill_engine import SkillEngine
 from core.utils.masker import mask_secrets
 
@@ -162,6 +163,7 @@ class AgentRuntime:
         total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         accumulated_content = ""
         length_recovery_used = False
+        successful_queries = {}
         recovery_kwargs = {}
 
         # 过滤 tools：只把 ctx.allowed_tools 允许的工具传给模型
@@ -241,20 +243,51 @@ class AgentRuntime:
                         },
                     )
             call_tools = [] if finalizing else effective_tools
+            call_max_tokens = effective_max_tokens
+            if token_budget is not None:
+                remaining = token_budget - total_usage['total_tokens']
+                estimated_input = estimate_input_tokens(model_messages, call_tools)
+                if not finalizing and remaining < 2 * (estimated_input + min(512, effective_max_tokens)):
+                    finalizing = True
+                    call_tools = []
+                    model_messages = list(model_messages) + [{
+                        'role': 'user', 'content': controller.finalization_instruction(),
+                    }]
+                    estimated_input = estimate_input_tokens(model_messages, [])
+                    yield RuntimeEvent(type=RuntimeEventType.BUDGET_DECISION, data={
+                        'action': 'finalize', 'reason': 'token_reserve',
+                        'lease_limit': controller.lease_limit,
+                    })
+                call_max_tokens = min(effective_max_tokens, remaining - estimated_input)
+                if call_max_tokens < 1:
+                    yield RuntimeEvent(type=RuntimeEventType.TOKEN_BUDGET_EXCEEDED,
+                                       data={'budget': token_budget, 'used': total_usage['total_tokens'],
+                                             'reason': 'request_admission'})
+                    yield RuntimeEvent(type=RuntimeEventType.DONE, data={
+                        'content': '请求预计用量超过剩余预算；已停止调用模型。',
+                        'usage_total': total_usage['total_tokens']})
+                    return
 
             try:
                 if stream:
                     yield from self._consume_stream(
                         state, call_tools, step_usage, tool_calls_acc, timeout,
-                        effective_max_tokens, call_overrides=recovery_kwargs,
+                        call_max_tokens, call_overrides=recovery_kwargs,
                         input_messages=model_messages,
                     )
                 else:
                     yield from self._consume_sync(
                         state, call_tools, step_usage, tool_calls_acc,
-                        effective_max_tokens, call_overrides=recovery_kwargs,
+                        call_max_tokens, call_overrides=recovery_kwargs,
                         input_messages=model_messages,
                     )
+            except BudgetAdmissionError as e:
+                yield RuntimeEvent(type=RuntimeEventType.TOKEN_BUDGET_EXCEEDED,
+                                   data={'budget': token_budget, 'used': total_usage['total_tokens'],
+                                         'reason': str(e)})
+                yield RuntimeEvent(type=RuntimeEventType.DONE, data={
+                    'content': str(e), 'usage_total': total_usage['total_tokens']})
+                return
             except Exception as e:
                 yield RuntimeEvent(type=RuntimeEventType.ERROR,
                                    data={"msg": f"模型调用失败: {e}"})
@@ -406,7 +439,15 @@ class AgentRuntime:
                 # 执行工具 - 始终通过 execute_with_context，不做权限预判
                 # 使用 monotonic clock 测量执行耗时，供账本索引投影
                 _tool_t0 = time.monotonic()
-                ok, output = self._execute_tool(tc, ctx)
+                query_key = (tc['name'], controller.board._canonical_arguments(tc['arguments']))
+                cacheable = getattr(self.skill_engine, 'is_read_only', lambda name: False)(tc['name']) is True
+                cached = cacheable and query_key in successful_queries
+                if cached:
+                    ok, output = successful_queries[query_key]
+                else:
+                    ok, output = self._execute_tool(tc, ctx)
+                    if cacheable and ok:
+                        successful_queries[query_key] = (ok, output)
                 tool_duration_ms = int((time.monotonic() - _tool_t0) * 1000)
 
                 state.messages.append({
@@ -431,6 +472,7 @@ class AgentRuntime:
                         "display": display,     # 脱敏截断，供 UI 展示
                         "step": state.step,
                         "duration_ms": tool_duration_ms,
+                        "cached": cached,
                     },
                 )
 
@@ -571,9 +613,12 @@ class AgentRuntime:
             }
 
         usage_total = result.get("usage_total", 0)
+        step_usage['prompt_tokens'] = int(result.get('prompt_tokens', 0) or 0)
+        step_usage['completion_tokens'] = int(result.get('completion_tokens', 0) or 0)
         if usage_total:
             step_usage["total_tokens"] = usage_total
-            yield RuntimeEvent(type=RuntimeEventType.USAGE, data=dict(step_usage))
+            yield RuntimeEvent(type=RuntimeEventType.USAGE, data={**step_usage,
+                'estimated': bool(result.get('usage_estimated'))})
 
         state.finish_reason = result.get("finish_reason", "stop")
         state.empty = bool(result.get("empty", False))

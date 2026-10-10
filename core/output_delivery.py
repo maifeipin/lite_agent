@@ -169,7 +169,12 @@ def _send_email(text: str, config: dict, title: str = "") -> str:
                     message.attach(MIMEText(text, "plain", "utf-8"))
                     smtp.send_message(message)
                 finally:
-                    smtp.quit()
+                    try:
+                        smtp.quit()
+                    except Exception:
+                        # A teardown failure does not invalidate an accepted
+                        # message or justify sending it again via another account.
+                        pass
             return provider
         except Exception as exc:
             last_error = exc
@@ -237,29 +242,41 @@ def _summary_or_preview(text: str, policy: dict,
 
 def prepare_channel_output(text: str, channel: str, config: dict,
                            overrides: dict = None, title: str = "",
-                           summarize: Optional[Callable[[str, int], str]] = None) -> str:
+                           summarize: Optional[Callable[[str, int], str]] = None,
+                           task_result=None) -> str:
     """Return channel-safe text while preserving the complete response elsewhere."""
     policy = resolve_output_policy(config, overrides)
     cfg = config.get("output_delivery", {}) or {}
     limits = {**DEFAULT_CHANNEL_LIMITS, **(cfg.get("channel_limits", {}) or {})}
     max_chars = policy["max_chars"] or int(limits.get(channel.lower(), 2500))
+    status_prefix = (task_result.status_text() + '\n\n') if task_result else ''
 
     # API callers retain complete inline output unless explicitly overridden.
     # Explicit external destinations also run for short text.
     if policy["full_delivery"] == "inline" or (
         channel.lower() == "api" and not policy["explicit"]
     ):
-        return text
+        return status_prefix + text
     needs_external = len(text) > max_chars or policy["explicit"]
     if not needs_external:
-        return text
+        return status_prefix + text
 
-    destination, location = _deliver_complete(text, channel, config, policy, title)
-    summary = _summary_or_preview(text, policy, summarize)
+    previous = task_result.delivery if task_result else {}
+    if previous.get('status') == 'submitted':
+        destination, location = previous['destination'], previous['location']
+    else:
+        destination, location = _deliver_complete(status_prefix + text, channel, config, policy, title)
+        if task_result:
+            task_result.delivery = {'purpose': 'execution_report', 'status': 'submitted' if destination else 'failed',
+                                    'destination': destination, 'location': location}
+    # Structured execution reports already contain a bounded analysis near
+    # the beginning; do not pay for another model pass over full detail tables.
+    summary = _summary_or_preview(text, policy, None if task_result else summarize)
     if destination == "hedgedoc":
         suffix = f"\n\n完整回复已保存为 HedgeDoc 公开链接：\n{location}"
     elif destination == "email":
-        suffix = f"\n\n完整回复已发送到配置邮箱（发送通道：{location}）。"
+        purpose = '账单报告' if previous.get('purpose') == 'billing_report' else '执行报告' if task_result else '完整回复'
+        suffix = f"\n\n{purpose}已提交邮件通道（{location}），收件人使用项目配置。"
     elif destination == "sqlite":
         if policy["full_delivery"] == "sqlite":
             suffix = (
@@ -276,5 +293,5 @@ def prepare_channel_output(text: str, channel: str, config: dict,
         # final transport-only fallback if local archive creation also fails.
         suffix = "\n\n⚠️ 完整回复外部转存失败；原文仍保留在会话历史中。"
 
-    available = max(0, max_chars - len(suffix))
-    return summary[:available].rstrip() + suffix
+    available = max(0, max_chars - len(suffix) - len(status_prefix))
+    return status_prefix + summary[:available].rstrip() + suffix

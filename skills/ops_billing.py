@@ -122,6 +122,16 @@ def billing_reconcile(months: int = 3, tolerance: float = 1.0) -> str:
 def billing_recent(months: int = 3) -> str:
     return _run_billing_cmd(["recent", str(months)])
 
+
+@skill(name='billing_snapshot', description='读取账单快照，按币种保留金额并检查数据缺口；只读数据库',
+       params={'months': {'type': 'integer', 'default': 1},
+               'detail_limit': {'type': 'integer', 'default': 20}}, side_effect=False)
+def billing_snapshot(months: int = 1, detail_limit: int = 20) -> str:
+    import json
+    from core.billing_snapshot import build_snapshot, model_evidence
+    path = _cfg.get('billing', {}).get('statement_db_path', os.path.join(BILLING_SCRIPT_DIR, 'statements.db'))
+    return json.dumps(model_evidence(build_snapshot(path, months, detail_limit)), ensure_ascii=False)
+
 @skill(
     name='billing_fetch',
     description='批量从邮箱下载最新的账单邮件，解析并入库 (自动同步最新账单数据)。比较耗时，请耐心等待',

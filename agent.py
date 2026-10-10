@@ -650,13 +650,14 @@ class Agent:
         return str(result.get("content") or "")[:max_chars]
 
     def _prepare_output(self, text: str, channel: str, overrides: dict = None,
-                        title: str = "", session_key: str = "") -> str:
+                        title: str = "", session_key: str = "", task_result=None) -> str:
         """Apply the shared output policy before channel transport."""
         return prepare_channel_output(
             text, channel, self._config, overrides=overrides, title=title,
             summarize=lambda value, limit: self._summarize_output(
                 value, limit, session_key=session_key
             ),
+            task_result=task_result,
         )
 
     # ------------------------------------------------------------------
@@ -1006,7 +1007,7 @@ class Agent:
         def _bg_run():
             try:
                 print(f"  [ORCH] 后台线程开始执行 session={msg.session_key} task_id={task_id}")
-                result = orch.execute(
+                result = orch.execute_result(
                     goal=goal,
                     session_key=msg.session_key,
                     progress_callback=self._on_subtask_progress(msg),
@@ -1014,7 +1015,7 @@ class Agent:
                     step_override=step_override,
                     execution_policy=execution_policy,
                 )
-                print(f"  [ORCH] 后台线程执行完成 session={msg.session_key} result_len={len(result)}")
+                print(f"  [ORCH] 后台线程执行完成 session={msg.session_key} status={result.status} result_len={len(result.content)}")
                 self._push_result(msg, result)
             except Exception as e:
                 print(f"  [ORCH] 后台线程异常 session={msg.session_key}: {e}")
@@ -1054,10 +1055,15 @@ class Agent:
         return callback
 
     def _push_result(self, msg, result: str):
+        from core.task_result import TaskResult
+        task_result = result if isinstance(result, TaskResult) else None
+        if task_result:
+            result = task_result.content
         overrides = {"full_delivery": msg.output_mode} if msg.output_mode else None
         prepared_result = self._prepare_output(
             result, msg.channel, overrides=overrides,
             title="多Agent执行报告", session_key=msg.session_key,
+            task_result=task_result,
         )
         response = AgentResponse(prepared_result, title="🤖 多Agent执行报告", color="blue")
         for ch in self.channels:

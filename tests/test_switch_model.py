@@ -7,6 +7,48 @@ from scripts import switch_model as switch
 
 
 class SwitchModelTests(unittest.TestCase):
+    def test_key_update_preserves_profiles_and_rolls_back_on_restart_failure(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                path = root / 'llm.json'
+                cfg = {'default': 'old', 'api_key': '${OLD_KEY}', 'models': {
+                    'old': {'api_key': '${OLD_KEY}'},
+                    'flash': {'api_key': '${DEEPSEEK_API_KEY}', 'profiles': {
+                        'default': {'invoke_kwargs': {'extra_body': {
+                            'thinking': {'type': 'disabled'}}}}}}}}
+                path.write_text(json.dumps(cfg))
+                original = path.read_bytes()
+                with patch.multiple(switch, CONF_D=str(root), LLM_JSON=str(path)), \
+                     patch.object(switch, 'restart_service',
+                                  side_effect=[RuntimeError('failed'), None] if fail else None), \
+                     patch('builtins.print') as output:
+                    self.assertEqual(switch.apply_switch('flash', cfg, {}, {}, {},
+                                     new_api_key='test-key-not-a-real-secret', yes=True), not fail)
+                self.assertNotIn('test-key-not-a-real-secret', str(output.call_args_list))
+                self.assertEqual(cfg['models']['flash']['api_key'], '${DEEPSEEK_API_KEY}')
+                if fail:
+                    self.assertEqual(path.read_bytes(), original)
+                else:
+                    saved = json.loads(path.read_text())
+                    self.assertEqual(saved['api_key'], 'test-key-not-a-real-secret')
+                    self.assertEqual(saved['models']['flash']['api_key'], saved['api_key'])
+                    self.assertEqual(saved['models']['old'], cfg['models']['old'])
+                    self.assertEqual(saved['models']['flash']['profiles'],
+                                     cfg['models']['flash']['profiles'])
+
+    def test_cli_alias_passes_key_without_prompt_or_restart(self):
+        cfg = {'default': 'old', 'models': {'flash': {'aliases': ['ds']}}}
+        with patch.object(switch.os.path, 'exists', return_value=True), \
+             patch.object(switch, 'load_json', side_effect=[cfg, {}, {}, {}]), \
+             patch.object(switch, 'apply_switch', return_value=True) as apply, \
+             patch('builtins.input', side_effect=AssertionError('unexpected prompt')), \
+             patch.object(switch.sys, 'argv', ['switch_model.py', 'DS', '--yes',
+                          '--no-restart', '--api-key', ' test-key ']):
+            switch.main()
+        apply.assert_called_once_with('flash', cfg, {}, {}, {},
+                                      new_api_key='test-key', yes=True, restart=False)
+
     def test_success_and_failure_restore_all_files(self):
         for fail in (False, True):
             with self.subTest(fail=fail), tempfile.TemporaryDirectory() as temp:

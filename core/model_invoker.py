@@ -51,10 +51,11 @@ class OpenAIInvoker(ModelInvoker):
 
     def __init__(self, client, model_name: str, temperature: float = 0.3,
                  max_tokens: int = 2048, timeout: float = 60.0,
-                 output_recovery: Optional[dict] = None):
+                 output_recovery: Optional[dict] = None, provider: str = 'openai'):
         super().__init__(model_name, temperature, max_tokens, output_recovery)
         self.client = client
         self.timeout = timeout
+        self.provider = provider
 
     # ---- 流式调用 ----
 
@@ -68,7 +69,10 @@ class OpenAIInvoker(ModelInvoker):
         call_kwargs = self._build_call_kwargs(messages, tools, stream=True, **kwargs)
         _finish_reason = "stop"
         try:
-            with self.client.chat.completions.create(**call_kwargs) as response_stream:
+            client = self.client
+            if 'max_retries' in kwargs and hasattr(client, 'with_options'):
+                client = client.with_options(max_retries=int(kwargs['max_retries']))
+            with client.chat.completions.create(**call_kwargs) as response_stream:
                 for chunk in response_stream:
                     if getattr(chunk, "usage", None):
                         yield ModelEvent(type=ModelEventType.USAGE, data={
@@ -155,6 +159,10 @@ class OpenAIInvoker(ModelInvoker):
         has_requested_thinking = "thinking" in kwargs
         requested_thinking = kwargs.get("thinking")
         requested_extra_body = kwargs.get("extra_body") or {}
+        if self.provider == 'deepseek' and 'enable_thinking' in requested_extra_body:
+            requested_extra_body = dict(requested_extra_body)
+            enabled = requested_extra_body.pop('enable_thinking')
+            requested_extra_body.setdefault('thinking', {'type': 'enabled' if enabled else 'disabled'})
         has_explicit_recovery = has_requested_thinking or bool(requested_extra_body)
         is_pro = "pro" in self.model_name.lower() or "reasoner" in self.model_name.lower()
         if has_explicit_recovery:
@@ -167,6 +175,9 @@ class OpenAIInvoker(ModelInvoker):
         if not is_pro or has_explicit_recovery:
             call_kwargs["temperature"] = self.temperature
             call_kwargs["max_tokens"] = kwargs.get("max_tokens", self.max_tokens)
+        # Explicit request budgets also apply to reasoning/pro models.
+        if 'max_tokens' in kwargs:
+            call_kwargs['max_tokens'] = kwargs['max_tokens']
 
         if tools:
             call_kwargs["tools"] = tools

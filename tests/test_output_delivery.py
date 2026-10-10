@@ -60,7 +60,7 @@ def test_explicit_email_delivers_even_short_reply():
             overrides={"full_delivery": "email"},
         )
     send.assert_called_once()
-    assert "完整回复已发送" in result
+    assert "完整回复已提交邮件通道" in result
     assert "qq" in result
 
 

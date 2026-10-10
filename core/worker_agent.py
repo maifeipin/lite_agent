@@ -11,6 +11,7 @@ from core.skill_engine import SkillEngine, _cap_tool_result
 from core.subtask_dag import Subtask
 from core.model_config import is_gemini_driver, supports_vision
 from core.model_invoker import OpenAIInvoker, GeminiInvoker
+from core.llm_gateway import LLMGateway
 
 
 @dataclass
@@ -37,7 +38,8 @@ class WorkerAgent:
                  invoker=None, max_retries: int = 1,
                  call_timeout: float = 60.0,
                  call_kwargs: Optional[dict] = None,
-                 adaptive_policy: Optional[AdaptiveBudgetPolicy] = None):
+                 adaptive_policy: Optional[AdaptiveBudgetPolicy] = None,
+                 execution_budget=None, estimate_margin=1.25, evidence_config=None):
         self.name = name
         self.client = client
         self.model_name = model_name
@@ -54,6 +56,9 @@ class WorkerAgent:
         self.call_timeout = max(1.0, float(call_timeout))
         self.call_kwargs = dict(call_kwargs or {})
         self.adaptive_policy = adaptive_policy or AdaptiveBudgetPolicy()
+        self.execution_budget = execution_budget
+        self.estimate_margin = estimate_margin
+        self.evidence_config = evidence_config or {}
 
         # ExecutionLedger: 旁路执行账本 (可选, 由调用方注入)
         self.ledger = ledger
@@ -75,6 +80,7 @@ class WorkerAgent:
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
                 output_recovery=model_cfg.get("output_recovery", {}),
+                provider=driver,
             )
 
     def _log(self, msg: str):
@@ -103,30 +109,6 @@ class WorkerAgent:
     def _build_prompt(self, subtask: Subtask, upstream: dict = None,
                       goal: str = None, global_strategy: str = None) -> str:
         tools_desc = self.skill_engine.list_skills_filtered(self.tools_allowlist)
-        ctx_block = ""
-        if upstream:
-            ctx_lines = []
-            for dep_id, dep_result in upstream.items():
-                if isinstance(dep_result, dict):
-                    res_text = dep_result.get("result", "")
-                    tool_res = dep_result.get("tool_results", [])
-
-                    block = f"### {dep_id}\n[执行结论]:\n{res_text[:8000]}\n"
-                    if tool_res:
-                        block += "\n[工具调用明细]:\n"
-                        for tr in tool_res:
-                            block += f"- 工具 `{tr.get('name')}(args={tr.get('args')})`:\n返回数据: {str(tr.get('result', ''))}\n"
-                    ctx_lines.append(block)
-                else:
-                    # Legacy fallback for old string formats
-                    ctx_lines.append(f"### {dep_id}\n{str(dep_result)[:1500]}")
-
-            ctx_block = "\n\n上游子任务结果（参考上下文）:\n" + "\n\n".join(ctx_lines)
-
-            # Total fan-in truncation to prevent context explosion (~16K+ tokens if CJK)
-            if len(ctx_block) > 24000:
-                ctx_block = ctx_block[:24000] + "\n\n... ⚠️ [上游已截断, 依赖的部分内容被省略] ..."
-
         goal_block = ""
         if goal:
             goal_block = f"## 总体目标 (北极星目标)\n{goal}\n"
@@ -144,7 +126,6 @@ class WorkerAgent:
 {goal_block}{strategy_block}
 ## 当前子任务
 {subtask.name}: {subtask.prompt}
-{ctx_block}
 
 可用工具:
 {tools_desc}
@@ -171,6 +152,17 @@ class WorkerAgent:
             "content": self._build_prompt(subtask, upstream, goal, global_strategy),
         }
         messages = [system_msg]
+        if upstream:
+            # Evidence is bounded and separate from immutable instructions.
+            evidence = []
+            for dep_id, result in upstream.items():
+                if isinstance(result, dict):
+                    evidence.append(f"{dep_id}: {str(result.get('result', ''))[:3000]}")
+                    for item in result.get('tool_results', [])[-4:]:
+                        evidence.append(f"{item.get('name')}: {str(item.get('result', ''))[:500]}")
+                else:
+                    evidence.append(f"{dep_id}: {str(result)[:1500]}")
+            messages.append({'role': 'user', 'content': '[上游证据，可能截断]\n' + '\n'.join(evidence)[:8000]})
 
         if images and self._supports_vision():
             user_content = [{"type": "text", "text": subtask.prompt}]
@@ -218,6 +210,8 @@ class WorkerAgent:
             max_retries=self.max_retries,
             call_kwargs=self.call_kwargs,
             adaptive_policy=self.adaptive_policy,
+            gateway=LLMGateway(budget=self.execution_budget,
+                               estimate_margin=self.estimate_margin),
         )
 
         try:
@@ -252,6 +246,14 @@ class WorkerAgent:
                     )
 
                 elif event.type == RuntimeEventType.TOOL_RESULT:
+                    evidence_ref = ''
+                    if self.ledger is not None:
+                        from core.output_delivery import archive_output
+                        from core.utils.masker import mask_secrets
+                        evidence_ref = archive_output(mask_secrets(json.dumps({
+                            'name': event.data['name'], 'arguments': event.data.get('arguments'),
+                            'ok': event.data['ok'], 'output': event.data['output'],
+                        }, ensure_ascii=False)), 'worker_evidence', self.evidence_config, self.name)
                     extracted_tools.append({
                         "name": event.data["name"],
                         "args": event.data.get("arguments", ""),
@@ -260,6 +262,7 @@ class WorkerAgent:
                             event.data["output"],
                             max_len=4000,
                         ),
+                        'evidence_ref': evidence_ref,
                     })
 
                 elif event.type == RuntimeEventType.DONE:

@@ -425,7 +425,8 @@ class TestCircuitBreakers:
 
         budget_event = [e for e in events if e.type == RuntimeEventType.TOKEN_BUDGET_EXCEEDED][0]
         assert budget_event.data["budget"] == 50
-        assert budget_event.data["used"] == 100
+        assert budget_event.data["used"] == 0
+        assert call_count[0] == 0
 
 
 # ================================================================
@@ -1086,7 +1087,7 @@ class TestTokenBudgetPostCheck:
                 # 第一步消耗 100 tokens，返回工具调用
                 yield from _make_stream_events(
                     tool_calls=[{"id": "c1", "name": "echo", "arguments": '{}'}],
-                    usage={"prompt_tokens": 50, "completion_tokens": 50, "total_tokens": 100},
+                    usage={"prompt_tokens": 50, "completion_tokens": 50, "total_tokens": 5000},
                 )
             else:
                 # 如果预算检查失败，不应该到达这里
@@ -1103,7 +1104,7 @@ class TestTokenBudgetPostCheck:
         events = list(runtime.run(
             messages=[{"role": "user", "content": "hi"}],
             tools=[],
-            ctx=_make_ctx(token_budget=80),
+            ctx=_make_ctx(token_budget=4000),
         ))
 
         types = [e.type for e in events]
@@ -1123,7 +1124,7 @@ class TestTokenBudgetPostCheck:
         invoker = MagicMock()
         invoker.invoke_stream.return_value = iter(_make_stream_events(
             text="response",
-            usage={"prompt_tokens": 50, "completion_tokens": 50, "total_tokens": 100},
+            usage={"prompt_tokens": 50, "completion_tokens": 50, "total_tokens": 5000},
         ))
         se = MagicMock()
 
@@ -1131,7 +1132,7 @@ class TestTokenBudgetPostCheck:
         events = list(runtime.run(
             messages=[{"role": "user", "content": "hi"}],
             tools=[],
-            ctx=_make_ctx(token_budget=80),
+            ctx=_make_ctx(token_budget=4000),
         ))
 
         types = [e.type for e in events]
@@ -1139,8 +1140,8 @@ class TestTokenBudgetPostCheck:
         assert RuntimeEventType.DONE in types
 
         budget_event = [e for e in events if e.type == RuntimeEventType.TOKEN_BUDGET_EXCEEDED][0]
-        assert budget_event.data["used"] == 100
-        assert budget_event.data["budget"] == 80
+        assert budget_event.data["used"] == 5000
+        assert budget_event.data["budget"] == 4000
 
 
 # ================================================================

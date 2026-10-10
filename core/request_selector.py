@@ -126,6 +126,7 @@ DOMAIN_MAP: Dict[str, Dict] = {
         "default_tools": [
             "billing_report", "billing_due_soon", "billing_unpaid",
             "billing_reconcile", "billing_recent",
+            "billing_snapshot",
             "billing_txns_over", "billing_parse_health",
         ],
         "explicit_intent_tools": [

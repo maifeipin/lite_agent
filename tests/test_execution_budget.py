@@ -97,7 +97,7 @@ def test_orchestrator_uses_policy_budget_across_all_llm_roles():
 
     assert result == "summary"
     assert observed["plan_max_steps"] == 7
-    assert observed["worker_limits"] == (5, 90)
+    assert observed["worker_limits"] == (5, 80)
     assert observed["before_aggregate"].used_steps == 3
     assert observed["before_aggregate"].used_tokens == 40
 

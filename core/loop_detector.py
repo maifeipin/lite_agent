@@ -8,6 +8,7 @@ class LoopDetector:
         self._threshold = threshold
         self._last = None
         self._streak = 0
+        self._history = []
 
     def check(self, tool_name: str, args_str: str) -> bool:
         """检查本次调用是否触发死循环熔断。返回 True 表示应终止。"""
@@ -17,6 +18,10 @@ class LoopDetector:
         else:
             self._streak = 1
         self._last = fingerprint
+        self._history = (self._history + [fingerprint])[-2 * self._threshold:]
+        if (len(self._history) == 2 * self._threshold and
+                self._history == self._history[:2] * self._threshold):
+            self._streak = self._threshold
         return self._streak >= self._threshold
 
     @property
@@ -26,6 +31,7 @@ class LoopDetector:
     def reset(self):
         self._last = None
         self._streak = 0
+        self._history = []
 
     def msg(self, tool_name: str, worker_name: str = "") -> str:
         """生成死循环终止消息。"""

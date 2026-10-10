@@ -7,5 +7,6 @@
     "low_yield_streak": 3,
     "low_result_chars": 80,
     "max_context_chars": 24000,
-    "recent_tool_rounds": 2
+    "recent_tool_rounds": 2,
+    "replan_low_yield_rounds": 2
 }

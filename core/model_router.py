@@ -93,6 +93,7 @@ class ModelRouter:
         return OpenAIInvoker(
             **common,
             timeout=kwargs.get("timeout", profile["timeout"]),
+            provider=self.get_driver(model_name),
         )
 
     def get_call_profile(self, model_name: str,

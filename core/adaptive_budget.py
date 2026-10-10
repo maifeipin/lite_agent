@@ -29,6 +29,7 @@ class AdaptiveBudgetPolicy:
     low_result_chars: int = 80
     max_context_chars: int = 24000
     recent_tool_rounds: int = 2
+    replan_low_yield_rounds: int = 2
 
     @classmethod
     def from_config(cls, config: Optional[dict]) -> "AdaptiveBudgetPolicy":
@@ -43,6 +44,7 @@ class AdaptiveBudgetPolicy:
             low_result_chars=max(0, int(raw.get("low_result_chars", 80))),
             max_context_chars=max(4000, int(raw.get("max_context_chars", 24000))),
             recent_tool_rounds=max(1, int(raw.get("recent_tool_rounds", 2))),
+            replan_low_yield_rounds=max(1, int(raw.get('replan_low_yield_rounds', 2))),
         )
 
 
@@ -75,6 +77,7 @@ class EvidenceBoard:
         self.low_yield_streak = 0
         self._calls: set[str] = set()
         self._outputs: set[str] = set()
+        self._rounds = {}
 
     @staticmethod
     def _canonical_url(value: str) -> str:
@@ -108,7 +111,8 @@ class EvidenceBoard:
         args = self._canonical_arguments(arguments)
         call_fp = hashlib.sha256(f"{tool_name}:{args}".encode()).hexdigest()
         output_fp = hashlib.sha256(text.encode()).hexdigest() if text else ""
-        duplicate = call_fp in self._calls or bool(output_fp and output_fp in self._outputs)
+        duplicate = bool(output_fp and output_fp in self._outputs) or (
+            tool_name in self.WEB_TOOLS and call_fp in self._calls)
         self._calls.add(call_fp)
         if output_fp:
             self._outputs.add(output_fp)
@@ -128,6 +132,8 @@ class EvidenceBoard:
 
         self.low_yield_streak = self.low_yield_streak + 1 if gain == "low" else 0
         signal = ProgressSignal(step, tool_name, gain, reason, len(text))
+        self._rounds[step] = self._rounds.get(step, False) or gain != 'low'
+        self._rounds = dict(list(self._rounds.items())[-12:])
         self.signals = (self.signals + [signal])[-12:]
         if text and not duplicate:
             self.items = (self.items + [{
@@ -158,6 +164,15 @@ class EvidenceBoard:
             "evidence_items": len(self.items),
         }
 
+    def low_rounds(self, since_step=0):
+        rounds = {step: useful for step, useful in self._rounds.items() if step > since_step}
+        streak = 0
+        for useful in reversed(list(rounds.values())):
+            if useful:
+                break
+            streak += 1
+        return streak
+
 
 class AdaptiveStepController:
     """Grants short leases inside an immutable hard limit and reserves summary."""
@@ -174,6 +189,7 @@ class AdaptiveStepController:
         self.board = EvidenceBoard(policy.low_result_chars)
         self.replan_used = False
         self.finalizing = False
+        self.replan_step = 0
 
     def record_tool_result(self, **kwargs) -> ProgressSignal:
         return self.board.record(**kwargs)
@@ -191,9 +207,15 @@ class AdaptiveStepController:
             action = BudgetAction.FINALIZE if next_step <= self.hard_steps else BudgetAction.EXHAUSTED
             return self._result(action, "finalization_reserved")
 
-        if self.board.low_yield_streak >= self.policy.low_yield_streak:
+        if (self.replan_used and self.board.low_rounds(self.replan_step) >=
+                self.policy.replan_low_yield_rounds):
+            self.finalizing = True
+            return self._result(BudgetAction.FINALIZE, 'low_yield_after_replan',
+                                self.finalization_instruction())
+        if self.board.low_rounds() >= self.policy.low_yield_streak:
             if not self.replan_used and next_step <= self.execution_cap:
                 self.replan_used = True
+                self.replan_step = next_step - 1
                 self.board.low_yield_streak = 0
                 self.lease_limit = min(
                     self.execution_cap,
@@ -249,6 +271,7 @@ class AdaptiveStepController:
                 return self._extend(str(value.get("reason") or "supervisor_extend"), grant)
             if action == "replan":
                 self.replan_used = True
+                self.replan_step = next_step - 1
                 self.lease_limit = min(self.execution_cap, self.lease_limit + 2)
                 return self._result(
                     BudgetAction.REPLAN,
@@ -278,12 +301,18 @@ def compact_messages(messages: list[dict], *, base_message_count: int,
                      board: EvidenceBoard, max_chars: int,
                      recent_tool_rounds: int) -> list[dict]:
     """Return a bounded provider view without mutating persisted history."""
-    size = lambda item: len(str(item.get("content", "")))
+    size = lambda item: len(json.dumps(item, ensure_ascii=False, default=str))
     if sum(map(size, messages)) <= max_chars:
         return messages
 
     base, current = messages[:base_message_count], messages[base_message_count:]
     systems = [dict(item) for item in base if item.get("role") == "system"]
+    # Worker system prompts contain instructions only. Still bound legacy
+    # prompts so old upstream dumps cannot bypass compaction indefinitely.
+    system_limit = max(1000, max_chars // max(4, len(systems) * 4))
+    for item in systems:
+        if isinstance(item.get('content'), str) and len(item['content']) > system_limit:
+            item['content'] = item['content'][:system_limit] + '\n…[system 上下文已截断]'
     conversation = [dict(item) for item in base
                     if item.get("role") not in ("system", "tool")
                     and not item.get("tool_calls")][-6:]
@@ -300,6 +329,15 @@ def compact_messages(messages: list[dict], *, base_message_count: int,
         if isinstance(item.get("content"), str) and len(item["content"]) > item_limit:
             item["content"] = item["content"][:item_limit] + "\n…[原始内容未重复注入]"
 
+    # A round may contain many results; bound the entire round, not each item
+    # independently. Never remove an assistant/tool pair halfway through.
+    fixed_base = sum(map(size, systems + conversation))
+    remaining = max(0, max_chars - fixed_base - 1200 - sum(
+        size({**item, 'content': ''}) for item in recent))
+    per_item = remaining // max(1, len(recent))
+    for item in recent:
+        if isinstance(item.get('content'), str) and len(item['content']) > per_item:
+            item['content'] = item['content'][:max(0, per_item - 30)] + '\n…[原始内容未重复注入]'
     fixed = sum(map(size, systems + conversation + recent))
     board_message = {"role": "user", "content": board.render(
         max(1200, min(10000, max_chars - fixed))
