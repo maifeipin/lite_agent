@@ -144,12 +144,9 @@ def billing_snapshot(months: int = 1, detail_limit: int = 20) -> str:
     }
 )
 def billing_fetch(months: int = 1) -> str:
-    # 结合下载并入库：mail_client.py 好像 exec3m (即 download_bank_bills) + validate (validate_bank_bills)
-    # 根据原菜单，[2] 是 download_bank_bills, [3] 是 validate_bank_bills
-    # 我们可以连续执行两次
-    out1 = _run_billing_cmd(["exec3m", str(months)], timeout=180)
-    out2 = _run_billing_cmd(["validate3m", str(months)], timeout=180)
-    return f"--- 步骤1: 邮件下载 ---\n{out1}\n\n--- 步骤2: 账单解析与入库 ---\n{out2}"
+    # 单次遍历流水线：下载归档 + 解析入库一次完成（替代旧 exec3m + validate3m 两次全盘扫描）。
+    # 300 秒仅外层兜底，账户级时限由脚本内部预算控制。
+    return _run_billing_cmd(["sync3m", str(months)], timeout=300)
 
 @skill(
     name='billing_txns_over',

@@ -74,6 +74,7 @@
     },
     "billing_workflow": {
         "enabled": true,
+        "analysis_model": "flash",
         "max_total_tokens": 60000,
         "analysis_max_calls": 2,
         "analysis_max_output_tokens": 2048,

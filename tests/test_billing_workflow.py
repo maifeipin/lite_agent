@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from core.billing_snapshot import build_snapshot, decimal_amount, render_report
-from core.billing_workflow import BillingWorkflow
+from core.billing_workflow import BillingWorkflow, _parse_json_summary
 from core.execution_budget import ExecutionBudget, BudgetAdmissionError
 from core.llm_gateway import LLMGateway
 from core.output_delivery import prepare_channel_output
@@ -14,6 +14,7 @@ from core.loop_detector import LoopDetector
 from core.worker_agent import WorkerAgent, WorkerOutcome
 from core.subtask_dag import Subtask
 from core.task_orchestrator import TaskOrchestrator
+from core.model_policy import ExecutionPolicy
 import threading
 import pytest
 
@@ -60,6 +61,77 @@ def test_missing_database_is_not_created(tmp_path):
     with pytest.raises(sqlite3.OperationalError):
         build_snapshot(missing)
     assert not missing.exists()
+
+
+def test_new_schema_anchors_are_authoritative_and_failed_statements_excluded(billing_db):
+    with sqlite3.connect(billing_db) as c:
+        c.execute("ALTER TABLE statements ADD COLUMN parse_status TEXT DEFAULT 'ok'")
+        c.execute('ALTER TABLE statement_transactions ADD COLUMN statement_id INTEGER')
+        c.execute('UPDATE statement_transactions SET statement_id=CASE WHEN id<3 THEN 1 ELSE 2 END')
+        c.execute("UPDATE statements SET uid='new-uid' WHERE id=1")
+        c.execute("UPDATE statements SET parse_status='failed',statement_month='2026-11' WHERE id=2")
+        c.execute("INSERT INTO statement_transactions VALUES (4,'a','new-uid','CMB','2026-10-03','unanchored','99','CNY','debit','',NULL)")
+    snapshot = build_snapshot(billing_db, today=date(2026, 10, 11))
+    assert snapshot['database_statement_count'] == 2
+    assert snapshot['failed_statement_count'] == 1
+    assert [r['id'] for r in snapshot['statements']] == [1]
+    assert [r['id'] for r in snapshot['transactions']] == [1, 2]
+    assert snapshot['transaction_totals'][0]['amount'] == '0.30'
+    assert any('解析失败' in s for s in snapshot['anomalies'])
+    assert all(r['bank'] != 'HX' for r in snapshot['latest_months'])
+
+
+@pytest.mark.parametrize('payload', ['[]', 'null', '{}', '{"accounts":[]}',
+                                   '{"accounts":["bad"]}', '{"accounts":[{}]}', '{bad'])
+def test_invalid_receipts_cannot_claim_success(payload):
+    output = '--- JSON_SUMMARY_START ---\n' + payload + '\n--- JSON_SUMMARY_END ---'
+    assert _parse_json_summary(output) is None
+    workflow = BillingWorkflow({}, MagicMock())
+    with patch('core.billing_workflow.subprocess.run', return_value=SimpleNamespace(
+            stdout=output, stderr='', returncode=0)):
+        _, errors = workflow.fetch('/parser', 1)
+    assert any('无法确认' in e for e in errors)
+
+
+def test_fetch_uses_single_sync_and_surfaces_each_account_failure():
+    receipt = {'accounts': [{'account': 'a', 'status': 'partial', 'errors': 1},
+                            {'account': 'b', 'status': 'timeout', 'error': 'scan timed out'},
+                            {'account': 'c', 'status': 'ok', 'parse_failed': 1}]}
+    raw = '--- JSON_SUMMARY_START ---\n' + json.dumps(receipt) + '\n--- JSON_SUMMARY_END ---'
+    with patch('core.billing_workflow.subprocess.run', return_value=SimpleNamespace(
+            stdout=raw, stderr='', returncode=0)) as run:
+        _, errors = BillingWorkflow({}, MagicMock()).fetch('/parser', 3)
+    assert run.call_count == 1
+    assert run.call_args.args[0][-2:] == ['sync3m', '3']
+    assert any('处理异常 1' in e for e in errors)
+    assert any('timeout' in e for e in errors)
+    assert any('解析失败 1' in e for e in errors)
+
+
+@pytest.mark.parametrize('policy,allowed,expected', [
+    (None, ['flash', 'glm'], 'flash'),
+    (ExecutionPolicy.user_locked('glm'), ['flash', 'glm'], 'glm'),
+    (None, ['glm'], 'glm'),
+])
+def test_billing_model_preference_preserves_user_lock_and_route_permissions(
+        billing_db, tmp_path, policy, allowed, expected):
+    config = {'llm': {'default': 'glm', 'models': {'flash': {}, 'glm': {}}},
+        'billing': {'statement_db_path': str(billing_db), 'script_dir': str(tmp_path)},
+        'task_routing': {'route_rules': [{'type': 'data_analysis', 'model': 'glm',
+                                        'allowed_models': allowed}],
+                         'billing_workflow': {'analysis_model': 'flash'}},
+        'output_delivery': {'long_output': {'full_delivery': 'email'},
+                            'sqlite': {'path': str(tmp_path / 'archive.db')}}}
+    router = MagicMock()
+    router.get_call_profile.return_value = {'max_tokens': 2048, 'timeout': 60, 'invoke_kwargs': {}}
+    router.get_invoker.return_value.invoke_sync.return_value = {
+        'content': '分析完成', 'usage_total': 500, 'finish_reason': 'stop'}
+    workflow = BillingWorkflow(config, router)
+    with patch.object(workflow, 'fetch', return_value=('', [])), \
+         patch('core.output_delivery._send_email', return_value='qq'):
+        result = workflow.run('拉取最新账单分析', 'model-policy-test', policy=policy)
+    assert result.status == 'succeeded'
+    assert router.get_invoker.call_args.args[0] == expected
 
 
 def test_task_failure_survives_summary_and_email_is_only_a_receipt():

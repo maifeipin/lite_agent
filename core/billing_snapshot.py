@@ -32,7 +32,9 @@ def build_snapshot(db_path, months=1, detail_limit=20, today=None):
     try:
         # Latest month per mailbox/bank, including older data as an explicit
         # fallback. A missing current month is a freshness gap, not zero spend.
-        all_rows = [dict(row) for row in conn.execute('SELECT * FROM statements ORDER BY bank_code, statement_month DESC, id DESC')]
+        database_rows = [dict(row) for row in conn.execute('SELECT * FROM statements ORDER BY bank_code, statement_month DESC, id DESC')]
+        failed_rows = [row for row in database_rows if row.get('parse_status') == 'failed']
+        all_rows = [row for row in database_rows if row.get('parse_status') != 'failed']
         cutoff = month_start(today, months)
         latest = {}
         for row in all_rows:
@@ -41,14 +43,19 @@ def build_snapshot(db_path, months=1, detail_limit=20, today=None):
         selected = [row for row in all_rows if (row['statement_month'] or '') >= cutoff or
                     row['statement_month'] == latest[(row['account_name'], row['bank_code'])]]
         txns = []
+        anchored = 'statement_id' in {row[1] for row in conn.execute('PRAGMA table_info(statement_transactions)')}
         for row in selected:
-            # Identity includes mailbox; POP UIDs are not globally unique.
-            for txn in conn.execute('''SELECT * FROM statement_transactions
-                    WHERE bank_code=? AND uid=? AND account_name=? ORDER BY txn_date, id''',
-                    (row['bank_code'], row['uid'], row['account_name'])):
+            # The anchor is authoritative after schema migration. Legacy UID
+            # association is used only for databases without the anchor column.
+            query = ('SELECT * FROM statement_transactions WHERE statement_id=? ORDER BY txn_date, id'
+                     if anchored else '''SELECT * FROM statement_transactions
+                     WHERE bank_code=? AND uid=? AND account_name=? ORDER BY txn_date, id''')
+            params = (row['id'],) if anchored else (row['bank_code'], row['uid'], row['account_name'])
+            for txn in conn.execute(query, params):
                 txns.append(dict(txn))
         txns = list({row['id']: row for row in txns}.values())
-        anomalies = []
+        anomalies = [f"账单 #{row['id']} 解析失败，已排除出账期选择、金额汇总及交易明细，需离线重解析。"
+                     for row in failed_rows]
         groups = {}
         for row in selected:
             groups.setdefault((row['account_name'], row['bank_code'], row['statement_month']), []).append(row['id'])
@@ -89,7 +96,8 @@ def build_snapshot(db_path, months=1, detail_limit=20, today=None):
             'generated_at': datetime.now(timezone.utc).isoformat(), 'as_of': today.isoformat(),
             'scope': f'账期 {cutoff} 起，另含各邮箱/银行最新历史账期',
             'latest_months': [{'account': key[0], 'bank': key[1], 'month': value} for key, value in latest.items()],
-            'database_statement_count': len(all_rows), 'statement_count': len(selected),
+            'database_statement_count': len(database_rows), 'failed_statement_count': len(failed_rows),
+            'statement_count': len(selected),
             'transaction_count': len(txns), 'statements': compact_statements,
             'transaction_totals': [{'currency': k[0], 'direction': k[1], 'amount': str(v)} for k, v in sums.items()],
             'transactions': txns, 'anomalies': anomalies,

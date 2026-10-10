@@ -12,6 +12,25 @@ from core.output_delivery import _deliver_complete, resolve_output_policy, archi
 from core.task_result import TaskResult
 from core.utils.masker import mask_secrets
 
+_JSON_SUMMARY_RE = re.compile(
+    r'--- JSON_SUMMARY_START ---\s*(.*?)\s*--- JSON_SUMMARY_END ---', re.S)
+
+
+def _parse_json_summary(raw_output):
+    """提取 mail_client.py sync3m 末尾的结构化回执；无回执或解析失败返回 None。"""
+    match = _JSON_SUMMARY_RE.search(raw_output or '')
+    if not match:
+        return None
+    try:
+        summary = json.loads(match.group(1))
+        if (not isinstance(summary, dict) or not isinstance(summary.get('accounts'), list)
+                or not summary['accounts'] or any(not isinstance(a, dict)
+                or not isinstance(a.get('status'), str) for a in summary['accounts'])):
+            return None
+        return summary
+    except (TypeError, ValueError):
+        return None
+
 
 class BillingWorkflow:
     def __init__(self, config, router, ledger=None):
@@ -29,27 +48,47 @@ class BillingWorkflow:
                     not any(word in text for word in ('删除', '转账', '标记', '还款操作', '投资建议')))
 
     def fetch(self, script_dir, months):
+        # 单次 sync3m 流水线（下载+入库一次遍历）；300 秒仅外层兜底，
+        # 账户级时限由脚本内部 account_budget_s 控制。
         logs, errors = [], []
-        for command in ('exec3m', 'validate3m'):
-            try:
-                response = subprocess.run(
-                    ['python3', os.path.join(script_dir, 'mail_client.py'), command, str(months)],
-                    cwd=script_dir, capture_output=True, text=True, timeout=180,
-                )
-                output = mask_secrets(response.stdout + '\n' + response.stderr)
-                logs.append(f'[{command}] exit={response.returncode}\n{output}')
-                if response.returncode:
-                    errors.append(f'{command} 返回非零退出码 {response.returncode}')
-                # External parser still returns text: surface account failures
-                # explicitly without declaring zero new bills a fetch failure.
+        command = 'sync3m'
+        try:
+            response = subprocess.run(
+                ['python3', os.path.join(script_dir, 'mail_client.py'), command, str(months)],
+                cwd=script_dir, capture_output=True, text=True, timeout=300,
+            )
+            # 回执从原始 stdout 解析（mask_secrets 只脱敏密码/token，不破坏 JSON 结构）
+            summary = _parse_json_summary(response.stdout)
+            output = mask_secrets(response.stdout + '\n' + response.stderr)
+            logs.append(f'[{command}] exit={response.returncode}\n{output}')
+            if response.returncode:
+                errors.append(f'{command} 返回非零退出码 {response.returncode}')
+            if summary is None:
+                errors.append('sync3m 缺少有效的账户同步回执，无法确认同步完整性')
+                # 旧版脚本无结构化回执：退回日志关键词兜底。
                 for line in output.splitlines():
                     if any(word in line for word in ('无法连接', '鉴权/刷新失败', '处理失败', '解析失败')):
                         if '处理失败 0' not in line:
                             errors.append(line.strip())
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                errors.append(f'{command}: {type(exc).__name__}')
-                logs.append(f'[{command}] {type(exc).__name__}')
-        return '\n\n'.join(logs), list(dict.fromkeys(errors))
+            else:
+                errors.extend(self._summary_errors(summary))
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            errors.append(f'{command}: {type(exc).__name__}')
+            logs.append(f'[{command}] {type(exc).__name__}')
+        return '\n\n'.join(logs), list(dict.fromkeys(mask_secrets(str(e)) for e in errors))
+
+    @staticmethod
+    def _summary_errors(summary):
+        errors = []
+        for acct in (summary or {}).get('accounts') or []:
+            name = acct.get('account') or '?'
+            if acct.get('status') not in (None, 'ok'):
+                errors.append(f"账户 {name} 同步状态 {acct['status']}：{acct.get('error', '')}")
+            if acct.get('parse_failed'):
+                errors.append(f"账户 {name} 解析失败 {acct['parse_failed']} 封")
+            if acct.get('errors'):
+                errors.append(f"账户 {name} 处理异常 {acct['errors']} 封")
+        return errors
 
     def run(self, goal, session_key, policy=None):
         policy = policy or ExecutionPolicy()
@@ -90,7 +129,8 @@ class BillingWorkflow:
             analysis = ''
             analysis_failed = False
             try:
-                decision = ModelSelector(self.config).select('worker', subtask_type='data_analysis', policy=policy)
+                decision = ModelSelector(self.config).select('worker', subtask_type='data_analysis', policy=policy,
+                    preferred_model=self.settings.get('analysis_model', ''))
                 profile = self.router.get_call_profile(decision.model, 'chat')
                 max_output = min(int(self.settings.get('analysis_max_output_tokens', 2048)), profile['max_tokens'])
                 invoker = self.router.get_invoker(decision.model, profile='chat', max_tokens=max_output)
