@@ -35,7 +35,8 @@ def parse_json_summary(raw_output: str) -> Optional[Dict[str, Any]]:
         for account in summary['accounts']:
             if not account['status'].strip():
                 return None
-            for name in ('errors','parse_failed','scanned','new_bills','new_summaries','inserted','skipped_dup'):
+            for name in ('errors','parse_failed','scanned','new_bills','new_summaries','inserted','skipped_dup',
+                         'associated_existing','identity_conflict','insufficient_evidence'):
                 value = account.get(name)
                 if name in account and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
                     return None

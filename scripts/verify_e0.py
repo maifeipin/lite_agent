@@ -27,7 +27,7 @@ ALLOWED_PARSER_ROOT_FILES = {
     'billing_readmodel.py', 'feishu_bot.py', 'mail_client.py', 'mail_connect.py',
     'mail_llm.py', 'mail_parse.py', 'mail_quality.py', 'mail_sync.py',
     'oauth_helper.py', 'parser_paths.py', 'replace_script.py', 'reprocess_failed.py',
-    'statement_db.py', 'statement_evidence.py', 'statement_models.py', 'statement_parser.py',
+    'statement_db.py', 'statement_evidence.py', 'statement_identity.py', 'statement_models.py', 'statement_parser.py',
     'noise_rules.json', 'email-config.example.json', 'feishu_config.example.json',
     'requirements.txt', 'README.md'
 }

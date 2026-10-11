@@ -203,6 +203,77 @@ class MailCLI:
             raise MailCLIError(errors)
         return envelope.get("data") or {}
 
+    def identity_preview(
+        self,
+        statement_id: int,
+        account: str,
+        transport_uid: str,
+        bank: str,
+        transport_kind: str = "pop3_uidl",
+        eml_path: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """生成身份关联预览计划"""
+        if not isinstance(statement_id, int) or isinstance(statement_id, bool) or statement_id <= 0:
+            raise ValueError("statement_id 必须为正整数")
+        args = [
+            "--statement-id", str(statement_id),
+            "--account", str(account),
+            "--transport-kind", str(transport_kind),
+            "--transport-uid", str(transport_uid),
+            "--bank", str(bank),
+        ]
+        if eml_path:
+            args.extend(["--eml", str(eml_path)])
+        envelope = self.run("identity_preview", args)
+        if envelope.get("status") != "ok":
+            errors = "; ".join(envelope.get("errors") or ["identity_preview 执行失败"])
+            raise MailCLIError(errors)
+        return envelope.get("data") or {}
+
+    def identity_confirm(
+        self,
+        plan_path: str,
+        plan_hash: str,
+        actor: str,
+        reason: str
+    ) -> Dict[str, Any]:
+        """显式执行人工身份关联确认"""
+        if not actor or not actor.strip():
+            raise ValueError("actor 必须为非空字符串")
+        if not reason or not reason.strip():
+            raise ValueError("reason 必须为非空字符串")
+        args = [
+            "--plan", str(plan_path),
+            "--plan-hash", str(plan_hash),
+            "--actor", str(actor),
+            "--reason", str(reason),
+        ]
+        envelope = self.run("identity_confirm", args)
+        if envelope.get("status") != "ok":
+            errors = "; ".join(envelope.get("errors") or ["identity_confirm 执行失败"])
+            raise MailCLIError(errors)
+        return envelope.get("data") or {}
+
+    def identity_status(
+        self,
+        statement_id: Optional[int] = None,
+        account: Optional[str] = None,
+        transport_uid: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """查询身份关联状态与审计日志"""
+        args = []
+        if statement_id:
+            args.extend(["--statement-id", str(statement_id)])
+        if account:
+            args.extend(["--account", str(account)])
+        if transport_uid:
+            args.extend(["--transport-uid", str(transport_uid)])
+        envelope = self.run("identity_status", args)
+        if envelope.get("status") != "ok":
+            errors = "; ".join(envelope.get("errors") or ["identity_status 执行失败"])
+            raise MailCLIError(errors)
+        return envelope.get("data") or {}
+
     def sync_fetch(
         self,
         months: int = 1,
