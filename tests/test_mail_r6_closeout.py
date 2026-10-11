@@ -259,7 +259,13 @@ def test_confirmation_failure_rolls_back_financial_save(mail_store,monkeypatch):
 def test_old_schema_without_currency_source_is_unverified_and_model_samples_are_bounded(billing_db):
     # fixture imported separately via local pytest fixture below, not production DB.
     with sqlite3.connect(billing_db) as c:
-        c.execute('ALTER TABLE statement_transactions DROP COLUMN currency_source')
+        columns = [row[1] for row in c.execute('PRAGMA table_info(statement_transactions)')
+                   if row[1] != 'currency_source']
+        projection = ', '.join('"' + column.replace('"', '""') + '"' for column in columns)
+        c.execute('CREATE TABLE legacy_transactions AS SELECT ' + projection +
+                  ' FROM statement_transactions')
+        c.execute('DROP TABLE statement_transactions')
+        c.execute('ALTER TABLE legacy_transactions RENAME TO statement_transactions')
     snapshot=build_snapshot(billing_db,today=date(2026,10,11),detail_limit=1)
     assert not snapshot['transaction_totals']
     assert len(snapshot['unknown_currency_transactions'])==3
