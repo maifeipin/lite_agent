@@ -7,19 +7,14 @@ import sys, os, sqlite3
 from core.skill_engine import skill
 from core.command_registry import slash_command
 
-_SCRIPT_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "..", "..", "mail-statement-parser"
-)
-_DB = os.path.join(_SCRIPT_DIR, "statements.db")
+from integrations.mail.paths import connect_readonly_db, get_statement_db_path
 
 
-def _compute_stats() -> str:
-    if not os.path.exists(_DB):
+def _compute_stats(db_path: str = None) -> str:
+    conn = connect_readonly_db(db_path)
+    if conn is None:
         return "❌ 邮件数据库不存在，请先运行 mail_fetch_summaries 初始化。"
 
-    conn = sqlite3.connect(_DB)
-    conn.row_factory = sqlite3.Row
     try:
         cur = conn.cursor()
 

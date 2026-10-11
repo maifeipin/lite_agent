@@ -128,13 +128,20 @@ def test_fetch_failure_is_reported_as_failed(tmp_path):
 
 
 @pytest.fixture
-def parser_repo(monkeypatch):
-    candidate=os.environ.get('MAIL_STATEMENT_PARSER_DIR') or '/Users/lilee/Projects/dev/mail-statement-parser'
-    root=Path(candidate)
-    if not (root/'mail_client.py').exists():
+def parser_repo(tmp_path, monkeypatch):
+    assert os.environ.get("TESTING") == "1", "parser_repo fixture must run under testing isolation"
+    import tempfile
+    assert os.path.realpath(str(tmp_path)).startswith(os.path.realpath(tempfile.gettempdir())), "tmp_path must be in system temp"
+    candidate = os.environ.get('MAIL_STATEMENT_PARSER_DIR') or '/Users/lilee/Projects/dev/mail-statement-parser'
+    root = Path(candidate)
+    if not (root / 'mail_client.py').exists():
         pytest.skip('Sibling mail parser checkout is needed for real CLI integration')
     monkeypatch.syspath_prepend(str(root))
-    return root,importlib.import_module('statement_db'),importlib.import_module('statement_models')
+    monkeypatch.setenv("MAIL_STATEMENT_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("MAIL_STATEMENT_DB_PATH", str(tmp_path / "statements.db"))
+    monkeypatch.setenv("MAIL_STATEMENT_REPORT_DIR", str(tmp_path / "validation-reports"))
+    monkeypatch.setenv("MAIL_STATEMENT_DOWNLOAD_DIR", str(tmp_path / "email-downloads"))
+    return root, importlib.import_module('statement_db'), importlib.import_module('statement_models')
 
 
 def test_real_cli_delivery_resolution_relapse_and_no_bill_starvation(tmp_path,parser_repo):
@@ -179,6 +186,10 @@ def test_real_cmb_case_is_repeat_safe_through_parser_cli_and_todo(tmp_path,parse
     monkeypatch.setattr(parser,'DB_PATH',db)
     monkeypatch.setattr(parser,'RULES_DIR',str(root/'rules'))
     monkeypatch.setattr(parser,'VALIDATION_REPORT_DIR',str(tmp_path/'reports'))
+    monkeypatch.setenv('MAIL_STATEMENT_DATA_ROOT', str(tmp_path))
+    monkeypatch.setenv('MAIL_STATEMENT_DB_PATH', db)
+    monkeypatch.setenv('MAIL_STATEMENT_DOWNLOAD_DIR', str(tmp_path / 'email-downloads'))
+    monkeypatch.setenv('MAIL_STATEMENT_REPORT_DIR', str(tmp_path / 'reports'))
     msg=EmailMessage()
     msg['Subject']='招商银行信用卡电子账单'
     msg['From']='ccsvc@message.cmbchina.com'

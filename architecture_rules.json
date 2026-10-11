@@ -1,0 +1,276 @@
+{
+  "schema_version": 1,
+  "description": "Lite Agent 架构门禁规则与过渡期例外清单 (E0 基线)",
+  "rules": {
+    "RULE_NO_DIRECT_PARSER_IMPORT": {
+      "name": "禁止生产代码直接导入 Parser 模块",
+      "description": "禁止 Agent 生产模块通过 import / from / importlib 直接导入 mail-statement-parser 内部模块 (mail_client, statement_parser, statement_db 等)，必须通过 MailCLI 或已声明的 integrations 适配器访问。"
+    },
+    "RULE_NO_CORE_REVERSE_DEPENDENCY": {
+      "name": "禁止 core 通用运行时产生反向依赖",
+      "description": "core/ 通用运行时不得新增对 skills/、scripts/ 或具体业务工作流 (如 BillingWorkflow) 的直接导入。"
+    },
+    "RULE_DYNAMIC_IMPORT_REGISTERED": {
+      "name": "动态导入必须严格登记",
+      "description": "禁止通过未登记的 importlib.import_module 或 __import__ 绕行跨仓或反向依赖门禁。"
+    },
+    "RULE_NO_CROSS_REPO_SYS_PATH": {
+      "name": "禁止生产代码注入跨仓 sys.path",
+      "description": "禁止生产代码动态修改 sys.path 引入外部未受管代码目录。"
+    }
+  },
+  "exceptions": [
+    {
+      "file": "core/output_delivery.py",
+      "rule": "RULE_NO_DIRECT_PARSER_IMPORT",
+      "target": "mail_client",
+      "reason": "历史输出交付通过动态导入 mail_client 发送邮件，待 E3 统一平台通知/输出能力后清退",
+      "owner": "platform_services",
+      "removal_stage": "E3",
+      "verification_requirement": "test_output_delivery.py 回归"
+    },
+    {
+      "file": "core/output_delivery.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "mail_client",
+      "reason": "动态 importlib.import_module('mail_client') 登记例外",
+      "owner": "platform_services",
+      "removal_stage": "E3",
+      "verification_requirement": "test_output_delivery.py 回归"
+    },
+    {
+      "file": "core/output_delivery.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "mail_connect",
+      "reason": "动态 importlib.import_module('mail_connect') 登记例外",
+      "owner": "platform_services",
+      "removal_stage": "E3",
+      "verification_requirement": "test_output_delivery.py 回归"
+    },
+    {
+      "file": "core/output_delivery.py",
+      "rule": "RULE_NO_CROSS_REPO_SYS_PATH",
+      "target": "script_dir",
+      "reason": "历史跨仓 script_dir 注入，待 E3 清退",
+      "owner": "platform_services",
+      "removal_stage": "E3",
+      "verification_requirement": "test_output_delivery.py 回归"
+    },
+    {
+      "file": "skills/ops_mail_reader.py",
+      "rule": "RULE_NO_DIRECT_PARSER_IMPORT",
+      "target": "statement_db",
+      "reason": "历史邮件读取技能直接访问 statement_db 获取数据库路径，E2 统一读模型 CLI 时清退",
+      "owner": "mail_feature",
+      "removal_stage": "E2",
+      "verification_requirement": "test_mail_sync_stage4.py 回归"
+    },
+    {
+      "file": "skills/ops_mail_reader.py",
+      "rule": "RULE_NO_DIRECT_PARSER_IMPORT",
+      "target": "mail_client",
+      "reason": "历史邮件读取技能调用 mail_client.load_static_noise_rules()，E2 统一读模型 CLI 时清退",
+      "owner": "mail_feature",
+      "removal_stage": "E2",
+      "verification_requirement": "test_mail_sync_stage4.py 回归"
+    },
+    {
+      "file": "skills/ops_mail_reader.py",
+      "rule": "RULE_NO_CROSS_REPO_SYS_PATH",
+      "target": "billing_dir",
+      "reason": "历史邮件读取跨仓 sys.path 注入，E2 统一读模型 CLI 时清退",
+      "owner": "mail_feature",
+      "removal_stage": "E2",
+      "verification_requirement": "test_mail_sync_stage4.py 回归"
+    },
+    {
+      "file": "core/skill_engine.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "<dynamic_expression>",
+      "reason": "动态扫描加载 skills 目录下插件模块",
+      "owner": "agent_runtime",
+      "removal_stage": "permanent_plugin_loader",
+      "verification_requirement": "test_skill_engine.py 回归"
+    },
+    {
+      "file": "core/skill_engine.py",
+      "rule": "RULE_NO_CROSS_REPO_SYS_PATH",
+      "target": "parent_dir",
+      "reason": "技能引擎添加父级包路径",
+      "owner": "agent_runtime",
+      "removal_stage": "permanent_plugin_loader",
+      "verification_requirement": "test_skill_engine.py 回归"
+    },
+    {
+      "file": "core/skill_engine.py",
+      "rule": "RULE_NO_CROSS_REPO_SYS_PATH",
+      "target": "skills_dir",
+      "reason": "技能引擎添加插件目录",
+      "owner": "agent_runtime",
+      "removal_stage": "permanent_plugin_loader",
+      "verification_requirement": "test_skill_engine.py 回归"
+    },
+    {
+      "file": "main.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "<dynamic_expression>",
+      "reason": "启动入口动态装载技能函数",
+      "owner": "app_entrypoint",
+      "removal_stage": "E4",
+      "verification_requirement": "main.py 冒烟验证"
+    },
+    {
+      "file": "main.py",
+      "rule": "RULE_NO_CROSS_REPO_SYS_PATH",
+      "target": "root",
+      "reason": "启动入口添加项目根目录",
+      "owner": "app_entrypoint",
+      "removal_stage": "E4",
+      "verification_requirement": "main.py 冒烟验证"
+    },
+    {
+      "file": "core/meeting_channel_commands.py",
+      "rule": "RULE_NO_CORE_REVERSE_DEPENDENCY",
+      "target": "scripts.review_meeting",
+      "reason": "会议频道指令在 core 中导入 scripts.review_meeting，E4 会议业务独立时迁出",
+      "owner": "review_meeting_feature",
+      "removal_stage": "E4",
+      "verification_requirement": "test_meeting_channel_commands.py 回归"
+    },
+    {
+      "file": "core/meeting_channel_commands.py",
+      "rule": "RULE_NO_CORE_REVERSE_DEPENDENCY",
+      "target": "skills.ops_review_meeting.invitation_parts",
+      "reason": "会议频道指令在 core 中导入 skills.ops_review_meeting，E4 会议业务独立时迁出",
+      "owner": "review_meeting_feature",
+      "removal_stage": "E4",
+      "verification_requirement": "test_meeting_channel_commands.py 回归"
+    },
+    {
+      "file": "core/meeting_channel_commands.py",
+      "rule": "RULE_NO_CORE_REVERSE_DEPENDENCY",
+      "target": "skills.ops_review_meeting.claim_invitation",
+      "reason": "会议频道指令在 core 中导入 skills.ops_review_meeting，E4 会议业务独立时迁出",
+      "owner": "review_meeting_feature",
+      "removal_stage": "E4",
+      "verification_requirement": "test_meeting_channel_commands.py 回归"
+    },
+    {
+      "file": "core/review_meeting_notifications.py",
+      "rule": "RULE_NO_CORE_REVERSE_DEPENDENCY",
+      "target": "scripts.review_meeting",
+      "reason": "会议通知策略在 core 中导入 scripts.review_meeting，E4 会议业务独立时迁出",
+      "owner": "review_meeting_feature",
+      "removal_stage": "E4",
+      "verification_requirement": "test_review_meeting_notifications.py 回归"
+    },
+    {
+      "file": "core/review_meeting_api.py",
+      "rule": "RULE_NO_CORE_REVERSE_DEPENDENCY",
+      "target": "scripts.review_meeting",
+      "reason": "会议长轮询与接口在 core 中导入 scripts.review_meeting，E4 会议业务独立时迁出",
+      "owner": "review_meeting_feature",
+      "removal_stage": "E4",
+      "verification_requirement": "test_review_meeting_api.py 回归"
+    },
+    {
+      "file": "core/task_orchestrator.py",
+      "rule": "RULE_NO_CORE_REVERSE_DEPENDENCY",
+      "target": "core.billing_workflow.BillingWorkflow",
+      "reason": "通用任务编排器直接导入 BillingWorkflow，E4 建立工作流注册表时解耦",
+      "owner": "agent_runtime",
+      "removal_stage": "E4",
+      "verification_requirement": "test_execution.py 回归"
+    },
+    {
+      "file": "tests/test_mail_quality_closeout.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "statement_db",
+      "scope": "parser_repo",
+      "reason": "受控测试动态加载 parser db 验证质量事件落地",
+      "owner": "test_infrastructure",
+      "removal_stage": "E0_closeout",
+      "verification_requirement": "绑定临时上下文与 tmp_path"
+    },
+    {
+      "file": "tests/test_mail_quality_closeout.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "statement_models",
+      "scope": "parser_repo",
+      "reason": "受控测试动态加载 parser models 验证质量事件契约",
+      "owner": "test_infrastructure",
+      "removal_stage": "E0_closeout",
+      "verification_requirement": "绑定临时上下文与 tmp_path"
+    },
+    {
+      "file": "tests/test_mail_quality_closeout.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "statement_parser",
+      "scope": "test_real_cmb_case_is_repeat_safe_through_parser_cli_and_todo",
+      "reason": "受控测试动态加载 parser 验证重解析契约",
+      "owner": "test_infrastructure",
+      "removal_stage": "E0_closeout",
+      "verification_requirement": "绑定临时上下文与 tmp_path"
+    },
+    {
+      "file": "tests/test_mail_r6_closeout.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "statement_parser",
+      "scope": "mail_store",
+      "reason": "受控测试动态加载 parser 验证 R6 阶段契约",
+      "owner": "test_infrastructure",
+      "removal_stage": "E0_closeout",
+      "verification_requirement": "绑定临时上下文与 tmp_path"
+    },
+    {
+      "file": "tests/test_mail_r6_closeout.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "billing_readmodel",
+      "scope": "mail_store",
+      "reason": "受控测试动态加载 readmodel 验证读模型契约",
+      "owner": "test_infrastructure",
+      "removal_stage": "E0_closeout",
+      "verification_requirement": "绑定临时上下文与 tmp_path"
+    },
+    {
+      "file": "tests/test_mail_r6_closeout.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "mail_quality",
+      "scope": "test_zero_is_present_for_purpose_requirements",
+      "reason": "受控测试动态加载 quality 验证质量模块",
+      "owner": "test_infrastructure",
+      "removal_stage": "E0_closeout",
+      "verification_requirement": "绑定临时上下文与 tmp_path"
+    },
+    {
+      "file": "tests/test_mail_r6_closeout.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "statement_evidence",
+      "scope": "test_purpose_isolation_keeps_confirmed_reminder_despite_detail_gap",
+      "reason": "受控测试动态加载 evidence 验证证据契约",
+      "owner": "test_infrastructure",
+      "removal_stage": "E0_closeout",
+      "verification_requirement": "绑定临时上下文与 tmp_path"
+    },
+    {
+      "file": "tests/test_mail_r6_closeout.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "mail_client",
+      "scope": "test_reminder_cli_never_claims_no_due_when_all_records_are_unverified",
+      "reason": "受控测试动态加载 client 验证离线重解析契约",
+      "owner": "test_infrastructure",
+      "removal_stage": "E0_closeout",
+      "verification_requirement": "绑定临时上下文与 tmp_path"
+    },
+    {
+      "file": "tests/test_mail_quality_closeout.py",
+      "rule": "RULE_NO_CROSS_REPO_SYS_PATH",
+      "target": "root",
+      "scope": "parser_repo",
+      "reason": "受控测试挂载 parser_repo 兄弟仓库路径",
+      "owner": "test_infrastructure",
+      "removal_stage": "E0_closeout",
+      "verification_requirement": "绑定临时上下文与 tmp_path"
+    }
+  ]
+}

@@ -1,14 +1,97 @@
 """
-Phase 0 行为锁定测试 — 共享 fixtures。
+Phase 0 行为锁定测试 — 共享 fixtures 与全生命周期副作用隔离。
 
 隔离策略：
-- 保存/恢复全局 _skill_registry，避免测试间污染；
-- 不触发 skills/ 目录的真实模块导入（避免 Cron 注册、DB 连接等副作用）；
-- 每个测试独立构造 SkillEngine 实例，通过直接操作 registry 注册测试技能。
+1. 收集期即刻安装副作用拦截器 (install_side_effect_guards)，覆盖测试模块导入与收集阶段；
+2. 每次测试运行建立独立唯一的临时会话根目录 (_TEST_SESSION_DIR)，DB、数据根、报告、下载、session、memory 全置于其内；
+3. 保存并重写外部环境变量，测试结束后在 pytest_sessionfinish 中完全恢复并清理临时目录；
+4. 隔离 _skill_registry 与测试技能，禁止测试触碰生产配置与数据。
 """
 
+import os
 import sys
+import shutil
+import tempfile
 import pytest
+
+# 1. 顶层立即安装副作用守卫（早于任何测试模块收集与导入）
+from tests.support.isolation_guard import (
+    install_side_effect_guards,
+    uninstall_side_effect_guards,
+    set_active_test_root,
+)
+install_side_effect_guards()
+
+# 2. 建立测试会话独占临时根目录
+_TEST_SESSION_DIR = tempfile.mkdtemp(prefix="lite_agent_test_session_")
+set_active_test_root(_TEST_SESSION_DIR)
+
+_DATA_ROOT = os.path.join(_TEST_SESSION_DIR, "data_root")
+os.makedirs(_DATA_ROOT, exist_ok=True)
+os.makedirs(os.path.join(_DATA_ROOT, "validation-reports"), exist_ok=True)
+os.makedirs(os.path.join(_DATA_ROOT, "email-downloads"), exist_ok=True)
+
+# 建立会话脱敏测试配置（基于 config.example.json，严禁测试读取真实 config.json/.env）
+_TEST_CONFIG_JSON = os.path.join(_TEST_SESSION_DIR, "config.json")
+_TEST_CONF_D = os.path.join(_TEST_SESSION_DIR, "conf.d")
+os.makedirs(_TEST_CONF_D, exist_ok=True)
+_example_cfg = os.path.realpath(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "config.example.json")))
+if os.path.isfile(_example_cfg):
+    shutil.copy2(_example_cfg, _TEST_CONFIG_JSON)
+else:
+    with open(_TEST_CONFIG_JSON, "w", encoding="utf-8") as _f:
+        _f.write("{}")
+
+# 3. 保存并覆写关键环境变量（强制覆盖现有外部 env，阻断外部指向真实数据与配置）
+_ENV_KEYS = [
+    "TESTING",
+    "MAIL_STATEMENT_DATA_ROOT",
+    "MAIL_STATEMENT_DB_PATH",
+    "MAIL_STATEMENT_REPORT_DIR",
+    "MAIL_STATEMENT_DOWNLOAD_DIR",
+    "LITE_AGENT_SESSION_DB_PATH",
+    "LITE_AGENT_MEMORY_DB_PATH",
+    "LITE_AGENT_LEDGER_DB_PATH",
+    "LITE_AGENT_EDGE_DB_PATH",
+    "LITE_AGENT_CONFIG_ROOT",
+    "LITE_AGENT_CONFIG_FILE",
+    "LITE_AGENT_SETTINGS_DB_PATH",
+    "LITE_AGENT_DISABLE_DOTENV",
+]
+_SAVED_ENV = {k: os.environ[k] for k in _ENV_KEYS if k in os.environ}
+
+os.environ["TESTING"] = "1"
+os.environ["LITE_AGENT_DISABLE_DOTENV"] = "1"
+os.environ["LITE_AGENT_CONFIG_ROOT"] = _TEST_SESSION_DIR
+os.environ["LITE_AGENT_CONFIG_FILE"] = _TEST_CONFIG_JSON
+os.environ["LITE_AGENT_SETTINGS_DB_PATH"] = os.path.join(_TEST_SESSION_DIR, "settings.db")
+os.environ["MAIL_STATEMENT_DATA_ROOT"] = _DATA_ROOT
+os.environ["MAIL_STATEMENT_DB_PATH"] = os.path.join(_DATA_ROOT, "statements.db")
+os.environ["MAIL_STATEMENT_REPORT_DIR"] = os.path.join(_DATA_ROOT, "validation-reports")
+os.environ["MAIL_STATEMENT_DOWNLOAD_DIR"] = os.path.join(_DATA_ROOT, "email-downloads")
+os.environ["LITE_AGENT_SESSION_DB_PATH"] = os.path.join(_TEST_SESSION_DIR, "sessions.db")
+os.environ["LITE_AGENT_MEMORY_DB_PATH"] = os.path.join(_TEST_SESSION_DIR, "memory.db")
+os.environ["LITE_AGENT_LEDGER_DB_PATH"] = os.path.join(_TEST_SESSION_DIR, "execution_ledger.db")
+os.environ["LITE_AGENT_EDGE_DB_PATH"] = os.path.join(_TEST_SESSION_DIR, "edge_tasks.db")
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """测试会话结束时，恢复环境变量并彻底清理临时会话根目录。"""
+    uninstall_side_effect_guards()
+    set_active_test_root(None)
+
+    # 完整恢复环境变量（含被覆盖或新增的环境变量）
+    for k in _ENV_KEYS:
+        if k in _SAVED_ENV:
+            os.environ[k] = _SAVED_ENV[k]
+        else:
+            os.environ.pop(k, None)
+
+    # 清理会话临时目录
+    if os.path.exists(_TEST_SESSION_DIR):
+        shutil.rmtree(_TEST_SESSION_DIR, ignore_errors=True)
+
+
 from core.skill_engine import _skill_registry, skill, SkillEngine
 
 
@@ -25,14 +108,12 @@ def _isolate_skill_registry():
 @pytest.fixture
 def engine():
     """返回一个干净的 SkillEngine 实例（不扫描 skills/ 目录）。"""
-    # 传入一个不存在的目录，阻止 import 真实技能模块
     return SkillEngine(skills_dir="/tmp/__nonexistent_skills__")
 
 
 @pytest.fixture
 def engine_with_test_skills():
     """返回一个 SkillEngine，注册了四个纯测试技能。"""
-    # 先注册测试技能到全局 registry
     _skill_registry.clear()
 
     @skill(
@@ -49,7 +130,7 @@ def engine_with_test_skills():
         name="test_raise",
         description="总是抛出异常",
         params={"msg": {"type": "string", "description": "异常消息"}},
-        side_effect=None,  # 未知
+        side_effect=None,
     )
     def test_raise(msg: str = "boom") -> str:
         raise RuntimeError(msg)

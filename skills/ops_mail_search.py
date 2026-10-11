@@ -10,26 +10,34 @@ from core.skill_engine import skill
 from core.command_registry import slash_command
 from core.utils.hedgedoc import upload_to_hedgedoc
 
-_SCRIPT_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "..", "..", "mail-statement-parser"
-)
-_DB = os.path.join(_SCRIPT_DIR, "statements.db")
+from integrations.mail.paths import connect_readonly_db, get_statement_db_path
 
 
-def _do_search(keyword, limit=20, account_name=None):
+def _get_db_path():
+    return get_statement_db_path()
+
+
+def _do_search(keyword, limit=20, account_name=None, db_path=None):
     """查 email_bodies JOIN email_summaries,返回完整 rows(含 plain_text 全文)"""
-    if not os.path.exists(_DB):
+    try:
+        limit = int(limit)
+        if limit <= 0:
+            limit = 20
+        elif limit > 100:
+            limit = 100
+    except (ValueError, TypeError):
+        limit = 20
+
+    conn = connect_readonly_db(db_path)
+    if conn is None:
         return []
-    conn = sqlite3.connect(_DB)
-    conn.row_factory = sqlite3.Row
     try:
         sql = (
             "SELECT es.subject, es.sender, es.email_date, es.category, es.importance, "
             "es.status, es.account_name, es.uid, eb.plain_text "
             "FROM email_bodies eb JOIN email_summaries es "
             "ON eb.account_name=es.account_name AND eb.uid=es.uid "
-            "WHERE eb.plain_text LIKE ? OR es.subject LIKE ? OR es.sender LIKE ? "
+            "WHERE (eb.plain_text LIKE ? OR es.subject LIKE ? OR es.sender LIKE ?) "
         )
         params = [f"%{keyword}%"] * 3
         if account_name:

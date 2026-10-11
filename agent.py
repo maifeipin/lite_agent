@@ -196,6 +196,7 @@ class Agent:
 
         # 会话管理
         self.session_mgr = SessionManager(
+            db_path=session_cfg.get("db_path") or os.environ.get("LITE_AGENT_SESSION_DB_PATH"),
             ttl_minutes=session_cfg.get("ttl_minutes", 30),
             max_history=session_cfg.get("max_history", 20),
             max_history_bytes=session_cfg.get("max_history_bytes", 40000),

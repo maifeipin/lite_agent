@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import re
 import glob
@@ -9,7 +10,8 @@ import logging
 import tempfile
 from typing import Any
 
-from core.constants import PROJECT_ROOT
+from core.constants import PROJECT_ROOT as _DEFAULT_PROJECT_ROOT
+PROJECT_ROOT = _DEFAULT_PROJECT_ROOT
 
 _base_cache = None
 _sqlite_cache = {}
@@ -21,7 +23,10 @@ _db_initialized = False
 SENSITIVE_SEGS = {'api_key', 'apikey', 'token', 'secret', 'password', 'passwd', 'credential', 'authorization', 'private_key', 'webhook'}
 
 def load_env():
-    env_path = os.path.join(PROJECT_ROOT, '.env')
+    if os.environ.get("LITE_AGENT_DISABLE_DOTENV") == "1" or os.environ.get("TESTING") == "1":
+        return
+    base_dir = os.environ.get("LITE_AGENT_CONFIG_ROOT", PROJECT_ROOT)
+    env_path = os.path.join(base_dir, '.env')
     if os.path.exists(env_path):
         with open(env_path, 'r', encoding='utf-8') as f:
             for line in f:
@@ -61,14 +66,19 @@ def _remove_edge_keys(obj):
         for item in obj:
             _remove_edge_keys(item)
 
+def _get_base_dir() -> str:
+    if PROJECT_ROOT != _DEFAULT_PROJECT_ROOT:
+        return PROJECT_ROOT
+    return os.environ.get("LITE_AGENT_CONFIG_ROOT", PROJECT_ROOT)
+
 def _get_base_config():
     global _base_cache
     if _base_cache is not None:
         return _base_cache
         
     load_env()
-    base_dir = PROJECT_ROOT
-    config_path = os.path.join(base_dir, 'config.json')
+    base_dir = _get_base_dir()
+    config_path = os.environ.get("LITE_AGENT_CONFIG_FILE", os.path.join(base_dir, 'config.json'))
     
     base_data = {}
     if os.path.exists(config_path):
@@ -103,7 +113,11 @@ def _get_sqlite_overrides():
         return _sqlite_cache
         
     overrides = {}
-    db_path = os.path.join(PROJECT_ROOT, 'data', 'settings.db')
+    base_dir = _get_base_dir()
+    if PROJECT_ROOT != _DEFAULT_PROJECT_ROOT:
+        db_path = os.path.join(base_dir, 'data', 'settings.db')
+    else:
+        db_path = os.environ.get("LITE_AGENT_SETTINGS_DB_PATH", os.path.join(base_dir, 'data', 'settings.db'))
     if os.path.exists(db_path):
         try:
             conn = sqlite3.connect(db_path, timeout=5.0)
@@ -178,7 +192,11 @@ def bust_base_cache():
 
 def _init_db():
     global _db_initialized
-    db_path = os.path.join(PROJECT_ROOT, 'data', 'settings.db')
+    base_dir = _get_base_dir()
+    if PROJECT_ROOT != _DEFAULT_PROJECT_ROOT:
+        db_path = os.path.join(base_dir, 'data', 'settings.db')
+    else:
+        db_path = os.environ.get("LITE_AGENT_SETTINGS_DB_PATH", os.path.join(base_dir, 'data', 'settings.db'))
     if not _db_initialized:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         conn = sqlite3.connect(db_path, timeout=5.0)
@@ -252,7 +270,7 @@ def write_conf_d(module_name: str, data: dict, operator: str = "system") -> bool
     # 递归拦截敏感字典，防止将明文写进 conf.d 甚至 git 历史
     _check_sensitive_dict(data)
         
-    base_dir = PROJECT_ROOT
+    base_dir = _get_base_dir()
     conf_d_path = os.path.join(base_dir, 'conf.d')
     os.makedirs(conf_d_path, exist_ok=True)
     

@@ -8,6 +8,9 @@ from core import config_loader
 from core.utils.masker import mask_secrets
 
 
+from integrations.mail.paths import get_parser_script_dir, get_statement_db_path
+
+
 class MailCLIError(RuntimeError):
     """Mail CLI 执行异常"""
     pass
@@ -21,20 +24,24 @@ class MailCLI:
     """
 
     def __init__(self, script_dir: Optional[str] = None, db_path: Optional[str] = None):
-        self.db_path = db_path
         if script_dir:
-            self.script_dir = script_dir
+            self.script_dir = os.path.abspath(os.path.expanduser(script_dir))
         else:
-            # 环境变量优先，方便本地单测覆盖
-            env_dir = os.environ.get("MAIL_STATEMENT_PARSER_DIR")
-            if env_dir and os.path.isdir(env_dir):
-                self.script_dir = env_dir
-            else:
-                config = config_loader.load_config() or {}
-                self.script_dir = (
-                    config.get("billing", {}).get("script_dir")
-                    or "/home/liteagent/mail-statement-parser"
-                )
+            self.script_dir = get_parser_script_dir()
+
+        if db_path:
+            self.db_path = os.path.abspath(os.path.expanduser(db_path))
+        else:
+            self.db_path = get_statement_db_path(script_dir=self.script_dir)
+
+    def _build_env(self) -> Dict[str, str]:
+        env = os.environ.copy()
+        target_db = os.path.abspath(self.db_path)
+        env['MAIL_STATEMENT_DB_PATH'] = target_db
+        env['MAIL_STATEMENT_DATA_ROOT'] = os.path.dirname(target_db)
+        env.pop('MAIL_STATEMENT_REPORT_DIR', None)
+        env.pop('MAIL_STATEMENT_DOWNLOAD_DIR', None)
+        return env
 
     def _resolve_script_path(self) -> str:
         cli_py = os.path.join(self.script_dir, "mail_client.py")
@@ -49,9 +56,7 @@ class MailCLI:
         """
         cli_py = self._resolve_script_path()
         cmd_args = [sys.executable, cli_py, command] + (args or [])
-        env = os.environ.copy()
-        if self.db_path is not None:
-            env['MAIL_STATEMENT_DB_PATH'] = os.path.abspath(self.db_path)
+        env = self._build_env()
         try:
             res = subprocess.run(
                 cmd_args,
@@ -210,9 +215,7 @@ class MailCLI:
         """
         cli_py = os.path.join(self.script_dir, "mail_client.py")
         cmd_args = [sys.executable, cli_py, "sync3m", str(months)]
-        env = os.environ.copy()
-        if self.db_path is not None:
-            env['MAIL_STATEMENT_DB_PATH'] = os.path.abspath(self.db_path)
+        env = self._build_env()
 
         runner_fn = runner or subprocess.run
         try:

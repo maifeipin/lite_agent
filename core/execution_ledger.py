@@ -191,7 +191,7 @@ class ExecutionLedger:
     _write_lock = threading.Lock()
 
     def __init__(self, db_path: Optional[str] = None):
-        self.db_path = db_path or DEFAULT_DB_PATH
+        self.db_path = db_path or os.environ.get("LITE_AGENT_LEDGER_DB_PATH") or DEFAULT_DB_PATH
         self._ensure_dir()
         self._init_schema()
         self._migrate_schema()

@@ -1,0 +1,8 @@
+# Dockerfile.test - E0 阶段 Python 3.9 隔离验证容器环境
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# 安装最小测试依赖 (支持可复现构建)
+COPY requirements-test.txt /tmp/requirements-test.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-test.txt

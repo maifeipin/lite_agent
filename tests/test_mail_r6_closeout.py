@@ -1,4 +1,4 @@
-"""Independent R6 acceptance through existing public parsing and reporting paths."""
+import os
 import importlib
 import json
 import sqlite3
@@ -13,6 +13,8 @@ from tests.test_mail_quality_closeout import parser_repo
 
 @pytest.fixture
 def mail_store(tmp_path, parser_repo, monkeypatch):
+    assert os.environ.get("TESTING") == "1", "mail_store must run under testing isolation"
+    assert "temp" in str(tmp_path).lower() or "tmp" in str(tmp_path).lower() or "var" in str(tmp_path).lower(), "mail_store must bind to temporary path"
     root, db_module, models = parser_repo
     parser = importlib.import_module('statement_parser')
     readmodel = importlib.import_module('billing_readmodel')
@@ -21,6 +23,10 @@ def mail_store(tmp_path, parser_repo, monkeypatch):
     monkeypatch.setattr(parser, 'DB_PATH', db)
     monkeypatch.setattr(parser, 'RULES_DIR', str(root / 'rules'))
     monkeypatch.setattr(parser, 'VALIDATION_REPORT_DIR', str(tmp_path / 'reports'))
+    monkeypatch.setenv('MAIL_STATEMENT_DATA_ROOT', str(tmp_path))
+    monkeypatch.setenv('MAIL_STATEMENT_DB_PATH', db)
+    monkeypatch.setenv('MAIL_STATEMENT_DOWNLOAD_DIR', str(tmp_path / 'email-downloads'))
+    monkeypatch.setenv('MAIL_STATEMENT_REPORT_DIR', str(tmp_path / 'reports'))
     return db, db_module, models, parser, readmodel
 
 

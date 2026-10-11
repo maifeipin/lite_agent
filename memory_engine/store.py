@@ -16,7 +16,6 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 
 DB_DIR = os.path.join(os.path.dirname(__file__), '..', 'data')
-os.makedirs(DB_DIR, exist_ok=True)
 
 SQLITE_PATH = os.path.join(DB_DIR, 'memory.db')
 
@@ -78,8 +77,10 @@ CREATE INDEX IF NOT EXISTS idx_retrieval_time ON retrieval_log(created_at);
 class MemoryStore:
     """底层存储：SQLite 结构化 + ChromaDB 向量"""
 
-    def __init__(self):
-        self.conn = sqlite3.connect(SQLITE_PATH, check_same_thread=False)
+    def __init__(self, db_path: Optional[str] = None):
+        target_path = db_path or os.environ.get("LITE_AGENT_MEMORY_DB_PATH") or SQLITE_PATH
+        os.makedirs(os.path.dirname(os.path.abspath(target_path)), exist_ok=True)
+        self.conn = sqlite3.connect(target_path, check_same_thread=False)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self._init_schema()
         self._chroma = None

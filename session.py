@@ -65,8 +65,12 @@ class SessionManager:
 
     def __init__(self, db_path: str = None, ttl_minutes: int = 30, max_history: int = 20, max_history_bytes: int = 40000):
         if db_path is None:
-            base = os.path.dirname(os.path.abspath(__file__))
-            db_path = os.path.join(base, "data", "sessions.db")
+            env_db = os.environ.get("LITE_AGENT_SESSION_DB_PATH")
+            if env_db:
+                db_path = env_db
+            else:
+                base = os.path.dirname(os.path.abspath(__file__))
+                db_path = os.path.join(base, "data", "sessions.db")
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
         self.db_path = db_path

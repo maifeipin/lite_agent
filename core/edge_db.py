@@ -16,7 +16,7 @@ import time
 from datetime import datetime, timedelta
 
 from core.constants import PROJECT_ROOT as _PROJECT_ROOT
-_DB_PATH = os.path.join(_PROJECT_ROOT, "data", "sentinel", "edge_tasks.db")
+_DB_PATH = os.environ.get("LITE_AGENT_EDGE_DB_PATH") or os.path.join(_PROJECT_ROOT, "data", "sentinel", "edge_tasks.db")
 
 
 def _conn() -> sqlite3.Connection:
