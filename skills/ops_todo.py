@@ -3,8 +3,16 @@ import os
 import sys
 import hashlib
 import time
+import json
 import re
+import tempfile
+import logging
+import threading
+import uuid
 from datetime import datetime, timezone, timedelta
+from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.skill_engine import skill
@@ -15,77 +23,118 @@ DB_PATH = os.path.join(DATA_DIR, 'todos.db')
 MD_PATH = os.path.join(DATA_DIR, 'personal.md')
 
 _db_initialized = False
+_initialized_path = None
+_initialized_file_id = None
+_schema_lock = threading.RLock()
+_render_lock = threading.RLock()
 
-def _ensure_schema():
-    global _db_initialized
-    if _db_initialized:
-        return
-    os.makedirs(DATA_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute('PRAGMA journal_mode=WAL')
-    conn.execute('PRAGMA synchronous=NORMAL')
-    conn.execute('PRAGMA foreign_keys=ON')
-    
-    # Create tables
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS todos (
-          id TEXT PRIMARY KEY,
-          title TEXT NOT NULL,
-          description TEXT,
-          status TEXT NOT NULL DEFAULT 'pending',
-          kind TEXT NOT NULL DEFAULT 'misc',
-          project TEXT,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL,
-          started_at TEXT,
-          snoozed_until TEXT,
-          shelved_at TEXT,
-          shelved_reason TEXT,
-          completed_at TEXT,
-          dropped_at TEXT,
-          dropped_reason TEXT,
-          due_at TEXT,
-          notified_due_at TEXT,
-          recur_cron TEXT,
-          recur_parent_id TEXT,
-          recur_last_spawned_at TEXT,
-          created_via TEXT,
-          source_message_id TEXT,
-          dispatch_target TEXT,
-          dispatch_payload_json TEXT,
-          dispatch_last_run_at TEXT,
-          FOREIGN KEY (recur_parent_id) REFERENCES todos(id) ON DELETE CASCADE
-        )
-    """)
-    try:
-        conn.execute("ALTER TABLE todos ADD COLUMN remind_interval_mins INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        conn.execute("ALTER TABLE todos ADD COLUMN remind_before_mins INTEGER DEFAULT 30")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_status ON todos(status, updated_at DESC)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_project ON todos(project, status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_wake ON todos(snoozed_until) WHERE status='snoozed'")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_due ON todos(due_at) WHERE due_at IS NOT NULL AND notified_due_at IS NULL")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_recur ON todos(kind, recur_last_spawned_at) WHERE kind='recurring'")
-    
-    conn.execute("PRAGMA user_version = 1")
-    conn.commit()
-    conn.close()
-    _db_initialized = True
+def _ensure_schema(db_path: Optional[str] = None):
+    with _schema_lock:
+        target = os.path.abspath(db_path or DB_PATH)
+        if _db_initialized and _initialized_path == target:
+            try:
+                stat = os.stat(target)
+                if _initialized_file_id == (stat.st_dev, stat.st_ino):
+                    return
+            except FileNotFoundError:
+                pass
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        import fcntl
+        with open(target + '.schema.lock', 'a') as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            _ensure_schema_locked(db_path)
 
-def _conn():
-    _ensure_schema()
-    conn = sqlite3.connect(DB_PATH)
+
+def _ensure_schema_locked(db_path: Optional[str] = None):
+    global _db_initialized, _initialized_path, _initialized_file_id
+    is_default = (db_path is None or os.path.abspath(db_path) == os.path.abspath(DB_PATH))
+    if is_default and _db_initialized and _initialized_path == os.path.abspath(DB_PATH):
+        try:
+            stat = os.stat(DB_PATH)
+            if _initialized_file_id == (stat.st_dev, stat.st_ino):
+                return
+        except FileNotFoundError:
+            pass
+    target = db_path or DB_PATH
+    os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
+    conn = sqlite3.connect(target)
+    try:
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('PRAGMA synchronous=NORMAL')
+        conn.execute('PRAGMA foreign_keys=ON')
+        conn.execute('BEGIN IMMEDIATE')
+
+        # Create tables
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS todos (
+              id TEXT PRIMARY KEY,
+              title TEXT NOT NULL,
+              description TEXT,
+              status TEXT NOT NULL DEFAULT 'pending',
+              kind TEXT NOT NULL DEFAULT 'misc',
+              project TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              started_at TEXT,
+              snoozed_until TEXT,
+              shelved_at TEXT,
+              shelved_reason TEXT,
+              completed_at TEXT,
+              dropped_at TEXT,
+              dropped_reason TEXT,
+              due_at TEXT,
+              notified_due_at TEXT,
+              recur_cron TEXT,
+              recur_parent_id TEXT,
+              recur_last_spawned_at TEXT,
+              created_via TEXT,
+              source_message_id TEXT,
+              dispatch_target TEXT,
+              dispatch_payload_json TEXT,
+              dispatch_last_run_at TEXT,
+              FOREIGN KEY (recur_parent_id) REFERENCES todos(id) ON DELETE CASCADE
+            )
+        """)
+        existing = {r[1] for r in conn.execute('PRAGMA table_info(todos)')}
+        for name, declaration in (
+            ('remind_interval_mins', 'INTEGER DEFAULT 0'),
+            ('remind_before_mins', 'INTEGER DEFAULT 30'),
+            ('source_key', 'TEXT'),
+            ('source_metadata_json', "TEXT NOT NULL DEFAULT '{}'"),
+        ):
+            if name not in existing:
+                conn.execute(f'ALTER TABLE todos ADD COLUMN {name} {declaration}')
+        conn.execute("""CREATE TABLE IF NOT EXISTS todo_source_receipts (
+            source_key TEXT PRIMARY KEY, revision INTEGER NOT NULL,
+            cycle_id INTEGER NOT NULL, event_type TEXT NOT NULL)""")
+
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_status ON todos(status, updated_at DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_project ON todos(project, status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_wake ON todos(snoozed_until) WHERE status='snoozed'")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_due ON todos(due_at) WHERE due_at IS NOT NULL AND notified_due_at IS NULL")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_recur ON todos(kind, recur_last_spawned_at) WHERE kind='recurring'")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_todos_source_key ON todos(source_key) WHERE source_key IS NOT NULL")
+
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+    finally:
+        conn.close()
+    if is_default:
+        _db_initialized = True
+        _initialized_path = os.path.abspath(target)
+        stat = os.stat(target)
+        _initialized_file_id = (stat.st_dev, stat.st_ino)
+
+def _conn(db_path: Optional[str] = None):
+    _ensure_schema(db_path)
+    target = db_path or DB_PATH
+    conn = sqlite3.connect(target)
     conn.execute('PRAGMA foreign_keys=ON')
     return conn
 
-def _gen_id(title: str) -> str:
+def _gen_id(title: str, db_path: Optional[str] = None) -> str:
     base = hashlib.sha256(f"{title}-{time.time_ns()}".encode()).hexdigest()[:6]
-    conn = _conn()
+    conn = _conn(db_path)
     cursor = conn.cursor()
     for attempt in range(5):
         candidate = base if attempt == 0 else hashlib.sha256(f"{base}-{attempt}".encode()).hexdigest()[:6]
@@ -113,8 +162,23 @@ def _parse_until(until: str) -> str:
     except ValueError:
         raise ValueError(f"无法解析时间: {until!r}（支持 ISO8601 或 +Nm/+Nh/+Nd）")
 
-def _render_markdown():
-    conn = _conn()
+def _render_markdown(db_path: Optional[str] = None):
+    # Serialize snapshot + replace, so an older render cannot overwrite a newer one.
+    with _render_lock:
+        try:
+            out_md = os.path.join(os.path.dirname(os.path.abspath(db_path)), 'personal.md') if db_path else MD_PATH
+            os.makedirs(os.path.dirname(os.path.abspath(out_md)), exist_ok=True)
+            # macOS/Linux processes share this lock as well as the thread lock above.
+            import fcntl
+            with open(out_md + '.lock', 'a') as lock_file:
+                fcntl.flock(lock_file, fcntl.LOCK_EX)
+                _render_markdown_locked(db_path)
+        except Exception:
+            logger.exception('Todo Markdown view refresh failed; database remains authoritative')
+
+
+def _render_markdown_locked(db_path: Optional[str] = None):
+    conn = _conn(db_path)
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM todos WHERE status != 'dropped' ORDER BY updated_at DESC")
     columns = [col[0] for col in cursor.description]
@@ -188,18 +252,172 @@ def _render_markdown():
             lines.append("")
             
     rendered = "\n".join(lines)
-    tmp_path = MD_PATH + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write(rendered)
-    os.replace(tmp_path, MD_PATH)
+    out_md = os.path.join(os.path.dirname(os.path.abspath(db_path)), 'personal.md') if db_path else MD_PATH
+    out_dir = os.path.dirname(os.path.abspath(out_md))
+    tmp_path = None
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        # 使用唯一临时文件，杜绝多消费者并发覆盖 .tmp 产生 FileNotFoundError
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=out_dir, delete=False, suffix=".tmp") as f:
+            f.write(rendered)
+            tmp_path = f.name
+        os.replace(tmp_path, out_md)
+    except Exception as exc:
+        # Markdown 视图渲染失败仅记录警告，绝不能打断已持久化的数据库事务
+        logger.warning(f"Markdown 视图渲染异常: {exc}")
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+def _source_version(metadata):
+    revision = metadata.get('revision')
+    cycle = metadata.get('cycle_id', 1)
+    if revision is not None:
+        if any(not isinstance(v, int) or isinstance(v, bool) or v < 1 for v in (revision, cycle)):
+            raise ValueError('revision and cycle_id must be positive integers')
+    return revision, cycle
+
+
+def _source_is_stale(conn, source_key, meta, revision, cycle):
+    receipt = conn.execute('SELECT revision,cycle_id,event_type FROM todo_source_receipts WHERE source_key=?',
+                           (source_key,)).fetchone()
+    current_rev = max(meta.get('revision', 0), receipt[0] if receipt else 0)
+    current_cycle = max(meta.get('cycle_id', 1), receipt[1] if receipt else 1)
+    return revision is not None and (revision <= current_rev or cycle < current_cycle)
+
+
+def _save_source_receipt(conn, source_key, revision, cycle, event_type):
+    if revision is not None:
+        conn.execute("""INSERT INTO todo_source_receipts VALUES(?,?,?,?)
+            ON CONFLICT(source_key) DO UPDATE SET revision=excluded.revision,
+            cycle_id=excluded.cycle_id,event_type=excluded.event_type""",
+            (source_key,revision,cycle,event_type))
+
+
+def resolve_source_todo(source_key: str, resolution_note: str = '上游问题已解决',
+                        cycle_id: Optional[int] = None, db_path: Optional[str] = None,
+                        revision: Optional[int] = None) -> dict:
+    """Persist a versioned resolution, including a tombstone if detection arrives later."""
+    if not source_key or not source_key.strip():
+        raise ValueError('source_key 不能为空')
+    source_key = source_key.strip()
+    revision, cycle = _source_version({'revision': revision, 'cycle_id': cycle_id or 1})
+    conn = _conn(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute('SELECT id,status,source_metadata_json,created_via FROM todos WHERE source_key=?',
+                           (source_key,)).fetchone()
+        meta = json.loads(row[2] or '{}') if row else {}
+        if _source_is_stale(conn,source_key,meta,revision,cycle):
+            return {'id': row[0] if row else None, 'resolved': False, 'reason': 'stale_event', 'status': 'protected'}
+        _save_source_receipt(conn,source_key,revision,cycle,'quality_resolved')
+        if row is None:
+            conn.commit()
+            return {'id': None, 'resolved': False, 'reason': 'resolution_recorded', 'status': 'protected'}
+        tid,status,_,created_via = row
+        # A resolution for an older cycle must never finish a recurring newer problem.
+        if cycle < meta.get('cycle_id',1):
+            return {'id': tid, 'resolved': False, 'reason': 'stale_cycle', 'status': 'protected'}
+        meta.update({'resolution_note': resolution_note, 'resolved_cycle_id': cycle,
+                     'resolved_at': _now_iso(), 'event_type': 'quality_resolved'})
+        if revision is not None:
+            meta.update(revision=revision,cycle_id=cycle)
+        close = status in ('pending','active') and created_via == 'mail_quality' and not meta.get('user_edited')
+        conn.execute('UPDATE todos SET source_metadata_json=?,updated_at=? WHERE id=?',
+                     (json.dumps(meta,ensure_ascii=False),_now_iso(),tid))
+        if close:
+            conn.execute("UPDATE todos SET status='done',completed_at=? WHERE id=?",(_now_iso(),tid))
+        conn.commit()
+        result = {'id':tid,'resolved':close,'status':'done' if close else 'protected'}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    _render_markdown(db_path)
+    return result
+
+
+def upsert_source_todo(source_key: str, title: str, description: Optional[str] = None,
+                       created_via: str = 'mail_quality', source_message_id: Optional[str] = None,
+                       source_metadata: Optional[dict] = None, due_at: Optional[str] = None,
+                       kind: str = 'code', project: Optional[str] = 'mail-statement-parser',
+                       db_path: Optional[str] = None) -> dict:
+    """Source-key uniqueness and monotone receipts are enforced under one write lock."""
+    if not source_key or not source_key.strip():
+        raise ValueError('source_key 不能为空')
+    source_key = source_key.strip()
+    incoming = dict(source_metadata or {})
+    revision,cycle = _source_version(incoming)
+    incoming.update(machine_title=title,machine_description=description,machine_due_at=due_at)
+    conn = _conn(db_path)
+    now = _now_iso()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute("""SELECT id,status,title,description,due_at,source_metadata_json,created_via
+            FROM todos WHERE source_key=?""",(source_key,)).fetchone()
+        meta = json.loads(row[5] or '{}') if row else {}
+        stale = _source_is_stale(conn,source_key,meta,revision,cycle)
+        if stale:
+            reason = 'already_done_same_cycle' if row and row[1] in ('done','completed') and cycle <= meta.get('cycle_id',1) else 'stale_event'
+            return {'id':row[0] if row else None,'created':False,'status':'protected','reason':reason}
+        _save_source_receipt(conn,source_key,revision,cycle,incoming.get('event_type','quality_detected'))
+        if row is None:
+            tid = uuid.uuid4().hex[:12]
+            conn.execute("""INSERT INTO todos(id,title,description,status,kind,project,created_at,
+                updated_at,due_at,created_via,source_message_id,source_key,source_metadata_json)
+                VALUES(?,?,?,'pending',?,?,?,?,?,?,?,?,?)""",
+                (tid,title,description,kind,project,now,now,due_at,created_via,source_message_id,
+                 source_key,json.dumps(incoming,ensure_ascii=False)))
+            result = {'id':tid,'created':True,'status':'created'}
+        else:
+            tid,status,old_title,old_desc,old_due,_,owner = row
+            old_cycle = meta.get('cycle_id',1)
+            human = bool(meta.get('user_edited')) or owner != created_via
+            protected = status == 'dropped' or (status in ('done','completed') and (cycle <= old_cycle or human))
+            # Ownership is local; upstream cannot unset a human's edit flag.
+            incoming.pop('user_edited',None)
+            meta.update(incoming)
+            conn.execute('UPDATE todos SET source_metadata_json=?,updated_at=? WHERE id=?',
+                         (json.dumps(meta,ensure_ascii=False),now,tid))
+            if protected:
+                result = {'id':tid,'created':False,'status':'protected',
+                          'reason':'dropped' if status == 'dropped' else 'already_done_same_cycle'}
+            else:
+                reopen = status in ('done','completed') and cycle > old_cycle
+                if status not in ('snoozed','shelved') and not human:
+                    conn.execute('UPDATE todos SET title=?,description=?,due_at=? WHERE id=?',
+                                 (title,description if description is not None else old_desc,
+                                  old_due if old_due is not None else due_at,tid))
+                if reopen:
+                    conn.execute("UPDATE todos SET status='pending',completed_at=NULL WHERE id=?",(tid,))
+                result = {'id':tid,'created':False,'status':'updated'}
+                if reopen:
+                    result['reason'] = 'relapse_reopened'
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    _render_markdown(db_path)
+    return result
 
 def _update_todo_status(tid: str, status: str, extra_fields: dict = None):
     conn = _conn()
+    conn.execute('BEGIN IMMEDIATE')
     now = _now_iso()
     fields = {"status": status, "updated_at": now}
     if extra_fields:
         fields.update(extra_fields)
         
+    if status == 'active':
+        row = conn.execute('SELECT source_key,source_metadata_json FROM todos WHERE id=?',(tid,)).fetchone()
+        if row and row[0]:
+            metadata = json.loads(row[1] or '{}')
+            metadata['user_edited'] = True
+            fields['source_metadata_json'] = json.dumps(metadata,ensure_ascii=False)
     set_clause = ", ".join([f"{k}=?" for k in fields.keys()])
     values = list(fields.values()) + [tid]
     
@@ -408,6 +626,7 @@ def todo_resume(id: str) -> str:
 )
 def todo_update(id: str, title: str = None, description: str = None, due_at: str = None, project: str = None, recur_cron: str = None, kind: str = None, remind_interval_mins: int = None, remind_before_mins: int = None) -> str:
     conn = _conn()
+    conn.execute('BEGIN IMMEDIATE')
     fields = {"updated_at": _now_iso()}
     if title is not None: fields["title"] = title
     if description is not None: fields["description"] = description
@@ -420,10 +639,21 @@ def todo_update(id: str, title: str = None, description: str = None, due_at: str
     if remind_interval_mins is not None: fields["remind_interval_mins"] = remind_interval_mins
     if remind_before_mins is not None: fields["remind_before_mins"] = remind_before_mins
     
+    cursor = conn.cursor()
+    if len(fields) > 1:
+        cursor.execute("SELECT source_metadata_json FROM todos WHERE id=?", (id,))
+        row = cursor.fetchone()
+        if row and row[0]:
+            try:
+                m = json.loads(row[0])
+            except Exception:
+                m = {}
+            m["user_edited"] = True
+            fields["source_metadata_json"] = json.dumps(m, ensure_ascii=False)
+
     set_clause = ", ".join([f"{k}=?" for k in fields.keys()])
     values = list(fields.values()) + [id]
     
-    cursor = conn.cursor()
     cursor.execute(f"UPDATE todos SET {set_clause} WHERE id=?", values)
     rowcount = cursor.rowcount
     conn.commit()
