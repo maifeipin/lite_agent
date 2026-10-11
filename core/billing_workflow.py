@@ -123,7 +123,7 @@ class BillingWorkflow:
             result.failed_nodes = ['部分邮箱拉取'] if fetch_errors else []
             print(f"[BILLING] snapshot statements={snapshot['statement_count']} transactions={snapshot['transaction_count']} anomalies={len(snapshot['anomalies'])}")
             messages = [
-                {'role': 'system', 'content': '根据提供的账单快照撰写中文分析。不得调用工具。区分数据库标记与实际还款；不得跨币种合计。交易样例不是全量，不能从样例推断全量消费分布。缺失数据不能算零。不提供投资建议。明确列出异常、数据时效和需核实事项。'},
+                {'role': 'system', 'content': '根据提供的账单快照撰写中文分析。不得调用工具。区分数据库标记与实际还款；不得跨币种合计。交易样例不是全量，不能从样例推断全量消费分布。缺失数据不能算零。遵守每张账单的 purpose_availability：blocked 用途不得给出确定结论，partial 或 transaction_totals_complete=false 必须标明不完整。原币币种或币种来源未确认时，不猜测币种、不计算汇率。不得依据地区、商户或金额比例推断币种。不提供投资建议。明确列出异常、数据时效和需核实事项。'},
                 {'role': 'user', 'content': json.dumps(model_evidence(snapshot), ensure_ascii=False)},
             ]
             analysis = ''

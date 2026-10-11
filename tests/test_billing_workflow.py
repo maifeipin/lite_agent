@@ -36,6 +36,8 @@ def billing_db(tmp_path):
       INSERT INTO statement_transactions VALUES (2,'a','1','CMB','2026-10-02','shop2','0.20','CNY','debit','');
       INSERT INTO statement_transactions VALUES (3,'b','1','HX','2026-09-02','foreign','2.00','USD','debit','');
     ''')
+    c.execute('ALTER TABLE statement_transactions ADD COLUMN currency_source TEXT')
+    c.execute("UPDATE statement_transactions SET currency_source='extracted'")
     c.commit()
     c.close()
     return path
@@ -70,7 +72,7 @@ def test_new_schema_anchors_are_authoritative_and_failed_statements_excluded(bil
         c.execute('UPDATE statement_transactions SET statement_id=CASE WHEN id<3 THEN 1 ELSE 2 END')
         c.execute("UPDATE statements SET uid='new-uid' WHERE id=1")
         c.execute("UPDATE statements SET parse_status='failed',statement_month='2026-11' WHERE id=2")
-        c.execute("INSERT INTO statement_transactions VALUES (4,'a','new-uid','CMB','2026-10-03','unanchored','99','CNY','debit','',NULL)")
+        c.execute("INSERT INTO statement_transactions VALUES (4,'a','new-uid','CMB','2026-10-03','unanchored','99','CNY','debit','','extracted',NULL)")
     snapshot = build_snapshot(billing_db, today=date(2026, 10, 11))
     assert snapshot['database_statement_count'] == 2
     assert snapshot['failed_statement_count'] == 1
