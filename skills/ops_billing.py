@@ -144,9 +144,56 @@ def billing_snapshot(months: int = 1, detail_limit: int = 20) -> str:
     }
 )
 def billing_fetch(months: int = 1) -> str:
-    # 单次遍历流水线：下载归档 + 解析入库一次完成（替代旧 exec3m + validate3m 两次全盘扫描）。
-    # 300 秒仅外层兜底，账户级时限由脚本内部预算控制。
-    return _run_billing_cmd(["sync3m", str(months)], timeout=300)
+    # 统一单次遍历流水线：下载归档 + 解析入库，并自动有上限消费落库的质量事件进入 Todo
+    from integrations.mail.sync_service import sync_and_consume
+    billing = _cfg.get("billing") or {}
+    stmt_db = billing.get("statement_db_path") or os.path.join(BILLING_SCRIPT_DIR, "statements.db")
+    res = sync_and_consume(
+        script_dir=BILLING_SCRIPT_DIR,
+        statement_db_path=stmt_db,
+        todo_db_path=billing.get("todo_db_path"),
+        months=months
+    )
+
+    lines = []
+    summary = res.get("summary")
+    fetch_errors = res.get("fetch_errors", [])
+    if summary and not fetch_errors:
+        accounts = summary.get("accounts", [])
+        lines.append(f"✅ 账单邮箱同步完成 ({len(accounts)} 个账户)")
+        for a in accounts:
+            name = a.get("account", "?")
+            lines.append(f"  - 账户 {name}: 状态 {a.get('status', 'ok')}, 新增 {a.get('new_bills', a.get('inserted', 0))} 封")
+    elif fetch_errors:
+        lines.append("⚠️ 账单邮箱同步存在异常:")
+        for err in fetch_errors:
+            lines.append(f"  - {err}")
+    else:
+        lines.append("✅ 账单邮箱同步执行完毕。")
+
+    # 质量事件与待办处理情况
+    q = res.get("quality_stats", {})
+    q_errors = q.get("errors", [])
+    if q.get("total", 0) > 0:
+        lines.append(
+            f"\n📋 质量事件与待办处理: 共扫描 {q.get('total')} 个事件 "
+            f"(新增待办 {q.get('created')}, 更新 {q.get('updated')}, 解决 {q.get('resolved')}, "
+            f"跳过出账 {q.get('skipped')}, 成功确认 {q.get('acked')})"
+        )
+    elif q.get("failed", 0) or q.get("failed_acks", 0) or q_errors:
+        lines.append("\n⚠️ 质量事件读取/确认失败，无法判断是否有待处理解析异常。")
+    else:
+        lines.append("\n📋 质量事件: 本轮未发现待处理事件（既有未完成 Todo 仍需处理）。")
+
+    if q.get("backlog_hit"):
+        lines.append("⚠️ 提示: 达到批次消费上限，仍有未确认质量事件积压，将在下次同步时继续处理。")
+    if q.get("failed", 0) > 0 or q.get("failed_acks", 0) > 0 or (q_errors and not q.get("backlog_hit")):
+        lines.append(f"⚠️ 待办处理异常: 写入失败 {q.get('failed', 0)} 笔, 确认失败 {q.get('failed_acks', 0)} 笔")
+        for q_err in q_errors[:3]:
+            lines.append(f"  - {q_err}")
+
+    from core.utils.masker import mask_secrets
+    return mask_secrets("\n".join(lines))
 
 @skill(
     name='billing_txns_over',

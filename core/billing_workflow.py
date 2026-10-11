@@ -12,24 +12,15 @@ from core.output_delivery import _deliver_complete, resolve_output_policy, archi
 from core.task_result import TaskResult
 from core.utils.masker import mask_secrets
 
-_JSON_SUMMARY_RE = re.compile(
-    r'--- JSON_SUMMARY_START ---\s*(.*?)\s*--- JSON_SUMMARY_END ---', re.S)
+from integrations.mail.sync_receipt import (
+    parse_json_summary,
+    summarize_account_errors,
+    _JSON_SUMMARY_RE
+)
+from integrations.mail.sync_service import sync_and_consume
 
-
-def _parse_json_summary(raw_output):
-    """提取 mail_client.py sync3m 末尾的结构化回执；无回执或解析失败返回 None。"""
-    match = _JSON_SUMMARY_RE.search(raw_output or '')
-    if not match:
-        return None
-    try:
-        summary = json.loads(match.group(1))
-        if (not isinstance(summary, dict) or not isinstance(summary.get('accounts'), list)
-                or not summary['accounts'] or any(not isinstance(a, dict)
-                or not isinstance(a.get('status'), str) for a in summary['accounts'])):
-            return None
-        return summary
-    except (TypeError, ValueError):
-        return None
+# 保持兼容导出
+_parse_json_summary = parse_json_summary
 
 
 class BillingWorkflow:
@@ -48,47 +39,22 @@ class BillingWorkflow:
                     not any(word in text for word in ('删除', '转账', '标记', '还款操作', '投资建议')))
 
     def fetch(self, script_dir, months):
-        # 单次 sync3m 流水线（下载+入库一次遍历）；300 秒仅外层兜底，
-        # 账户级时限由脚本内部 account_budget_s 控制。
-        logs, errors = [], []
-        command = 'sync3m'
-        try:
-            response = subprocess.run(
-                ['python3', os.path.join(script_dir, 'mail_client.py'), command, str(months)],
-                cwd=script_dir, capture_output=True, text=True, timeout=300,
-            )
-            # 回执从原始 stdout 解析（mask_secrets 只脱敏密码/token，不破坏 JSON 结构）
-            summary = _parse_json_summary(response.stdout)
-            output = mask_secrets(response.stdout + '\n' + response.stderr)
-            logs.append(f'[{command}] exit={response.returncode}\n{output}')
-            if response.returncode:
-                errors.append(f'{command} 返回非零退出码 {response.returncode}')
-            if summary is None:
-                errors.append('sync3m 缺少有效的账户同步回执，无法确认同步完整性')
-                # 旧版脚本无结构化回执：退回日志关键词兜底。
-                for line in output.splitlines():
-                    if any(word in line for word in ('无法连接', '鉴权/刷新失败', '处理失败', '解析失败')):
-                        if '处理失败 0' not in line:
-                            errors.append(line.strip())
-            else:
-                errors.extend(self._summary_errors(summary))
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            errors.append(f'{command}: {type(exc).__name__}')
-            logs.append(f'[{command}] {type(exc).__name__}')
-        return '\n\n'.join(logs), list(dict.fromkeys(mask_secrets(str(e)) for e in errors))
+        # 委托统一同步服务：单次 sync3m 流水线并自动有上限消费落库的质量事件。
+        stmt_db = (self.config.get('billing') or {}).get('statement_db_path') or os.path.join(script_dir, 'statements.db')
+        todo_db = (self.config.get('billing') or {}).get('todo_db_path')
+        result = sync_and_consume(
+            script_dir=script_dir,
+            statement_db_path=stmt_db,
+            todo_db_path=todo_db,
+            months=months,
+            runner=subprocess.run
+        )
+        all_errors = list(dict.fromkeys(result['fetch_errors'] + result['quality_errors']))
+        return result['fetch_log'], all_errors
 
     @staticmethod
     def _summary_errors(summary):
-        errors = []
-        for acct in (summary or {}).get('accounts') or []:
-            name = acct.get('account') or '?'
-            if acct.get('status') not in (None, 'ok'):
-                errors.append(f"账户 {name} 同步状态 {acct['status']}：{acct.get('error', '')}")
-            if acct.get('parse_failed'):
-                errors.append(f"账户 {name} 解析失败 {acct['parse_failed']} 封")
-            if acct.get('errors'):
-                errors.append(f"账户 {name} 处理异常 {acct['errors']} 封")
-        return errors
+        return summarize_account_errors(summary)
 
     def run(self, goal, session_key, policy=None):
         policy = policy or ExecutionPolicy()
@@ -120,7 +86,7 @@ class BillingWorkflow:
             fetch_log, fetch_errors = self.fetch(script_dir, months)
             snapshot = build_snapshot(db_path, months, self.settings.get('detail_limit', 20))
             snapshot['anomalies'] += fetch_errors
-            result.failed_nodes = ['部分邮箱拉取'] if fetch_errors else []
+            result.failed_nodes = ['账单同步或质量待办'] if fetch_errors else []
             print(f"[BILLING] snapshot statements={snapshot['statement_count']} transactions={snapshot['transaction_count']} anomalies={len(snapshot['anomalies'])}")
             messages = [
                 {'role': 'system', 'content': '根据提供的账单快照撰写中文分析。不得调用工具。区分数据库标记与实际还款；不得跨币种合计。交易样例不是全量，不能从样例推断全量消费分布。缺失数据不能算零。遵守每张账单的 purpose_availability：blocked 用途不得给出确定结论，partial 或 transaction_totals_complete=false 必须标明不完整。原币币种或币种来源未确认时，不猜测币种、不计算汇率。不得依据地区、商户或金额比例推断币种。不提供投资建议。明确列出异常、数据时效和需核实事项。'},

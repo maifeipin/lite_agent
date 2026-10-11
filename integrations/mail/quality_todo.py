@@ -1,8 +1,10 @@
 import json
 import logging
+import time
 from typing import Optional, Dict, Any, List
 
 from integrations.mail.client import MailCLI
+from core.utils.masker import mask_secrets
 from skills.ops_todo import upsert_source_todo, resolve_source_todo
 
 logger = logging.getLogger(__name__)
@@ -68,7 +70,9 @@ def _format_quality_todo_content(event: Dict[str, Any]) -> tuple:
 def consume_quality_events(
     client: Optional[MailCLI] = None,
     db_path: Optional[str] = None,
-    limit: int = 100
+    limit: int = 100,
+    stop_on_error: bool = False,
+    deadline: Optional[float] = None
 ) -> Dict[str, Any]:
     """
     拉取未确认的质量事件，幂等写入 Todo 数据库，并在成功后执行 ack（重构契约 §1.3 / R4）。
@@ -96,10 +100,18 @@ def consume_quality_events(
         "errors": []
     }
 
+    def remaining():
+        if deadline is None:
+            return {}
+        seconds = deadline - time.monotonic()
+        if seconds <= 0:
+            raise TimeoutError('质量待办消费预算耗尽，未确认事件保留待重试')
+        return {'timeout': seconds}
+
     try:
-        events = cli.quality_events(limit=limit)
+        events = cli.quality_events(limit=limit, **remaining())
     except Exception as exc:
-        err_msg = f"拉取质量事件失败: {exc}"
+        err_msg = mask_secrets(f"拉取质量事件失败: {exc}")
         logger.error(err_msg)
         stats["errors"].append(err_msg)
         stats["failed"] += 1
@@ -108,6 +120,12 @@ def consume_quality_events(
     stats["total"] = len(events)
 
     for event in events:
+        if stop_on_error and (stats['failed'] or stats['failed_acks']):
+            break
+        if deadline is not None and time.monotonic() >= deadline:
+            stats['failed'] += 1
+            stats['errors'].append('质量待办消费预算耗尽，未确认事件保留待重试')
+            break
         if not isinstance(event, dict):
             stats['failed'] += 1
             stats['errors'].append('Invalid quality event object')
@@ -116,7 +134,7 @@ def consume_quality_events(
         case_key = event.get("case_key")
         if not isinstance(event_id, str) or not event_id.strip() or not isinstance(case_key, str) or not case_key.strip():
             stats["failed"] += 1
-            stats["errors"].append(f"事件缺少必要字段 (event_id/case_key): {event}")
+            stats["errors"].append("事件缺少必要字段 (event_id/case_key)")
             continue
 
         event_type = event.get("event_type")
@@ -155,7 +173,7 @@ def consume_quality_events(
                     stats['protected'] += 1
                 todo_id = res_todo.get("id") or f"resolved:{case_key}"
             except Exception as exc:
-                err_msg = f"解决事件 {event_id} 处理 Todo 异常: {exc}"
+                err_msg = mask_secrets(f"解决事件 {event_id} 处理 Todo 异常: {exc}")
                 logger.error(err_msg)
                 stats["failed"] += 1
                 stats["errors"].append(err_msg)
@@ -163,17 +181,17 @@ def consume_quality_events(
 
             # 确认解决事件（带 revision）
             try:
-                ack_res = cli.quality_ack(event_id=event_id, todo_id=todo_id, revision=revision)
+                ack_res = cli.quality_ack(event_id=event_id, todo_id=todo_id, revision=revision, **remaining())
                 if ack_res.get("acked") is True:
                     stats["acked"] += 1
                 else:
                     stats["failed_acks"] += 1
-                    err_msg = f"解决事件 {event_id} ack 未确认: {ack_res.get('reason')}"
+                    err_msg = mask_secrets(f"解决事件 {event_id} ack 未确认: {ack_res.get('reason')}")
                     logger.warning(err_msg)
                     stats["errors"].append(err_msg)
             except Exception as exc:
                 stats["failed_acks"] += 1
-                err_msg = f"解决事件 {event_id} ack 失败: {exc}"
+                err_msg = mask_secrets(f"解决事件 {event_id} ack 失败: {exc}")
                 logger.warning(err_msg)
                 stats["errors"].append(err_msg)
             continue
@@ -217,7 +235,7 @@ def consume_quality_events(
                 db_path=db_path
             )
         except Exception as exc:
-            err_msg = f"事件 {event_id} 写入 Todo 失败: {exc}"
+            err_msg = mask_secrets(f"事件 {event_id} 写入 Todo 失败: {exc}")
             logger.error(err_msg)
             stats["failed"] += 1
             stats["errors"].append(err_msg)
@@ -235,17 +253,17 @@ def consume_quality_events(
 
         # Todo 写入成功，调用 quality_ack 进行幂等条件确认（带 revision）
         try:
-            ack_res = cli.quality_ack(event_id=event_id, todo_id=todo_id, revision=revision)
+            ack_res = cli.quality_ack(event_id=event_id, todo_id=todo_id, revision=revision, **remaining())
             if ack_res.get("acked") is True:
                 stats["acked"] += 1
             else:
                 stats["failed_acks"] += 1
-                err_msg = f"事件 {event_id} (Todo {todo_id}) ack 拒绝/未确认: {ack_res.get('reason')}"
+                err_msg = mask_secrets(f"事件 {event_id} (Todo {todo_id}) ack 拒绝/未确认: {ack_res.get('reason')}")
                 logger.warning(err_msg)
                 stats["errors"].append(err_msg)
         except Exception as exc:
             stats["failed_acks"] += 1
-            err_msg = f"事件 {event_id} (Todo {todo_id}) ack 异常: {exc}"
+            err_msg = mask_secrets(f"事件 {event_id} (Todo {todo_id}) ack 异常: {exc}")
             logger.warning(err_msg)
             stats["errors"].append(err_msg)
 

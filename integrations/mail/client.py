@@ -135,9 +135,9 @@ class MailCLI:
 
         return parsed_json
 
-    def quality_events(self, limit: int = 100) -> List[Dict[str, Any]]:
+    def quality_events(self, limit: int = 100, timeout: float = 60) -> List[Dict[str, Any]]:
         """只读获取未确认的质量事件"""
-        envelope = self.run("quality_events", ["--limit", str(limit), "--kind", "quality"])
+        envelope = self.run("quality_events", ["--limit", str(limit), "--kind", "quality"], timeout=timeout)
         if envelope.get("status") != "ok":
             errors = "; ".join(envelope.get("errors") or ["获取质量事件失败"])
             raise MailCLIError(errors)
@@ -146,14 +146,14 @@ class MailCLI:
             raise MailCLIError('Invalid quality events payload')
         return data['events']
 
-    def quality_ack(self, event_id: str, todo_id: str, revision: Optional[int] = None) -> Dict[str, Any]:
+    def quality_ack(self, event_id: str, todo_id: str, revision: Optional[int] = None, timeout: float = 60) -> Dict[str, Any]:
         """幂等确认已落库/处理的质量事件（支持单调 revision 条件确认）"""
         if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
             raise ValueError('quality_ack requires a positive revision')
         args = ["--event-id", str(event_id), "--todo-id", str(todo_id)]
         if revision is not None:
             args.extend(["--revision", str(revision)])
-        envelope = self.run("quality_ack", args)
+        envelope = self.run("quality_ack", args, timeout=timeout)
         if envelope.get("status") != "ok":
             errors = "; ".join(envelope.get("errors") or ["确认质量事件失败"])
             raise MailCLIError(errors)
@@ -197,3 +197,52 @@ class MailCLI:
             errors = "; ".join(envelope.get("errors") or ["标记还款状态失败"])
             raise MailCLIError(errors)
         return envelope.get("data") or {}
+
+    def sync_fetch(
+        self,
+        months: int = 1,
+        timeout: int = 300,
+        runner: Optional[Any] = None
+    ) -> Dict[str, Any]:
+        """
+        执行外部 sync3m 批量拉取命令并解析 tagged summary。
+        与普通 JSON Envelope 协议分离，支持自定义 runner 与超时控制。
+        """
+        cli_py = os.path.join(self.script_dir, "mail_client.py")
+        cmd_args = [sys.executable, cli_py, "sync3m", str(months)]
+        env = os.environ.copy()
+        if self.db_path is not None:
+            env['MAIL_STATEMENT_DB_PATH'] = os.path.abspath(self.db_path)
+
+        runner_fn = runner or subprocess.run
+        try:
+            res = runner_fn(
+                cmd_args, cwd=self.script_dir, capture_output=True, text=True,
+                timeout=timeout, env=env
+            )
+            from integrations.mail.sync_receipt import evaluate_sync_receipt
+            eval_res = evaluate_sync_receipt(res.returncode, res.stdout, res.stderr, command="sync3m")
+            return {
+                "exit_code": res.returncode,
+                "summary": eval_res["summary"],
+                "errors": eval_res["errors"],
+                "masked_output": eval_res["masked_output"],
+                "success": eval_res["success"],
+            }
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "exit_code": -1,
+                "summary": None,
+                "errors": [f"sync3m: TimeoutExpired ({timeout}s)"],
+                "masked_output": mask_secrets(f"[sync3m] TimeoutExpired: {exc}"),
+                "success": False,
+            }
+        except Exception as exc:
+            err_name = type(exc).__name__
+            return {
+                "exit_code": -1,
+                "summary": None,
+                "errors": [f"sync3m: {err_name}"],
+                "masked_output": mask_secrets(f"[sync3m] {err_name}: {exc}"),
+                "success": False,
+            }
