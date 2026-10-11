@@ -34,3 +34,13 @@ docs/
 *.bak.*
 *.pre-compat-cutover
 /.review-tmp/
+# Runtime and backup directories
+backup/
+*.lock
+.*.lock
+*.code-workspace
+statements.db*
+/wecom.py
+/scripts/export_gaokao_with_majors.py
+/scripts/external_review.py
+docs/mail-billing*.md
