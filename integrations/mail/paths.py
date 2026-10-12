@@ -27,12 +27,18 @@ def get_parser_script_dir() -> str:
     except Exception:
         pass
 
-    # 尝试本地开发相对路径
-    candidate = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "..", "mail-statement-parser")
-    )
-    if os.path.isdir(candidate):
-        return candidate
+    # 尝试本地开发相对路径（仅在未显式配置时）
+    for rel_path in [
+        ("..", "..", "dev", "mail-statement-parser"),
+        ("..", "..", "mail-statement-parser"),
+        ("..", "..", "..", "mail-statement-parser"),
+        ("..", "..", "..", "dev", "mail-statement-parser"),
+    ]:
+        candidate = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), *rel_path)
+        )
+        if os.path.isdir(candidate):
+            return candidate
 
     return "/home/liteagent/mail-statement-parser"
 

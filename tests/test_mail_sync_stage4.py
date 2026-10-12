@@ -367,7 +367,7 @@ def test_billing_workflow_fetch_delegates_to_sync_service(tmp_path):
     }
     raw = f"--- JSON_SUMMARY_START ---\n{json.dumps(receipt)}\n--- JSON_SUMMARY_END ---"
     workflow = BillingWorkflow({}, Mock())
-    with patch("core.billing_workflow.subprocess.run", return_value=SimpleNamespace(
+    with patch("integrations.mail.client.run_process", return_value=SimpleNamespace(
             stdout=raw, stderr="", returncode=0)) as run_mock:
         with patch.object(MailCLI, "quality_events", return_value=[]):
             log, errors = workflow.fetch(str(tmp_path), 1)
@@ -385,7 +385,7 @@ def test_billing_workflow_fetch_surfaces_quality_errors_without_masking_accounts
     }
     raw = f"--- JSON_SUMMARY_START ---\n{json.dumps(receipt)}\n--- JSON_SUMMARY_END ---"
     workflow = BillingWorkflow({}, Mock())
-    with patch("core.billing_workflow.subprocess.run", return_value=SimpleNamespace(
+    with patch("integrations.mail.client.run_process", return_value=SimpleNamespace(
             stdout=raw, stderr="", returncode=0)):
         with patch.object(MailCLI, "quality_events", side_effect=MailCLIError("quality read error")):
             log, errors = workflow.fetch(str(tmp_path), 1)

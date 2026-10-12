@@ -1729,8 +1729,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         qs = parse_qs(query)
         status = qs.get("status", ["pending,active"])[0]
         try:
-            from skills.ops_todo import get_todos_json
-            todos = get_todos_json(status=status)
+            from features.todo import TodoService
+            todos = TodoService().get_json(status=status)
             self.send_response(200)
             self._send_cors_headers()
             self.send_header('Content-Type', 'application/json; charset=utf-8')
@@ -1758,8 +1758,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             remind_interval_mins = data.get("remind_interval_mins", 0)
             remind_before_mins = data.get("remind_before_mins", 30)
 
-            from skills.ops_todo import todo_add
-            msg = todo_add(title=title, kind=kind, project=project, description=description, due_at=due_at, remind_interval_mins=remind_interval_mins, remind_before_mins=remind_before_mins)
+            from features.todo import TodoService
+            msg = TodoService().add(title=title, kind=kind, project=project, description=description, due_at=due_at, remind_interval_mins=remind_interval_mins, remind_before_mins=remind_before_mins)
             
             self.send_response(200)
             self._send_cors_headers()
@@ -1771,8 +1771,8 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def _handle_post_todo_brief_push(self):
         try:
-            from skills.ops_todo import todo_push_brief
-            msg = todo_push_brief()
+            from features.todo import TodoService
+            msg = TodoService().push_brief()
             self.send_response(200)
             self._send_cors_headers()
             self.send_header('Content-Type', 'application/json; charset=utf-8')
@@ -1792,16 +1792,17 @@ class ApiHandler(BaseHTTPRequestHandler):
             data = json.loads(body.decode('utf-8'))
             msg = []
 
-            from skills.ops_todo import todo_done, todo_start, todo_resume, todo_update
+            from features.todo import TodoService
+            svc = TodoService()
 
             status = data.get("status")
             if status:
                 if status == 'done':
-                    msg.append(todo_done(tid))
+                    msg.append(svc.done(tid))
                 elif status == 'active':
-                    msg.append(todo_start(tid))
+                    msg.append(svc.start(tid))
                 elif status == 'pending':
-                    msg.append(todo_resume(tid))
+                    msg.append(svc.resume(tid))
                 else:
                     self.send_error(400, f"Unsupported status: {status}")
                     return
@@ -1816,7 +1817,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             remind_before_mins = data.get("remind_before_mins")
 
             if any(x is not None for x in [title, description, due_at, project, recur_cron, kind, remind_interval_mins, remind_before_mins]):
-                msg.append(todo_update(tid, title=title, description=description, due_at=due_at, project=project, recur_cron=recur_cron, kind=kind, remind_interval_mins=remind_interval_mins, remind_before_mins=remind_before_mins))
+                msg.append(svc.update(tid, title=title, description=description, due_at=due_at, project=project, recur_cron=recur_cron, kind=kind, remind_interval_mins=remind_interval_mins, remind_before_mins=remind_before_mins))
 
             if not msg:
                 self.send_error(400, "Bad Request: No fields to update")
@@ -1833,17 +1834,10 @@ class ApiHandler(BaseHTTPRequestHandler):
     def _handle_delete_todo(self, path: str):
         tid = path.split('/')[-1]
         try:
-            from skills.ops_todo import _conn, _render_markdown
-            import sqlite3
-            conn = _conn()
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM todos WHERE id=?", (tid,))
-            rowcount = cursor.rowcount
-            conn.commit()
-            conn.close()
+            from features.todo import TodoService
+            deleted = TodoService().delete(tid)
 
-            if rowcount > 0:
-                _render_markdown()
+            if deleted:
                 msg = f"✅ 任务 {tid} 已被永久删除"
             else:
                 self.send_response(404)

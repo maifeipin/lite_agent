@@ -37,7 +37,24 @@ _TEST_CONF_D = os.path.join(_TEST_SESSION_DIR, "conf.d")
 os.makedirs(_TEST_CONF_D, exist_ok=True)
 _example_cfg = os.path.realpath(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "config.example.json")))
 if os.path.isfile(_example_cfg):
-    shutil.copy2(_example_cfg, _TEST_CONFIG_JSON)
+    import json
+    with open(_example_cfg, "r", encoding="utf-8") as _f:
+        _cfg_data = json.load(_f)
+    _sb_paths = _cfg_data.setdefault("security", {}).setdefault("sandbox_paths", [])
+    for _p in [_TEST_SESSION_DIR, tempfile.gettempdir(), "/parser", "/dummy_parser"]:
+        if _p not in _sb_paths:
+            _sb_paths.append(_p)
+    _local_parser = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "dev", "mail-statement-parser"))
+    if os.path.isdir(_local_parser):
+        if _local_parser not in _sb_paths:
+            _sb_paths.append(_local_parser)
+        if "MAIL_STATEMENT_PARSER_DIR" not in os.environ:
+            os.environ["MAIL_STATEMENT_PARSER_DIR"] = _local_parser
+    _env_parser = os.environ.get("MAIL_STATEMENT_PARSER_DIR")
+    if _env_parser and _env_parser not in _sb_paths:
+        _sb_paths.append(_env_parser)
+    with open(_TEST_CONFIG_JSON, "w", encoding="utf-8") as _f:
+        json.dump(_cfg_data, _f, indent=2, ensure_ascii=False)
 else:
     with open(_TEST_CONFIG_JSON, "w", encoding="utf-8") as _f:
         _f.write("{}")
@@ -45,6 +62,7 @@ else:
 # 3. 保存并覆写关键环境变量（强制覆盖现有外部 env，阻断外部指向真实数据与配置）
 _ENV_KEYS = [
     "TESTING",
+    "MAIL_STATEMENT_PARSER_DIR",
     "MAIL_STATEMENT_DATA_ROOT",
     "MAIL_STATEMENT_DB_PATH",
     "MAIL_STATEMENT_REPORT_DIR",

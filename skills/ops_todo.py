@@ -1,437 +1,133 @@
-import sqlite3
+"""Ops Todo Skill: LLM tools and CLI adapters for personal and source todos.
+Delegates domain logic, database operations, and rendering to features.todo.
+Maintains full backward-compatible interfaces and tool signatures.
+"""
+
 import os
 import sys
-import hashlib
-import time
-import json
-import re
-import tempfile
-import logging
-import threading
-import uuid
-from datetime import datetime, timezone, timedelta
-from typing import Optional
-
-logger = logging.getLogger(__name__)
+from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from core.skill_engine import skill
 from core.cron_engine import CronManager
+from features.todo.repository import (
+    DEFAULT_DB_PATH,
+    _ensure_schema as _repo_ensure_schema,
+    generate_todo_id,
+    get_connection,
+    resolve_db_path,
+)
+from features.todo.rendering import (
+    DEFAULT_MD_PATH,
+    render_markdown,
+    resolve_md_path,
+)
+from features.todo.service import (
+    TodoService,
+    send_im_alert,
+    _now_iso,
+    _parse_until,
+)
 
+# Compatibility exports
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data')
-DB_PATH = os.path.join(DATA_DIR, 'todos.db')
-MD_PATH = os.path.join(DATA_DIR, 'personal.md')
+DB_PATH = DEFAULT_DB_PATH
+MD_PATH = DEFAULT_MD_PATH
 
-_db_initialized = False
-_initialized_path = None
-_initialized_file_id = None
-_schema_lock = threading.RLock()
-_render_lock = threading.RLock()
+_send_im_alert = send_im_alert
+
 
 def _ensure_schema(db_path: Optional[str] = None):
-    with _schema_lock:
-        target = os.path.abspath(db_path or DB_PATH)
-        if _db_initialized and _initialized_path == target:
-            try:
-                stat = os.stat(target)
-                if _initialized_file_id == (stat.st_dev, stat.st_ino):
-                    return
-            except FileNotFoundError:
-                pass
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        import fcntl
-        with open(target + '.schema.lock', 'a') as lock_file:
-            fcntl.flock(lock_file, fcntl.LOCK_EX)
-            _ensure_schema_locked(db_path)
-
-
-def _ensure_schema_locked(db_path: Optional[str] = None):
-    global _db_initialized, _initialized_path, _initialized_file_id
-    is_default = (db_path is None or os.path.abspath(db_path) == os.path.abspath(DB_PATH))
-    if is_default and _db_initialized and _initialized_path == os.path.abspath(DB_PATH):
-        try:
-            stat = os.stat(DB_PATH)
-            if _initialized_file_id == (stat.st_dev, stat.st_ino):
-                return
-        except FileNotFoundError:
-            pass
     target = db_path or DB_PATH
-    os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
-    conn = sqlite3.connect(target)
-    try:
-        conn.execute('PRAGMA journal_mode=WAL')
-        conn.execute('PRAGMA synchronous=NORMAL')
-        conn.execute('PRAGMA foreign_keys=ON')
-        conn.execute('BEGIN IMMEDIATE')
+    _repo_ensure_schema(target)
 
-        # Create tables
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS todos (
-              id TEXT PRIMARY KEY,
-              title TEXT NOT NULL,
-              description TEXT,
-              status TEXT NOT NULL DEFAULT 'pending',
-              kind TEXT NOT NULL DEFAULT 'misc',
-              project TEXT,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL,
-              started_at TEXT,
-              snoozed_until TEXT,
-              shelved_at TEXT,
-              shelved_reason TEXT,
-              completed_at TEXT,
-              dropped_at TEXT,
-              dropped_reason TEXT,
-              due_at TEXT,
-              notified_due_at TEXT,
-              recur_cron TEXT,
-              recur_parent_id TEXT,
-              recur_last_spawned_at TEXT,
-              created_via TEXT,
-              source_message_id TEXT,
-              dispatch_target TEXT,
-              dispatch_payload_json TEXT,
-              dispatch_last_run_at TEXT,
-              FOREIGN KEY (recur_parent_id) REFERENCES todos(id) ON DELETE CASCADE
-            )
-        """)
-        existing = {r[1] for r in conn.execute('PRAGMA table_info(todos)')}
-        for name, declaration in (
-            ('remind_interval_mins', 'INTEGER DEFAULT 0'),
-            ('remind_before_mins', 'INTEGER DEFAULT 30'),
-            ('source_key', 'TEXT'),
-            ('source_metadata_json', "TEXT NOT NULL DEFAULT '{}'"),
-        ):
-            if name not in existing:
-                conn.execute(f'ALTER TABLE todos ADD COLUMN {name} {declaration}')
-        conn.execute("""CREATE TABLE IF NOT EXISTS todo_source_receipts (
-            source_key TEXT PRIMARY KEY, revision INTEGER NOT NULL,
-            cycle_id INTEGER NOT NULL, event_type TEXT NOT NULL)""")
-
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_status ON todos(status, updated_at DESC)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_project ON todos(project, status)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_wake ON todos(snoozed_until) WHERE status='snoozed'")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_due ON todos(due_at) WHERE due_at IS NOT NULL AND notified_due_at IS NULL")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_recur ON todos(kind, recur_last_spawned_at) WHERE kind='recurring'")
-        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_todos_source_key ON todos(source_key) WHERE source_key IS NOT NULL")
-
-        conn.execute("PRAGMA user_version = 1")
-        conn.commit()
-    finally:
-        conn.close()
-    if is_default:
-        _db_initialized = True
-        _initialized_path = os.path.abspath(target)
-        stat = os.stat(target)
-        _initialized_file_id = (stat.st_dev, stat.st_ino)
 
 def _conn(db_path: Optional[str] = None):
-    _ensure_schema(db_path)
     target = db_path or DB_PATH
-    conn = sqlite3.connect(target)
-    conn.execute('PRAGMA foreign_keys=ON')
-    return conn
+    return get_connection(target)
+
 
 def _gen_id(title: str, db_path: Optional[str] = None) -> str:
-    base = hashlib.sha256(f"{title}-{time.time_ns()}".encode()).hexdigest()[:6]
-    conn = _conn(db_path)
-    cursor = conn.cursor()
-    for attempt in range(5):
-        candidate = base if attempt == 0 else hashlib.sha256(f"{base}-{attempt}".encode()).hexdigest()[:6]
-        cursor.execute("SELECT 1 FROM todos WHERE id=?", (candidate,))
-        if not cursor.fetchone():
-            conn.close()
-            return candidate
-    conn.close()
-    raise RuntimeError("ID collision after 5 attempts")
+    target = db_path or DB_PATH
+    return generate_todo_id(title, target)
 
-# Time utilities
-def _now_iso():
-    return datetime.now(timezone.utc).isoformat()
-
-def _parse_until(until: str) -> str:
-    if until.startswith('+'):
-        m = re.match(r'^\+(\d+)([mhd])$', until)
-        if m:
-            n, unit = int(m.group(1)), m.group(2)
-            delta = {'m': timedelta(minutes=n), 'h': timedelta(hours=n), 'd': timedelta(days=n)}[unit]
-            return (datetime.now(timezone.utc) + delta).isoformat()
-    try:
-        dt = datetime.fromisoformat(until.replace('Z', '+00:00'))
-        return dt.isoformat()
-    except ValueError:
-        raise ValueError(f"无法解析时间: {until!r}（支持 ISO8601 或 +Nm/+Nh/+Nd）")
 
 def _render_markdown(db_path: Optional[str] = None):
-    # Serialize snapshot + replace, so an older render cannot overwrite a newer one.
-    with _render_lock:
-        try:
-            out_md = os.path.join(os.path.dirname(os.path.abspath(db_path)), 'personal.md') if db_path else MD_PATH
-            os.makedirs(os.path.dirname(os.path.abspath(out_md)), exist_ok=True)
-            # macOS/Linux processes share this lock as well as the thread lock above.
-            import fcntl
-            with open(out_md + '.lock', 'a') as lock_file:
-                fcntl.flock(lock_file, fcntl.LOCK_EX)
-                _render_markdown_locked(db_path)
-        except Exception:
-            logger.exception('Todo Markdown view refresh failed; database remains authoritative')
+    target_db = db_path or DB_PATH
+    target_md = MD_PATH if target_db == DB_PATH else None
+    render_markdown(target_db, target_md)
 
 
-def _render_markdown_locked(db_path: Optional[str] = None):
-    conn = _conn(db_path)
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM todos WHERE status != 'dropped' ORDER BY updated_at DESC")
-    columns = [col[0] for col in cursor.description]
-    todos = [dict(zip(columns, row)) for row in cursor.fetchall()]
-    conn.close()
-    
-    grouped = {
-        'active': [],
-        'pending': [],
-        'snoozed': [],
-        'shelved': [],
-        'done': []
-    }
-    now_dt = datetime.now(timezone.utc)
-    
-    for t in todos:
-        st = t['status']
-        if st == 'done':
-            comp_dt = datetime.fromisoformat(t['completed_at'].replace('Z', '+00:00')) if t['completed_at'] else now_dt
-            if (now_dt - comp_dt).days <= 7:
-                grouped['done'].append(t)
-        elif st in grouped:
-            grouped[st].append(t)
-            
-    lines = [
-        "<!-- AUTO-GENERATED by ops_todo. 不要手编，改动会被覆盖。 -->",
-        "<!-- 增删改请通过 lite_agent 的飞书或钉钉对话使用 todo_xxx 技能。 -->",
-        f"\n# Personal Todos · 最新同步: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
-    ]
-    
-    def _format_todo(t):
-        checkbox = "[x]" if t['status'] == 'done' else "[ ]"
-        prefix = f"- {checkbox} `{t['id']}`"
-        tags = []
-        if t['kind'] != 'misc':
-            tags.append(t['kind'])
-        if t['project']:
-            tags.append(f"proj:{t['project']}")
-        tag_str = f" `[{','.join(tags)}]`" if tags else ""
-        
-        line = f"{prefix}{tag_str} {t['title']}"
-        
-        detail_lines = []
-        if t['status'] == 'snoozed' and t['snoozed_until']:
-            detail_lines.append(f"唤醒时间: {t['snoozed_until']}")
-        if t['status'] == 'shelved' and t['shelved_reason']:
-            detail_lines.append(f"搁置原因: {t['shelved_reason']}")
-        if t['due_at']:
-            detail_lines.append(f"到期时间: {t['due_at']}")
-        if t['description']:
-            detail_lines.append(t['description'])
-            
-        if detail_lines:
-            detail_str = "\n  ".join(detail_lines)
-            line += f"\n  <details><summary>详情</summary>\n\n  {detail_str}\n\n  </details>"
-        return line
-        
-    labels = {
-        'active': '进行中',
-        'pending': '待办',
-        'snoozed': '延期中',
-        'shelved': '搁置',
-        'done': '已完成（最近 7 天）'
-    }
-    
-    for k in ['active', 'pending', 'snoozed', 'shelved', 'done']:
-        if grouped[k]:
-            lines.append(f"## {labels[k]}\n")
-            for t in grouped[k]:
-                lines.append(_format_todo(t))
-            lines.append("")
-            
-    rendered = "\n".join(lines)
-    out_md = os.path.join(os.path.dirname(os.path.abspath(db_path)), 'personal.md') if db_path else MD_PATH
-    out_dir = os.path.dirname(os.path.abspath(out_md))
-    tmp_path = None
-    try:
-        os.makedirs(out_dir, exist_ok=True)
-        # 使用唯一临时文件，杜绝多消费者并发覆盖 .tmp 产生 FileNotFoundError
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=out_dir, delete=False, suffix=".tmp") as f:
-            f.write(rendered)
-            tmp_path = f.name
-        os.replace(tmp_path, out_md)
-    except Exception as exc:
-        # Markdown 视图渲染失败仅记录警告，绝不能打断已持久化的数据库事务
-        logger.warning(f"Markdown 视图渲染异常: {exc}")
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+def get_service(db_path: Optional[str] = None) -> TodoService:
+    target = db_path or DB_PATH
+    return TodoService(target)
 
 
-def _source_version(metadata):
-    revision = metadata.get('revision')
-    cycle = metadata.get('cycle_id', 1)
-    if revision is not None:
-        if any(not isinstance(v, int) or isinstance(v, bool) or v < 1 for v in (revision, cycle)):
-            raise ValueError('revision and cycle_id must be positive integers')
-    return revision, cycle
+def upsert_source_todo(
+    source_key: str,
+    title: str,
+    description: Optional[str] = None,
+    created_via: str = 'mail_quality',
+    source_message_id: Optional[str] = None,
+    source_metadata: Optional[dict] = None,
+    due_at: Optional[str] = None,
+    kind: str = 'code',
+    project: Optional[str] = 'mail-statement-parser',
+    db_path: Optional[str] = None
+) -> dict:
+    svc = get_service(db_path)
+    return svc.upsert_source(
+        source_key=source_key,
+        title=title,
+        description=description,
+        created_via=created_via,
+        source_message_id=source_message_id,
+        source_metadata=source_metadata,
+        due_at=due_at,
+        kind=kind,
+        project=project
+    )
 
 
-def _source_is_stale(conn, source_key, meta, revision, cycle):
-    receipt = conn.execute('SELECT revision,cycle_id,event_type FROM todo_source_receipts WHERE source_key=?',
-                           (source_key,)).fetchone()
-    current_rev = max(meta.get('revision', 0), receipt[0] if receipt else 0)
-    current_cycle = max(meta.get('cycle_id', 1), receipt[1] if receipt else 1)
-    return revision is not None and (revision <= current_rev or cycle < current_cycle)
+def resolve_source_todo(
+    source_key: str,
+    resolution_note: str = '上游问题已解决',
+    cycle_id: Optional[int] = None,
+    db_path: Optional[str] = None,
+    revision: Optional[int] = None
+) -> dict:
+    svc = get_service(db_path)
+    return svc.resolve_source(
+        source_key=source_key,
+        resolution_note=resolution_note,
+        cycle_id=cycle_id,
+        revision=revision
+    )
 
 
-def _save_source_receipt(conn, source_key, revision, cycle, event_type):
-    if revision is not None:
-        conn.execute("""INSERT INTO todo_source_receipts VALUES(?,?,?,?)
-            ON CONFLICT(source_key) DO UPDATE SET revision=excluded.revision,
-            cycle_id=excluded.cycle_id,event_type=excluded.event_type""",
-            (source_key,revision,cycle,event_type))
+def get_todos_json(status: str = "pending,active", limit: int = 50) -> list:
+    return get_service().get_json(status=status, limit=limit)
 
-
-def resolve_source_todo(source_key: str, resolution_note: str = '上游问题已解决',
-                        cycle_id: Optional[int] = None, db_path: Optional[str] = None,
-                        revision: Optional[int] = None) -> dict:
-    """Persist a versioned resolution, including a tombstone if detection arrives later."""
-    if not source_key or not source_key.strip():
-        raise ValueError('source_key 不能为空')
-    source_key = source_key.strip()
-    revision, cycle = _source_version({'revision': revision, 'cycle_id': cycle_id or 1})
-    conn = _conn(db_path)
-    try:
-        conn.execute('BEGIN IMMEDIATE')
-        row = conn.execute('SELECT id,status,source_metadata_json,created_via FROM todos WHERE source_key=?',
-                           (source_key,)).fetchone()
-        meta = json.loads(row[2] or '{}') if row else {}
-        if _source_is_stale(conn,source_key,meta,revision,cycle):
-            return {'id': row[0] if row else None, 'resolved': False, 'reason': 'stale_event', 'status': 'protected'}
-        _save_source_receipt(conn,source_key,revision,cycle,'quality_resolved')
-        if row is None:
-            conn.commit()
-            return {'id': None, 'resolved': False, 'reason': 'resolution_recorded', 'status': 'protected'}
-        tid,status,_,created_via = row
-        # A resolution for an older cycle must never finish a recurring newer problem.
-        if cycle < meta.get('cycle_id',1):
-            return {'id': tid, 'resolved': False, 'reason': 'stale_cycle', 'status': 'protected'}
-        meta.update({'resolution_note': resolution_note, 'resolved_cycle_id': cycle,
-                     'resolved_at': _now_iso(), 'event_type': 'quality_resolved'})
-        if revision is not None:
-            meta.update(revision=revision,cycle_id=cycle)
-        close = status in ('pending','active') and created_via == 'mail_quality' and not meta.get('user_edited')
-        conn.execute('UPDATE todos SET source_metadata_json=?,updated_at=? WHERE id=?',
-                     (json.dumps(meta,ensure_ascii=False),_now_iso(),tid))
-        if close:
-            conn.execute("UPDATE todos SET status='done',completed_at=? WHERE id=?",(_now_iso(),tid))
-        conn.commit()
-        result = {'id':tid,'resolved':close,'status':'done' if close else 'protected'}
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-    _render_markdown(db_path)
-    return result
-
-
-def upsert_source_todo(source_key: str, title: str, description: Optional[str] = None,
-                       created_via: str = 'mail_quality', source_message_id: Optional[str] = None,
-                       source_metadata: Optional[dict] = None, due_at: Optional[str] = None,
-                       kind: str = 'code', project: Optional[str] = 'mail-statement-parser',
-                       db_path: Optional[str] = None) -> dict:
-    """Source-key uniqueness and monotone receipts are enforced under one write lock."""
-    if not source_key or not source_key.strip():
-        raise ValueError('source_key 不能为空')
-    source_key = source_key.strip()
-    incoming = dict(source_metadata or {})
-    revision,cycle = _source_version(incoming)
-    incoming.update(machine_title=title,machine_description=description,machine_due_at=due_at)
-    conn = _conn(db_path)
-    now = _now_iso()
-    try:
-        conn.execute('BEGIN IMMEDIATE')
-        row = conn.execute("""SELECT id,status,title,description,due_at,source_metadata_json,created_via
-            FROM todos WHERE source_key=?""",(source_key,)).fetchone()
-        meta = json.loads(row[5] or '{}') if row else {}
-        stale = _source_is_stale(conn,source_key,meta,revision,cycle)
-        if stale:
-            reason = 'already_done_same_cycle' if row and row[1] in ('done','completed') and cycle <= meta.get('cycle_id',1) else 'stale_event'
-            return {'id':row[0] if row else None,'created':False,'status':'protected','reason':reason}
-        _save_source_receipt(conn,source_key,revision,cycle,incoming.get('event_type','quality_detected'))
-        if row is None:
-            tid = uuid.uuid4().hex[:12]
-            conn.execute("""INSERT INTO todos(id,title,description,status,kind,project,created_at,
-                updated_at,due_at,created_via,source_message_id,source_key,source_metadata_json)
-                VALUES(?,?,?,'pending',?,?,?,?,?,?,?,?,?)""",
-                (tid,title,description,kind,project,now,now,due_at,created_via,source_message_id,
-                 source_key,json.dumps(incoming,ensure_ascii=False)))
-            result = {'id':tid,'created':True,'status':'created'}
-        else:
-            tid,status,old_title,old_desc,old_due,_,owner = row
-            old_cycle = meta.get('cycle_id',1)
-            human = bool(meta.get('user_edited')) or owner != created_via
-            protected = status == 'dropped' or (status in ('done','completed') and (cycle <= old_cycle or human))
-            # Ownership is local; upstream cannot unset a human's edit flag.
-            incoming.pop('user_edited',None)
-            meta.update(incoming)
-            conn.execute('UPDATE todos SET source_metadata_json=?,updated_at=? WHERE id=?',
-                         (json.dumps(meta,ensure_ascii=False),now,tid))
-            if protected:
-                result = {'id':tid,'created':False,'status':'protected',
-                          'reason':'dropped' if status == 'dropped' else 'already_done_same_cycle'}
-            else:
-                reopen = status in ('done','completed') and cycle > old_cycle
-                if status not in ('snoozed','shelved') and not human:
-                    conn.execute('UPDATE todos SET title=?,description=?,due_at=? WHERE id=?',
-                                 (title,description if description is not None else old_desc,
-                                  old_due if old_due is not None else due_at,tid))
-                if reopen:
-                    conn.execute("UPDATE todos SET status='pending',completed_at=NULL WHERE id=?",(tid,))
-                result = {'id':tid,'created':False,'status':'updated'}
-                if reopen:
-                    result['reason'] = 'relapse_reopened'
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-    _render_markdown(db_path)
-    return result
 
 def _update_todo_status(tid: str, status: str, extra_fields: dict = None):
-    conn = _conn()
-    conn.execute('BEGIN IMMEDIATE')
-    now = _now_iso()
-    fields = {"status": status, "updated_at": now}
-    if extra_fields:
-        fields.update(extra_fields)
-        
+    svc = get_service()
     if status == 'active':
-        row = conn.execute('SELECT source_key,source_metadata_json FROM todos WHERE id=?',(tid,)).fetchone()
-        if row and row[0]:
-            metadata = json.loads(row[1] or '{}')
-            metadata['user_edited'] = True
-            fields['source_metadata_json'] = json.dumps(metadata,ensure_ascii=False)
-    set_clause = ", ".join([f"{k}=?" for k in fields.keys()])
-    values = list(fields.values()) + [tid]
-    
-    cursor = conn.cursor()
-    cursor.execute(f"UPDATE todos SET {set_clause} WHERE id=?", values)
-    rowcount = cursor.rowcount
-    conn.commit()
-    conn.close()
-    
-    if rowcount > 0:
-        _render_markdown()
-        return f"✅ 任务 {tid} 状态已更新为 {status}"
-    return f"❌ 未找到任务 {tid}"
+        return svc.start(tid)
+    elif status == 'done':
+        return svc.done(tid)
+    elif status == 'dropped':
+        reason = extra_fields.get("dropped_reason") if extra_fields else None
+        return svc.drop(tid, reason)
+    elif status == 'shelved':
+        reason = extra_fields.get("shelved_reason") if extra_fields else None
+        return svc.shelve(tid, reason)
+    elif status == 'pending':
+        return svc.resume(tid)
+    return f"❌ 不支持的状态: {status}"
 
+
+# Skill Tool Definitions
 @skill(
     name="todo_add",
     description="添加一条新的待办事项",
@@ -446,26 +142,27 @@ def _update_todo_status(tid: str, status: str, extra_fields: dict = None):
         "remind_before_mins": {"type": "integer", "description": "提前多少分钟开始首推提醒，默认 30 分钟", "default": 30}
     }
 )
-def todo_add(title: str, kind: str = "misc", project: str = None, description: str = None, due_at: str = None, recur_cron: str = None, remind_interval_mins: int = 0, remind_before_mins: int = 30) -> str:
-    if kind == "recurring" and not recur_cron:
-        recur_cron = "daily"
-    
-    tid = _gen_id(title)
-    now = _now_iso()
-    
-    conn = _conn()
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO todos (id, title, description, status, kind, project, created_at, updated_at, due_at, recur_cron, remind_interval_mins, remind_before_mins)
-        VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (tid, title, description, kind, project, now, now, due_at, recur_cron, remind_interval_mins, remind_before_mins))
-    conn.commit()
-    conn.close()
-    
-    _render_markdown()
-    if kind == "recurring":
-        return f"✅ 成功添加周期任务模板: {title} (ID: {tid}, 周期: {recur_cron})"
-    return f"✅ 成功添加待办事项: {title} (ID: {tid})"
+def todo_add(
+    title: str,
+    kind: str = "misc",
+    project: str = None,
+    description: str = None,
+    due_at: str = None,
+    recur_cron: str = None,
+    remind_interval_mins: int = 0,
+    remind_before_mins: int = 30
+) -> str:
+    return get_service().add(
+        title=title,
+        kind=kind,
+        project=project,
+        description=description,
+        due_at=due_at,
+        recur_cron=recur_cron,
+        remind_interval_mins=remind_interval_mins,
+        remind_before_mins=remind_before_mins
+    )
+
 
 @skill(
     name="todo_list",
@@ -478,140 +175,59 @@ def todo_add(title: str, kind: str = "misc", project: str = None, description: s
     }
 )
 def todo_list(status: str = "pending,active", project: str = None, kind: str = None, limit: int = 20) -> str:
-    conn = _conn()
-    cursor = conn.cursor()
-    
-    query = "SELECT id, title, status, kind, project, due_at FROM todos WHERE 1=1"
-    params = []
-    
-    if status and status != 'all':
-        statuses = status.split(',')
-        query += f" AND status IN ({','.join(['?'] * len(statuses))})"
-        params.extend(statuses)
-        
-    if project:
-        query += " AND project = ?"
-        params.append(project)
-        
-    if kind:
-        query += " AND kind = ?"
-        params.append(kind)
-        
-    query += " ORDER BY updated_at DESC LIMIT ?"
-    params.append(limit)
-    
-    cursor.execute(query, params)
-    rows = cursor.fetchall()
-    conn.close()
-    
-    if not rows:
-        return "没有找到符合条件的待办事项。"
-        
-    result = []
-    for r in rows:
-        tags = [r[3]]
-        if r[4]: tags.append(f"proj:{r[4]}")
-        tag_str = f"[{','.join(tags)}]"
-        due_str = f" (到期: {r[5]})" if r[5] else ""
-        result.append(f"- [{r[2]}] {r[0]} {tag_str} {r[1]}{due_str}")
-        
-    return "\n".join(result)
+    return get_service().list(status=status, project=project, kind=kind, limit=limit)
 
-def get_todos_json(status: str = "pending,active", limit: int = 50) -> list:
-    conn = _conn()
-    cursor = conn.cursor()
-    query = "SELECT id, title, description, status, kind, project, created_at, updated_at, due_at, recur_cron, remind_interval_mins, remind_before_mins, snoozed_until, shelved_reason FROM todos WHERE 1=1"
-    params = []
-    if status and status != 'all':
-        statuses = status.split(',')
-        query += f" AND status IN ({','.join(['?'] * len(statuses))})"
-        params.extend(statuses)
-    query += " ORDER BY updated_at DESC LIMIT ?"
-    params.append(limit)
-    cursor.execute(query, params)
-    rows = cursor.fetchall()
-    columns = [col[0] for col in cursor.description]
-    todos = [dict(zip(columns, row)) for row in rows]
-    conn.close()
-    return todos
 
 @skill(name="todo_get", description="获取待办事项详情", params={"id": {"type": "string", "description": "任务 ID"}})
 def todo_get(id: str) -> str:
-    conn = _conn()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM todos WHERE id=?", (id,))
-    row = cursor.fetchone()
-    if not row:
-        conn.close()
-        return f"❌ 未找到任务 {id}"
-        
-    columns = [col[0] for col in cursor.description]
-    t = dict(zip(columns, row))
-    conn.close()
-    
-    res = [f"【任务详情】 ID: {t['id']}"]
-    for k, v in t.items():
-        if v is not None:
-            res.append(f"{k}: {v}")
-    return "\n".join(res)
+    return get_service().get(id)
+
 
 @skill(name="todo_start", description="开始处理待办事项", params={"id": {"type": "string"}})
 def todo_start(id: str) -> str:
-    return _update_todo_status(id, "active", {
-        "started_at": _now_iso(),
-        "completed_at": None,
-        "notified_due_at": None
-    })
+    return get_service().start(id)
+
 
 @skill(name="todo_done", description="将待办事项标记为完成", params={"id": {"type": "string"}})
 def todo_done(id: str) -> str:
-    return _update_todo_status(id, "done", {"completed_at": _now_iso()})
+    return get_service().done(id)
+
 
 @skill(
-    name="todo_drop", 
-    description="放弃待办事项（不再做但保留记录）", 
+    name="todo_drop",
+    description="放弃待办事项（不再做但保留记录）",
     params={"id": {"type": "string"}, "reason": {"type": "string", "description": "放弃原因，可选"}}
 )
 def todo_drop(id: str, reason: str = None) -> str:
-    return _update_todo_status(id, "dropped", {"dropped_at": _now_iso(), "dropped_reason": reason})
+    return get_service().drop(id, reason)
+
 
 @skill(
-    name="todo_snooze", 
-    description="将任务延期挂起", 
+    name="todo_snooze",
+    description="将任务延期挂起",
     params={"id": {"type": "string"}, "until": {"type": "string", "description": "唤醒时间 ISO8601 格式或 +Nm/+Nh/+Nd 相对时间（如 +2m, +3d）"}}
 )
 def todo_snooze(id: str, until: str) -> str:
-    try:
-        dt = _parse_until(until)
-    except ValueError as e:
-        return f"❌ {e}"
-    return _update_todo_status(id, "snoozed", {
-        "snoozed_until": dt,
-        "completed_at": None,
-        "notified_due_at": None
-    })
+    return get_service().snooze(id, until)
+
 
 @skill(
-    name="todo_shelve", 
-    description="无限期搁置任务（不知何时做）", 
+    name="todo_shelve",
+    description="无限期搁置任务（不知何时做）",
     params={"id": {"type": "string"}, "reason": {"type": "string", "description": "搁置原因，可选"}}
 )
 def todo_shelve(id: str, reason: str = None) -> str:
-    return _update_todo_status(id, "shelved", {"shelved_at": _now_iso(), "shelved_reason": reason})
+    return get_service().shelve(id, reason)
+
 
 @skill(name="todo_resume", description="恢复被延期或搁置的任务为待办状态", params={"id": {"type": "string"}})
 def todo_resume(id: str) -> str:
-    return _update_todo_status(id, "pending", {
-        "snoozed_until": None,
-        "shelved_at": None,
-        "shelved_reason": None,
-        "notified_due_at": None,
-        "completed_at": None
-    })
+    return get_service().resume(id)
+
 
 @skill(
-    name="todo_update", 
-    description="修改任务的基本信息", 
+    name="todo_update",
+    description="修改任务的基本信息",
     params={
         "id": {"type": "string"},
         "title": {"type": "string", "description": "新标题"},
@@ -624,370 +240,52 @@ def todo_resume(id: str) -> str:
         "remind_before_mins": {"type": "integer", "description": "新提前提醒时间(分钟)"}
     }
 )
-def todo_update(id: str, title: str = None, description: str = None, due_at: str = None, project: str = None, recur_cron: str = None, kind: str = None, remind_interval_mins: int = None, remind_before_mins: int = None) -> str:
-    conn = _conn()
-    conn.execute('BEGIN IMMEDIATE')
-    fields = {"updated_at": _now_iso()}
-    if title is not None: fields["title"] = title
-    if description is not None: fields["description"] = description
-    if due_at is not None:
-        fields["due_at"] = due_at
-        fields["notified_due_at"] = None
-    if project is not None: fields["project"] = project
-    if recur_cron is not None: fields["recur_cron"] = recur_cron
-    if kind is not None: fields["kind"] = kind
-    if remind_interval_mins is not None: fields["remind_interval_mins"] = remind_interval_mins
-    if remind_before_mins is not None: fields["remind_before_mins"] = remind_before_mins
-    
-    cursor = conn.cursor()
-    if len(fields) > 1:
-        cursor.execute("SELECT source_metadata_json FROM todos WHERE id=?", (id,))
-        row = cursor.fetchone()
-        if row and row[0]:
-            try:
-                m = json.loads(row[0])
-            except Exception:
-                m = {}
-            m["user_edited"] = True
-            fields["source_metadata_json"] = json.dumps(m, ensure_ascii=False)
+def todo_update(
+    id: str,
+    title: str = None,
+    description: str = None,
+    due_at: str = None,
+    project: str = None,
+    recur_cron: str = None,
+    kind: str = None,
+    remind_interval_mins: int = None,
+    remind_before_mins: int = None
+) -> str:
+    return get_service().update(
+        tid=id,
+        title=title,
+        description=description,
+        due_at=due_at,
+        project=project,
+        recur_cron=recur_cron,
+        kind=kind,
+        remind_interval_mins=remind_interval_mins,
+        remind_before_mins=remind_before_mins
+    )
 
-    set_clause = ", ".join([f"{k}=?" for k in fields.keys()])
-    values = list(fields.values()) + [id]
-    
-    cursor.execute(f"UPDATE todos SET {set_clause} WHERE id=?", values)
-    rowcount = cursor.rowcount
-    conn.commit()
-    conn.close()
-    
-    if rowcount > 0:
-        _render_markdown()
-        return f"✅ 任务 {id} 已更新"
-    return f"❌ 未找到任务 {id}"
 
 @skill(name="todo_dispatch", description="派发代码任务以供本地 IDE 处理", params={"id": {"type": "string"}, "target": {"type": "string", "default": "manual"}})
 def todo_dispatch(id: str, target: str = "manual") -> str:
-    conn = _conn()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM todos WHERE id=?", (id,))
-    row = cursor.fetchone()
-    if not row:
-        conn.close()
-        return f"❌ 未找到任务 {id}"
-        
-    columns = [col[0] for col in cursor.description]
-    t = dict(zip(columns, row))
-    
-    cursor.execute("UPDATE todos SET dispatch_last_run_at=?, updated_at=? WHERE id=?", (_now_iso(), _now_iso(), id))
-    conn.commit()
-    conn.close()
-    
-    if target == "manual":
-        proj = t['project'] or "未知项目"
-        prompt = f"""请在本地 IDE 执行以下任务：
-项目: {proj}
-任务标题: {t['title']}
-任务ID: {t['id']}
-背景详情: 
-{t['description'] or '无'}
-"""
-        return f"✅ 手动派发成功。请将以下内容复制给本地 IDE：\n\n{prompt}"
-    
-    return f"❌ 暂不支持的 dispatch target: {target}"
+    return get_service().dispatch(id, target)
 
-def _send_im_alert(title: str, text: str, color: str = "yellow", dedup_key: str = None):
-    """发送通用 IM 告警/通知到系统的 alert 通道"""
-    try:
-        import json
-        import urllib.request
-        url = os.environ.get("LITE_AGENT_ALERT_URL", "http://127.0.0.1:8887/api/v1/alert")
-        token = os.environ.get("API_AUTH_TOKEN", "")
-        payload = {
-            "title": title,
-            "text": text,
-            "color": color
-        }
-        if dedup_key:
-            payload["dedup_key"] = dedup_key
-        headers = {"Content-Type": "application/json"}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            pass
-    except Exception as e:
-        print(f"[_send_im_alert] 推送跳过/异常: {e}")
-
-send_im_alert = _send_im_alert
-
-def _parse_target_hm_and_dow(recur_cron: str):
-    """
-    解析循环周期表达式，支持:
-    - 'daily', 'every_day', 'everyday' -> 每日 09:00
-    - 'weekly', 'every_monday' -> 每周一 09:00
-    - '09:00', '9:00', '14:30' -> 每日指定 HH:MM
-    - 5 字段 Cron 表达式（如 '0 9 * * *', '30 8 * * 1', '0 9 * * mon'）
-    """
-    if not recur_cron:
-        return "09:00", None
-        
-    s = recur_cron.strip().lower()
-    
-    if s in ("daily", "every_day", "everyday"):
-        return "09:00", None
-    elif s in ("weekly", "every_monday"):
-        return "09:00", 0  # 0代表周一
-        
-    # 匹配 HH:MM 格式 (如 9:00 或 09:30)
-    m_hm = re.match(r'^(\d{1,2}):(\d{2})$', s)
-    if m_hm:
-        h_val, m_val = int(m_hm.group(1)), int(m_hm.group(2))
-        return f"{h_val:02d}:{m_val:02d}", None
-        
-    # 匹配 5 字段 Standard Cron (如 "0 9 * * *" 或 "30 8 * * 1" 或 "0 9 * * mon")
-    parts = s.split()
-    if len(parts) == 5:
-        m_str, h_str, dom_str, mon_str, dow_str = parts
-        try:
-            m_val = int(m_str) if m_str != '*' else 0
-            h_val = int(h_str) if h_str != '*' else 9
-            
-            # Standard Cron: 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat, 7/0=Sun
-            dow_map = {
-                "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
-                "1": 0, "2": 1, "3": 2, "4": 3, "5": 4, "6": 5, "7": 6, "0": 6
-            }
-            if dow_str in dow_map:
-                dow_val = dow_map[dow_str]
-            elif dow_str != '*':
-                try:
-                    val = int(dow_str)
-                    dow_val = (val - 1) % 7 if val >= 1 else 6
-                except ValueError:
-                    dow_val = None
-            else:
-                dow_val = None
-                
-            return f"{h_val:02d}:{m_val:02d}", dow_val
-        except ValueError:
-            pass
-            
-    print(f"[_parse_target_hm_and_dow] 警告: 无法完全解析 Cron '{recur_cron}', 降级使用默认 (09:00)")
-    return "09:00", None
-
-def _should_spawn_recurring(recur_cron: str, last_spawned_at: str, now_iso_str: str) -> bool:
-    """判断在当前本地时间下，是否应当派生循环任务（完美对齐本地时区与 CronManager）"""
-    try:
-        local_now = datetime.fromisoformat(now_iso_str).astimezone()
-    except Exception:
-        local_now = datetime.now().astimezone()
-        
-    today_prefix = local_now.strftime("%Y-%m-%d")
-    
-    if last_spawned_at:
-        try:
-            last_dt = datetime.fromisoformat(last_spawned_at).astimezone()
-            last_date_str = last_dt.strftime("%Y-%m-%d")
-        except Exception:
-            last_date_str = last_spawned_at[:10]
-            
-        if today_prefix == last_date_str:
-            return False
-            
-    target_hm, target_dow = _parse_target_hm_and_dow(recur_cron)
-    
-    if target_dow is not None and local_now.weekday() != target_dow:
-        return False
-        
-    current_hm = local_now.strftime("%H:%M")
-    return current_hm >= target_hm
-
-def _todo_tick():
-    now = _now_iso()
-    conn = _conn()
-    cursor = conn.cursor()
-    
-    # 1. 自动唤醒 Snoozed 任务 (同时确保清空 completed_at 与 notified_due_at)
-    cursor.execute("""
-        UPDATE todos SET status='pending', snoozed_until=NULL, completed_at=NULL, notified_due_at=NULL, updated_at=?
-        WHERE status='snoozed' AND datetime(snoozed_until) <= datetime(?)
-    """, (now, now))
-    woken_count = cursor.rowcount
-    
-    # 2. 检查到期或已超期的任务并推送到 IM (支持提前时间窗口 + 高频重复间隔提醒)
-    cursor.execute("""
-        SELECT id, title, due_at, created_via, project, kind, description, remind_interval_mins, remind_before_mins, notified_due_at FROM todos
-        WHERE status IN ('pending','active')
-          AND due_at IS NOT NULL
-    """)
-    due_tasks = cursor.fetchall()
-    
-    due_soon_count = 0
-    now_dt = datetime.fromisoformat(now)
-    for row in due_tasks:
-        tid, title, due_at, created_via, project, kind, description, interval_mins, before_mins, last_notified = row
-        
-        try:
-            due_dt = datetime.fromisoformat(due_at)
-        except Exception:
-            continue
-
-        # 如果在未来且尚未进入提醒时间窗口 (now < due_at - before_mins) -> 跳过
-        window_mins = before_mins if (before_mins is not None and before_mins > 0) else 30
-        start_notify_dt = due_dt - timedelta(minutes=window_mins)
-        
-        if now_dt < start_notify_dt:
-            continue
-        
-        should_notify = False
-        if not last_notified:
-            should_notify = True
-        elif interval_mins and interval_mins > 0:
-            try:
-                last_dt = datetime.fromisoformat(last_notified)
-                if (now_dt - last_dt).total_seconds() >= (interval_mins * 60 - 5):
-                    should_notify = True
-            except Exception:
-                pass
-                
-        if should_notify:
-            cursor.execute("UPDATE todos SET notified_due_at=?, updated_at=? WHERE id=?", (now, now, tid))
-            due_soon_count += 1
-            
-            is_overdue = due_dt < now_dt
-            tag = "🔴 已超期" if is_overdue else f"⏰ 即将到期 ({window_mins}分钟内)"
-            proj_info = f"【{project}】" if project else ""
-            
-            msg = f"{tag} {proj_info}\n**{title}**\n\n- 到期时间: {due_at}\n- 任务类型: {kind}\n- 任务 ID: `{tid}`"
-            if interval_mins and interval_mins > 0:
-                msg += f"\n- 提醒频次: 每 {interval_mins} 分钟"
-            if description:
-                msg += f"\n- 说明: {description[:100]}"
-                
-            print(f"[todo_tick] 提醒任务到期推送到 IM (before={window_mins}m, interval={interval_mins}m): {tid} {title}")
-            _send_im_alert(
-                title=f"⏰ 待办提醒: {title}",
-                text=msg,
-                color="red" if is_overdue else "yellow",
-                dedup_key=f"todo_due:{tid}:{now[:16]}" if (interval_mins and interval_mins > 0) else f"todo_due:{tid}"
-            )
-        
-    # 3. 检查循环/周期任务 (kind='recurring') 并自动派生子任务
-    cursor.execute("""
-        SELECT id, title, description, project, recur_cron, recur_last_spawned_at
-        FROM todos
-        WHERE kind = 'recurring' AND status != 'dropped'
-    """)
-    recurring_templates = cursor.fetchall()
-    
-    spawned_count = 0
-    local_now = datetime.now().astimezone()
-    for r in recurring_templates:
-        pid, ptitle, pdesc, pproj, rcron, rlast = r
-        if _should_spawn_recurring(rcron, rlast, now):
-            child_id = _gen_id(f"{ptitle}_{local_now.strftime('%Y-%m-%d')}")
-            due_time = local_now.strftime("%Y-%m-%dT18:00:00%z")
-            cursor.execute("""
-                INSERT INTO todos (id, title, description, status, kind, project, created_at, updated_at, recur_parent_id, due_at)
-                VALUES (?, ?, ?, 'pending', 'todo', ?, ?, ?, ?, ?)
-            """, (child_id, ptitle, pdesc, pproj, now, now, pid, due_time))
-            
-            cursor.execute("""
-                UPDATE todos SET recur_last_spawned_at=?, updated_at=? WHERE id=?
-            """, (now, now, pid))
-            spawned_count += 1
-            print(f"[todo_tick] 周期任务自动派生子任务: {child_id} ({ptitle})")
-            _send_im_alert(
-                title=f"🔄 周期任务自动派发: {ptitle}",
-                text=f"已自动派发今日周期任务：**{ptitle}** (`{child_id}`)\n- 所属项目: {pproj or '默认'}\n- 周期配置: `{rcron}`",
-                color="green",
-                dedup_key=f"todo_spawn:{child_id}"
-            )
-
-    if woken_count > 0:
-        print(f"[todo_tick] 成功唤醒 {woken_count} 个任务")
-        
-    conn.commit()
-    conn.close()
-    
-    if woken_count > 0 or due_soon_count > 0 or spawned_count > 0:
-        _render_markdown()
 
 @skill(name="todo_push_brief", description="汇总当前待办事项并推送到 IM 聊天频道", params={})
 def todo_push_brief() -> str:
-    """按分类格式化当前未完成与超期待办并推送到 IM 通道"""
-    now = _now_iso()
-    conn = _conn()
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        SELECT id, title, status, kind, project, due_at, description
-        FROM todos
-        WHERE status IN ('pending', 'active', 'snoozed')
-        ORDER BY CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC, updated_at DESC
-    """)
-    rows = cursor.fetchall()
-    conn.close()
-    
-    today_prefix = now[:10]
-    
-    if not rows:
-        msg = f"📋 **每日待办简报 ({today_prefix})**\n\n🎉 当前没有任何待办事项，保持极佳状态！"
-        _send_im_alert(title=f"📋 每日待办简报 ({today_prefix})", text=msg, color="green", dedup_key=f"todo_brief:{today_prefix}")
-        return "✅ 无待办事项，已发送空简报"
-        
-    overdue = []
-    due_today = []
-    active = []
-    pending = []
-    
-    for r in rows:
-        tid, title, status, kind, project, due_at, desc = r
-        item_str = f"- **{title}** (`{tid}`)"
-        if project:
-            item_str += f" [{project}]"
-        if due_at:
-            item_str += f" *(到期: {due_at[:16]})*"
-            
-        if due_at and due_at < now:
-            overdue.append(item_str)
-        elif due_at and due_at.startswith(today_prefix):
-            due_today.append(item_str)
-        elif status == 'active':
-            active.append(item_str)
-        else:
-            pending.append(item_str)
-            
-    sections = [f"📋 **每日待办简报 ({today_prefix})**\n"]
-    if overdue:
-        sections.append(f"🔴 **已超期任务 ({len(overdue)})**:")
-        sections.extend(overdue)
-        sections.append("")
-    if due_today:
-        sections.append(f"⏰ **今日到期任务 ({len(due_today)})**:")
-        sections.extend(due_today)
-        sections.append("")
-    if active:
-        sections.append(f"🚀 **进行中任务 ({len(active)})**:")
-        sections.extend(active)
-        sections.append("")
-    if pending:
-        sections.append(f"📌 **待处理任务 ({len(pending)})**:")
-        sections.extend(pending)
-        sections.append("")
-        
-    text = "\n".join(sections).strip()
-    _send_im_alert(title=f"📋 每日待办简报 ({today_prefix})", text=text, color="blue", dedup_key=f"todo_brief:{today_prefix}")
-    return f"✅ 已成功推送每日待办简报（包含 {len(rows)} 条任务）"
+    return get_service().push_brief()
 
-# 防重复注册 Job
-_mgr = CronManager()
-if not any(j.name == 'todo_tick' for j in _mgr.jobs.values()):
-    _mgr.add_job('todo_tick', 'every_minute', _todo_tick)
 
-if not any(j.name == 'todo_brief' for j in _mgr.jobs.values()):
-    _mgr.add_job('todo_brief', '08:30', todo_push_brief)
+def _todo_tick():
+    return get_service().tick()
+
+
+def register_todo_cron(mgr: Optional[CronManager] = None) -> None:
+    """Idempotent cron registration entry point."""
+    cron = mgr or CronManager()
+    if not any(j.name == 'todo_tick' for j in cron.jobs.values()):
+        cron.add_job('todo_tick', 'every_minute', _todo_tick)
+    if not any(j.name == 'todo_brief' for j in cron.jobs.values()):
+        cron.add_job('todo_brief', '08:30', todo_push_brief)
+
+
+# 装配处：技能模块加载时显式幂等注册
+register_todo_cron()

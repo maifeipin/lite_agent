@@ -1,3 +1,4 @@
+from integrations.mail.process import run_process
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.skill_engine import skill
@@ -39,10 +40,19 @@ def _run_mail_reader_cmd(cmd_args: list, timeout=None) -> str:
     if timeout is None:
         timeout = cfg.get('mail', {}).get('subprocess_timeout', 300)
 
-    # 从 billing 获取 script_dir
-    billing_dir = cfg.get("billing", {}).get("script_dir", "/home/liteagent/mail-statement-parser")
+    from integrations.mail.paths import get_parser_script_dir
+    from security import SecurityGuard
+    billing_dir = get_parser_script_dir()
+    guard = SecurityGuard(cfg)
+    if not guard.check_path(billing_dir):
+        return f"❌ 拒绝访问未授权目录: {billing_dir}"
+
+    from integrations.mail.client import MailCLI
+    cli = MailCLI(script_dir=billing_dir)
+    sec_error = cli._check_security()
+    if sec_error:
+        return "❌ " + "; ".join(sec_error['errors'])
     mail_client_py = os.path.join(billing_dir, "mail_client.py")
-    
     if not os.path.exists(mail_client_py):
         return f"❌ 找不到邮件脚本: {mail_client_py}"
         
@@ -67,7 +77,7 @@ def _run_mail_reader_cmd(cmd_args: list, timeout=None) -> str:
     provider = "gemini" if is_gemini_driver(driver) else "openai"
     
     # 构建子进程环境变量
-    env = dict(os.environ)
+    env = cli._build_env()
     if api_key:
         env["LLM_API_KEY"] = api_key
     if base_url:
@@ -82,7 +92,7 @@ def _run_mail_reader_cmd(cmd_args: list, timeout=None) -> str:
 
     cmd = [sys.executable, mail_client_py] + cmd_args
     try:
-        r = subprocess.run(cmd, cwd=billing_dir, capture_output=True, text=True, encoding='utf-8', timeout=timeout, env=env)
+        r = run_process(cmd, cwd=billing_dir, capture_output=True, text=True, encoding='utf-8', timeout=timeout, env=env)
         output = r.stdout.strip()
         if r.returncode != 0:
             return f"⚠️ 脚本执行出错 (代码 {r.returncode}):\n{r.stderr.strip()}"
@@ -91,17 +101,6 @@ def _run_mail_reader_cmd(cmd_args: list, timeout=None) -> str:
         return f"❌ 脚本执行超时 (> {timeout}秒)"
     except Exception as e:
         return f"❌ 脚本调用失败: {e}"
-
-
-def _get_db_path_and_import_db():
-    cfg = load_config() or {}
-    billing_dir = cfg.get("billing", {}).get("script_dir", "/home/liteagent/mail-statement-parser")
-    import sys
-    if billing_dir not in sys.path:
-        sys.path.insert(0, billing_dir)
-    import statement_db  # type: ignore
-    db_path = os.path.join(billing_dir, "statements.db")
-    return db_path, statement_db
 
 
 def _format_headers_table(headers_list: list) -> str:
@@ -327,15 +326,16 @@ slash_command('/mail_enrich', category='邮件管理',
 
 
 def mail_feedback_ok(summary_id: int) -> str:
-    db_path, sdb = _get_db_path_and_import_db()
-    row = sdb.get_email_summary_by_id(db_path, summary_id)
-    if not row:
-        return f"❌ 未找到 ID={summary_id} 的邮件摘要记录。"
-    
-    success = sdb.update_summary_status(db_path, summary_id, 'processed')
-    if success:
+    from integrations.mail.client import MailCLI
+    cli = MailCLI()
+    try:
+        row = cli.mail_summary_get(summary_id)
+        if not row:
+            return f"❌ 未找到 ID={summary_id} 的邮件摘要记录。"
+        cli.mail_mark_processed(summary_id)
         return f"✅ 已成功标记邮件 ID={summary_id} 为已处理状态 (processed)。"
-    return f"❌ 标记邮件 ID={summary_id} 失败。"
+    except Exception as exc:
+        return f"❌ 标记邮件 ID={summary_id} 失败: {exc}"
 
 slash_command('/mail_ok', category='邮件管理',
               description='标记邮件已处理 (processed)',
@@ -344,33 +344,24 @@ slash_command('/mail_ok', category='邮件管理',
 
 
 def mail_feedback_noise(summary_id: int) -> str:
-    db_path, sdb = _get_db_path_and_import_db()
-    row = sdb.get_email_summary_by_id(db_path, summary_id)
-    if not row:
-        return f"❌ 未找到 ID={summary_id} 的邮件摘要记录。"
-    
-    sender = row["sender"] or ""
-    from email.utils import parseaddr
-    _, addr = parseaddr(sender)
-    addr_l = addr.lower()
-    local, domain = addr_l.split('@') if '@' in addr_l else (addr_l, '')
-    
-    # 载入默认的 protected domains
+    from integrations.mail.client import MailCLI
+    cli = MailCLI()
     try:
-        import mail_client  # type: ignore
-        rules = mail_client.load_static_noise_rules()
-    except Exception:
-        rules = {"protected_domains": ["qq.com", "gmail.com", "163.com", "outlook.com", "hotmail.com", "yahoo.com", "icloud.com"]}
-        
-    protected_domains = rules.get("protected_domains", [])
-    
-    pattern_type = "sender_email" if domain in protected_domains or not domain else "sender_domain"
-    pattern_value = addr_l if pattern_type == "sender_email" else domain
-    
-    sdb.add_noise_rule(db_path, pattern_type, pattern_value)
-    sdb.update_summary_status(db_path, summary_id, 'noise')
-    
-    return f"✅ 已学习降噪规则：类型={pattern_type}，规则值={pattern_value}。该邮件 ID={summary_id} 已标为 noise。"
+        row = cli.mail_summary_get(summary_id)
+        if not row:
+            return f"❌ 未找到 ID={summary_id} 的邮件摘要记录。"
+        sender = row.get("sender") or ""
+        from email.utils import parseaddr
+        _, addr = parseaddr(sender)
+        addr_l = addr.lower()
+        local, domain = addr_l.split('@') if '@' in addr_l else (addr_l, '')
+        protected_domains = ["qq.com", "gmail.com", "163.com", "outlook.com", "hotmail.com", "yahoo.com", "icloud.com"]
+        pattern_type = "sender_email" if domain in protected_domains or not domain else "sender_domain"
+        pattern_value = addr_l if pattern_type == "sender_email" else domain
+        cli.mail_noise_rule_add(pattern_type, pattern_value, summary_id=summary_id)
+        return f"✅ 已学习降噪规则：类型={pattern_type}，规则值={pattern_value}。该邮件 ID={summary_id} 已标为 noise。"
+    except Exception as exc:
+        return f"❌ 学习降噪规则失败: {exc}"
 
 slash_command('/mail_noise', category='邮件管理',
               description='将邮件标记为噪声并学习降噪规则',
@@ -379,44 +370,39 @@ slash_command('/mail_noise', category='邮件管理',
 
 
 def mail_delete_noise_rule(arg_val: str) -> str:
-    db_path, sdb = _get_db_path_and_import_db()
-    
-    pattern_value = None
-    if arg_val.isdigit():
-        summary_id = int(arg_val)
-        row = sdb.get_email_summary_by_id(db_path, summary_id)
-        if row:
-            sender = row["sender"] or ""
-            from email.utils import parseaddr
-            _, addr = parseaddr(sender)
-            addr_l = addr.lower()
-            local, domain = addr_l.split('@') if '@' in addr_l else (addr_l, '')
-            
-            try:
-                import mail_client  # type: ignore
-                rules = mail_client.load_static_noise_rules()
-            except Exception:
-                rules = {"protected_domains": ["qq.com", "gmail.com", "163.com", "outlook.com", "hotmail.com", "yahoo.com", "icloud.com"]}
-            protected_domains = rules.get("protected_domains", [])
-            
-            if domain in protected_domains or not domain:
-                pattern_value = addr_l
+    from integrations.mail.client import MailCLI
+    cli = MailCLI()
+    try:
+        pattern_value = None
+        if arg_val.isdigit():
+            summary_id = int(arg_val)
+            row = cli.mail_summary_get(summary_id)
+            if row:
+                sender = row.get("sender") or ""
+                from email.utils import parseaddr
+                _, addr = parseaddr(sender)
+                addr_l = addr.lower()
+                local, domain = addr_l.split('@') if '@' in addr_l else (addr_l, '')
+                protected_domains = ["qq.com", "gmail.com", "163.com", "outlook.com", "hotmail.com", "yahoo.com", "icloud.com"]
+                if domain in protected_domains or not domain:
+                    pattern_value = addr_l
+                else:
+                    pattern_value = domain
             else:
-                pattern_value = domain
+                return f"❌ 未找到 ID={summary_id} 的邮件摘要记录，因此无法反查规则。"
         else:
-            return f"❌ 未找到 ID={summary_id} 的邮件摘要记录，因此无法反查规则。"
-    else:
-        pattern_value = arg_val.strip().lower()
-        
-    if not pattern_value:
-        return "❌ 无法解析待删除的降噪规则值。"
-        
-    deleted1 = sdb.delete_noise_rule(db_path, "sender_domain", pattern_value)
-    deleted2 = sdb.delete_noise_rule(db_path, "sender_email", pattern_value)
-    
-    if deleted1 or deleted2:
-        return f"✅ 已成功删除降噪过滤规则：{pattern_value}。"
-    return f"❌ 未在数据库中找到匹配的过滤规则值：{pattern_value}。"
+            pattern_value = arg_val.strip().lower()
+
+        if not pattern_value:
+            return "❌ 无法解析待删除的降噪规则值。"
+
+        data = cli.mail_noise_rule_delete(pattern_value)
+        deleted = data.get("deleted", 0)
+        if deleted:
+            return f"✅ 已成功删除降噪过滤规则：{pattern_value}。"
+        return f"❌ 未在数据库中找到匹配的过滤规则值：{pattern_value}。"
+    except Exception as exc:
+        return f"❌ 删除降噪规则失败: {exc}"
 
 slash_command('/mail_unnoise', category='邮件管理',
               description='删除降噪规则 (按 ID 反查或直接指定)',
@@ -425,15 +411,18 @@ slash_command('/mail_unnoise', category='邮件管理',
 
 
 def mail_list_noise_rules() -> str:
-    db_path, sdb = _get_db_path_and_import_db()
-    rules = sdb.load_noise_rules(db_path)
-    if not rules:
-        return "🔕 目前没有配置任何自定义的降噪规则。"
-        
-    lines = ["📋 **当前自定义降噪规则列表:**"]
-    for idx, (p_type, p_val) in enumerate(rules, 1):
-        lines.append(f"{idx}. [{p_type}] `{p_val}`")
-    return "\n".join(lines)
+    from integrations.mail.client import MailCLI
+    cli = MailCLI()
+    try:
+        rules = cli.mail_noise_rules_list()
+        if not rules:
+            return "🔕 目前没有配置任何自定义的降噪规则。"
+        lines = ["📋 **当前自定义降噪规则列表:**"]
+        for idx, (p_type, p_val) in enumerate(rules, 1):
+            lines.append(f"{idx}. [{p_type}] `{p_val}`")
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"❌ 获取降噪规则失败: {exc}"
 
 slash_command('/mail_noiselist', category='邮件管理',
               description='查看当前自定义降噪规则列表',
@@ -442,7 +431,7 @@ slash_command('/mail_noiselist', category='邮件管理',
 
 
 @skill(
-    name='mail_show_headers',
+    name='mail_headers',
     description='查询最近的邮件标题列表',
     params={
         'limit': {
@@ -452,24 +441,24 @@ slash_command('/mail_noiselist', category='邮件管理',
         }
     }
 )
-def mail_show_headers(limit: int = 15) -> str:
-    output = _run_mail_reader_cmd(["show_headers", str(limit)])
+def mail_headers(limit: int = 15) -> str:
+    from integrations.mail.client import MailCLI
+    cli = MailCLI()
     try:
-        import json
-        headers_list = json.loads(output)
+        headers_list = cli.mail_headers(limit=limit)
         text = _format_headers_table(headers_list)
         return _handle_large_content(text, "邮件标题列表")
     except Exception as e:
-        return f"❌ 解析标题列表失败: {e}\n{output}"
+        return f"❌ 查询标题列表失败: {e}"
 
 slash_command('/mail_headers', category='邮件管理',
               description='查看最近邮件标题列表',
               show_in_dashboard=False, guest_ok=False)(
-    lambda agent, msg, args: mail_show_headers(limit=int(args[0]) if args else 15))
+    lambda agent, msg, args: mail_headers(limit=int(args[0]) if args else 15))
 
 
 @skill(
-    name='mail_show_missed',
+    name='mail_missed',
     description='查询最近 7 天可能错过的非高优邮件列表',
     params={
         'limit': {
@@ -479,20 +468,20 @@ slash_command('/mail_headers', category='邮件管理',
         }
     }
 )
-def mail_show_missed(limit: int = 15) -> str:
-    output = _run_mail_reader_cmd(["show_missed", str(limit)])
+def mail_missed(limit: int = 15) -> str:
+    from integrations.mail.client import MailCLI
+    cli = MailCLI()
     try:
-        import json
-        missed_list = json.loads(output)
+        missed_list = cli.mail_missed(limit=limit)
         text = _format_missed_list(missed_list)
         return _handle_large_content(text, "可能错过的邮件")
     except Exception as e:
-        return f"❌ 解析错过邮件失败: {e}\n{output}"
+        return f"❌ 查询错过邮件失败: {e}"
 
 slash_command('/mail_missed', category='邮件管理',
               description='查看最近7天可能错过的非高优邮件',
               show_in_dashboard=False, guest_ok=False)(
-    lambda agent, msg, args: mail_show_missed(limit=int(args[0]) if args else 15))
+    lambda agent, msg, args: mail_missed(limit=int(args[0]) if args else 15))
 
 @skill(
     name='mail_view_original',
@@ -509,30 +498,20 @@ slash_command('/mail_missed', category='邮件管理',
     }
 )
 def mail_view_original(account: str, uid: str) -> str:
-    db_path, _sdb = _get_db_path_and_import_db()
-    if not db_path or not os.path.exists(db_path):
-        return "❌ 找不到 statements.db 数据库"
-    
-    import sqlite3
+    from integrations.mail.client import MailCLI
+    cli = MailCLI()
     try:
-        conn = sqlite3.connect(db_path)
-        cur = conn.cursor()
-        cur.execute("SELECT es.subject, es.sender, es.email_date, eb.raw_html, eb.plain_text "
-                    "FROM email_bodies eb "
-                    "JOIN email_summaries es ON eb.account_name=es.account_name AND eb.uid=es.uid "
-                    "WHERE eb.account_name=? AND eb.uid=?", (account, uid))
-        row = cur.fetchone()
-        conn.close()
-        if not row:
+        data = cli.view_original(account=account, uid=uid)
+        if not data:
             return f"❌ 找不到该邮件原文 (Account: {account}, UID: {uid})"
-            
-        subject, sender, date, raw_html, plain_text = row
-        content = raw_html if raw_html else plain_text
-        if not content:
-            content = "无邮件正文内容"
-            
+
+        subject = data.get("subject", "无主题")
+        sender = data.get("sender", "未知发件人")
+        date = data.get("email_date", "")
+        content = data.get("content") or "无邮件正文内容"
+
         md_text = f"# 邮件原文: {subject}\n\n**发件人**: {sender}\n**时间**: {date}\n\n---\n\n```html\n{content}\n```"
-        
+
         cfg = load_config() or {}
         hc = cfg.get("hedgedoc", {})
         if hc.get("enabled"):
@@ -543,7 +522,7 @@ def mail_view_original(account: str, uid: str) -> str:
                     return f"✅ 邮件原文已为您生成 HedgeDoc 链接：\n👉 [点击查看完整原文]({url})"
             except Exception as e:
                 print(f"HedgeDoc upload failed: {e}")
-                
+
         return _handle_large_content(md_text, "邮件原文")
     except Exception as e:
         return f"❌ 查看邮件原文失败: {e}"
@@ -560,16 +539,36 @@ slash_command('/mail_view', category='邮件管理',
 )
 def backfill_bodies() -> str:
     """运行 scripts/backfill_email_bodies.py 脚本补齐历史邮件正文"""
+    from integrations.mail.paths import get_parser_script_dir, get_statement_db_path
+    from security import SecurityGuard
+    billing_dir = get_parser_script_dir()
+    db_path = get_statement_db_path(script_dir=billing_dir)
     cfg = load_config() or {}
-    billing_dir = cfg.get("billing", {}).get("script_dir", "/home/liteagent/mail-statement-parser")
+    guard = SecurityGuard(cfg)
+
     script_path = os.path.join(billing_dir, "scripts", "backfill_email_bodies.py")
-    
+    paths_to_check = [
+        billing_dir,
+        os.path.realpath(billing_dir),
+        script_path,
+        os.path.realpath(script_path) if os.path.lexists(script_path) else script_path,
+        db_path,
+        os.path.realpath(db_path) if os.path.lexists(db_path) else db_path,
+        os.path.dirname(os.path.abspath(db_path)),
+        os.path.realpath(os.path.dirname(os.path.abspath(db_path))),
+    ]
+    for p in paths_to_check:
+        if not guard.check_path(p):
+            return f"❌ 拒绝访问未授权目录: {p}"
+
     if not os.path.exists(script_path):
         return f"❌ 找不到回填脚本: {script_path}"
-        
+
     cmd = [sys.executable, script_path]
+    from integrations.mail.client import MailCLI
+    env = MailCLI(script_dir=billing_dir, db_path=db_path)._build_env()
     try:
-        r = subprocess.run(cmd, cwd=billing_dir, capture_output=True, text=True, encoding='utf-8', timeout=600)
+        r = run_process(cmd, cwd=billing_dir, capture_output=True, text=True, encoding='utf-8', timeout=600, env=env)
         output = r.stdout.strip()
         if r.returncode != 0:
             return f"⚠️ 回填脚本执行出错 (代码 {r.returncode}):\n{r.stderr.strip()}"

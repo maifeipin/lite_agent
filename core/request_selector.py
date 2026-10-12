@@ -102,8 +102,8 @@ DOMAIN_MAP: Dict[str, Dict] = {
     "mail": {
         "pattern": r"(邮件|邮箱|收件箱|mail|inbox)",
         "default_tools": [
-            "mail_list", "mail_show_headers",
-            "mail_show_missed", "mail_search", "mail_stats",
+            "mail_list", "mail_headers",
+            "mail_missed", "mail_search", "mail_stats",
         ],
         "explicit_intent_tools": [
             # v5: mail_fetch_summaries 抓取邮件+账单入库+LLM 摘要（耗时且有数据变更），从 default 移入

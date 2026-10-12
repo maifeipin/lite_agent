@@ -2,8 +2,9 @@ import os
 import sys
 import json
 import subprocess
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
+from integrations.mail.process import run_process
 from core import config_loader
 from core.utils.masker import mask_secrets
 
@@ -49,16 +50,51 @@ class MailCLI:
             raise FileNotFoundError(f"找不到 mail_client.py: {cli_py}")
         return cli_py
 
+    def _check_security(self) -> Optional[Dict[str, Any]]:
+        """检查脚本目录、可执行文件、数据库及数据根是否在安全沙箱内。"""
+        cfg = config_loader.load_config() or {}
+        from security import SecurityGuard
+        guard = SecurityGuard(cfg)
+        if not guard.sandbox_paths:
+            return None
+
+        cli_py = os.path.join(self.script_dir, "mail_client.py")
+        paths_to_check = [
+            self.script_dir,
+            os.path.realpath(self.script_dir),
+            cli_py,
+            os.path.realpath(cli_py) if os.path.lexists(cli_py) else cli_py,
+            self.db_path,
+            os.path.realpath(self.db_path) if os.path.lexists(self.db_path) else self.db_path,
+            os.path.dirname(os.path.abspath(self.db_path)),
+            os.path.realpath(os.path.dirname(os.path.abspath(self.db_path))),
+        ]
+        for p in paths_to_check:
+            if not guard.check_path(p):
+                return {
+                    "schema_version": 1,
+                    "command": "",
+                    "status": "error",
+                    "data": None,
+                    "errors": [f"安全沙箱拒绝访问未授权路径: {p}"]
+                }
+        return None
+
     def run(self, command: str, args: Optional[List[str]] = None, timeout: int = 60) -> Dict[str, Any]:
         """
         执行外部命令并解析统一 envelope:
         {"schema_version": 1, "command": ..., "status": "ok"|"error", "data": ..., "errors": [...]}
         """
+        sec_err = self._check_security()
+        if sec_err:
+            sec_err["command"] = command
+            return sec_err
+
         cli_py = self._resolve_script_path()
         cmd_args = [sys.executable, cli_py, command] + (args or [])
         env = self._build_env()
         try:
-            res = subprocess.run(
+            res = run_process(
                 cmd_args,
                 cwd=self.script_dir,
                 capture_output=True,
@@ -81,6 +117,17 @@ class MailCLI:
                 "status": "error",
                 "data": None,
                 "errors": [f"子进程启动失败: {exc}"]
+            }
+
+        MAX_OUTPUT_BYTES = 10 * 1024 * 1024
+        stdout_bytes = res.stdout.encode('utf-8') if isinstance(res.stdout, str) else b''
+        if len(stdout_bytes) > MAX_OUTPUT_BYTES:
+            return {
+                "schema_version": 1,
+                "command": command,
+                "status": "error",
+                "data": None,
+                "errors": [f"命令输出超出上限 ({len(stdout_bytes)} > {MAX_OUTPUT_BYTES} 字节)"]
             }
 
         stdout = res.stdout.strip()
@@ -124,15 +171,17 @@ class MailCLI:
                 or parsed_json.get('status') not in ('ok', 'error')
                 or not isinstance(parsed_json.get('errors'), list)
                 or any(not isinstance(err, str) for err in parsed_json.get('errors', []))
-                or (parsed_json.get('status') == 'ok' and not isinstance(parsed_json.get('data'), dict))
-                or 'data' not in parsed_json):
+                or 'data' not in parsed_json
+                or (parsed_json.get('status') == 'ok' and not isinstance(parsed_json.get('data'), dict))):
             return {
                 "schema_version": 1,
                 "command": command,
                 "status": "error",
-                "data": parsed_json,
+                "data": parsed_json if isinstance(parsed_json, dict) else None,
                 "errors": ["输出不符合统一 Envelope 规范"]
             }
+
+        parsed_json.setdefault("data", None)
 
         if res.returncode != 0 and parsed_json.get("status") == "ok":
             parsed_json["status"] = "error"
@@ -274,6 +323,101 @@ class MailCLI:
             raise MailCLIError(errors)
         return envelope.get("data") or {}
 
+    def mail_stats(self, timeout: float = 30) -> Dict[str, Any]:
+        """获取邮件处理统计（只读 readmodel）"""
+        envelope = self.run("mail_stats", [], timeout=timeout)
+        if envelope.get("status") != "ok":
+            errors = "; ".join(envelope.get("errors") or ["获取邮件统计失败"])
+            raise MailCLIError(errors)
+        return envelope.get("data") or {}
+
+    def mail_search(self, keyword: str, limit: int = 20, account_name: Optional[str] = None, timeout: float = 30, *, offset: int = 0) -> List[Dict[str, Any]]:
+        """全文检索邮件（只读 readmodel）"""
+        args = ["--keyword", str(keyword), "--limit", str(limit), "--offset", str(offset)]
+        if account_name:
+            args.extend(["--account", str(account_name)])
+        envelope = self.run("mail_search", args, timeout=timeout)
+        if envelope.get("status") != "ok":
+            errors = "; ".join(envelope.get("errors") or ["搜索邮件失败"])
+            raise MailCLIError(errors)
+        data = envelope.get("data") or {}
+        return data.get("results") or []
+
+    def mail_summary_get(self, summary_id: int, timeout: float = 30) -> Optional[Dict[str, Any]]:
+        """获取单条邮件摘要详情"""
+        envelope = self.run("mail_summary_get", ["--id", str(summary_id)], timeout=timeout)
+        if envelope.get("status") != "ok":
+            errors = "; ".join(envelope.get("errors") or ["获取邮件摘要失败"])
+            raise MailCLIError(errors)
+        data = envelope.get("data") or {}
+        return data.get("summary")
+
+    def mail_mark_processed(self, summary_id: int, timeout: float = 30) -> Dict[str, Any]:
+        """标记邮件为已处理状态"""
+        envelope = self.run("mail_mark_processed", ["--id", str(summary_id)], timeout=timeout)
+        if envelope.get("status") != "ok":
+            errors = "; ".join(envelope.get("errors") or ["标记邮件处理状态失败"])
+            raise MailCLIError(errors)
+        return envelope.get("data") or {}
+
+    def mail_noise_rules_list(self, timeout: float = 30) -> List[Tuple[str, str]]:
+        """查询自定义降噪规则列表"""
+        envelope = self.run("mail_noise_rules_list", [], timeout=timeout)
+        if envelope.get("status") != "ok":
+            errors = "; ".join(envelope.get("errors") or ["获取降噪规则失败"])
+            raise MailCLIError(errors)
+        data = envelope.get("data") or {}
+        return [tuple(r) for r in data.get("rules") or []]
+
+    def mail_noise_rule_add(self, pattern_type: str, pattern_value: str, summary_id: Optional[int] = None, timeout: float = 30) -> Dict[str, Any]:
+        """添加自定义降噪规则"""
+        args = ["--type", str(pattern_type), "--value", str(pattern_value)]
+        if summary_id:
+            args.extend(["--summary-id", str(summary_id)])
+        envelope = self.run("mail_noise_rule_add", args, timeout=timeout)
+        if envelope.get("status") != "ok":
+            errors = "; ".join(envelope.get("errors") or ["添加降噪规则失败"])
+            raise MailCLIError(errors)
+        return envelope.get("data") or {}
+
+    def mail_noise_rule_delete(self, pattern_value: str, pattern_type: Optional[str] = None, timeout: float = 30) -> Dict[str, Any]:
+        """删除自定义降噪规则"""
+        args = ["--value", str(pattern_value)]
+        if pattern_type:
+            args.extend(["--type", str(pattern_type)])
+        envelope = self.run("mail_noise_rule_delete", args, timeout=timeout)
+        if envelope.get("status") != "ok":
+            errors = "; ".join(envelope.get("errors") or ["删除降噪规则失败"])
+            raise MailCLIError(errors)
+        return envelope.get("data") or {}
+
+    def mail_headers(self, limit: int = 15, timeout: float = 30) -> List[Dict[str, Any]]:
+        """获取最近邮件标题列表（Envelope 契约）"""
+        envelope = self.run("mail_headers", ["--limit", str(limit)], timeout=timeout)
+        if envelope.get("status") != "ok":
+            errors = "; ".join(envelope.get("errors") or ["获取邮件标题列表失败"])
+            raise MailCLIError(errors)
+        data = envelope.get("data") or {}
+        return data.get("headers") or []
+
+    def mail_missed(self, limit: int = 15, timeout: float = 30) -> List[Dict[str, Any]]:
+        """获取可能错过的非高优邮件列表（Envelope 契约）"""
+        envelope = self.run("mail_missed", ["--limit", str(limit)], timeout=timeout)
+        if envelope.get("status") != "ok":
+            errors = "; ".join(envelope.get("errors") or ["获取可能错过的邮件失败"])
+            raise MailCLIError(errors)
+        data = envelope.get("data") or {}
+        return data.get("missed") or []
+
+    def view_original(self, account: str, uid: str, max_bytes: int = 50000, timeout: float = 30) -> Dict[str, Any]:
+        """获取邮件原文（受控大小与只读保护）"""
+        args = ["--account", str(account), "--uid", str(uid), "--max-bytes", str(max_bytes)]
+        envelope = self.run("mail_view_original", args, timeout=timeout)
+        if envelope.get("status") != "ok":
+            errors = "; ".join(envelope.get("errors") or ["获取邮件原文失败"])
+            raise MailCLIError(errors)
+        return envelope.get("data") or {}
+
     def sync_fetch(
         self,
         months: int = 1,
@@ -284,11 +428,21 @@ class MailCLI:
         执行外部 sync3m 批量拉取命令并解析 tagged summary。
         与普通 JSON Envelope 协议分离，支持自定义 runner 与超时控制。
         """
+        sec_err = self._check_security()
+        if sec_err:
+            return {
+                "exit_code": -1,
+                "summary": None,
+                "errors": sec_err["errors"],
+                "masked_output": sec_err["errors"][0],
+                "success": False,
+            }
+
         cli_py = os.path.join(self.script_dir, "mail_client.py")
         cmd_args = [sys.executable, cli_py, "sync3m", str(months)]
         env = self._build_env()
 
-        runner_fn = runner or subprocess.run
+        runner_fn = runner or run_process
         try:
             res = runner_fn(
                 cmd_args, cwd=self.script_dir, capture_output=True, text=True,

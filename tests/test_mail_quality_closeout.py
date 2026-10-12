@@ -236,7 +236,7 @@ def test_adapter_rejects_invalid_envelope(tmp_path,monkeypatch,overrides):
     script=tmp_path/'mail_client.py';script.touch()
     payload={'schema_version':1,'command':'quality_events','status':'ok','data':{'events':[]},'errors':[]}
     payload.update(overrides)
-    monkeypatch.setattr('integrations.mail.client.subprocess.run',Mock(return_value=SimpleNamespace(
+    monkeypatch.setattr('integrations.mail.client.run_process',Mock(return_value=SimpleNamespace(
         stdout=json.dumps(payload),stderr='',returncode=0)))
     assert MailCLI(str(tmp_path)).run('quality_events')['status']=='error'
 

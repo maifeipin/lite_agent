@@ -4,13 +4,13 @@
 replytype: 0=截断摘要(默认), 1=分批(待实现), 2=上传HedgeDoc+链接
 搜 email_bodies 正文库(Phase 2 已存),不连邮箱,毫秒级。
 """
-import os, sqlite3
+import os
 from datetime import datetime
 from core.skill_engine import skill
 from core.command_registry import slash_command
 from core.utils.hedgedoc import upload_to_hedgedoc
 
-from integrations.mail.paths import connect_readonly_db, get_statement_db_path
+from integrations.mail.paths import get_statement_db_path
 
 
 def _get_db_path():
@@ -18,36 +18,23 @@ def _get_db_path():
 
 
 def _do_search(keyword, limit=20, account_name=None, db_path=None):
-    """查 email_bodies JOIN email_summaries,返回完整 rows(含 plain_text 全文)"""
+    """查 email_bodies JOIN email_summaries，通过 MailCLI 统一接口"""
+    from integrations.mail.client import MailCLI
     try:
-        limit = int(limit)
-        if limit <= 0:
-            limit = 20
-        elif limit > 100:
-            limit = 100
+        limit_val = int(limit)
+        if limit_val <= 0:
+            limit_val = 20
+        elif limit_val > 100:
+            limit_val = 100
     except (ValueError, TypeError):
-        limit = 20
+        limit_val = 20
 
-    conn = connect_readonly_db(db_path)
-    if conn is None:
-        return []
+    cli = MailCLI(db_path=db_path)
     try:
-        sql = (
-            "SELECT es.subject, es.sender, es.email_date, es.category, es.importance, "
-            "es.status, es.account_name, es.uid, eb.plain_text "
-            "FROM email_bodies eb JOIN email_summaries es "
-            "ON eb.account_name=es.account_name AND eb.uid=es.uid "
-            "WHERE (eb.plain_text LIKE ? OR es.subject LIKE ? OR es.sender LIKE ?) "
-        )
-        params = [f"%{keyword}%"] * 3
-        if account_name:
-            sql += "AND es.account_name = ? "
-            params.append(account_name)
-        sql += "ORDER BY es.id DESC LIMIT ?"
-        params.append(limit)
-        return conn.execute(sql, params).fetchall()
-    finally:
-        conn.close()
+        return cli.mail_search(keyword=keyword, limit=limit_val, account_name=account_name)
+    except Exception:
+        return []
+
 
 
 def _format_summary(keyword, rows):

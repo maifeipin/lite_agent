@@ -55,7 +55,7 @@ ALLOWED_AGENT_EXACT_FILES = {
 }
 
 ALLOWED_AGENT_CODE_DIRS = [
-    'channels', 'core', 'edge_node', 'integrations', 'memory_engine', 'skills', 'scripts',
+    'channels', 'core', 'edge_node', 'features', 'integrations', 'memory_engine', 'skills', 'scripts',
     'tests', 'web_dashboard', 'conf.d'
 ]
 

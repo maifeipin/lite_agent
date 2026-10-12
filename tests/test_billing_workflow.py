@@ -47,8 +47,8 @@ def test_snapshot_preserves_currency_precision_identity_and_freshness(billing_db
     snapshot = build_snapshot(billing_db, today=date(2026, 10, 10), detail_limit=1)
     assert snapshot['transaction_count'] == 3
     assert snapshot['transaction_totals'] == [
-        {'currency': 'CNY', 'direction': 'debit', 'amount': '0.30'},
-        {'currency': 'USD', 'direction': 'debit', 'amount': '2.00'}]
+        {'currency': 'CNY', 'direction': 'debit', 'amount': '0.30', 'count': 2},
+        {'currency': 'USD', 'direction': 'debit', 'amount': '2.00', 'count': 1}]
     assert any('最新账期为 2026-09' in s for s in snapshot['anomalies'])
     assert any('需核实实际还款状态' in s for s in snapshot['anomalies'])
     assert any('应还金额缺失' in s for s in snapshot['anomalies'])
@@ -60,7 +60,7 @@ def test_snapshot_preserves_currency_precision_identity_and_freshness(billing_db
 
 def test_missing_database_is_not_created(tmp_path):
     missing = tmp_path / 'missing.db'
-    with pytest.raises(sqlite3.OperationalError):
+    with pytest.raises((sqlite3.OperationalError, RuntimeError)):
         build_snapshot(missing)
     assert not missing.exists()
 
@@ -89,7 +89,7 @@ def test_invalid_receipts_cannot_claim_success(payload):
     output = '--- JSON_SUMMARY_START ---\n' + payload + '\n--- JSON_SUMMARY_END ---'
     assert _parse_json_summary(output) is None
     workflow = BillingWorkflow({}, MagicMock())
-    with patch('core.billing_workflow.subprocess.run', return_value=SimpleNamespace(
+    with patch('integrations.mail.client.run_process', return_value=SimpleNamespace(
             stdout=output, stderr='', returncode=0)):
         _, errors = workflow.fetch('/parser', 1)
     assert any('无法确认' in e for e in errors)
@@ -100,7 +100,7 @@ def test_fetch_uses_single_sync_and_surfaces_each_account_failure():
                             {'account': 'b', 'status': 'timeout', 'error': 'scan timed out'},
                             {'account': 'c', 'status': 'ok', 'parse_failed': 1}]}
     raw = '--- JSON_SUMMARY_START ---\n' + json.dumps(receipt) + '\n--- JSON_SUMMARY_END ---'
-    with patch('core.billing_workflow.subprocess.run', return_value=SimpleNamespace(
+    with patch('integrations.mail.client.run_process', return_value=SimpleNamespace(
             stdout=raw, stderr='', returncode=0)) as run:
         _, errors = BillingWorkflow({}, MagicMock()).fetch('/dummy_parser', 3)
     assert run.call_count == 1

@@ -17,6 +17,14 @@
     "RULE_NO_CROSS_REPO_SYS_PATH": {
       "name": "禁止生产代码注入跨仓 sys.path",
       "description": "禁止生产代码动态修改 sys.path 引入外部未受管代码目录。"
+    },
+    "RULE_NO_DIRECT_SQLITE_IN_BILLING": {
+      "name": "禁止账单业务层直接直连 SQLite",
+      "description": "禁止 features/billing/ 业务代码直接 import sqlite3 直连解析库/账单库，所有只读或变更操作必须收敛至 Parser CLI (MailCLI)。"
+    },
+    "RULE_NO_FEATURE_SYS_MODULES_LOOKUP": {
+      "name": "禁止业务特性层通过 sys.modules 反查上层依赖",
+      "description": "禁止 features/ 内部通过 sys.modules 反向检索 skills/ 或兼容层实例，必须通过显式依赖注入或参数传递解耦。"
     }
   },
   "exceptions": [
@@ -55,33 +63,6 @@
       "owner": "platform_services",
       "removal_stage": "E3",
       "verification_requirement": "test_output_delivery.py 回归"
-    },
-    {
-      "file": "skills/ops_mail_reader.py",
-      "rule": "RULE_NO_DIRECT_PARSER_IMPORT",
-      "target": "statement_db",
-      "reason": "历史邮件读取技能直接访问 statement_db 获取数据库路径，E2 统一读模型 CLI 时清退",
-      "owner": "mail_feature",
-      "removal_stage": "E2",
-      "verification_requirement": "test_mail_sync_stage4.py 回归"
-    },
-    {
-      "file": "skills/ops_mail_reader.py",
-      "rule": "RULE_NO_DIRECT_PARSER_IMPORT",
-      "target": "mail_client",
-      "reason": "历史邮件读取技能调用 mail_client.load_static_noise_rules()，E2 统一读模型 CLI 时清退",
-      "owner": "mail_feature",
-      "removal_stage": "E2",
-      "verification_requirement": "test_mail_sync_stage4.py 回归"
-    },
-    {
-      "file": "skills/ops_mail_reader.py",
-      "rule": "RULE_NO_CROSS_REPO_SYS_PATH",
-      "target": "billing_dir",
-      "reason": "历史邮件读取跨仓 sys.path 注入，E2 统一读模型 CLI 时清退",
-      "owner": "mail_feature",
-      "removal_stage": "E2",
-      "verification_requirement": "test_mail_sync_stage4.py 回归"
     },
     {
       "file": "core/skill_engine.py",

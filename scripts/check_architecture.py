@@ -8,6 +8,8 @@
 2. RULE_NO_CORE_REVERSE_DEPENDENCY: 禁止 core/ 核心通用运行时产生对 skills/、scripts/ 或具体业务工作流的反向依赖
 3. RULE_DYNAMIC_IMPORT_REGISTERED: 禁止通过未登记的动态调用 (importlib.import_module / __import__ 及别名) 绕过门禁
 4. RULE_NO_CROSS_REPO_SYS_PATH: 禁止在生产代码中动态注入跨仓外部路径到 sys.path
+5. RULE_NO_DIRECT_SQLITE_IN_BILLING: 禁止 features/billing/ 业务代码直接导入 sqlite3 直连解析/账单数据库
+6. RULE_NO_FEATURE_SYS_MODULES_LOOKUP: 禁止 features/ 特性业务代码通过 sys.modules 反查上层技能或兼容层模块
 
 使用方式：
     python scripts/check_architecture.py
@@ -105,6 +107,8 @@ class ArchitectureVisitor(ast.NodeVisitor):
         self.rel_path = rel_path
         self.is_core = rel_path.startswith("core" + os.sep) or rel_path.startswith("core/")
         self.is_test = rel_path.startswith("tests" + os.sep) or rel_path.startswith("tests/")
+        self.is_billing_feature = self.rel_path.startswith("features" + os.sep + "billing") or self.rel_path.startswith("features/billing")
+        self.is_feature = self.rel_path.startswith("features" + os.sep) or self.rel_path.startswith("features/")
         self.findings: List[Dict[str, Any]] = []
         self.scope_stack: List[Union[ast.FunctionDef, ast.AsyncFunctionDef]] = []
 
@@ -165,6 +169,16 @@ class ArchitectureVisitor(ast.NodeVisitor):
                     "将业务或技能逻辑下沉或使用端口注入，避免 core 依赖外层",
                 )
 
+            # 规则 5: features/billing 禁止直接导入 sqlite3
+            if self.is_billing_feature and root_mod == "sqlite3":
+                self._record_finding(
+                    "RULE_NO_DIRECT_SQLITE_IN_BILLING",
+                    "sqlite3",
+                    node.lineno,
+                    "features/billing 导入直接数据库模块 sqlite3",
+                    "features/billing 必须通过 MailCLI 调用外部 Parser 读模型，禁止直接连接数据库",
+                )
+
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom):
@@ -212,7 +226,53 @@ class ArchitectureVisitor(ast.NodeVisitor):
                         "使用工作流注册表在启动时装配，解耦通用编排器与具体业务",
                     )
 
+        # 规则 5: features/billing 禁止从 sqlite3 导入
+        if self.is_billing_feature and root_mod == "sqlite3":
+            self._record_finding(
+                "RULE_NO_DIRECT_SQLITE_IN_BILLING",
+                "sqlite3",
+                node.lineno,
+                f"from {mod_name} import ...",
+                "features/billing 必须通过 MailCLI 调用外部 Parser 读模型，禁止直接连接数据库",
+            )
+
         self.generic_visit(node)
+
+    def visit_Subscript(self, node: ast.Subscript):
+        if self.is_feature:
+            if isinstance(node.value, ast.Attribute) and node.value.attr == "modules":
+                if isinstance(node.value.value, ast.Name) and node.value.value.id == "sys":
+                    target_str = ""
+                    if isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str):
+                        target_str = node.slice.value
+                    if target_str and (target_str.startswith("skills.") or target_str.startswith("integrations.") or target_str.startswith("core.")):
+                        self._record_finding(
+                            "RULE_NO_FEATURE_SYS_MODULES_LOOKUP",
+                            target_str,
+                            node.lineno,
+                            f"features 模块通过 sys.modules 反向查找旧入口: {target_str}",
+                            "严禁 features 反向查找旧入口模块，依赖必须通过参数显式注入",
+                        )
+        self.generic_visit(node)
+
+    def visit_Compare(self, node: ast.Compare):
+        if self.is_feature:
+            for op, comparator in zip(node.ops, node.comparators):
+                if isinstance(op, (ast.In, ast.NotIn)):
+                    if isinstance(comparator, ast.Attribute) and comparator.attr == "modules":
+                        if isinstance(comparator.value, ast.Name) and comparator.value.id == "sys":
+                            if isinstance(node.left, ast.Constant) and isinstance(node.left.value, str):
+                                target_str = node.left.value
+                                if target_str.startswith("skills.") or target_str.startswith("integrations.") or target_str.startswith("core."):
+                                    self._record_finding(
+                                        "RULE_NO_FEATURE_SYS_MODULES_LOOKUP",
+                                        target_str,
+                                        node.lineno,
+                                        f"features 模块通过 sys.modules 检查旧入口: {target_str}",
+                                        "严禁 features 反向查找旧入口模块，依赖必须通过参数显式注入",
+                                    )
+        self.generic_visit(node)
+
 
     def visit_Call(self, node: ast.Call):
         func = node.func

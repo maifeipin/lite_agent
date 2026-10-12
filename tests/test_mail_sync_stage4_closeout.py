@@ -42,7 +42,7 @@ def test_runner_type_error_does_not_refetch_or_drop_database_env(tmp_path):
 def test_workflow_uses_own_default_database_not_unrelated_global_config(tmp_path,monkeypatch):
     monkeypatch.setattr('integrations.mail.sync_service.config_loader.load_config',lambda:{'billing':{'statement_db_path':'/unrelated.db'}})
     runner=Mock(return_value=response())
-    with patch('core.billing_workflow.subprocess.run',runner), patch.object(MailCLI,'quality_events',return_value=[]):
+    with patch('integrations.mail.client.run_process',runner), patch.object(MailCLI,'quality_events',return_value=[]):
         _,errors=BillingWorkflow({},Mock()).fetch(str(tmp_path),1)
     assert errors==[]
     assert runner.call_args.kwargs['env']['MAIL_STATEMENT_DB_PATH']==str(tmp_path/'statements.db')
