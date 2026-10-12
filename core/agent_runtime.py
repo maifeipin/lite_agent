@@ -164,6 +164,9 @@ class AgentRuntime:
         accumulated_content = ""
         length_recovery_used = False
         successful_queries = {}
+        # Opt-in side-effect tools can reuse even partial/failed receipts within
+        # this run. No cross-request cache; ordinary tools retain their policy.
+        request_receipts = {}
         recovery_kwargs = {}
 
         # 过滤 tools：只把 ctx.allowed_tools 允许的工具传给模型
@@ -427,8 +430,18 @@ class AgentRuntime:
                           "step": state.step},
                 )
 
+                key_fn = getattr(self.skill_engine, 'get_request_reuse_key', lambda *_: None)
+                reuse_args = key_fn(tc['name'], tc['arguments'])
+                reuse_key = (tc['name'], reuse_args) if isinstance(reuse_args, str) else None
+                reused_receipt = reuse_key is not None and reuse_key in request_receipts
+
+                # Receipt reuse is not another execution. Remove the sync tool
+                # from subsequent model calls; analysis/delivery tools remain.
+                if reused_receipt:
+                    effective_tools = [tool for tool in effective_tools
+                                       if tool.get('function', {}).get('name') != tc['name']]
                 # 死循环检测
-                if loop_detector.check(tc["name"], tc["arguments"]):
+                if not reused_receipt and loop_detector.check(tc["name"], tc["arguments"]):
                     warning = loop_detector.warning(tc["name"])
                     yield RuntimeEvent(type=RuntimeEventType.DEAD_LOOP,
                                        data={"tool_name": tc["name"], "msg": warning})
@@ -441,11 +454,16 @@ class AgentRuntime:
                 _tool_t0 = time.monotonic()
                 query_key = (tc['name'], controller.board._canonical_arguments(tc['arguments']))
                 cacheable = getattr(self.skill_engine, 'is_read_only', lambda name: False)(tc['name']) is True
-                cached = cacheable and query_key in successful_queries
-                if cached:
+                cached = reused_receipt or (cacheable and query_key in successful_queries)
+                if reused_receipt:
+                    ok, receipt = request_receipts[reuse_key]
+                    output = '本次请求该操作已执行，以下为原回执；请继续完成其余目标，不重复执行。\n' + receipt
+                elif cached:
                     ok, output = successful_queries[query_key]
                 else:
                     ok, output = self._execute_tool(tc, ctx)
+                    if reuse_key is not None:
+                        request_receipts[reuse_key] = (ok, output)
                     if cacheable and ok:
                         successful_queries[query_key] = (ok, output)
                 tool_duration_ms = int((time.monotonic() - _tool_t0) * 1000)

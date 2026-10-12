@@ -125,7 +125,7 @@ def billing_recent(months: int = 3) -> str:
     return _run_billing_cmd(["recent", str(months)])
 
 
-@skill(name='billing_snapshot', description='读取账单快照，按币种保留金额并检查数据缺口；只读数据库',
+@skill(name='billing_snapshot', description='外币分析优先使用：读取权威账单快照，含分币种汇总、交易样例、原币金额/币种及来源、币种缺失与用途门禁。无需自行写 SQL；样例不是全量，UNKNOWN 不猜币种，境外位置不等于币种；只读',
        params={'months': {'type': 'integer', 'default': 1},
                'detail_limit': {'type': 'integer', 'default': 20}}, side_effect=False)
 def billing_snapshot(months: int = 1, detail_limit: int = 20) -> str:
@@ -136,16 +136,22 @@ def billing_snapshot(months: int = 1, detail_limit: int = 20) -> str:
 
 @skill(
     name='billing_fetch',
-    description='批量从邮箱下载最新的账单邮件，解析并入库 (自动同步最新账单数据)。比较耗时，请耐心等待',
+    reuse_within_run=True,
+    description='拉取最新账单并入库，默认仅同步配置的163账单邮箱；其他邮箱必须由用户明确指定 account。同一次请求同步一次后分析已有结果，不重复拉取。',
     params={
         'months': {
             'type': 'integer',
             'description': '下载最近几个月的账单邮件，默认 1',
             'default': 1
+        },
+        'account': {
+            'type': 'string',
+            'description': '用户明确指定的邮箱地址；空值使用配置的163账单邮箱',
+            'default': ''
         }
     }
 )
-def billing_fetch(months: int = 1) -> str:
+def billing_fetch(months: int = 1, account: str = '') -> str:
     # 统一单次遍历流水线：下载归档 + 解析入库，并自动有上限消费落库的质量事件进入 Todo
     from integrations.mail.sync_service import sync_and_consume
     billing = _cfg.get("billing") or {}
@@ -154,7 +160,8 @@ def billing_fetch(months: int = 1) -> str:
         script_dir=BILLING_SCRIPT_DIR,
         statement_db_path=stmt_db,
         todo_db_path=billing.get("todo_db_path"),
-        months=months
+        months=months,
+        account=account or None
     )
 
     lines = []

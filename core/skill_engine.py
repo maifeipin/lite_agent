@@ -44,7 +44,7 @@ _skill_registry: Dict[str, Dict] = {}  # {name: {"func": callable, "schema": dic
 def skill(name: str, description: str, params: dict = None, tags: list = None,
           guest_ok: bool = False, guard_keywords: list = None, guard_prompt: str = "",
           guard_threshold: int = 1, side_effect: Optional[bool] = None,
-          dry_run_handler=None):
+          dry_run_handler=None, reuse_within_run: bool = False):
     """
     技能装饰器 - 标记一个函数为可被 AI 调用的技能
 
@@ -60,6 +60,7 @@ def skill(name: str, description: str, params: dict = None, tags: list = None,
             guard_threshold=1,
             side_effect=None,        # None=未知, True=有副作用, False=纯查询
             dry_run_handler=None,    # 预演回调，提供则 supports_dry_run 自动为 True
+            reuse_within_run=False,  # 显式启用同一 run 内同参数回执复用（含失败）
         )
         def ops_sys_status(detail: bool = False) -> str:
             ...
@@ -112,6 +113,7 @@ def skill(name: str, description: str, params: dict = None, tags: list = None,
             "tags": tags or [],
             "policy": policy,
             "dry_run_handler": dry_run_handler,
+            "reuse_within_run": reuse_within_run,
         }
         func._skill_name = name
         return func
@@ -436,6 +438,22 @@ class SkillEngine:
     def is_read_only(self, name: str) -> bool:
         info = _skill_registry.get(name)
         return bool(info and info['policy'].side_effect is False)
+
+    def get_request_reuse_key(self, name: str, arguments: str) -> Optional[str]:
+        """Opt-in receipt reuse; schema defaults make omitted args equivalent."""
+        info = _skill_registry.get(name)
+        if not info or not info.get('reuse_within_run'):
+            return None
+        try:
+            values = json.loads(arguments or '{}')
+            if not isinstance(values, dict):
+                return None
+            for key, spec in info['schema']['function']['parameters']['properties'].items():
+                if 'default' in spec:
+                    values.setdefault(key, spec['default'])
+            return json.dumps(values, sort_keys=True, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return None
 
     def is_guest_ok(self, skill_name: str) -> bool:
         """检查指定技能是否允许访客调用"""

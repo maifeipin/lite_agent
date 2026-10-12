@@ -104,7 +104,7 @@ def test_fetch_uses_single_sync_and_surfaces_each_account_failure():
             stdout=raw, stderr='', returncode=0)) as run:
         _, errors = BillingWorkflow({}, MagicMock()).fetch('/dummy_parser', 3)
     assert run.call_count == 1
-    assert run.call_args.args[0][-2:] == ['sync3m', '3']
+    assert run.call_args.args[0][-4:] == ['sync3m', '3', '--provider', '163']
     assert any('处理异常 1' in e for e in errors)
     assert any('timeout' in e for e in errors)
     assert any('解析失败 1' in e for e in errors)

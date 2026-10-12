@@ -122,7 +122,7 @@ DOMAIN_MAP: Dict[str, Dict] = {
         ],
     },
     "billing": {
-        "pattern": r"(账单|bill|invoice|还款|信用卡|交易|流水|对账|大额)",
+        "pattern": r"([账帐]单|外币|原币|汇率|bill|invoice|还款|信用卡|交易|流水|对账|大额)",
         "default_tools": [
             "billing_report", "billing_due_soon", "billing_unpaid",
             "billing_reconcile", "billing_recent",
@@ -132,7 +132,7 @@ DOMAIN_MAP: Dict[str, Dict] = {
         "explicit_intent_tools": [
             "billing_mark_paid", "billing_fetch",
         ],
-        "explicit_patterns": r"(标记.*已还|拉取最新|下载账单|同步账单|更新账单)",
+        "explicit_patterns": r"(标记.*已还|拉取|下载[账帐]单|同步[账帐]单|更新[账帐]单)",
     },
     "todo": {
         "pattern": r"(待办|todo|提醒|延期|搁置)",

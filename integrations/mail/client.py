@@ -422,7 +422,9 @@ class MailCLI:
         self,
         months: int = 1,
         timeout: int = 300,
-        runner: Optional[Any] = None
+        runner: Optional[Any] = None,
+        account: Optional[str] = None,
+        provider: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         执行外部 sync3m 批量拉取命令并解析 tagged summary。
@@ -440,6 +442,10 @@ class MailCLI:
 
         cli_py = os.path.join(self.script_dir, "mail_client.py")
         cmd_args = [sys.executable, cli_py, "sync3m", str(months)]
+        if account:
+            cmd_args.extend(["--account", account])
+        elif provider:
+            cmd_args.extend(["--provider", provider])
         env = self._build_env()
 
         runner_fn = runner or run_process

@@ -32,7 +32,7 @@ class BillingWorkflow:
         self.settings = (config.get('task_routing') or {}).get('billing_workflow') or {}
 
     def matches(self, goal):
-        text = goal.lower()
+        text = goal.lower().replace('帐单', '账单')
         # Narrow opt-in: configured destination and latest billing retrieval /
         # summary only. Explicit recipients or extra operations stay with DAG.
         return bool(self.settings.get('enabled', False) and '账单' in text and

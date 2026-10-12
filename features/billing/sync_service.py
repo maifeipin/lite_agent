@@ -95,7 +95,8 @@ def sync_and_consume(
     client: Optional[MailCLI] = None,
     run_fetch: bool = True,
     runner: Optional[Callable] = None,
-    drain_fn: Optional[Callable] = None
+    drain_fn: Optional[Callable] = None,
+    account: Optional[str] = None
 ) -> Dict[str, Any]:
     """Sync exactly once. Even fetch failure does not prevent existing event delivery."""
     months = _bounded_int(months, 'months', 24)
@@ -116,7 +117,10 @@ def sync_and_consume(
     fetch_log, fetch_errors, summary = '', [], None
     if run_fetch:
         try:
-            fetched = client.sync_fetch(months=months, timeout=300, runner=runner)
+            fetched = client.sync_fetch(
+                months=months, timeout=300, runner=runner,
+                account=account or billing.get('sync_account'),
+                provider=billing.get('sync_provider') or '163')
             summary = fetched.get('summary')
             fetch_errors = [mask_secrets(str(e)) for e in fetched.get('errors', [])]
             if not fetched.get('success', False) and not fetch_errors:
