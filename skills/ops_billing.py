@@ -70,24 +70,26 @@ def billing_unpaid() -> str:
 
 @skill(
     name='billing_mark_paid',
-    description='标记某银行账单为已还款',
+    description='按明确账单 ID 标记为已还款',
     params={
-        'bank_code': {
-            'type': 'string',
-            'description': '银行代码 (如 CMB, ICBC 等)'
-        },
-        'statement_month': {
-            'type': 'string',
-            'description': '账单月份，如 2026年5月。若不填则默认最新一期',
-            'default': ''
+        'statement_id': {
+            'type': 'integer',
+            'description': '账单记录的正整数 ID，必须先查询确认具体账单'
         }
     }
 )
-def billing_mark_paid(bank_code: str, statement_month: str = '') -> str:
-    args = ["mark_paid", bank_code]
-    if statement_month:
-        args.append(statement_month)
-    return _run_billing_cmd(args)
+def billing_mark_paid(statement_id: int) -> str:
+    from integrations.mail.client import MailCLI
+    if not isinstance(statement_id, int) or isinstance(statement_id, bool) or statement_id <= 0:
+        return '❌ 必须提供已确认账单的正整数 ID'
+    try:
+        result = MailCLI().mark_paid(statement_id=statement_id)
+        if result.get('updated') is True:
+            return f'✅ 账单 #{statement_id} 已标记为已还款'
+        return f'❌ 未找到可更新的账单 #{statement_id}'
+    except Exception as exc:
+        from core.utils.masker import mask_secrets
+        return '❌ 标记还款失败：' + mask_secrets(str(exc))
 
 @skill(
     name='billing_reconcile',
