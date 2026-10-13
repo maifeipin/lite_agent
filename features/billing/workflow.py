@@ -31,13 +31,26 @@ class BillingWorkflow:
         self.config, self.router, self.ledger = config, router, ledger
         self.settings = (config.get('task_routing') or {}).get('billing_workflow') or {}
 
+    # 窄入口守卫: 显式否定与双目的地请求交回通用循环, 本流程不猜用户意图
+    _NEGATION_RE = re.compile(r'(不要|不用|请勿|禁止|不发|不传|不上传|别发|别传|别上传)')
+    _EMAIL_WORD_RE = re.compile(r'(邮箱|邮件)')
+    _HEDGEDOC_WORD_RE = re.compile(r'he(?:rdge|dge)doc', re.I)
+
     def matches(self, goal):
         text = goal.lower().replace('帐单', '账单')
         # Narrow opt-in: configured destination and latest billing retrieval /
         # summary only. Explicit recipients or extra operations stay with DAG.
+        if self._NEGATION_RE.search(text):
+            return False
+        if self._EMAIL_WORD_RE.search(text) and self._HEDGEDOC_WORD_RE.search(text):
+            # 双目的地(主目标+备用或并列)超出本流程能力, 不静默只做一个
+            return False
+        has_destination = bool(self._EMAIL_WORD_RE.search(text) or
+                               self._HEDGEDOC_WORD_RE.search(text))
         return bool(self.settings.get('enabled', False) and '账单' in text and
                     any(word in text for word in ('拉取', '最新')) and
                     any(word in text for word in ('分析', '总结')) and
+                    has_destination and
                     not re.search(r'[\w.+-]+@[\w.-]+\.[a-z]{2,}', text) and
                     not any(word in text for word in ('删除', '转账', '标记', '还款操作', '投资建议')))
 
@@ -59,7 +72,7 @@ class BillingWorkflow:
     def _summary_errors(summary):
         return summarize_account_errors(summary)
 
-    def run(self, goal, session_key, policy=None):
+    def run(self, goal, session_key, policy=None, output_mode=''):
         policy = policy or ExecutionPolicy()
         ceiling = int(self.settings.get('max_total_tokens', 60000))
         if policy.max_total_tokens is not None:
@@ -144,18 +157,39 @@ class BillingWorkflow:
             result.content = render_report(snapshot, analysis, fetch_log, result.usage)
             title = f"账单明细与异常 {snapshot['as_of']}"
             archive_id = archive_output(result.status_text() + '\n\n' + result.content, 'billing', self.config, '账单明细与异常')
-            delivery_policy = resolve_output_policy(self.config)
+            mode = (output_mode or '').strip().lower()
+            if mode == 'inline':
+                # 用户显式要求不外发: 仅频道内回复 + 本地归档, 绝不外发
+                result.delivery = {'purpose': 'billing_report', 'status': 'skipped',
+                                   'destination': 'inline', 'location': '', 'archive_id': archive_id}
+                print(f'[BILLING] status={result.status} tokens={result.usage["total_tokens"]} delivery=inline(不外发)')
+                return result
+            # 目的地优先级: 请求结构化指令 > 目标文本自然语言 > 配置默认。
+            # 否定与双目的地请求已在 matches 拦截, 走到这里意图必为单一目的地。
+            if mode in ('email', 'sqlite'):
+                delivery_policy = resolve_output_policy(self.config, {'full_delivery': mode})
+            elif mode == 'hedgedoc':
+                # 只传 HedgeDoc: 上传失败不得转投邮件假成功, 归档并如实报失败
+                delivery_policy = resolve_output_policy(self.config,
+                    {'full_delivery': 'hedgedoc', 'allow_email_fallback': False})
+            elif mode:
+                # 显式 auto: 交给配置默认顺序, 不再看目标文本
+                delivery_policy = resolve_output_policy(self.config)
+            elif self._HEDGEDOC_WORD_RE.search(goal):
+                delivery_policy = resolve_output_policy(self.config,
+                    {'full_delivery': 'hedgedoc', 'allow_email_fallback': False})
+            elif self._EMAIL_WORD_RE.search(goal):
+                delivery_policy = resolve_output_policy(self.config, {'full_delivery': 'email'})
+            else:
+                delivery_policy = resolve_output_policy(self.config)
             destination, location = _deliver_complete(result.status_text() + '\n\n' + result.content,
                 'billing', self.config, delivery_policy, title)
-            # Public fallback is permitted only when this request explicitly
-            # includes HedgeDoc as an alternative destination.
-            if destination in ('', 'sqlite') and re.search(r'he(?:rdge|dge)doc', goal, re.I):
-                destination, location = _deliver_complete(result.status_text() + '\n\n' + result.content,
-                    'billing', self.config, resolve_output_policy(self.config, {'full_delivery': 'hedgedoc'}), title)
             submitted = destination in ('email', 'hedgedoc')
+            # 显式选择 sqlite 时, 归档成功即完成投递, 不算外部失败
+            delivered = submitted or (destination == 'sqlite' and mode == 'sqlite')
             result.delivery = {'purpose': 'billing_report', 'status': 'submitted' if submitted else 'archived',
                                'destination': destination, 'location': location, 'archive_id': archive_id}
-            if not submitted:
+            if not delivered:
                 result.status = 'partial'
                 result.failed_nodes.append('外部投递')
             print(f'[BILLING] status={result.status} tokens={result.usage["total_tokens"]} delivery={destination}')

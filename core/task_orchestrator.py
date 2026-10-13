@@ -116,7 +116,8 @@ class TaskOrchestrator:
         from core.billing_workflow import BillingWorkflow
         workflow = BillingWorkflow(self.config, self.router, self.ledger)
         if workflow.matches(goal) and not kwargs.get('planned_subtasks'):
-            result = workflow.run(goal, session_key, kwargs.get('execution_policy'))
+            result = workflow.run(goal, session_key, kwargs.get('execution_policy'),
+                                  output_mode=kwargs.get('output_mode', ''))
             self.session_mgr.save_subtask_dag(session_key, kwargs.get('task_id') or uuid.uuid4().hex[:8],
                 json.dumps({'workflow': 'billing', 'status': result.status,
                             'final_result': result.content, 'usage': result.usage,

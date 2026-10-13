@@ -157,6 +157,220 @@ def test_submitted_billing_report_is_not_sent_twice():
     assert '账单报告已提交' in text
 
 
+def test_archived_billing_report_is_not_redelivered_by_channel():
+    """P1(seq19): 工作流已归档(hedgedoc 上传失败)的回执, 频道层不得重新外发。"""
+    result = TaskResult('partial', 'x' * 3000,
+        delivery={'purpose': 'billing_report', 'status': 'archived',
+                  'destination': 'sqlite', 'location': '42', 'archive_id': '42'})
+    config = {'hedgedoc': {'enabled': True, 'public_url': 'https://md.example'},
+              'output_delivery': {'email': {'enabled': True, 'default_recipients': ['a@b.c']}}}
+    with patch('core.output_delivery._send_email') as send, \
+         patch('core.utils.hedgedoc.upload_to_hedgedoc') as upload:
+        text = prepare_channel_output(result.content, 'wechat', config, task_result=result)
+    send.assert_not_called()
+    upload.assert_not_called()
+    assert '归档 ID：42' in text
+    assert '转存失败' not in text
+
+
+def test_inline_delivery_receipt_is_never_resent():
+    """P1(seq19): inline 回执在频道层仅呈现摘要+归档 ID, 零外发。"""
+    result = TaskResult('succeeded', 'x' * 3000,
+        delivery={'purpose': 'billing_report', 'status': 'skipped',
+                  'destination': 'inline', 'location': '', 'archive_id': '7'})
+    config = {'hedgedoc': {'enabled': True, 'public_url': 'https://md.example'}}
+    with patch('core.output_delivery._send_email') as send, \
+         patch('core.utils.hedgedoc.upload_to_hedgedoc') as upload:
+        text = prepare_channel_output(result.content, 'wechat', config, task_result=result)
+    send.assert_not_called()
+    upload.assert_not_called()
+    assert '归档 ID：7' in text
+    assert '转存失败' not in text
+
+
+def test_billing_request_bypasses_complex_keyword_gate():
+    """R1: 原始 IM 请求命中不了复杂任务关键词,必须由前置判定送入编排入口。"""
+    from agent import Agent
+    text = '再拉取一下最新的帐单,分析外币和异常金额并总结到邮箱'
+    enabled = {'task_routing': {'billing_workflow': {'enabled': True}}}
+    assert not Agent._is_complex_task(text)
+    assert Agent._matches_billing_workflow(enabled, text)
+    assert not Agent._matches_billing_workflow({'task_routing': {}}, text)
+    assert not Agent._matches_billing_workflow(enabled, '今天天气怎么样,总结一下')
+
+
+def _run_workflow_for_delivery(goal, upload_mock, send_mock, tmp_path, billing_db, output_mode=''):
+    config = {'llm': {'default': 'glm', 'models': {'glm': {}}},
+        'billing': {'statement_db_path': str(billing_db), 'script_dir': str(tmp_path)},
+        'task_routing': {'billing_workflow': {'enabled': True}},
+        'hedgedoc': {'enabled': True, 'public_url': 'https://md.example'},
+        'output_delivery': {'sqlite': {'path': str(tmp_path / 'archive.db')}}}
+    router = MagicMock()
+    router.get_call_profile.return_value = {'max_tokens': 2048, 'timeout': 60, 'invoke_kwargs': {}}
+    router.get_invoker.return_value.invoke_sync.return_value = {
+        'content': '分析完成', 'usage_total': 500, 'finish_reason': 'stop'}
+    workflow = BillingWorkflow(config, router)
+    with patch.object(workflow, 'fetch', return_value=('', [])), \
+         patch('core.output_delivery._send_email', send_mock), \
+         patch('core.utils.hedgedoc.upload_to_hedgedoc', upload_mock):
+        return workflow.run(goal, 'delivery-test', output_mode=output_mode)
+
+
+def test_email_intent_forces_email_and_never_touches_hedgedoc(billing_db, tmp_path):
+    """R2: 用户点名邮箱时,hedgedoc 可用也绝不截胡。"""
+    send = MagicMock(return_value='qq')
+    upload = MagicMock(return_value='https://md.example/x')
+    result = _run_workflow_for_delivery(
+        '再拉取一下最新的帐单,分析外币和异常金额并总结到邮箱', upload, send, tmp_path, billing_db)
+    assert result.delivery['destination'] == 'email'
+    send.assert_called_once()
+    upload.assert_not_called()
+
+
+def test_matches_declines_negation_dual_and_destination_less():
+    """S1: 否定、双目的地、无目的地请求一律交回通用循环, 窄流程不猜意图。"""
+    wf = BillingWorkflow({'task_routing': {'billing_workflow': {'enabled': True}}}, MagicMock())
+    assert wf.matches('再拉取一下最新的帐单,分析外币和异常金额并总结到邮箱')
+    assert wf.matches('拉取最新账单分析总结传到 hedgedoc')
+    assert not wf.matches('拉取最新账单分析,不要发邮箱,只在这里回复')
+    assert not wf.matches('拉取最新账单分析总结到邮箱,不要上传 hedgedoc')
+    assert not wf.matches('拉取最新账单分析总结到邮箱,同时传一份到 hedgedoc')
+    assert not wf.matches('拉取最新账单分析一下')
+    assert not wf.matches('拉取最新账单分析总结到邮箱,不用发到别处')
+
+
+def test_hedgedoc_only_destination_goes_hedgedoc(billing_db, tmp_path):
+    """S1: 仅点名 hedgedoc 时邮件发送次数必须为 0。"""
+    send = MagicMock(return_value='')
+    upload = MagicMock(return_value='https://md.example/x')
+    result = _run_workflow_for_delivery(
+        '拉取最新账单分析总结传到 hedgedoc', upload, send, tmp_path, billing_db)
+    assert result.delivery['destination'] == 'hedgedoc'
+    upload.assert_called_once()
+    send.assert_not_called()
+
+
+def test_no_destination_falls_back_to_config_default(billing_db, tmp_path):
+    """S1: 未指定目的地时不强制 email, 走配置默认顺序(hedgedoc 在前)。"""
+    send = MagicMock(return_value='')
+    upload = MagicMock(return_value='https://md.example/x')
+    result = _run_workflow_for_delivery(
+        '拉取最新账单分析总结一下', upload, send, tmp_path, billing_db)
+    assert result.delivery['destination'] == 'hedgedoc'
+    send.assert_not_called()
+
+
+def test_inline_output_mode_never_sends_externally(billing_db, tmp_path):
+    """S1: [output=inline] 显式不外发, 邮件与 hedgedoc 均零调用。"""
+    send = MagicMock(return_value='qq')
+    upload = MagicMock(return_value='https://md.example/x')
+    result = _run_workflow_for_delivery(
+        '再拉取一下最新的帐单,分析总结到邮箱', upload, send, tmp_path, billing_db,
+        output_mode='inline')
+    assert result.delivery['destination'] == 'inline'
+    assert result.delivery['status'] == 'skipped'
+    send.assert_not_called()
+    upload.assert_not_called()
+
+
+def test_structured_email_mode_overrides_hedgedoc_text(billing_db, tmp_path):
+    """S1: 结构化指令优先于目标文本; hedgedoc 即使可用也不得覆盖 email 主目标。"""
+    send = MagicMock(return_value='qq')
+    upload = MagicMock(return_value='https://md.example/x')
+    result = _run_workflow_for_delivery(
+        '拉取最新账单分析总结传到 hedgedoc', upload, send, tmp_path, billing_db,
+        output_mode='email')
+    assert result.delivery['destination'] == 'email'
+    send.assert_called_once()
+    upload.assert_not_called()
+
+
+def test_handle_stream_billing_branch_keeps_directive_parsing():
+    """S2: 流式账单分支必须在编排前解析模型锁与输出指令(与 IM 等价)。"""
+    import inspect
+    from agent import Agent
+    src = inspect.getsource(Agent.handle_stream)
+    branch = src.split('_matches_billing_workflow', 1)[1]
+    assert '_extract_model_override' in branch
+
+
+def test_stream_parses_output_mode_before_routing_like_im():
+    """P2a: 流式先剥离 [output=...] 再路由, 与 handle() 同序; 指令不影响分流。"""
+    import inspect
+    from agent import Agent
+    src = inspect.getsource(Agent.handle_stream)
+    assert src.index('_extract_output_mode') < src.index('_matches_billing_workflow')
+    from core.billing_workflow import BillingWorkflow as BW
+    wf = BW({'task_routing': {'billing_workflow': {'enabled': True}}}, MagicMock())
+    # 指令剥离后, 带不带 [output=...] 分流结论一致
+    for body, expected in [
+        ('再拉取一下最新的帐单,分析总结到邮箱', True),
+        ('拉取最新账单分析总结传到 hedgedoc', True),
+        ('拉取最新账单分析一下', False),
+    ]:
+        assert wf.matches(body) is expected
+        mode, cleaned = Agent._extract_output_mode(body + ' [output=inline]')
+        assert mode == 'inline'
+        assert wf.matches(cleaned) is expected
+
+
+def test_hedgedoc_failure_never_falls_back_to_email(billing_db, tmp_path):
+    """P1: 只传 HedgeDoc 上传失败 → 不转投邮件、不假成功, 归档并如实报失败。"""
+    send = MagicMock(return_value='qq')
+    upload = MagicMock(return_value='')
+    result = _run_workflow_for_delivery(
+        '拉取最新账单分析总结传到 hedgedoc', upload, send, tmp_path, billing_db)
+    upload.assert_called_once()
+    send.assert_not_called()
+    assert result.delivery['destination'] == 'sqlite'
+    assert result.delivery['status'] == 'archived'
+    assert result.status == 'partial'
+    assert '外部投递' in result.failed_nodes
+
+
+def test_structured_hedgedoc_mode_also_forbids_email_fallback(billing_db, tmp_path):
+    """P1: [output=hedgedoc] 与文本点名同契约。"""
+    send = MagicMock(return_value='qq')
+    upload = MagicMock(return_value='')
+    result = _run_workflow_for_delivery(
+        '再拉取一下最新的帐单,分析总结到邮箱', upload, send, tmp_path, billing_db,
+        output_mode='hedgedoc')
+    upload.assert_called_once()
+    send.assert_not_called()
+    assert result.delivery['destination'] == 'sqlite'
+    assert result.status == 'partial'
+
+
+def test_explicit_sqlite_archive_counts_as_delivered(billing_db, tmp_path):
+    """P2b: 明确选择 sqlite 时归档成功不再误报外部投递失败。"""
+    send = MagicMock(return_value='')
+    upload = MagicMock(return_value='')
+    result = _run_workflow_for_delivery(
+        '再拉取一下最新的帐单,分析总结到邮箱', upload, send, tmp_path, billing_db,
+        output_mode='sqlite')
+    assert result.delivery['destination'] == 'sqlite'
+    assert result.delivery['status'] == 'archived'
+    assert result.status == 'succeeded'
+    assert '外部投递' not in result.failed_nodes
+    send.assert_not_called()
+    upload.assert_not_called()
+
+
+def test_stream_directive_semantics_match_im():
+    """S2: 模型锁与输出模式解析语义; 无效模型在外发前抛错。"""
+    from agent import Agent, IncomingMessage
+    agent = Agent.__new__(Agent)
+    agent._config = {'llm': {'default': 'glm', 'models': {'glm': {}}}}
+    msg = IncomingMessage('console', 'u', 'c', 'm1',
+        '再拉取一下最新的帐单,分析总结到邮箱 [model=glm]')
+    msg.model_override = agent._extract_model_override(msg.text.strip()) or ''
+    assert msg.model_override == 'glm'
+    mode, cleaned = Agent._extract_output_mode('拉取最新账单分析 [output=inline]')
+    assert mode == 'inline' and '[output=' not in cleaned
+    with pytest.raises(ValueError):
+        agent._extract_model_override('拉取最新账单分析 [model=notexist]')
+
+
 def test_alternating_cycle_is_detected():
     detector = LoopDetector()
     assert [detector.check(name, '{}') for name in ['a','b','a','b','a','b']] == [False] * 5 + [True]

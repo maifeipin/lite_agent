@@ -593,6 +593,9 @@ class Agent:
         elif msg.is_guest:
             print(f"  [ROUTE] 访客消息 → 走同步AI Loop (已限制工具权限): {text[:60]}")
             response = self._run_ai_loop(msg)
+        elif self._matches_billing_workflow(self._config, text):
+            print(f"  [ROUTE] 账单工作流命中 → 走编排入口: {text[:60]}")
+            response = self._run_orchestrated(msg)
         elif self._is_complex_task(text):
             print(f"  [ROUTE] 复杂任务检测命中 → 走多Agent编排: {text[:60]}")
             response = self._run_orchestrated(msg)
@@ -952,6 +955,16 @@ class Agent:
         ]
         return any(kw in text for kw in keywords)
 
+    @staticmethod
+    def _matches_billing_workflow(config, text: str) -> bool:
+        """账单确定性工作流前置判定，与复杂任务关键词解耦。
+
+        IM 与流式入口共用：非访客请求先判专用流程，再走通用路由。
+        matches 只读取 config，不触网。
+        """
+        from core.billing_workflow import BillingWorkflow
+        return BillingWorkflow(config, None, None).matches(text)
+
     def _extract_model_override(self, text: str):
         """Return a configured model key explicitly requested by the user.
 
@@ -1015,6 +1028,7 @@ class Agent:
                     task_id=task_id,
                     step_override=step_override,
                     execution_policy=execution_policy,
+                    output_mode=msg.output_mode,
                 )
                 print(f"  [ORCH] 后台线程执行完成 session={msg.session_key} status={result.status} result_len={len(result.content)}")
                 self._push_result(msg, result)
@@ -1113,6 +1127,23 @@ class Agent:
                 return
             if text.startswith("/"):
                 yield from self._wrap_sync_response(self._handle_builtin(msg))
+                return
+            # 与 handle() 同序: 先剥离输出指令再路由, 保证 [output=...] 在 IM/流式下分流一致
+            directive_mode, cleaned_text = self._extract_output_mode(msg.text)
+            if directive_mode:
+                msg.output_mode = directive_mode
+                msg.text = cleaned_text
+                text = cleaned_text.strip()
+            if not msg.is_guest and self._matches_billing_workflow(self._config, text):
+                # 账单确定性工作流: 与 IM 入口同判定, 不依赖复杂任务关键词。
+                # 先补齐 IM 路径等价的模型锁解析, 避免用户锁在编排前丢失
+                try:
+                    msg.model_override = self._extract_model_override(text) or ""
+                except ValueError as exc:
+                    yield from self._wrap_sync_response(
+                        AgentResponse(f"❌ {exc}", title="❌ 模型选择失败", color="red"))
+                    return
+                yield from self._wrap_sync_response(self._run_orchestrated(msg))
                 return
             if not msg.is_guest and self._is_complex_task(text):
                 # 复杂任务: 仅流式回执, 真实结果仍由 _push_result 异步推送 (路径 C 不做 token 流)

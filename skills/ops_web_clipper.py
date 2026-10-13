@@ -254,7 +254,7 @@ def _smart_deliver(result: dict, force_hedgedoc: bool = False) -> str:
                     f"> {summary}{'...' if len(markdown) > 800 else ''}",
                     f"",
                     f"📊 全文 {len(markdown)} 字 | 🖼 {image_count} 张图片",
-                    f"🔗 [点击查看完整图文]({hedgedoc_url})",
+                    f"🔗 [点击查看完整图文（需登录 HedgeDoc 账号）]({hedgedoc_url})",
                 ]
                 if source_url:
                     lines.append(f"📎 [原文链接]({source_url})")
@@ -398,4 +398,4 @@ def hedgedoc_upload(content: str) -> str:
     if not url:
         return "❌ 上传 HedgeDoc 失败（服务未启用或登录失败），请检查 hedgedoc 配置"
 
-    return f"✅ 已上传到 HedgeDoc：{url}"
+    return f"✅ 已上传到 HedgeDoc（仅登录账号可见，非公开链接）：{url}"
