@@ -306,3 +306,36 @@ def test_real_cli_racing_ack_preserves_new_event_and_retry_updates_existing_todo
     assert read_todo(todos)['id']==original_id
     assert json.loads(read_todo(todos)['source_metadata_json'])['revision']==2
     assert sd.get_unacked_quality_events(db)==[]
+
+
+@pytest.mark.parametrize('code,label', [('FORMAT_BASELINE_MISSING','模板基线待确认'),('FORMAT_CHANGED','账单模板变化'),('SOURCE_FIELD_MISSING','原文缺少关键字段'),('EXTRACTION_FAILED','关键字段提取失败')])
+def test_template_and_missing_field_real_cli_todo_lifecycle(tmp_path,parser_repo,code,label):
+    root,sd,models=parser_repo
+    db=str(tmp_path/'mail.db'); todos=str(tmp_path/'todos.db')
+    sd.init_db(db)
+    record=models.QualityEventRecord(case_key='monitor:'+code,event_type='quality_detected',
+        bank_code='CMB',account_name='mailbox',template_version='v1',
+        diagnostics=[models.Diagnostic(code=code,field='structure' if code.startswith('FORMAT') else 'due_date')],
+        evidence_refs=[{'account':'mailbox','uid':'monitor-1','message_id':'<monitor@bank>'}])
+    client=MailCLI(str(root),db_path=db)
+    sd.upsert_quality_event(db,record)
+    assert consume_quality_events(client,todos)['created']==1
+    assert label in read_todo(todos)['title']
+    sd.upsert_quality_event(db,record)
+    assert consume_quality_events(client,todos)['total']==0
+    record.event_type='quality_resolved'
+    sd.upsert_quality_event(db,record)
+    assert consume_quality_events(client,todos)['resolved']==1
+    assert read_todo(todos)['status']=='done'
+
+
+def test_report_original_evidence_is_visible_without_fabricated_currency():
+    from features.billing.snapshot import render_report,model_evidence
+    snapshot={'transactions':[{'id':1483,'description':'GOOGLE*CHATGPT','amount':'125.55',
+        'currency':'CNY','original_amount':'2860.00','original_currency_token':'¥',
+        'original_currency_confirmed':False,'original_currency':None,'txn_location_code':'JP'}],
+        'transaction_count':1,'unknown_currency_transactions':[]}
+    report=render_report(snapshot)
+    assert '2860.00' in report and '¥' in report and '未确认' in report
+    assert '地点代码（非币种）' in report and 'JP' in report
+    assert 'JPY' not in report

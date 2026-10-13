@@ -68,7 +68,11 @@ def _format_quality_todo_content(event: Dict[str, Any]) -> tuple:
     diagnostics = event.get("diagnostics") or []
 
     diag_codes = [d.get("code") for d in diagnostics if isinstance(d, dict) and d.get("code")]
-    code_summary = ", ".join(list(dict.fromkeys(diag_codes))[:3]) if diag_codes else "解析异常"
+    labels = {'FORMAT_CHANGED': '账单模板变化', 'FORMAT_BASELINE_MISSING': '模板基线待确认',
+              'SOURCE_FIELD_MISSING': '原文缺少关键字段', 'EXTRACTION_FAILED': '关键字段提取失败',
+              'FIELD_SOURCE_UNKNOWN': '关键字段来源待核验', 'CURRENCY_UNKNOWN': '币种证据不足',
+              'TRANSACTION_ROW_INVALID': '交易行解析异常', 'TRANSACTION_COVERAGE_GAP': '交易明细不完整'}
+    code_summary = ", ".join(labels.get(code, code) for code in list(dict.fromkeys(diag_codes))[:3]) if diag_codes else "解析异常"
 
     title = f"[账单质量] {bank_code} 发现 {len(diagnostics)} 项解析问题: {code_summary} (影响 {affected_count} 封邮件)"
 

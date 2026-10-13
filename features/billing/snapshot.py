@@ -63,7 +63,8 @@ def model_evidence(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     limit = snapshot.get('model_detail_limit', 20)
     fields = (
         'id', 'bank_code', 'txn_date', 'description', 'amount', 'currency', 'currency_source',
-        'direction', 'original_amount', 'original_currency', 'original_currency_source'
+        'direction', 'original_amount', 'original_currency', 'original_currency_source',
+        'original_currency_token', 'original_amount_raw', 'original_currency_confirmed', 'txn_location_code'
     )
 
     def sample(rows):
@@ -122,8 +123,13 @@ def render_report(snapshot: Dict[str, Any], analysis: str = '', fetch_log: str =
              for r in snapshot['unknown_currency_transactions']]
         ))
     parts.append('## 完整交易明细\n\n' + table(
-        ['ID', '邮箱', '银行', '交易日期', '描述', '金额', '入账币种', '币种证据', '方向', '原始金额', '原币币种', '原币证据'],
-        [[r.get(k) for k in ('id', 'account_name', 'bank_code', 'txn_date', 'description', 'amount', 'currency', 'currency_source', 'direction', 'original_amount', 'original_currency', 'original_currency_source')]
+        ['ID', '邮箱', '银行', '交易日期', '描述', '金额', '入账币种', '币种证据', '方向', '原币金额', '原文币种符号/代码', '原币币种', '原币证据', '地点代码（非币种）'],
+        [[r.get(k) for k in ('id', 'account_name', 'bank_code', 'txn_date', 'description', 'amount', 'currency', 'currency_source', 'direction')]
+         + [r.get('original_amount') if r.get('original_amount') not in (None, '') else '未提供',
+            r.get('original_currency_token') or '原文未标',
+            r.get('original_currency') if r.get('original_currency_confirmed') else '未确认',
+            r.get('original_currency_source') or '原文无明确币种证据',
+            r.get('txn_location_code') or '未提供']
          for r in snapshot.get('transactions', [])]
     ))
     if fetch_log:
