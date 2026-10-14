@@ -1,6 +1,7 @@
 import time
 import threading
 import traceback
+import re
 from datetime import datetime
 from typing import Callable, Dict
 from concurrent.futures import ThreadPoolExecutor
@@ -9,41 +10,52 @@ class CronJob:
     def __init__(self, job_id: int, name: str, cron_expr: str, func: Callable, enabled: bool = True):
         self.id = job_id
         self.name = name
-        self.cron_expr = cron_expr  # 暂定为每天的小时:分钟，如 "02:00"，或者 "every_minute" 等
+        self.cron_expr = cron_expr.strip() if isinstance(cron_expr, str) else ''
+        self._minutes, self._hours = self._parse_schedule(self.cron_expr)
         self.func = func
         self.enabled = enabled
         self.last_run_date = ""
         self._job_lock = threading.Lock()
         self.is_running = False
+        self._schedule_lock = threading.Lock()
+        self._last_run_minute = None
+
+    @staticmethod
+    def _parse_schedule(expr):
+        """Supported: HH:MM, every_minute, and minute hour * * *."""
+        if expr == 'every_minute':
+            return set(range(60)), set(range(24))
+        daily = re.fullmatch(r'(\d{1,2}):(\d{2})', expr)
+        if daily and int(daily[1]) < 24 and int(daily[2]) < 60:
+            return {int(daily[2])}, {int(daily[1])}
+        fields = expr.split()
+        if len(fields) == 5 and fields[2:] == ['*', '*', '*']:
+            def values(field, maximum):
+                if field == '*':
+                    return set(range(maximum + 1))
+                if re.fullmatch(r'\d+', field) and int(field) <= maximum:
+                    return {int(field)}
+                if re.fullmatch(r'\*/\d+', field):
+                    interval = int(field[2:])
+                    if 1 <= interval <= maximum:
+                        return set(range(0, maximum + 1, interval))
+                raise ValueError(f'Unsupported cron field: {field!r}')
+            return values(fields[0], 59), values(fields[1], 23)
+        raise ValueError(f'Unsupported cron expression: {expr!r}; use HH:MM, every_minute, or minute hour * * *')
 
     def should_run(self, current_time: datetime) -> bool:
         if not self.enabled:
             return False
             
-        today_str = current_time.strftime("%Y-%m-%d")
-        
-        if ":" in self.cron_expr:
-            current_hm = current_time.strftime("%H:%M")
-            if current_hm == self.cron_expr and self.last_run_date != today_str:
-                self.last_run_date = today_str
-                return True
-        elif self.cron_expr == "every_minute":
+        if current_time.minute not in self._minutes or current_time.hour not in self._hours:
+            return False
+        minute_key = int(current_time.timestamp() // 60)
+        with self._schedule_lock:
+            if self._last_run_minute is not None and minute_key <= self._last_run_minute:
+                return False
+            self._last_run_minute = minute_key
+            self.last_run_date = current_time.strftime('%Y-%m-%d')
             return True
-        elif self.cron_expr.startswith("*/"):
-            # 支持每N分钟格式: */N * * * *
-            try:
-                interval = int(self.cron_expr.split("/")[1].split(" ")[0])
-                minute = current_time.minute
-                if minute % interval == 0:
-                    last_minute_key = f"{self.name}_last_minute"
-                    last_min = getattr(self, last_minute_key, None)
-                    if last_min != minute:
-                        setattr(self, last_minute_key, minute)
-                        return True
-            except (ValueError, IndexError):
-                pass
-            
-        return False
 
 class CronManager:
     _instance = None
@@ -70,8 +82,8 @@ class CronManager:
 
     def add_job(self, name: str, cron_expr: str, func: Callable, enabled: bool = True) -> int:
         job_id = self._next_id
-        self._next_id += 1
         job = CronJob(job_id, name, cron_expr, func, enabled)
+        self._next_id += 1
         self.jobs[job_id] = job
         return job_id
 

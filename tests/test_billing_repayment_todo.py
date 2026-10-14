@@ -193,7 +193,7 @@ def test_im_sender_uses_configured_api_credentials_without_logging_them(monkeypa
     monkeypatch.delenv('LITE_AGENT_ALERT_URL',raising=False)
     monkeypatch.setattr('core.config_loader.load_config',lambda:{'channels':{'api':{'port':8899,'auth_token':'fixture-only'}}})
     requests=[]
-    monkeypatch.setattr('features.todo.service.urllib.request.urlopen',lambda request,timeout:requests.append(request) or BytesIO())
+    monkeypatch.setattr('features.todo.service.urllib.request.urlopen',lambda request,timeout:requests.append(request) or BytesIO(b'{"status":"delivered"}'))
     assert send_im_alert('test','test') is True
     assert requests[0].full_url=='http://127.0.0.1:8899/api/v1/alert'
     assert requests[0].get_header('Authorization')=='Bearer fixture-only'

@@ -453,7 +453,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         """透传告警到 IM (push_alert), 非阻塞: 先 ACK 200 再推。
         供 standalone 脚本(hotspot.py/topic_diff.py)绕开 agent.handle 用。
         仅 admin (非 guest; edge 已被 do_POST 白名单挡在 /api/report,/api/task_result)。
-        Body: {title?, text, color?, dedup_key?}"""
+        Body: {title?, text, color?, dedup_key?, wait_delivery?}
+        wait_delivery=true 返回通道发送回执；默认保持先 ACK 后推送。"""
         if getattr(self, 'is_guest', False):
             self.send_error(403, "Forbidden: admin token required")
             return
@@ -474,6 +475,23 @@ class ApiHandler(BaseHTTPRequestHandler):
         title = req.get('title') or '📢 告警'
         color = req.get('color') or 'red'
         dedup_key = req.get('dedup_key')
+
+        # Todo callers require a delivery receipt, rather than the default ACK.
+        if req.get('wait_delivery') is True:
+            try:
+                from core.alerts import push_alert
+                delivered = push_alert(self.server.api_server.agent, text,
+                    title=title, color=color, dedup_key=dedup_key)
+            except Exception:
+                delivered = False
+            receipt = json.dumps({'status': 'delivered' if delivered else 'failed'}).encode('utf-8')
+            self.send_response(200)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(receipt)))
+            self.end_headers()
+            self.wfile.write(receipt)
+            return
 
         # 1. 先 ACK 200 (调用方不阻塞/不超时; 镜像 _handle_edge_report 的 ACK-first)
         ack = json.dumps({"status": "accepted"}).encode('utf-8')

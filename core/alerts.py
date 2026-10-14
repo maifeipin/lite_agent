@@ -3,7 +3,7 @@
 设计:
 - IM 密钥只在中心 (agent.channels 已实例化), 不下发边缘。
 - 永不 raise — 告警失败不得影响业务 (报告 ACK / skill 执行)。
-- 去重复用 session_mgr.is_message_processed, 时间窗进 key (仿 wecom.py:132)。
+- 去重只读已发送回执，通道成功后才写入；相同 key 的并发在本进程串行。
 
 依赖的 Agent 公开属性 (agent.py:114-155):
 - agent.channels: list[BaseChannel], 由 main.py 注入
@@ -12,9 +12,12 @@
 """
 from agent import AgentResponse
 from core.config_loader import load_config
+import threading
 
 # 通道优先级: 谁启用谁先, 逐个 try 直到成功
 _CHANNEL_PRIORITY = ['feishu', 'wecom', 'wechat', 'dingtalk', 'telegram']
+# Bounded locks serialize retries of the same identity without holding DB locks.
+_DELIVERY_LOCKS = [threading.RLock() for _ in range(32)]
 
 
 def _resolve_admin_uid(ch_name: str, channels_cfg: dict) -> str:
@@ -30,6 +33,13 @@ def _resolve_admin_uid(ch_name: str, channels_cfg: dict) -> str:
 
 def push_alert(agent, text: str, title: str = '🛡️ Edge 告警',
                color: str = 'red', dedup_key: str = None) -> bool:
+    """Return channel confirmation; a failed send leaves no dedup receipt."""
+    lock = _DELIVERY_LOCKS[hash(str(dedup_key or '')) % len(_DELIVERY_LOCKS)]
+    with lock:
+        return _push_alert(agent, text, title, color, dedup_key)
+
+
+def _push_alert(agent, text, title, color, dedup_key):
     """推送告警到第一个可用的 IM 通道。返回是否推送成功。
 
     - dedup_key: 若提供, 先查 session_mgr 去重; 命中则跳过 (返回 True, 视为已处理)。
@@ -41,7 +51,7 @@ def push_alert(agent, text: str, title: str = '🛡️ Edge 告警',
 
         # 去重: 时间窗进 key 由调用方负责构造 (见 _evaluate_edge_alert)
         if dedup_key:
-            if agent.session_mgr.is_message_processed(f"edge_alert:{dedup_key}"):
+            if agent.session_mgr.has_message_processed(f"edge_alert:{dedup_key}"):
                 return True  # 本窗口已推过
 
         channels_cfg = (load_config() or {}).get('channels', {})
@@ -56,6 +66,8 @@ def push_alert(agent, text: str, title: str = '🛡️ Edge 告警',
             try:
                 ok = ch.send_to(uid, AgentResponse(text, title=title, color=color))
                 if ok:
+                    if dedup_key:
+                        agent.session_mgr.is_message_processed(f"edge_alert:{dedup_key}")
                     return True
             except Exception as e:
                 print(f"  ⚠️ [alerts] {ch_name} 推送失败: {e}")

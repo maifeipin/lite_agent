@@ -35,7 +35,7 @@ def _parse_until(until: str) -> str:
 
 
 def send_im_alert(title: str, text: str, color: str = "yellow", dedup_key: Optional[str] = None) -> bool:
-    """Send IM alert to the alert webhook endpoint."""
+    """Wait for channel confirmation; HTTP acceptance alone is not delivery."""
     try:
         from core.config_loader import load_config
         api = ((load_config() or {}).get('channels') or {}).get('api') or {}
@@ -44,7 +44,8 @@ def send_im_alert(title: str, text: str, color: str = "yellow", dedup_key: Optio
         payload: Dict[str, Any] = {
             "title": title,
             "text": text,
-            "color": color
+            "color": color,
+            "wait_delivery": True
         }
         if dedup_key:
             payload["dedup_key"] = dedup_key
@@ -57,9 +58,9 @@ def send_im_alert(title: str, text: str, color: str = "yellow", dedup_key: Optio
             headers=headers,
             method="POST"
         )
-        with urllib.request.urlopen(req, timeout=10):
-            pass
-        return True
+        with urllib.request.urlopen(req, timeout=10) as response:
+            receipt = json.loads(response.read().decode('utf-8'))
+        return isinstance(receipt, dict) and receipt.get('status') == 'delivered'
     except Exception as e:
         logger.debug(f"[send_im_alert] 推送跳过/异常: {e}")
         return False

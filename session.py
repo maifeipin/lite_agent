@@ -755,6 +755,13 @@ class SessionManager:
     # ------------------------------------------------------------------
     #  防重放管理
     # ------------------------------------------------------------------
+    def has_message_processed(self, msg_id: str) -> bool:
+        """Read a receipt without claiming the message before delivery."""
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT 1 FROM processed_msgs WHERE msg_id=?", (msg_id,)
+            ).fetchone() is not None
+
     def is_message_processed(self, msg_id: str) -> bool:
         """检查并记录消息ID（基于 SQLite 的防重放机制）"""
         with self._db_write_lock:
