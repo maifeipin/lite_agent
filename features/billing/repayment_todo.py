@@ -20,6 +20,7 @@ def reconcile_repayment_todos(client, db_path=None, remind_days=3):
     if not isinstance(envelope,dict) or envelope.get('status')!='ok':
         raise RuntimeError('还款待办快照读取失败')
     service=TodoService(db_path)
+    existing=service.existing_source_keys('billing_repayment:')
     stats={'created':0,'updated':0,'resolved':0,'verification':0,'notices':0}
     records=(envelope.get('data') or {}).get('statements',[])
     latest={}
@@ -38,10 +39,12 @@ def reconcile_repayment_todos(client, db_path=None, remind_days=3):
             revision=2
         paid=bill.get('is_paid') in (1,True)
         if paid:
-            result=service.resolve_source(key,'账单已明确标记为已还款',revision=revision+1)
+            result=service.resolve_source(key,'账单已明确标记为已还款',revision=revision+1,
+                expected_owner='billing',close_user_edited=True)
             stats['resolved']+=int(result.get('resolved') is True)
             continue
-        if bill.get('statement_month') != latest[(bill['account_name'],bill['bank_code'])]:
+        is_latest=bill.get('statement_month') == latest[(bill['account_name'],bill['bank_code'])]
+        if not is_latest and key not in existing:
             continue  # Initial enrollment covers the newest bill, not an old backlog.
         try:
             amount=Decimal(str(bill.get('total_due')))
@@ -49,9 +52,9 @@ def reconcile_repayment_todos(client, db_path=None, remind_days=3):
         except InvalidOperation:
             positive=False
         amount_verified=bill.get('total_due_source')=='extracted'
-        if amount_verified and not positive:
+        if amount_verified and not positive and key not in existing:
             continue
-        if positive and amount_verified:
+        if is_latest and positive and amount_verified:
             notice=service.upsert_source(f"billing_statement_notice:{bill['id']}",
                 f"新账单：{bill['bank_code']} {bill['statement_month']}（账单 #{bill['id']}）",
                 f"本期应还金额：{bill['total_due']}。请核验账单币种与明细；金额不表示已经还款。",
@@ -76,7 +79,8 @@ def reconcile_repayment_todos(client, db_path=None, remind_days=3):
             due_at=due_at,project='billing',source_message_id=bill.get('message_id'),
             source_metadata={'revision':revision,'cycle_id':1,'statement_id':bill['id'],
                              'event_type':'repayment_detected','due_date':bill.get('due_date'),'verification_required':not ready},
-            remind_before_mins=0,remind_interval_mins=0,recur_cron='12:00' if due_at else None)
+            remind_before_mins=0,remind_interval_mins=0,recur_cron='12:00' if due_at else None,
+            create_if_missing=is_latest,replace_schedule=True)
         stats['created']+=int(result.get('created') is True)
         stats['updated']+=int(result.get('status')=='updated')
         stats['verification']+=int(not ready)
@@ -96,7 +100,8 @@ def confirm_repayment(statement_id, confirmed=False, client=None, db_path=None):
             return receipt
         receipt=dict(receipt,already_paid=True)
     try:
-        result=TodoService(db_path).resolve_source(key,'用户明确确认已还款',revision=time.time_ns()//1000*2+1)
+        result=TodoService(db_path).resolve_source(key,'用户明确确认已还款',revision=time.time_ns()//1000*2+1,
+            expected_owner='billing',close_user_edited=True)
         receipt=dict(receipt,todo_sync='done' if result.get('resolved') or result.get('reason') in ('resolution_recorded','stale_event') else result.get('status'))
     except Exception:
         receipt=dict(receipt,todo_sync='retry_required')

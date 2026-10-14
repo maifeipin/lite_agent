@@ -1765,6 +1765,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(content_length)
         try:
             data = json.loads(body.decode('utf-8'))
+            if 'notify_enabled' in data and not isinstance(data['notify_enabled'], bool):
+                self.send_error(400, 'notify_enabled must be boolean')
+                return
             title = data.get("title")
             if not title:
                 self.send_error(400, "Bad Request: Missing title")
@@ -1775,9 +1778,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             due_at = data.get("due_at")
             remind_interval_mins = data.get("remind_interval_mins", 0)
             remind_before_mins = data.get("remind_before_mins", 30)
+            notify_enabled = data.get('notify_enabled', True)
 
             from features.todo import TodoService
-            msg = TodoService().add(title=title, kind=kind, project=project, description=description, due_at=due_at, remind_interval_mins=remind_interval_mins, remind_before_mins=remind_before_mins)
+            msg = TodoService().add(title=title, kind=kind, project=project, description=description, due_at=due_at, remind_interval_mins=remind_interval_mins, remind_before_mins=remind_before_mins, notify_enabled=notify_enabled)
             
             self.send_response(200)
             self._send_cors_headers()
@@ -1808,6 +1812,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(content_length)
         try:
             data = json.loads(body.decode('utf-8'))
+            if 'notify_enabled' in data and not isinstance(data['notify_enabled'], bool):
+                self.send_error(400, 'notify_enabled must be boolean')
+                return
             msg = []
 
             from features.todo import TodoService
@@ -1833,9 +1840,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             kind = data.get("kind")
             remind_interval_mins = data.get("remind_interval_mins")
             remind_before_mins = data.get("remind_before_mins")
+            notify_enabled = data.get('notify_enabled')
 
-            if any(x is not None for x in [title, description, due_at, project, recur_cron, kind, remind_interval_mins, remind_before_mins]):
-                msg.append(svc.update(tid, title=title, description=description, due_at=due_at, project=project, recur_cron=recur_cron, kind=kind, remind_interval_mins=remind_interval_mins, remind_before_mins=remind_before_mins))
+            if any(x is not None for x in [title, description, due_at, project, recur_cron, kind, remind_interval_mins, remind_before_mins, notify_enabled]):
+                msg.append(svc.update(tid, title=title, description=description, due_at=due_at, project=project, recur_cron=recur_cron, kind=kind, remind_interval_mins=remind_interval_mins, remind_before_mins=remind_before_mins, notify_enabled=notify_enabled))
 
             if not msg:
                 self.send_error(400, "Bad Request: No fields to update")

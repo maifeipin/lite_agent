@@ -104,6 +104,7 @@ def _ensure_schema_locked(target: str) -> None:
         for name, declaration in (
             ('remind_interval_mins', 'INTEGER DEFAULT 0'),
             ('remind_before_mins', 'INTEGER DEFAULT 30'),
+            ('notify_enabled', 'INTEGER NOT NULL DEFAULT 1 CHECK (notify_enabled IN (0, 1))'),
             ('source_key', 'TEXT'),
             ('source_metadata_json', "TEXT NOT NULL DEFAULT '{}'"),
         ):
@@ -243,11 +244,17 @@ class TodoRepository:
         project: Optional[str] = 'mail-statement-parser',
         remind_before_mins: int = 30,
         remind_interval_mins: int = 0,
-        recur_cron: Optional[str] = None
+        recur_cron: Optional[str] = None,
+        create_if_missing: bool = True,
+        replace_schedule: bool = False
     ) -> Dict[str, Any]:
         """Source-key uniqueness and monotone receipts enforced under one atomic transaction."""
         if not source_key or not source_key.strip():
             raise ValueError('source_key 不能为空')
+        if not isinstance(create_if_missing, bool):
+            raise ValueError('create_if_missing must be boolean')
+        if not isinstance(replace_schedule, bool):
+            raise ValueError('replace_schedule must be boolean')
         source_key = source_key.strip()
         for value in (remind_before_mins, remind_interval_mins):
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
@@ -264,6 +271,10 @@ class TodoRepository:
                 SELECT id, status, title, description, due_at, source_metadata_json, created_via
                 FROM todos WHERE source_key=?
             """, (source_key,)).fetchone()
+
+            if row is None and not create_if_missing:
+                conn.commit()
+                return {'id': None, 'created': False, 'status': 'skipped', 'reason': 'not_found'}
 
             meta = json.loads(row[5] or '{}') if row else {}
             stale = _source_is_stale(conn, source_key, meta, revision, cycle)
@@ -305,9 +316,11 @@ class TodoRepository:
                     reopen = status in ('done', 'completed') and cycle > old_cycle
                     if status not in ('snoozed', 'shelved') and not human:
                         conn.execute("""
-                            UPDATE todos SET title=?, description=?, due_at=?, remind_before_mins=?, remind_interval_mins=?, recur_cron=? WHERE id=?
+                            UPDATE todos SET title=?, description=?, due_at=?, remind_before_mins=?, remind_interval_mins=?, recur_cron=?,
+                                kind=CASE WHEN ? THEN ? ELSE kind END WHERE id=?
                         """, (title, description if description is not None else old_desc,
-                              due_at if created_via == 'billing' else (old_due if old_due is not None else due_at), remind_before_mins, remind_interval_mins, recur_cron, tid))
+                              due_at if replace_schedule else (old_due if old_due is not None else due_at), remind_before_mins, remind_interval_mins, recur_cron,
+                              replace_schedule, kind, tid))
                     if reopen:
                         conn.execute("UPDATE todos SET status='pending', completed_at=NULL, notified_due_at=NULL WHERE id=?", (tid,))
                     result = {'id': tid, 'created': False, 'status': 'updated'}
@@ -327,11 +340,15 @@ class TodoRepository:
         source_key: str,
         resolution_note: str = '上游问题已解决',
         cycle_id: Optional[int] = None,
-        revision: Optional[int] = None
+        revision: Optional[int] = None,
+        expected_owner: str = 'mail_quality',
+        close_user_edited: bool = False
     ) -> Dict[str, Any]:
         """Atomically persist versioned resolution, tombstone, and status update."""
         if not source_key or not source_key.strip():
             raise ValueError('source_key 不能为空')
+        if not isinstance(close_user_edited, bool) or not expected_owner:
+            raise ValueError('resolution owner and boolean close policy are required')
         source_key = source_key.strip()
         revision, cycle = _source_version({'revision': revision, 'cycle_id': cycle_id or 1})
 
@@ -366,8 +383,9 @@ class TodoRepository:
             if revision is not None:
                 meta.update(revision=revision, cycle_id=cycle)
 
-            close = ((status in ('pending', 'active') and created_via == 'mail_quality' and not meta.get('user_edited')) or
-                     (source_key.startswith('billing_repayment:') and created_via == 'billing' and status not in ('done', 'completed', 'dropped')))
+            close = created_via == expected_owner and (
+                (close_user_edited and status not in ('done', 'completed', 'dropped')) or
+                (status in ('pending', 'active') and not meta.get('user_edited')))
             conn.execute('UPDATE todos SET source_metadata_json=?, updated_at=? WHERE id=?',
                          (json.dumps(meta, ensure_ascii=False), _now_iso(), tid))
             if close:
@@ -420,7 +438,8 @@ class TodoRepository:
         due_at: Optional[str] = None,
         recur_cron: Optional[str] = None,
         remind_interval_mins: int = 0,
-        remind_before_mins: int = 30
+        remind_before_mins: int = 30,
+        notify_enabled: bool = True
     ) -> str:
         """Atomically insert a new manual Todo or recurring template."""
         conn = self.connect()
@@ -429,10 +448,10 @@ class TodoRepository:
             conn.execute('BEGIN IMMEDIATE')
             conn.execute("""
                 INSERT INTO todos (id, title, description, status, kind, project, created_at, updated_at,
-                                   due_at, recur_cron, remind_interval_mins, remind_before_mins)
-                VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
+                                   due_at, recur_cron, remind_interval_mins, remind_before_mins, notify_enabled)
+                VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (tid, title, description, kind, project, now, now, due_at, recur_cron,
-                  remind_interval_mins, remind_before_mins))
+                  remind_interval_mins, remind_before_mins, notify_enabled))
             conn.commit()
             return tid
         except Exception:
@@ -449,7 +468,7 @@ class TodoRepository:
             fields["updated_at"] = _now_iso()
             cursor = conn.cursor()
 
-            if len(fields) > 1:
+            if set(fields) - {'updated_at', 'notify_enabled'}:
                 cursor.execute("SELECT source_metadata_json FROM todos WHERE id=?", (tid,))
                 row = cursor.fetchone()
                 if row and row[0]:
@@ -485,6 +504,16 @@ class TodoRepository:
         except Exception:
             conn.rollback()
             raise
+        finally:
+            conn.close()
+
+    def get_source_keys(self, prefix: str) -> set:
+        """Read existing identities without loading private task descriptions."""
+        conn = self.connect()
+        try:
+            return {row[0] for row in conn.execute(
+                'SELECT source_key FROM todos WHERE substr(source_key, 1, ?) = ?',
+                (len(prefix), prefix))}
         finally:
             conn.close()
 
@@ -597,7 +626,7 @@ class TodoRepository:
         try:
             cur = conn.cursor()
             cur.execute("""
-                SELECT id, title, description, project, recur_cron, recur_last_spawned_at
+                SELECT id, title, description, project, recur_cron, recur_last_spawned_at, notify_enabled
                 FROM todos
                 WHERE kind = 'recurring' AND status != 'dropped'
             """)
@@ -617,9 +646,9 @@ class TodoRepository:
             if changed.rowcount != 1:
                 return False
             conn.execute("""
-                INSERT INTO todos (id, title, description, status, kind, project, created_at, updated_at, recur_parent_id, due_at)
-                VALUES (?, ?, ?, 'pending', 'todo', ?, ?, ?, ?, ?)
-            """, (child_id, title, description, project, now, now, parent_id, due_time))
+                INSERT INTO todos (id, title, description, status, kind, project, created_at, updated_at, recur_parent_id, due_at, notify_enabled)
+                SELECT ?, ?, ?, 'pending', 'todo', ?, ?, ?, ?, ?, notify_enabled FROM todos WHERE id=?
+            """, (child_id, title, description, project, now, now, parent_id, due_time, parent_id))
             return True
 
     def get_due_reminder_candidates(self) -> List[Dict[str, Any]]:
@@ -632,7 +661,7 @@ class TodoRepository:
                 SELECT id, title, due_at, created_via, project, kind, description,
                        remind_interval_mins, remind_before_mins, notified_due_at, recur_cron
                 FROM todos
-                WHERE status IN ('pending', 'active') AND due_at IS NOT NULL
+                WHERE status IN ('pending', 'active') AND due_at IS NOT NULL AND notify_enabled=1
             """).fetchall()
             return [dict(r) for r in rows]
         finally:
@@ -653,7 +682,7 @@ class TodoRepository:
         """Claim a reminder only if the candidate is still current and actionable."""
         with self.transaction() as conn:
             result = conn.execute("""UPDATE todos SET notified_due_at=?, updated_at=?
-                WHERE id=? AND status IN ('pending','active')
+                WHERE id=? AND status IN ('pending','active') AND notify_enabled=1
                 AND notified_due_at IS ? AND due_at IS ?""",
                 (now, now, tid, expected_last, expected_due))
             return result.rowcount == 1

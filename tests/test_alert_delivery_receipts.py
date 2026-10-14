@@ -48,7 +48,7 @@ def test_simultaneous_same_identity_has_one_successful_send(tmp_path, monkeypatc
 
 @pytest.mark.parametrize('receipt', [b'{"status":"accepted"}', b'{"status":"failed"}', b'', b'[]'])
 def test_todo_does_not_treat_acceptance_or_invalid_response_as_delivery(monkeypatch, receipt):
-    monkeypatch.setattr('features.todo.service.urllib.request.urlopen', lambda *a, **k: io.BytesIO(receipt))
+    monkeypatch.setattr('integrations.notifications.urllib.request.urlopen', lambda *a, **k: io.BytesIO(receipt))
     assert send_im_alert('notice', 'text') is False
 
 
@@ -82,10 +82,10 @@ def test_todo_retries_actual_failed_channel_and_records_success_once(tmp_path, m
         handler = handler_for(payload, agent)
         ApiHandler._handle_alert(handler)
         return io.BytesIO(handler.wfile.getvalue())
-    monkeypatch.setattr('features.todo.service.urllib.request.urlopen', post)
+    monkeypatch.setattr('integrations.notifications.urllib.request.urlopen', post)
     service = TodoService(str(tmp_path/'todos.db'))
     result = service.upsert_source('billing_statement_notice:7', 'notice', 'evidence',
-        created_via='billing_notice', kind=kind, due_at='2026-10-01T00:00:00+00:00',
+        created_via='billing_notice', kind=kind, due_at='2026-10-01T00:00:00+08:00',
         recur_cron='12:00' if kind == 'reminder' else None,
         source_metadata={'revision': 1, 'cycle_id': 1})
     tid = result['id']

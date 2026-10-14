@@ -193,7 +193,96 @@ def test_im_sender_uses_configured_api_credentials_without_logging_them(monkeypa
     monkeypatch.delenv('LITE_AGENT_ALERT_URL',raising=False)
     monkeypatch.setattr('core.config_loader.load_config',lambda:{'channels':{'api':{'port':8899,'auth_token':'fixture-only'}}})
     requests=[]
-    monkeypatch.setattr('features.todo.service.urllib.request.urlopen',lambda request,timeout:requests.append(request) or BytesIO(b'{"status":"delivered"}'))
+    monkeypatch.setattr('integrations.notifications.urllib.request.urlopen',lambda request,timeout:requests.append(request) or BytesIO(b'{"status":"delivered"}'))
     assert send_im_alert('test','test') is True
     assert requests[0].full_url=='http://127.0.0.1:8899/api/v1/alert'
     assert requests[0].get_header('Authorization')=='Bearer fixture-only'
+
+
+def test_missing_date_promotes_same_todo_to_daily_reminder_after_verified_reparse(tmp_path,monkeypatch):
+    db=str(tmp_path/'todo.db');client=client_for(bill(due_date=None,due_date_source=None))
+    reconcile_repayment_todos(client,db)
+    original=rows(db)[0]
+    assert original['kind']=='task' and original['due_at'] is None
+    client.run.return_value={'status':'ok','data':{'statements':[bill(updated_at='2026-10-02T00:00:00+00:00')]}}
+    assert reconcile_repayment_todos(client,db)['notices']==0
+    promoted=rows(db)[0]
+    assert promoted['id']==original['id'] and promoted['kind']=='reminder' and promoted['recur_cron']=='12:00'
+    alerts=[];monkeypatch.setattr('features.todo.service.send_im_alert',lambda **kw:alerts.append(kw) or True)
+    service=TodoService(db)
+    service.tick('2026-10-25T11:59:00+08:00');count=len(alerts)
+    service.tick('2026-10-25T12:00:00+08:00');assert len(alerts)==count+1
+    service.tick('2026-10-25T12:01:00+08:00');assert len(alerts)==count+1
+    service.tick('2026-10-26T12:00:00+08:00');assert len(alerts)==count+2
+
+
+@pytest.mark.parametrize('changes',[
+    {'due_date_source':None}, {'total_due_source':None},
+    {'total_due':'0'}, {'total_due':'-1'}, {'total_due':'NaN'},
+])
+def test_existing_reminder_loses_unreliable_schedule_without_marking_paid(tmp_path,monkeypatch,changes):
+    db=str(tmp_path/'todo.db');client=client_for(bill());reconcile_repayment_todos(client,db)
+    old=rows(db)[0]
+    client.run.return_value={'status':'ok','data':{'statements':[bill(updated_at='2026-10-02T00:00:00+00:00',**changes)]}}
+    reconcile_repayment_todos(client,db)
+    updated=rows(db)[0]
+    assert updated['id']==old['id'] and updated['status']=='pending'
+    assert updated['kind']=='task' and updated['due_at'] is None and updated['recur_cron'] is None
+    sender=Mock(return_value=True);monkeypatch.setattr('features.todo.service.send_im_alert',sender)
+    service=TodoService(db)
+    service.tick('2026-10-25T12:00:00+08:00') # May send existing new-bill notice, never periodic.
+    assert not any(call.kwargs['dedup_key'].startswith('todo_periodic:') for call in sender.call_args_list)
+    client.mark_paid.assert_not_called()
+
+
+def test_existing_old_bill_gets_due_correction_without_creating_old_backlog_or_notices(tmp_path):
+    db=str(tmp_path/'todo.db');client=client_for(bill());reconcile_repayment_todos(client,db)
+    original=rows(db)[0]
+    client.run.return_value={'status':'ok','data':{'statements':[
+        bill(updated_at='2026-10-02T00:00:00+00:00',due_date='2026-10-29'),
+        bill(id=8,statement_month='2026-09'),
+        bill(id=9,statement_month='2026-11',due_date='2026-11-28')]}}
+    result=reconcile_repayment_todos(client,db)
+    tasks={r['source_key']:r for r in rows(db)}
+    assert tasks['billing_repayment:7']['id']==original['id']
+    assert tasks['billing_repayment:7']['due_at'].startswith('2026-10-26')
+    assert 'billing_repayment:8' not in tasks
+    assert result['created']==1 and result['notices']==1
+
+
+@pytest.mark.parametrize('closed', ['done','dropped'])
+def test_later_date_evidence_never_reactivates_manually_closed_verification(tmp_path,closed):
+    db=str(tmp_path/'todo.db');client=client_for(bill(due_date_source=None))
+    reconcile_repayment_todos(client,db);old=rows(db)[0]
+    TodoService(db).repo.update_todo_status_atomic(old['id'],closed)
+    client.run.return_value={'status':'ok','data':{'statements':[bill(updated_at='2026-10-02T00:00:00+00:00')]}}
+    reconcile_repayment_todos(client,db)
+    r=rows(db)[0]
+    assert r['status']==closed and r['kind']=='task' and r['due_at'] is None
+
+
+def test_later_date_evidence_preserves_human_owned_verification(tmp_path):
+    db=str(tmp_path/'todo.db');client=client_for(bill(due_date_source=None))
+    reconcile_repayment_todos(client,db);old=rows(db)[0]
+    TodoService(db).update(old['id'],title='my verification note')
+    client.run.return_value={'status':'ok','data':{'statements':[bill(updated_at='2026-10-02T00:00:00+00:00')]}}
+    reconcile_repayment_todos(client,db)
+    r=rows(db)[0]
+    assert r['title']=='my verification note' and r['kind']=='task' and r['due_at'] is None
+
+
+def test_update_only_source_transaction_does_not_recreate_deleted_old_todo(tmp_path):
+    service=TodoService(str(tmp_path/'todo.db'))
+    result=service.upsert_source('billing_repayment:7','old',created_via='billing',
+        source_metadata={'revision':1},create_if_missing=False)
+    assert result['status']=='skipped' and result['reason']=='not_found'
+    assert service.existing_source_keys('billing_repayment:')==set()
+    with sqlite3.connect(service.db_path) as db:
+        assert db.execute('select count(*) from todo_source_receipts').fetchone()[0]==0
+
+
+def test_other_source_todo_kind_is_not_changed_by_machine_refresh(tmp_path):
+    service=TodoService(str(tmp_path/'todo.db'))
+    first=service.upsert_source('mail_quality:7','quality',kind='code',source_metadata={'revision':1})
+    service.upsert_source('mail_quality:7','quality revised',kind='reminder',source_metadata={'revision':2})
+    assert service.repo.get_todo(first['id'])['kind']=='code'

@@ -2,14 +2,12 @@
 Zero database connections, file writes, or cron registrations occur upon module import.
 """
 
-import json
 import logging
-import os
 import re
-import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from integrations.notifications import send_im_alert
 from features.todo.rendering import render_markdown
 from features.todo.repository import TodoRepository, generate_todo_id
 
@@ -33,37 +31,6 @@ def _parse_until(until: str) -> str:
     except ValueError:
         raise ValueError(f"无法解析时间: {until!r}（支持 ISO8601 或 +Nm/+Nh/+Nd）")
 
-
-def send_im_alert(title: str, text: str, color: str = "yellow", dedup_key: Optional[str] = None) -> bool:
-    """Wait for channel confirmation; HTTP acceptance alone is not delivery."""
-    try:
-        from core.config_loader import load_config
-        api = ((load_config() or {}).get('channels') or {}).get('api') or {}
-        url = os.environ.get("LITE_AGENT_ALERT_URL") or f"http://127.0.0.1:{api.get('port', 8887)}/api/v1/alert"
-        token = os.environ.get("API_AUTH_TOKEN") or api.get('auth_token', '')
-        payload: Dict[str, Any] = {
-            "title": title,
-            "text": text,
-            "color": color,
-            "wait_delivery": True
-        }
-        if dedup_key:
-            payload["dedup_key"] = dedup_key
-        headers = {"Content-Type": "application/json"}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=10) as response:
-            receipt = json.loads(response.read().decode('utf-8'))
-        return isinstance(receipt, dict) and receipt.get('status') == 'delivered'
-    except Exception as e:
-        logger.debug(f"[send_im_alert] 推送跳过/异常: {e}")
-        return False
 
 
 def _parse_target_hm_and_dow(recur_cron: str) -> Tuple[str, Optional[int]]:
@@ -152,8 +119,12 @@ class TodoService:
         due_at: Optional[str] = None,
         recur_cron: Optional[str] = None,
         remind_interval_mins: int = 0,
-        remind_before_mins: int = 30
+        remind_before_mins: int = 30,
+        notify_enabled: bool = True
     ) -> str:
+        self._validate_reminders(notify_enabled, remind_before_mins, remind_interval_mins)
+        if not isinstance(notify_enabled, bool):
+            raise ValueError('notify_enabled must be boolean')
         if kind == "recurring" and not recur_cron:
             recur_cron = "daily"
 
@@ -167,7 +138,8 @@ class TodoService:
             due_at=due_at,
             recur_cron=recur_cron,
             remind_interval_mins=remind_interval_mins,
-            remind_before_mins=remind_before_mins
+            remind_before_mins=remind_before_mins,
+            notify_enabled=notify_enabled
         )
         render_markdown(self.db_path)
         if kind == "recurring":
@@ -285,8 +257,10 @@ class TodoService:
         recur_cron: Optional[str] = None,
         kind: Optional[str] = None,
         remind_interval_mins: Optional[int] = None,
-        remind_before_mins: Optional[int] = None
+        remind_before_mins: Optional[int] = None,
+        notify_enabled: Optional[bool] = None
     ) -> str:
+        self._validate_reminders(notify_enabled, remind_before_mins, remind_interval_mins)
         fields: Dict[str, Any] = {}
         if title is not None: fields["title"] = title
         if description is not None: fields["description"] = description
@@ -298,6 +272,7 @@ class TodoService:
         if kind is not None: fields["kind"] = kind
         if remind_interval_mins is not None: fields["remind_interval_mins"] = remind_interval_mins
         if remind_before_mins is not None: fields["remind_before_mins"] = remind_before_mins
+        if notify_enabled is not None: fields['notify_enabled'] = notify_enabled
 
         if not fields:
             return f"❌ 未提供任何修改项"
@@ -333,6 +308,17 @@ class TodoService:
             return f"✅ 手动派发成功。请将以下内容复制给本地 IDE：\n\n{prompt}"
         return f"❌ 暂不支持的 dispatch target: {target}"
 
+    @staticmethod
+    def _validate_reminders(enabled, before, interval):
+        if enabled is not None and not isinstance(enabled, bool):
+            raise ValueError('notify_enabled must be boolean')
+        for value in (before, interval):
+            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+                raise ValueError('reminder minutes must be nonnegative integers')
+
+    def existing_source_keys(self, prefix: str) -> set:
+        return self.repo.get_source_keys(prefix)
+
     def upsert_source(
         self,
         source_key: str,
@@ -346,7 +332,9 @@ class TodoService:
         project: Optional[str] = 'mail-statement-parser',
         remind_before_mins: int = 30,
         remind_interval_mins: int = 0,
-        recur_cron: Optional[str] = None
+        recur_cron: Optional[str] = None,
+        create_if_missing: bool = True,
+        replace_schedule: bool = False
     ) -> Dict[str, Any]:
         res = self.repo.upsert_source_receipt_atomic(
             source_key=source_key,
@@ -360,7 +348,9 @@ class TodoService:
             project=project,
             remind_before_mins=remind_before_mins,
             remind_interval_mins=remind_interval_mins,
-            recur_cron=recur_cron
+            recur_cron=recur_cron,
+            create_if_missing=create_if_missing,
+            replace_schedule=replace_schedule
         )
         render_markdown(self.db_path)
         return res
@@ -370,13 +360,17 @@ class TodoService:
         source_key: str,
         resolution_note: str = '上游问题已解决',
         cycle_id: Optional[int] = None,
-        revision: Optional[int] = None
+        revision: Optional[int] = None,
+        expected_owner: str = 'mail_quality',
+        close_user_edited: bool = False
     ) -> Dict[str, Any]:
         res = self.repo.resolve_source_receipt_atomic(
             source_key=source_key,
             resolution_note=resolution_note,
             cycle_id=cycle_id,
-            revision=revision
+            revision=revision,
+            expected_owner=expected_owner,
+            close_user_edited=close_user_edited
         )
         render_markdown(self.db_path)
         return res
@@ -416,25 +410,26 @@ class TodoService:
                 continue
 
             if kind == 'reminder':
-                local_now = now_dt.astimezone(timezone(timedelta(hours=8)))
+                schedule_zone = due_dt.tzinfo or timezone.utc
+                local_now = now_dt.astimezone(schedule_zone)
                 last_day = None
                 if last_notified:
                     try:
-                        last_day = datetime.fromisoformat(last_notified).astimezone(timezone(timedelta(hours=8))).date()
+                        last_day = datetime.fromisoformat(last_notified).astimezone(schedule_zone).date()
                     except ValueError:
                         continue
-                if now_dt < due_dt or local_now.strftime('%H:%M') < (row.get('recur_cron') or '12:00') or last_day == local_now.date():
+                if now_dt < due_dt or local_now.strftime('%H:%M') < (row.get('recur_cron') or due_dt.strftime('%H:%M')) or last_day == local_now.date():
                     continue
                 if not self.repo.mark_notified_due(tid, now, last_notified, due_at):
                     continue
-                sent = send_im_alert(title=f'🔔 周期提醒: {title}', text=f'{title}\n{description or ""}\n手动关闭待办可停止此账单提醒；不会自动标记已还款。',
+                sent = send_im_alert(title=f'🔔 周期提醒: {title}', text=f'{title}\n{description or ""}',
                                      color='yellow', dedup_key=f'todo_periodic:{tid}:{local_now.date()}')
                 if sent is False:
                     self.repo.release_notification_claim(tid, now, last_notified)
                 else:
                     due_soon_count += 1
                 continue
-            window_mins = before_mins if (before_mins is not None and before_mins > 0) else 30
+            window_mins = before_mins if before_mins is not None else 30
             start_notify_dt = due_dt - timedelta(minutes=window_mins)
             if now_dt < start_notify_dt:
                 continue
@@ -492,6 +487,8 @@ class TodoService:
                 if not self.repo.spawn_recurring_child(child_id, ptitle, pdesc, pproj, now, pid, due_time, rlast):
                     continue
                 spawned_count += 1
+                if not r.get('notify_enabled', True):
+                    continue
                 send_im_alert(
                     title=f"🔄 周期任务自动派发: {ptitle}",
                     text=f"已自动派发今日周期任务：**{ptitle}** (`{child_id}`)\n- 所属项目: {pproj or '默认'}\n- 周期配置: `{rcron}`",

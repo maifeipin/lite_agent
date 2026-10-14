@@ -139,7 +139,8 @@ def _update_todo_status(tid: str, status: str, extra_fields: dict = None):
         "due_at": {"type": "string", "description": "到期时间必须是 ISO8601 且含时区，例如 2026-06-20T12:00:00+08:00，可选"},
         "recur_cron": {"type": "string", "description": "循环周期配置，如 daily, weekly, 09:00, 可选"},
         "remind_interval_mins": {"type": "integer", "description": "高频重复提醒间隔(分钟)，如 10 表示每10分钟提醒一次，0表示仅提醒一次", "default": 0},
-        "remind_before_mins": {"type": "integer", "description": "提前多少分钟开始首推提醒，默认 30 分钟", "default": 30}
+        "remind_before_mins": {"type": "integer", "description": "提前多少分钟开始首推提醒，0为到点，默认30", "default": 30},
+        "notify_enabled": {"type": "boolean", "description": "是否发送逐条提醒；false保留待办和排期，仅关闭通知", "default": True}
     }
 )
 def todo_add(
@@ -150,7 +151,8 @@ def todo_add(
     due_at: str = None,
     recur_cron: str = None,
     remind_interval_mins: int = 0,
-    remind_before_mins: int = 30
+    remind_before_mins: int = 30,
+    notify_enabled: bool = True
 ) -> str:
     return get_service().add(
         title=title,
@@ -160,7 +162,8 @@ def todo_add(
         due_at=due_at,
         recur_cron=recur_cron,
         remind_interval_mins=remind_interval_mins,
-        remind_before_mins=remind_before_mins
+        remind_before_mins=remind_before_mins,
+        notify_enabled=notify_enabled
     )
 
 
@@ -237,7 +240,8 @@ def todo_resume(id: str) -> str:
         "recur_cron": {"type": "string", "description": "新循环周期"},
         "kind": {"type": "string", "description": "新任务分类"},
         "remind_interval_mins": {"type": "integer", "description": "新重复提醒间隔(分钟)"},
-        "remind_before_mins": {"type": "integer", "description": "新提前提醒时间(分钟)"}
+        "remind_before_mins": {"type": "integer", "description": "新提前提醒时间(分钟)，0为到点"},
+        "notify_enabled": {"type": "boolean", "description": "关闭/恢复逐条提醒，不改变待办完成状态"}
     }
 )
 def todo_update(
@@ -249,7 +253,8 @@ def todo_update(
     recur_cron: str = None,
     kind: str = None,
     remind_interval_mins: int = None,
-    remind_before_mins: int = None
+    remind_before_mins: int = None,
+    notify_enabled: bool = None
 ) -> str:
     return get_service().update(
         tid=id,
@@ -260,7 +265,8 @@ def todo_update(
         recur_cron=recur_cron,
         kind=kind,
         remind_interval_mins=remind_interval_mins,
-        remind_before_mins=remind_before_mins
+        remind_before_mins=remind_before_mins,
+        notify_enabled=notify_enabled
     )
 
 

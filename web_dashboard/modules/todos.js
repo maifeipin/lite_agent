@@ -88,6 +88,7 @@ registerTabModule({
         html += `<h3 class="card-title">${h(title)}</h3>`;
         if (doc.description) html += `<div class="card-snippet">${h(doc.description)}</div>`;
 
+        const notifyEnabled = doc.notify_enabled !== false && doc.notify_enabled !== 0;
         // ── Action Buttons with Reversible Status Transitions ──
         html += `<div class="todo-actions">`;
         if (status === 'pending') {
@@ -103,6 +104,7 @@ registerTabModule({
         if (!isDone) {
             html += `<button class="todo-btn todo-btn-meeting" data-id="${h(doc.id)}" title="就此待办发起会审会议，生成邀请链接">📣 会议</button>`;
         }
+        html += `<button class="todo-btn todo-btn-notify" data-id="${h(doc.id)}" data-enabled="${!notifyEnabled}">${notifyEnabled ? "🔔 关闭提醒" : "🔕 恢复提醒"}</button>`;
         html += `<button class="todo-btn todo-btn-toggle-edit" data-id="${h(doc.id)}" title="编辑时间和周期">✏ 编辑</button>`;
         html += `<button class="todo-btn todo-btn-del" data-id="${h(doc.id)}" title="永久删除">🗑 删除</button>`;
         html += `</div>`;
@@ -112,6 +114,7 @@ registerTabModule({
         html += `<div class="edit-row">`;
         html += `<input type="text" class="edit-title" value="${h(title)}" placeholder="任务标题" />`;
         html += `<select class="edit-kind">`;
+        if (!["misc", "code", "recurring"].includes(kind)) html += `<option value="${h(kind)}" selected>${h(kind)}</option>`;
         html += `<option value="misc" ${kind === 'misc' ? 'selected' : ''}>📌 普通 (misc)</option>`;
         html += `<option value="code" ${kind === 'code' ? 'selected' : ''}>💻 代码 (code)</option>`;
         html += `<option value="recurring" ${kind === 'recurring' ? 'selected' : ''}>🔄 周期 (recurring)</option>`;
@@ -162,6 +165,7 @@ registerTabModule({
                     <input type="number" id="todo-new-before-mins" placeholder="提前(分)" value="30" title="到期前多少分钟开始提醒 (默认 30)" style="width: 90px;" />
                     <input type="number" id="todo-new-interval-mins" placeholder="间隔(分)" value="10" title="提醒重复频次间隔(分钟)，如 10 分钟" style="width: 90px;" />
                     <input type="text" id="todo-new-cron" placeholder="周期配置 (如 09:00, daily)" />
+                    <label><input type="checkbox" id="todo-new-notify" checked /> 开启提醒</label>
                     <input type="text" id="todo-new-project" placeholder="关联项目 (可选)" />
                 </div>
             `;
@@ -174,6 +178,7 @@ registerTabModule({
             const intervalInput = form.querySelector('#todo-new-interval-mins');
             const cronInput     = form.querySelector('#todo-new-cron');
             const projInput     = form.querySelector('#todo-new-project');
+            const notifyInput   = form.querySelector('#todo-new-notify');
             const moreBtn       = form.querySelector('#todo-toggle-more');
             const moreFields    = form.querySelector('#todo-more-fields');
             const submitBtn     = form.querySelector('#todo-new-submit');
@@ -198,13 +203,14 @@ registerTabModule({
                 try {
                     const payload = {
                         title,
+                        notify_enabled: notifyInput.checked,
                         kind: kindSelect.value,
                         project: projInput.value.trim() || undefined,
                         recur_cron: cronInput.value.trim() || undefined,
                     };
                     if (dueInput.value) {
                         payload.due_at = new Date(dueInput.value).toISOString();
-                        payload.remind_before_mins = parseInt(beforeInput.value) || 30;
+                        payload.remind_before_mins = beforeInput.value === '' ? 30 : parseInt(beforeInput.value);
                         payload.remind_interval_mins = parseInt(intervalInput.value) || 0;
                     }
 
@@ -233,6 +239,7 @@ registerTabModule({
             this._clickHandler = async (e) => {
                 const statusBtn = e.target.closest('.todo-btn-status');
                 const editBtn   = e.target.closest('.todo-btn-toggle-edit');
+                const notifyBtn = e.target.closest('.todo-btn-notify');
                 const saveEdit  = e.target.closest('.todo-btn-save-edit');
                 const cancelEdit = e.target.closest('.todo-btn-cancel-edit');
                 const delBtn    = e.target.closest('.todo-btn-del');
@@ -248,6 +255,15 @@ registerTabModule({
                         body: JSON.stringify({ status: targetStatus }),
                     });
                     performSearch(false);
+                } else if (notifyBtn) {
+                    notifyBtn.disabled = true;
+                    try {
+                        await fetch(`/agent/api/v1/todos/${notifyBtn.getAttribute('data-id')}`, {
+                            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({notify_enabled: notifyBtn.getAttribute('data-enabled') === 'true'}),
+                        });
+                        performSearch(false);
+                    } finally { notifyBtn.disabled = false; }
                 } else if (editBtn) {
                     const id = editBtn.getAttribute('data-id');
                     const panel = document.getElementById(`todo-edit-${id}`);
