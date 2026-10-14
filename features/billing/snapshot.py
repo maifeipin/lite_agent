@@ -62,7 +62,7 @@ def model_evidence(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     result = {k: v for k, v in snapshot.items() if k not in ('transactions', 'unknown_currency_transactions', 'gated_transactions')}
     limit = snapshot.get('model_detail_limit', 20)
     fields = (
-        'id', 'bank_code', 'txn_date', 'description', 'amount', 'currency', 'currency_source',
+        'id', 'statement_id', 'account_name', 'bank_code', 'txn_date', 'description', 'amount', 'currency', 'currency_source',
         'direction', 'original_amount', 'original_currency', 'original_currency_source',
         'original_currency_token', 'original_amount_raw', 'original_currency_confirmed', 'txn_location_code'
     )
@@ -70,11 +70,41 @@ def model_evidence(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     def sample(rows):
         return [{k: row.get(k) for k in fields} for row in (rows or [])[:limit]]
 
+    # Intern repeated purpose reasons; keep every status and full reason text.
+    catalog, reason_ids = {}, {}
+    statements = []
+    for statement in snapshot.get('statements', []):
+        item = dict(statement)
+        item.pop('raw_fields_json', None)
+        gates = {}
+        for purpose, gate in (statement.get('purpose_availability') or {}).items():
+            compact = dict(gate)
+            refs = []
+            for reason in gate.get('reasons') or []:
+                key = json.dumps(reason, ensure_ascii=False, sort_keys=True, default=str)
+                if key not in reason_ids:
+                    ref = 'q' + str(len(catalog) + 1)
+                    reason_ids[key] = ref
+                    catalog[ref] = reason
+                refs.append({'ref': reason_ids[key]})
+            compact['reasons'] = refs
+            gates[purpose] = compact
+        item['purpose_availability'] = gates
+        statements.append(item)
+    result['statements'] = statements
+    result['quality_reason_catalog'] = catalog
     result['transaction_examples'] = sample(snapshot.get('transactions', []))
     for key in ('unknown_currency_transactions', 'gated_transactions'):
         rows = snapshot.get(key, [])
         result[key] = sample(rows)
         result[key + '_count'] = len(rows)
+    # Reuse uncertain/gated samples instead of serializing them a second time.
+    referenced_ids = {row.get('id') for key in ('unknown_currency_transactions', 'gated_transactions')
+                      for row in result[key] if row.get('id') is not None}
+    result['transaction_example_refs'] = [row['id'] for row in result['transaction_examples']
+                                          if row.get('id') in referenced_ids]
+    result['transaction_examples'] = [row for row in result['transaction_examples']
+                                      if row.get('id') not in referenced_ids]
     result['details_truncated'] = snapshot.get('transaction_count', 0) > limit
     return result
 

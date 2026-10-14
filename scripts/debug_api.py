@@ -73,8 +73,10 @@ def stream_task(port, token, task_id):
                                     res = sub.get('result', '') or sub.get('error', '')
                                     print(f"\n[Subtask {sub_id}] {sub.get('name')} -> {sub_status.upper()}:\n{res}")
                         
-                        if status in ('done', 'completed', 'failed', 'error'):
+                        if status in ('done', 'completed', 'succeeded', 'partial', 'failed', 'error'):
                             print(f"\n\n[*] Task {status.upper()}!")
+                            if data.get('response'):
+                                print(data['response'])
                             break
                     except json.JSONDecodeError:
                         pass
