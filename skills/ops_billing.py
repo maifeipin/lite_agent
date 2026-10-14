@@ -75,17 +75,22 @@ def billing_unpaid() -> str:
         'statement_id': {
             'type': 'integer',
             'description': '账单记录的正整数 ID，必须先查询确认具体账单'
-        }
+        },
+        'confirmed': {'type': 'boolean', 'description': '仅当用户明确确认已完成该账单还款时为 true', 'default': False}
     }
 )
-def billing_mark_paid(statement_id: int) -> str:
+def billing_mark_paid(statement_id: int, confirmed: bool = False) -> str:
     from integrations.mail.client import MailCLI
     if not isinstance(statement_id, int) or isinstance(statement_id, bool) or statement_id <= 0:
         return '❌ 必须提供已确认账单的正整数 ID'
+    if confirmed is not True:
+        return '❌ 请明确确认该账单已经还款；不会自动标记已还。'
     try:
-        result = MailCLI().mark_paid(statement_id=statement_id)
-        if result.get('updated') is True:
-            return f'✅ 账单 #{statement_id} 已标记为已还款'
+        from features.billing.repayment_todo import confirm_repayment
+        settings = (load_config() or {}).get('billing') or {}
+        result = confirm_repayment(statement_id, confirmed=True, client=MailCLI(), db_path=settings.get('todo_db_path'))
+        if result.get('updated') is True or result.get('already_paid') is True:
+            return f'✅ 账单 #{statement_id} 已标记为已还款' + ('；还款提醒同步待重试，下一次账单同步将补齐。' if result.get('todo_sync') == 'retry_required' else '；对应还款待办已处理。')
         return f'❌ 未找到可更新的账单 #{statement_id}'
     except Exception as exc:
         from core.utils.masker import mask_secrets

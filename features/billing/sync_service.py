@@ -132,6 +132,17 @@ def sync_and_consume(
 
     _drain_fn = drain_fn or drain_quality_events
     quality = _drain_fn(client, todo_database, event_limit, max_batches)
+    repayment = {'enabled': False}
+    settings = billing.get('repayment_todo') or {}
+    if settings.get('enabled') is True:
+        from features.billing.repayment_todo import reconcile_repayment_todos
+        try:
+            repayment = dict(reconcile_repayment_todos(client, todo_database,
+                remind_days=settings.get('remind_days', 3)), enabled=True)
+        except Exception as exc:
+            quality['errors'].append(mask_secrets(f'还款待办同步失败，待重试: {exc}'))
+            quality['complete'] = False
+            repayment = {'enabled': True, 'retry_required': True}
     fetch_ok = not run_fetch or not fetch_errors
     quality_ok = quality['complete']
     some_success = bool(quality['acked'] or quality['created'] or
@@ -142,6 +153,7 @@ def sync_and_consume(
         'fetch_errors': fetch_errors,
         'summary': summary,
         'quality_stats': quality,
+        'repayment_stats': repayment,
         'quality_errors': quality['errors'],
         'partial': status == 'partial',
         'status': status,

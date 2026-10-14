@@ -6,7 +6,7 @@ from skills.ops_billing import billing_mark_paid
 def test_paid_skill_uses_only_explicit_statement_id():
     with patch('integrations.mail.client.MailCLI') as cli:
         cli.return_value.mark_paid.return_value={'updated':True,'statement_id':7}
-        assert '已标记为已还款' in billing_mark_paid(7)
+        assert '已标记为已还款' in billing_mark_paid(7, confirmed=True)
         cli.return_value.mark_paid.assert_called_once_with(statement_id=7)
 
 
@@ -20,4 +20,4 @@ def test_invalid_paid_id_does_not_start_cli(value):
 def test_missing_statement_is_not_success():
     with patch('integrations.mail.client.MailCLI') as cli:
         cli.return_value.mark_paid.return_value={'updated':False}
-        assert billing_mark_paid(7).startswith('❌')
+        assert billing_mark_paid(7, confirmed=True).startswith('❌')

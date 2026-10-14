@@ -240,12 +240,18 @@ class TodoRepository:
         source_metadata: Optional[Dict[str, Any]] = None,
         due_at: Optional[str] = None,
         kind: str = 'code',
-        project: Optional[str] = 'mail-statement-parser'
+        project: Optional[str] = 'mail-statement-parser',
+        remind_before_mins: int = 30,
+        remind_interval_mins: int = 0,
+        recur_cron: Optional[str] = None
     ) -> Dict[str, Any]:
         """Source-key uniqueness and monotone receipts enforced under one atomic transaction."""
         if not source_key or not source_key.strip():
             raise ValueError('source_key 不能为空')
         source_key = source_key.strip()
+        for value in (remind_before_mins, remind_interval_mins):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError('reminder minutes must be nonnegative integers')
         incoming = dict(source_metadata or {})
         revision, cycle = _source_version(incoming)
         incoming.update(machine_title=title, machine_description=description, machine_due_at=due_at)
@@ -272,10 +278,10 @@ class TodoRepository:
                 tid = uuid.uuid4().hex[:12]
                 conn.execute("""
                     INSERT INTO todos(id, title, description, status, kind, project, created_at,
-                        updated_at, due_at, created_via, source_message_id, source_key, source_metadata_json)
-                    VALUES(?,?,?,'pending',?,?,?,?,?,?,?,?,?)
+                        updated_at, due_at, created_via, source_message_id, source_key, source_metadata_json, remind_before_mins, remind_interval_mins, recur_cron)
+                    VALUES(?,?,?,'pending',?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (tid, title, description, kind, project, now, now, due_at, created_via,
-                      source_message_id, source_key, json.dumps(incoming, ensure_ascii=False)))
+                      source_message_id, source_key, json.dumps(incoming, ensure_ascii=False), remind_before_mins, remind_interval_mins, recur_cron))
                 result = {'id': tid, 'created': True, 'status': 'created'}
             else:
                 tid, status, old_title, old_desc, old_due, _, owner = row
@@ -299,11 +305,11 @@ class TodoRepository:
                     reopen = status in ('done', 'completed') and cycle > old_cycle
                     if status not in ('snoozed', 'shelved') and not human:
                         conn.execute("""
-                            UPDATE todos SET title=?, description=?, due_at=? WHERE id=?
+                            UPDATE todos SET title=?, description=?, due_at=?, remind_before_mins=?, remind_interval_mins=?, recur_cron=? WHERE id=?
                         """, (title, description if description is not None else old_desc,
-                              old_due if old_due is not None else due_at, tid))
+                              due_at if created_via == 'billing' else (old_due if old_due is not None else due_at), remind_before_mins, remind_interval_mins, recur_cron, tid))
                     if reopen:
-                        conn.execute("UPDATE todos SET status='pending', completed_at=NULL WHERE id=?", (tid,))
+                        conn.execute("UPDATE todos SET status='pending', completed_at=NULL, notified_due_at=NULL WHERE id=?", (tid,))
                     result = {'id': tid, 'created': False, 'status': 'updated'}
                     if reopen:
                         result['reason'] = 'relapse_reopened'
@@ -360,7 +366,8 @@ class TodoRepository:
             if revision is not None:
                 meta.update(revision=revision, cycle_id=cycle)
 
-            close = status in ('pending', 'active') and created_via == 'mail_quality' and not meta.get('user_edited')
+            close = ((status in ('pending', 'active') and created_via == 'mail_quality' and not meta.get('user_edited')) or
+                     (source_key.startswith('billing_repayment:') and created_via == 'billing' and status not in ('done', 'completed', 'dropped')))
             conn.execute('UPDATE todos SET source_metadata_json=?, updated_at=? WHERE id=?',
                          (json.dumps(meta, ensure_ascii=False), _now_iso(), tid))
             if close:
@@ -623,13 +630,23 @@ class TodoRepository:
             conn.row_factory = sqlite3.Row
             rows = conn.execute("""
                 SELECT id, title, due_at, created_via, project, kind, description,
-                       remind_interval_mins, remind_before_mins, notified_due_at
+                       remind_interval_mins, remind_before_mins, notified_due_at, recur_cron
                 FROM todos
                 WHERE status IN ('pending', 'active') AND due_at IS NOT NULL
             """).fetchall()
             return [dict(r) for r in rows]
         finally:
             conn.close()
+
+    def finish_notice(self, tid, claim):
+        with self.transaction() as conn:
+            conn.execute("UPDATE todos SET status='done', completed_at=?, updated_at=? WHERE id=? AND kind='notice' AND status IN ('pending','active') AND notified_due_at=?",
+                         (claim, claim, tid, claim))
+
+    def release_notification_claim(self, tid, claim, previous):
+        with self.transaction() as conn:
+            conn.execute("UPDATE todos SET notified_due_at=? WHERE id=? AND notified_due_at=? AND status IN ('pending','active')",
+                         (previous, tid, claim))
 
     def mark_notified_due(self, tid: str, now: str, expected_last: Optional[str] = None,
                           expected_due: Optional[str] = None) -> bool:

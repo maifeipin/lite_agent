@@ -1,4 +1,4 @@
-"""A bounded billing workflow: fetch, snapshot, write, deliver. No tool loop.
+"""A bounded billing workflow: fetch, snapshot, analyze. No tool loop.
 
 迁入 features/billing/，跨业务同步和财务分析统一在此编排。
 """
@@ -11,7 +11,6 @@ from core.execution import ExecutionContext, ActorType, ExecutionSource
 from core.execution_budget import ExecutionBudget
 from core.llm_gateway import LLMGateway
 from core.model_policy import ExecutionPolicy, ModelSelector
-from core.output_delivery import _deliver_complete, resolve_output_policy, archive_output
 from core.task_result import TaskResult
 from core.utils.masker import mask_secrets
 
@@ -156,43 +155,17 @@ class BillingWorkflow:
                 result.failed_nodes.append('账单数据为空')
             result.content = render_report(snapshot, analysis, fetch_log, result.usage)
             title = f"账单明细与异常 {snapshot['as_of']}"
-            archive_id = archive_output(result.status_text() + '\n\n' + result.content, 'billing', self.config, '账单明细与异常')
             mode = (output_mode or '').strip().lower()
-            if mode == 'inline':
-                # 用户显式要求不外发: 仅频道内回复 + 本地归档, 绝不外发
-                result.delivery = {'purpose': 'billing_report', 'status': 'skipped',
-                                   'destination': 'inline', 'location': '', 'archive_id': archive_id}
-                print(f'[BILLING] status={result.status} tokens={result.usage["total_tokens"]} delivery=inline(不外发)')
-                return result
-            # 目的地优先级: 请求结构化指令 > 目标文本自然语言 > 配置默认。
-            # 否定与双目的地请求已在 matches 拦截, 走到这里意图必为单一目的地。
-            if mode in ('email', 'sqlite'):
-                delivery_policy = resolve_output_policy(self.config, {'full_delivery': mode})
-            elif mode == 'hedgedoc':
-                # 只传 HedgeDoc: 上传失败不得转投邮件假成功, 归档并如实报失败
-                delivery_policy = resolve_output_policy(self.config,
-                    {'full_delivery': 'hedgedoc', 'allow_email_fallback': False})
-            elif mode:
-                # 显式 auto: 交给配置默认顺序, 不再看目标文本
-                delivery_policy = resolve_output_policy(self.config)
-            elif self._HEDGEDOC_WORD_RE.search(goal):
-                delivery_policy = resolve_output_policy(self.config,
-                    {'full_delivery': 'hedgedoc', 'allow_email_fallback': False})
-            elif self._EMAIL_WORD_RE.search(goal):
-                delivery_policy = resolve_output_policy(self.config, {'full_delivery': 'email'})
-            else:
-                delivery_policy = resolve_output_policy(self.config)
-            destination, location = _deliver_complete(result.status_text() + '\n\n' + result.content,
-                'billing', self.config, delivery_policy, title)
-            submitted = destination in ('email', 'hedgedoc')
-            # 显式选择 sqlite 时, 归档成功即完成投递, 不算外部失败
-            delivered = submitted or (destination == 'sqlite' and mode == 'sqlite')
-            result.delivery = {'purpose': 'billing_report', 'status': 'submitted' if submitted else 'archived',
-                               'destination': destination, 'location': location, 'archive_id': archive_id}
-            if not delivered:
-                result.status = 'partial'
-                result.failed_nodes.append('外部投递')
-            print(f'[BILLING] status={result.status} tokens={result.usage["total_tokens"]} delivery={destination}')
+            # Execution generates content and an output request; the shared
+            # channel delivery entry owns all external sends and receipts.
+            if not mode:
+                if self._HEDGEDOC_WORD_RE.search(goal):
+                    mode = 'hedgedoc'
+                elif self._EMAIL_WORD_RE.search(goal):
+                    mode = 'email'
+            result.output_policy = {'full_delivery': mode} if mode else {}
+            result.delivery = {'purpose': 'billing_report', 'title': title}
+            print(f'[BILLING] status={result.status} tokens={result.usage["total_tokens"]} output_pending={mode or "auto"}')
             return result
         finally:
             if self.ledger and parent:

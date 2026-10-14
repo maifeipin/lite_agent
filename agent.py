@@ -1032,10 +1032,25 @@ class Agent:
                 )
                 print(f"  [ORCH] 后台线程执行完成 session={msg.session_key} status={result.status} result_len={len(result.content)}")
                 self._push_result(msg, result)
+                try:
+                    prior = self.session_mgr.load_subtask_dag(msg.session_key, task_id)
+                    progress = json.loads(prior[0]) if prior else {}
+                    progress.update(status=result.status, final_result=result.content,
+                                    usage=result.usage, delivery=result.delivery)
+                    self.session_mgr.save_subtask_dag(msg.session_key, task_id,
+                        json.dumps(progress, ensure_ascii=False), result.status)
+                except Exception as persist_error:
+                    print(f'  [ORCH] 投递已结束，终态保存失败: {type(persist_error).__name__}')
             except Exception as e:
                 print(f"  [ORCH] 后台线程异常 session={msg.session_key}: {e}")
                 traceback.print_exc()
-                self._push_result(msg, f"❌ 编排执行异常: {e}")
+                failure = f"❌ 编排执行异常: {e}"
+                try:
+                    self.session_mgr.save_subtask_dag(msg.session_key, task_id,
+                        json.dumps({'status':'failed','final_result':failure}, ensure_ascii=False), 'failed')
+                except Exception:
+                    pass
+                self._push_result(msg, failure)
 
         threading.Thread(target=_bg_run, daemon=True, name=f"Orch-{msg.session_key}").start()
 

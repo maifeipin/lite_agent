@@ -10,6 +10,7 @@ class TaskResult:
     skipped_nodes: list = field(default_factory=list)
     usage: dict = field(default_factory=dict)
     delivery: dict = field(default_factory=dict)
+    output_policy: dict = field(default_factory=dict)
 
     def status_text(self):
         labels = {'succeeded': '任务已完成', 'partial': '任务部分完成', 'failed': '任务失败'}

@@ -95,6 +95,7 @@
         "database": "rsslite"
     },
     "billing": {
+        "repayment_todo": {"enabled": true, "remind_days": 3},
         "script_dir": "/home/liteagent/mail-statement-parser",
         "sync_provider": "163"
     },

@@ -112,20 +112,26 @@ class TaskOrchestrator:
     # ==================================================================
     #  Phase 1: 拆解
     # ==================================================================
-    def execute_result(self, goal, session_key, **kwargs):
+    def execute_result(self, goal, session_key, output_mode="", **kwargs):
         from core.billing_workflow import BillingWorkflow
         workflow = BillingWorkflow(self.config, self.router, self.ledger)
         if workflow.matches(goal) and not kwargs.get('planned_subtasks'):
             result = workflow.run(goal, session_key, kwargs.get('execution_policy'),
-                                  output_mode=kwargs.get('output_mode', ''))
+                                  output_mode=output_mode)
             self.session_mgr.save_subtask_dag(session_key, kwargs.get('task_id') or uuid.uuid4().hex[:8],
                 json.dumps({'workflow': 'billing', 'status': result.status,
                             'final_result': result.content, 'usage': result.usage,
-                            'delivery': result.delivery}, ensure_ascii=False), result.status)
+                            'delivery': result.delivery}, ensure_ascii=False), "delivering")
             return result
         self.last_result = None
-        content = self.execute(goal, session_key, **kwargs)
-        return self.last_result or TaskResult(status='failed', content=content)
+        self._shared_delivery_pending = True
+        try:
+            content = self.execute(goal, session_key, **kwargs)
+        finally:
+            self._shared_delivery_pending = False
+        result = self.last_result or TaskResult(status='failed', content=content)
+        result.output_policy = {'full_delivery': output_mode} if output_mode else {}
+        return result
 
     def _role_invoker(self, model: str, profile_name: str,
                       policy: ExecutionPolicy, budget: ExecutionBudget = None):
@@ -986,7 +992,7 @@ class TaskOrchestrator:
             elif not dag.is_aggregated:
                 status = "summarizing"
             else:
-                status = "done"
+                status = "delivering" if getattr(self, "_shared_delivery_pending", False) else "done"
             self.session_mgr.save_subtask_dag(session_key, task_id, dag_json, status)
         except Exception as e:
             import sys

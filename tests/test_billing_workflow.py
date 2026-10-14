@@ -213,7 +213,9 @@ def _run_workflow_for_delivery(goal, upload_mock, send_mock, tmp_path, billing_d
     with patch.object(workflow, 'fetch', return_value=('', [])), \
          patch('core.output_delivery._send_email', send_mock), \
          patch('core.utils.hedgedoc.upload_to_hedgedoc', upload_mock):
-        return workflow.run(goal, 'delivery-test', output_mode=output_mode)
+        result = workflow.run(goal, 'delivery-test', output_mode=output_mode)
+        prepare_channel_output(result.content, 'wechat', config, task_result=result)
+        return result
 
 
 def test_email_intent_forces_email_and_never_touches_hedgedoc(billing_db, tmp_path):
@@ -437,6 +439,7 @@ def test_case_uses_single_model_call_and_delivers_all_details(billing_db, tmp_pa
     with patch.object(workflow, 'fetch', return_value=('fetch done', [])), \
          patch('core.output_delivery._send_email', return_value='qq') as send:
         result = workflow.run('拉取最新账单，分析总结到邮箱', 'test')
+        prepare_channel_output(result.content, 'wechat', config, task_result=result)
     assert result.status == 'succeeded'
     assert result.usage['calls'] == 1 and result.usage['total_tokens'] == 1234
     assert invoker.invoke_sync.call_count == 1

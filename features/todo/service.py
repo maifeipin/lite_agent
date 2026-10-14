@@ -34,11 +34,13 @@ def _parse_until(until: str) -> str:
         raise ValueError(f"无法解析时间: {until!r}（支持 ISO8601 或 +Nm/+Nh/+Nd）")
 
 
-def send_im_alert(title: str, text: str, color: str = "yellow", dedup_key: Optional[str] = None) -> None:
+def send_im_alert(title: str, text: str, color: str = "yellow", dedup_key: Optional[str] = None) -> bool:
     """Send IM alert to the alert webhook endpoint."""
     try:
-        url = os.environ.get("LITE_AGENT_ALERT_URL", "http://127.0.0.1:8887/api/v1/alert")
-        token = os.environ.get("API_AUTH_TOKEN", "")
+        from core.config_loader import load_config
+        api = ((load_config() or {}).get('channels') or {}).get('api') or {}
+        url = os.environ.get("LITE_AGENT_ALERT_URL") or f"http://127.0.0.1:{api.get('port', 8887)}/api/v1/alert"
+        token = os.environ.get("API_AUTH_TOKEN") or api.get('auth_token', '')
         payload: Dict[str, Any] = {
             "title": title,
             "text": text,
@@ -57,8 +59,10 @@ def send_im_alert(title: str, text: str, color: str = "yellow", dedup_key: Optio
         )
         with urllib.request.urlopen(req, timeout=10):
             pass
+        return True
     except Exception as e:
         logger.debug(f"[send_im_alert] 推送跳过/异常: {e}")
+        return False
 
 
 def _parse_target_hm_and_dow(recur_cron: str) -> Tuple[str, Optional[int]]:
@@ -338,7 +342,10 @@ class TodoService:
         source_metadata: Optional[Dict[str, Any]] = None,
         due_at: Optional[str] = None,
         kind: str = 'code',
-        project: Optional[str] = 'mail-statement-parser'
+        project: Optional[str] = 'mail-statement-parser',
+        remind_before_mins: int = 30,
+        remind_interval_mins: int = 0,
+        recur_cron: Optional[str] = None
     ) -> Dict[str, Any]:
         res = self.repo.upsert_source_receipt_atomic(
             source_key=source_key,
@@ -349,7 +356,10 @@ class TodoService:
             source_metadata=source_metadata,
             due_at=due_at,
             kind=kind,
-            project=project
+            project=project,
+            remind_before_mins=remind_before_mins,
+            remind_interval_mins=remind_interval_mins,
+            recur_cron=recur_cron
         )
         render_markdown(self.db_path)
         return res
@@ -404,6 +414,25 @@ class TodoService:
             except Exception:
                 continue
 
+            if kind == 'reminder':
+                local_now = now_dt.astimezone(timezone(timedelta(hours=8)))
+                last_day = None
+                if last_notified:
+                    try:
+                        last_day = datetime.fromisoformat(last_notified).astimezone(timezone(timedelta(hours=8))).date()
+                    except ValueError:
+                        continue
+                if now_dt < due_dt or local_now.strftime('%H:%M') < (row.get('recur_cron') or '12:00') or last_day == local_now.date():
+                    continue
+                if not self.repo.mark_notified_due(tid, now, last_notified, due_at):
+                    continue
+                sent = send_im_alert(title=f'🔔 周期提醒: {title}', text=f'{title}\n{description or ""}\n手动关闭待办可停止此账单提醒；不会自动标记已还款。',
+                                     color='yellow', dedup_key=f'todo_periodic:{tid}:{local_now.date()}')
+                if sent is False:
+                    self.repo.release_notification_claim(tid, now, last_notified)
+                else:
+                    due_soon_count += 1
+                continue
             window_mins = before_mins if (before_mins is not None and before_mins > 0) else 30
             start_notify_dt = due_dt - timedelta(minutes=window_mins)
             if now_dt < start_notify_dt:
@@ -425,7 +454,7 @@ class TodoService:
                     continue
                 due_soon_count += 1
                 is_overdue = due_dt < now_dt
-                tag = "🔴 已超期" if is_overdue else f"⏰ 即将到期 ({window_mins}分钟内)"
+                tag = "📬 一次性通知" if kind == "notice" else ("🔴 已超期" if is_overdue else f"⏰ 即将到期 ({window_mins}分钟内)")
                 proj_info = f"【{project}】" if project else ""
                 msg = f"{tag} {proj_info}\n**{title}**\n\n- 到期时间: {due_at}\n- 任务类型: {kind}\n- 任务 ID: `{tid}`"
                 if interval_mins and interval_mins > 0:
@@ -433,12 +462,17 @@ class TodoService:
                 if description:
                     msg += f"\n- 说明: {description[:100]}"
 
-                send_im_alert(
-                    title=f"⏰ 待办提醒: {title}",
+                sent = send_im_alert(
+                    title=(f"📬 {title}" if kind == "notice" else f"⏰ 待办提醒: {title}"),
                     text=msg,
-                    color="red" if is_overdue else "yellow",
+                    color="yellow" if kind == "notice" else ("red" if is_overdue else "yellow"),
                     dedup_key=f"todo_due:{tid}:{now[:16]}" if (interval_mins and interval_mins > 0) else f"todo_due:{tid}"
                 )
+                if sent is False:
+                    self.repo.release_notification_claim(tid, now, last_notified)
+                    due_soon_count -= 1
+                elif kind == 'notice':
+                    self.repo.finish_notice(tid, now)
 
         # 3. Recurring templates
         recurring_templates = self.repo.get_recurring_templates()

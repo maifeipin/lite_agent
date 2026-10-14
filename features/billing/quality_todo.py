@@ -3,6 +3,7 @@ Pulls unacked quality events from MailCLI, idempotently records them to TodoServ
 and confirms (acks) with monotonic revisions.
 """
 
+from datetime import datetime, timezone
 import logging
 import sys
 import time
@@ -268,7 +269,7 @@ def consume_quality_events(
                 created_via="mail_quality",
                 source_message_id=None,
                 source_metadata=metadata,
-                due_at=None,
+                due_at=datetime.now(timezone.utc).isoformat(),
                 kind="code",
                 project="mail-statement-parser",
                 db_path=db_path

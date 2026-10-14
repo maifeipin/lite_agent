@@ -305,7 +305,7 @@ def _delivery_order(policy: dict) -> list[str]:
 
 
 def _deliver_complete(text: str, channel: str, config: dict,
-                      policy: dict, title: str) -> tuple[str, str]:
+                      policy: dict, title: str, archive_id: str = "") -> tuple[str, str]:
     for destination in _delivery_order(policy):
         try:
             if destination == "hedgedoc":
@@ -320,7 +320,7 @@ def _deliver_complete(text: str, channel: str, config: dict,
                 if provider:
                     return "email", provider
             elif destination == "sqlite":
-                return "sqlite", archive_output(text, channel, config, title=title)
+                return "sqlite", archive_id or archive_output(text, channel, config, title=title)
         except (Exception, SystemExit) as exc:
             print(
                 f"  ⚠️ [OutputDelivery] {destination} 失败，继续回退: "
@@ -341,44 +341,73 @@ def _summary_or_preview(text: str, policy: dict,
     return text[:policy["summary_chars"]].rstrip()
 
 
+def deliver_task_result_once(text, channel, config, policy, title, task_result, external):
+    """Single owner of execution-result archives, sends and delivery receipts."""
+    if task_result.delivery.get('destination'):
+        return task_result.delivery
+    previous = task_result.delivery
+    title = previous.get('title') or title
+    purpose = previous.get('purpose', 'execution_report')
+    archive_id = previous.get('archive_id', '')
+    if not archive_id:
+        try:
+            archive_id = archive_output(task_result.status_text() + '\n\n' + text,
+                'billing' if purpose == 'billing_report' else channel, config, title)
+        except Exception:
+            archive_id = ''
+    if not external or policy['full_delivery'] == 'inline':
+        destination, location = 'inline', ''
+        status = 'skipped'
+    else:
+        destination, location = _deliver_complete(task_result.status_text() + '\n\n' + text,
+            channel, config, policy, title, archive_id=archive_id)
+        status = 'submitted' if destination in ('email', 'hedgedoc') else 'archived' if destination == 'sqlite' else 'failed'
+        if destination not in ('email', 'hedgedoc') and not (destination == 'sqlite' and policy['full_delivery'] == 'sqlite'):
+            task_result.status = 'partial'
+            if '外部投递' not in task_result.failed_nodes:
+                task_result.failed_nodes.append('外部投递')
+    task_result.delivery = {'purpose': purpose, 'status': status, 'destination': destination,
+                           'location': location, 'archive_id': archive_id}
+    return task_result.delivery
+
+
 def prepare_channel_output(text: str, channel: str, config: dict,
                            overrides: dict = None, title: str = "",
                            summarize: Optional[Callable[[str, int], str]] = None,
                            task_result=None) -> str:
     """Return channel-safe text while preserving the complete response elsewhere."""
-    policy = resolve_output_policy(config, overrides)
+    requested = dict(getattr(task_result, 'output_policy', {}) or {})
+    requested.update(overrides or {})
+    if requested.get('full_delivery') == 'hedgedoc':
+        requested['allow_email_fallback'] = False
+    policy = resolve_output_policy(config, requested)
     cfg = config.get("output_delivery", {}) or {}
     limits = {**DEFAULT_CHANNEL_LIMITS, **(cfg.get("channel_limits", {}) or {})}
     max_chars = policy["max_chars"] or int(limits.get(channel.lower(), 2500))
     status_prefix = (task_result.status_text() + '\n\n') if task_result else ''
 
-    # API callers retain complete inline output unless explicitly overridden.
-    # Explicit external destinations also run for short text.
-    if policy["full_delivery"] == "inline" or (
-        channel.lower() == "api" and not policy["explicit"]
-    ):
-        return status_prefix + text
-    needs_external = len(text) > max_chars or policy["explicit"]
-    if not needs_external:
-        return status_prefix + text
-
+    explicit_destination = policy['explicit'] and policy['full_delivery'] in ('email', 'hedgedoc', 'sqlite')
+    fits_inline = len(status_prefix + text) <= max_chars
+    needs_external = explicit_destination or (not fits_inline and policy['full_delivery'] != 'inline')
+    if channel.lower() == 'api' and not explicit_destination:
+        needs_external = False
     previous = task_result.delivery if task_result else {}
-    if previous.get('destination') == 'inline':
-        # 用户要求不外发且工作流已完成本地归档: 频道层绝不重新外发,
-        # 仅呈现摘要并指向已有归档 ID
+    if task_result:
+        previous = deliver_task_result_once(text, channel, config, policy, title, task_result, needs_external)
+        status_prefix = task_result.status_text() + '\n\n'
+    if not task_result and policy['full_delivery'] == 'inline':
+        return status_prefix + text
+    if previous.get('destination') == 'inline' or not needs_external:
+        if fits_inline or channel.lower() == 'api':
+            return status_prefix + text
         summary = _summary_or_preview(text, policy, None)
         note = f"\n\n完整内容已保存本地归档（归档 ID：{previous.get('archive_id', '')}）。"
         available = max(0, max_chars - len(note) - len(status_prefix))
         return status_prefix + summary[:available].rstrip() + note
     if previous.get('destination'):
-        # 复用上游已完成的投递回执与归档 ID(submitted/archived 均算),
-        # 频道层不得据此重新上传或重新发送
         destination, location = previous['destination'], previous.get('location', '')
     else:
         destination, location = _deliver_complete(status_prefix + text, channel, config, policy, title)
-        if task_result:
-            task_result.delivery = {'purpose': 'execution_report', 'status': 'submitted' if destination else 'failed',
-                                    'destination': destination, 'location': location}
     # Structured execution reports already contain a bounded analysis near
     # the beginning; do not pay for another model pass over full detail tables.
     summary = _summary_or_preview(text, policy, None if task_result else summarize)
