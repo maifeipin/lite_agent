@@ -132,12 +132,39 @@ class SkillEngine:
     - 提供统一的执行调度接口
     """
 
-    def __init__(self, skills_dir: str = None):
+    _instance_registry: Optional[Dict[str, Dict]] = None
+
+    def __init__(self, skills_dir: Optional[str] = None,
+                 tools: Optional[Dict[str, Dict]] = None,
+                 auto_load: bool = True):
         if skills_dir is None:
             from core.constants import PROJECT_ROOT
             skills_dir = os.path.join(PROJECT_ROOT, "skills")
         self.skills_dir = skills_dir
-        self._load_skills()
+        if tools is not None:
+            self._instance_registry = dict(tools)
+        else:
+            self._instance_registry = None
+            if auto_load:
+                self._load_skills()
+
+    @property
+    def _registry(self) -> Dict[str, Dict]:
+        if getattr(self, "_instance_registry", None) is not None:
+            return self._instance_registry
+        return _skill_registry
+
+    def register_tool(self, name: str, tool_def: Dict[str, Any]) -> None:
+        """向本实例显式登记工具，不污染其它实例。"""
+        if self._instance_registry is None:
+            self._instance_registry = dict(_skill_registry)
+        self._instance_registry[name] = tool_def
+
+    def unregister_tool(self, name: str) -> bool:
+        """从本实例注销工具。"""
+        if self._instance_registry is None:
+            self._instance_registry = dict(_skill_registry)
+        return self._instance_registry.pop(name, None) is not None
 
     def _load_skills(self):
         """扫描 skills/ 目录，自动导入所有技能模块"""
@@ -168,19 +195,20 @@ class SkillEngine:
                 print(f"  ❌ 加载技能模块失败 [{filename}]: {e}")
                 traceback.print_exc()
 
-        print(f"📦 技能引擎就绪: 共注册 {len(_skill_registry)} 个技能")
+        self._registry.update(_skill_registry)
+        print(f"📦 技能引擎就绪: 共注册 {len(self._registry)} 个技能")
 
     def get_all_schemas(self) -> List[Dict]:
         """返回所有已注册技能的 OpenAI Tool Schema 列表"""
-        return [info["schema"] for info in _skill_registry.values()]
+        return [info["schema"] for info in self._registry.values()]
 
     def get_all_names(self) -> set:
         """返回所有已注册技能名集合 (供 planner tools_hint 校验用)。"""
-        return set(_skill_registry.keys())
+        return set(self._registry.keys())
 
     def get_guest_schemas(self) -> List[Dict]:
         """返回所有已注册且 guest_ok=True 的技能 OpenAI Tool Schema 列表"""
-        return [info["schema"] for info in _skill_registry.values()
+        return [info["schema"] for info in self._registry.values()
                 if info["policy"].guest_ok]
 
     def get_schemas_by_names(self, names: list) -> List[Dict]:
@@ -188,21 +216,21 @@ class SkillEngine:
         names=None → 返回全部；names=[] → 返回空列表（禁止全部）。"""
         if names is None:
             return self.get_all_schemas()
-        return [info["schema"] for name, info in _skill_registry.items()
+        return [info["schema"] for name, info in self._registry.items()
                 if name in names]
 
     def get_schemas_by_tag(self, tag: str) -> List[Dict]:
         """按标签筛选技能 Schema"""
-        return [info["schema"] for info in _skill_registry.values()
+        return [info["schema"] for info in self._registry.values()
                 if tag in (info.get("tags") or [])]
 
     def get_gemini_tool_declarations(self, names: list = None) -> list:
         """将 OpenAI tool schema 转为 Gemini function_declarations 格式"""
         decls = []
         items = (
-            [(n, _skill_registry[n]) for n in names if n in _skill_registry]
+            [(n, self._registry[n]) for n in names if n in self._registry]
             if names is not None
-            else _skill_registry.items()
+            else self._registry.items()
         )
         for name, info in items:
             fn = info["schema"]["function"]
@@ -261,12 +289,12 @@ class SkillEngine:
                 retryable=False,
             )
 
-        if skill_name not in _skill_registry:
+        if skill_name not in self._registry:
             _write_audit(skill_name, arguments, ctx,
                          outcome="denied", error_code="UNKNOWN_SKILL")
             return ExecutionResult.unknown_skill(skill_name, arguments)
 
-        info = _skill_registry[skill_name]
+        info = self._registry[skill_name]
         policy = info["policy"]
 
         # 访客权限检查
@@ -366,10 +394,10 @@ class SkillEngine:
 
     def list_skills(self, is_guest: bool = False) -> str:
         """列出所有已注册技能 (供 System Prompt 和 /help 展示)"""
-        if not _skill_registry:
+        if not self._registry:
             return "(暂无技能)"
         lines = []
-        for name, info in _skill_registry.items():
+        for name, info in self._registry.items():
             if is_guest and not info["policy"].guest_ok:
                 continue
             desc = info["schema"]["function"]["description"]
@@ -385,7 +413,7 @@ class SkillEngine:
             raise ValueError("页码和每页数量必须大于 0")
         term = query.strip().casefold()
         matches = []
-        for name, info in sorted(_skill_registry.items()):
+        for name, info in sorted(self._registry.items()):
             if is_guest and not info["policy"].guest_ok:
                 continue
             description = info["schema"]["function"]["description"]
@@ -416,13 +444,13 @@ class SkillEngine:
         names=[]   -> 无技能
         names=[...] -> 指定技能
         """
-        if not _skill_registry:
+        if not self._registry:
             return "(暂无技能)"
         if names is not None and len(names) == 0:
             return "(无可用工具)"
         lines = []
         name_set = set(names) if names else set()
-        for name, info in _skill_registry.items():
+        for name, info in self._registry.items():
             if name_set and name not in name_set:
                 continue
             desc = info["schema"]["function"]["description"]
@@ -433,15 +461,15 @@ class SkillEngine:
 
     def get_skill_count(self) -> int:
         """返回已注册技能数量"""
-        return len(_skill_registry)
+        return len(self._registry)
 
     def is_read_only(self, name: str) -> bool:
-        info = _skill_registry.get(name)
+        info = self._registry.get(name)
         return bool(info and info['policy'].side_effect is False)
 
     def get_request_reuse_key(self, name: str, arguments: str) -> Optional[str]:
         """Opt-in receipt reuse; schema defaults make omitted args equivalent."""
-        info = _skill_registry.get(name)
+        info = self._registry.get(name)
         if not info or not info.get('reuse_within_run'):
             return None
         try:
@@ -457,7 +485,7 @@ class SkillEngine:
 
     def is_guest_ok(self, skill_name: str) -> bool:
         """检查指定技能是否允许访客调用"""
-        info = _skill_registry.get(skill_name)
+        info = self._registry.get(skill_name)
         if not info:
             return False
         return bool(info["policy"].guest_ok)
@@ -465,7 +493,7 @@ class SkillEngine:
     def get_guard_prompts(self, text: str, is_guest: bool = False) -> List[str]:
         """检查消息是否命中技能的 guard_keywords，返回对应 guard_prompt"""
         prompts = []
-        for name, info in _skill_registry.items():
+        for name, info in self._registry.items():
             policy = info["policy"]
             if is_guest and not policy.guest_ok:
                 continue

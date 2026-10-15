@@ -25,6 +25,18 @@
     "RULE_NO_FEATURE_SYS_MODULES_LOOKUP": {
       "name": "禁止业务特性层通过 sys.modules 反查上层依赖",
       "description": "禁止 features/ 内部通过 sys.modules 反向检索 skills/ 或兼容层实例，必须通过显式依赖注入或参数传递解耦。"
+    },
+    "RULE_NO_KERNEL_BUSINESS_DEPENDENCY": {
+      "name": "禁止基础内核代码依赖业务特性、技能与脚本",
+      "description": "基础内核代码 (core/, services/, contracts/, app/, 以及根文件 agent.py, session.py, security.py) 严禁产生对 features/ 业务层、skills/ 工具实现、scripts/ 业务脚本或具体业务工作流的反向导入。"
+    },
+    "RULE_NO_CONTRACTS_DEPENDENCY": {
+      "name": "禁止 contracts 契约层依赖运行时与业务",
+      "description": "contracts/ 纯契约层严禁依赖任何外部运行时实现 (agent, session, security, core, services, features, skills, scripts 等)，仅允许标准库。"
+    },
+    "RULE_NO_SERVICES_DEPENDENCY": {
+      "name": "禁止 services 服务层反向依赖完整 Agent 实现",
+      "description": "services/ 通用服务层严禁反向依赖完整 agent.py 运行时，必须通过参数注入或契约类型解耦。"
     }
   },
   "exceptions": [
@@ -252,6 +264,224 @@
       "owner": "test_infrastructure",
       "removal_stage": "E0_closeout",
       "verification_requirement": "绑定临时上下文与 tmp_path"
+    },
+    {
+      "file": "core/billing_workflow.py",
+      "rule": "RULE_NO_CORE_REVERSE_DEPENDENCY",
+      "target": "features.billing.workflow",
+      "reason": "历史重导出兼容层，待阶段二业务迁出与唯一装配时清退",
+      "owner": "billing_feature",
+      "removal_stage": "kernel_stage_2",
+      "verification_requirement": "阶段二业务解耦后删除兼容文件",
+      "scope": "<module>",
+      "max_occurrences": 1
+    },
+    {
+      "file": "core/billing_workflow.py",
+      "rule": "RULE_NO_CORE_REVERSE_DEPENDENCY",
+      "target": "features.billing.workflow._parse_json_summary",
+      "reason": "历史重导出兼容层，待阶段二业务迁出与唯一装配时清退",
+      "owner": "billing_feature",
+      "removal_stage": "kernel_stage_2",
+      "verification_requirement": "阶段二业务解耦后删除兼容文件",
+      "scope": "<module>",
+      "max_occurrences": 1
+    },
+    {
+      "file": "core/billing_workflow.py",
+      "rule": "RULE_NO_CORE_REVERSE_DEPENDENCY",
+      "target": "features.billing.workflow.parse_json_summary",
+      "reason": "历史重导出兼容层，待阶段二业务迁出与唯一装配时清退",
+      "owner": "billing_feature",
+      "removal_stage": "kernel_stage_2",
+      "verification_requirement": "阶段二业务解耦后删除兼容文件",
+      "scope": "<module>",
+      "max_occurrences": 1
+    },
+    {
+      "file": "core/billing_workflow.py",
+      "rule": "RULE_NO_CORE_REVERSE_DEPENDENCY",
+      "target": "features.billing.workflow.summarize_account_errors",
+      "reason": "历史重导出兼容层，待阶段二业务迁出与唯一装配时清退",
+      "owner": "billing_feature",
+      "removal_stage": "kernel_stage_2",
+      "verification_requirement": "阶段二业务解耦后删除兼容文件",
+      "scope": "<module>",
+      "max_occurrences": 1
+    },
+    {
+      "file": "core/billing_workflow.py",
+      "rule": "RULE_NO_CORE_REVERSE_DEPENDENCY",
+      "target": "features.billing.workflow._JSON_SUMMARY_RE",
+      "reason": "历史重导出兼容层，待阶段二业务迁出与唯一装配时清退",
+      "owner": "billing_feature",
+      "removal_stage": "kernel_stage_2",
+      "verification_requirement": "阶段二业务解耦后删除兼容文件",
+      "scope": "<module>",
+      "max_occurrences": 1
+    },
+    {
+      "file": "core/billing_snapshot.py",
+      "rule": "RULE_NO_CORE_REVERSE_DEPENDENCY",
+      "target": "features.billing.snapshot",
+      "reason": "历史重导出兼容层，待阶段二业务迁出与唯一装配时清退",
+      "owner": "billing_feature",
+      "removal_stage": "kernel_stage_2",
+      "verification_requirement": "阶段二业务解耦后删除兼容文件",
+      "scope": "<module>",
+      "max_occurrences": 1
+    },
+    {
+      "file": "core/billing_snapshot.py",
+      "rule": "RULE_NO_CORE_REVERSE_DEPENDENCY",
+      "target": "features.billing.snapshot.decimal_amount",
+      "reason": "历史重导出兼容层，待阶段二业务迁出与唯一装配时清退",
+      "owner": "billing_feature",
+      "removal_stage": "kernel_stage_2",
+      "verification_requirement": "阶段二业务解耦后删除兼容文件",
+      "scope": "<module>",
+      "max_occurrences": 1
+    },
+    {
+      "file": "core/billing_snapshot.py",
+      "rule": "RULE_NO_CORE_REVERSE_DEPENDENCY",
+      "target": "features.billing.snapshot.month_start",
+      "reason": "历史重导出兼容层，待阶段二业务迁出与唯一装配时清退",
+      "owner": "billing_feature",
+      "removal_stage": "kernel_stage_2",
+      "verification_requirement": "阶段二业务解耦后删除兼容文件",
+      "scope": "<module>",
+      "max_occurrences": 1
+    },
+    {
+      "file": "core/billing_snapshot.py",
+      "rule": "RULE_NO_CORE_REVERSE_DEPENDENCY",
+      "target": "features.billing.snapshot.build_snapshot",
+      "reason": "历史重导出兼容层，待阶段二业务迁出与唯一装配时清退",
+      "owner": "billing_feature",
+      "removal_stage": "kernel_stage_2",
+      "verification_requirement": "阶段二业务解耦后删除兼容文件",
+      "scope": "<module>",
+      "max_occurrences": 1
+    },
+    {
+      "file": "core/billing_snapshot.py",
+      "rule": "RULE_NO_CORE_REVERSE_DEPENDENCY",
+      "target": "features.billing.snapshot.model_evidence",
+      "reason": "历史重导出兼容层，待阶段二业务迁出与唯一装配时清退",
+      "owner": "billing_feature",
+      "removal_stage": "kernel_stage_2",
+      "verification_requirement": "阶段二业务解耦后删除兼容文件",
+      "scope": "<module>",
+      "max_occurrences": 1
+    },
+    {
+      "file": "core/billing_snapshot.py",
+      "rule": "RULE_NO_CORE_REVERSE_DEPENDENCY",
+      "target": "features.billing.snapshot.render_report",
+      "reason": "历史重导出兼容层，待阶段二业务迁出与唯一装配时清退",
+      "owner": "billing_feature",
+      "removal_stage": "kernel_stage_2",
+      "verification_requirement": "阶段二业务解耦后删除兼容文件",
+      "scope": "<module>",
+      "max_occurrences": 1
+    },
+    {
+      "file": "core/billing_snapshot.py",
+      "rule": "RULE_NO_CORE_REVERSE_DEPENDENCY",
+      "target": "features.billing.snapshot.table",
+      "reason": "历史重导出兼容层，待阶段二业务迁出与唯一装配时清退",
+      "owner": "billing_feature",
+      "removal_stage": "kernel_stage_2",
+      "verification_requirement": "阶段二业务解耦后删除兼容文件",
+      "scope": "<module>",
+      "max_occurrences": 1
+    },
+    {
+      "file": "agent.py",
+      "rule": "RULE_NO_KERNEL_BUSINESS_DEPENDENCY",
+      "target": "skills.ops_billing._run_billing_cmd",
+      "scope": "_handle_builtin",
+      "reason": "历史 /cmd 指令中惰性导入业务技能，待阶段二指令服务解耦时清退",
+      "owner": "agent_runtime",
+      "removal_stage": "kernel_stage_2",
+      "verification_requirement": "阶段二通过通用指令注册机制解耦",
+      "max_occurrences": 1
+    },
+    {
+      "file": "agent.py",
+      "rule": "RULE_NO_KERNEL_BUSINESS_DEPENDENCY",
+      "target": "skills.ops_billing.billing_fetch",
+      "scope": "_handle_builtin",
+      "reason": "历史 /cmd 指令中惰性导入业务技能，待阶段二指令服务解耦时清退",
+      "owner": "agent_runtime",
+      "removal_stage": "kernel_stage_2",
+      "verification_requirement": "阶段二通过通用指令注册机制解耦",
+      "max_occurrences": 1
+    },
+    {
+      "file": "agent.py",
+      "rule": "RULE_NO_KERNEL_BUSINESS_DEPENDENCY",
+      "target": "skills.ops_mail_reader.mail_fetch_summaries",
+      "scope": "_handle_builtin",
+      "reason": "历史 /cmd 指令中惰性导入邮件技能，待阶段二指令服务解耦时清退",
+      "owner": "agent_runtime",
+      "removal_stage": "kernel_stage_2",
+      "verification_requirement": "阶段二通过通用指令注册机制解耦",
+      "max_occurrences": 1
+    },
+    {
+      "file": "agent.py",
+      "rule": "RULE_NO_KERNEL_BUSINESS_DEPENDENCY",
+      "target": "skills.ops_self_check._get_health_report",
+      "scope": "_handle_builtin",
+      "reason": "历史 /check 指令中惰性导入自检技能，待阶段二指令服务解耦时清退",
+      "owner": "agent_runtime",
+      "removal_stage": "kernel_stage_2",
+      "verification_requirement": "阶段二通过通用指令注册机制解耦",
+      "max_occurrences": 1
+    },
+    {
+      "file": "agent.py",
+      "rule": "RULE_NO_CORE_REVERSE_DEPENDENCY",
+      "target": "core.billing_workflow.BillingWorkflow",
+      "scope": "_matches_billing_workflow",
+      "reason": "历史账单工作流前置判定直接导入 BillingWorkflow，待阶段二建立工作流注册表与插件时解耦",
+      "owner": "agent_runtime",
+      "removal_stage": "E4",
+      "verification_requirement": "阶段二通过通用工作流注册表解耦"
+    },
+    {
+      "file": "app/plugins.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "<dynamic_expression>",
+      "scope": "load_plugin_by_entry",
+      "reason": "受控插件加载器基于显式允许清单导入插件模块",
+      "owner": "app_plugins",
+      "removal_stage": "permanent_plugin_loader",
+      "verification_requirement": "必须校验 entry 在 allowed_entries 显式白名单内"
+    },
+    {
+      "file": "main.py",
+      "rule": "RULE_NO_KERNEL_BUSINESS_DEPENDENCY",
+      "target": "skills.ops_backup",
+      "scope": "_register_cron_jobs",
+      "max_occurrences": 1,
+      "reason": "阶段一补全 main.py 扫描后登记的基线旧调用；并非新业务依赖",
+      "owner": "app_entrypoint",
+      "removal_stage": "kernel_stage_2",
+      "verification_requirement": "阶段二由插件显式注册替代，删除此精确例外"
+    },
+    {
+      "file": "main.py",
+      "rule": "RULE_NO_KERNEL_BUSINESS_DEPENDENCY",
+      "target": "skills.ops_mail_reader",
+      "scope": "_register_cron_jobs",
+      "max_occurrences": 1,
+      "reason": "阶段一补全 main.py 扫描后登记的基线旧调用；并非新业务依赖",
+      "owner": "app_entrypoint",
+      "removal_stage": "kernel_stage_2",
+      "verification_requirement": "阶段二由插件显式注册替代，删除此精确例外"
     }
   ]
 }

@@ -31,7 +31,7 @@ def test_current_repo_passes_architecture_check(repo_root, rules_config):
     file_count, violations, approved = run_checks(repo_root, rules_config)
     assert file_count > 0
     assert len(violations) == 0, f"Unexpected violations found: {violations}"
-    assert len(approved) > 0
+    assert all(item.get("exception_owner") for item in approved)
 
 
 def test_core_reverse_dependency_rejected(repo_root, rules_config, tmp_path):

@@ -5,11 +5,14 @@
 
 规则包括：
 1. RULE_NO_DIRECT_PARSER_IMPORT: 禁止 Agent 生产代码直接导入 parser 模块 (如 mail_client, statement_parser 等)
-2. RULE_NO_CORE_REVERSE_DEPENDENCY: 禁止 core/ 核心通用运行时产生对 skills/、scripts/ 或具体业务工作流的反向依赖
-3. RULE_DYNAMIC_IMPORT_REGISTERED: 禁止通过未登记的动态调用 (importlib.import_module / __import__ 及别名) 绕过门禁
-4. RULE_NO_CROSS_REPO_SYS_PATH: 禁止在生产代码中动态注入跨仓外部路径到 sys.path
-5. RULE_NO_DIRECT_SQLITE_IN_BILLING: 禁止 features/billing/ 业务代码直接导入 sqlite3 直连解析/账单数据库
-6. RULE_NO_FEATURE_SYS_MODULES_LOOKUP: 禁止 features/ 特性业务代码通过 sys.modules 反查上层技能或兼容层模块
+2. RULE_NO_CORE_REVERSE_DEPENDENCY / RULE_NO_KERNEL_BUSINESS_DEPENDENCY:
+   禁止基础内核 (core/, services/, contracts/, app/, agent.py, session.py, security.py) 产生对 features/、skills/、scripts/ 或具体业务工作流的反向依赖
+3. RULE_NO_CONTRACTS_DEPENDENCY: contracts 契约层严禁依赖任何外部运行时或业务模块，仅限标准库
+4. RULE_NO_SERVICES_DEPENDENCY: services 服务层严禁反向依赖完整 agent 运行时
+5. RULE_DYNAMIC_IMPORT_REGISTERED: 禁止通过未登记的动态调用 (importlib.import_module / __import__ 及别名) 绕过门禁
+6. RULE_NO_CROSS_REPO_SYS_PATH: 禁止在生产代码中动态注入跨仓外部路径到 sys.path
+7. RULE_NO_DIRECT_SQLITE_IN_BILLING: 禁止 features/billing/ 业务代码直接导入 sqlite3 直连解析/账单数据库
+8. RULE_NO_FEATURE_SYS_MODULES_LOOKUP: 禁止 features/ 特性业务代码通过 sys.modules 反查上层技能或兼容层模块
 
 使用方式：
     python scripts/check_architecture.py
@@ -21,7 +24,7 @@ import json
 import os
 import subprocess
 import sys
-from typing import Dict, List, Set, Tuple, Optional
+from typing import Dict, List, Set, Tuple, Optional, Any, Union
 
 PARSER_MODULES = {
     "mail_client",
@@ -81,7 +84,7 @@ def get_repo_python_files(repo_root: str, target_dir: Optional[str] = None) -> L
     excluded_prefixes = (".git", ".venv", "venv", "scratch", "docs", ".gemini", "deploy")
     result = []
     for f in sorted(files_set):
-        norm = os.path.normpath(f)
+        norm = os.path.normpath(f).replace("\\", "/")
         if any(norm.startswith(p) for p in excluded_prefixes):
             continue
         if os.path.isfile(os.path.join(repo_root, f)):
@@ -102,13 +105,30 @@ def is_local_repo_root_expr(node: ast.AST) -> bool:
     return False
 
 
+CONTRACT_STDLIB = frozenset({
+    "__future__", "abc", "collections", "copy", "dataclasses", "datetime",
+    "decimal", "enum", "functools", "itertools", "json", "math", "numbers",
+    "operator", "re", "types", "typing", "uuid",
+})
+
+
 class ArchitectureVisitor(ast.NodeVisitor):
     def __init__(self, rel_path: str):
-        self.rel_path = rel_path
-        self.is_core = rel_path.startswith("core" + os.sep) or rel_path.startswith("core/")
-        self.is_test = rel_path.startswith("tests" + os.sep) or rel_path.startswith("tests/")
-        self.is_billing_feature = self.rel_path.startswith("features" + os.sep + "billing") or self.rel_path.startswith("features/billing")
-        self.is_feature = self.rel_path.startswith("features" + os.sep) or self.rel_path.startswith("features/")
+        norm = os.path.normpath(rel_path).replace("\\", "/")
+        self.rel_path = norm
+
+        # 分层判定
+        self.is_contracts = norm.startswith("contracts/") or norm == "contracts.py"
+        self.is_services = norm.startswith("services/") or norm == "services.py"
+        self.is_app = norm.startswith("app/") or norm == "app.py"
+        self.is_core = norm.startswith("core/") or norm == "core.py"
+        self.is_kernel_root = norm in ("main.py", "agent.py", "session.py", "security.py")
+        self.is_kernel = self.is_contracts or self.is_services or self.is_app or self.is_core or self.is_kernel_root
+
+        self.is_test = norm.startswith("tests/")
+        self.is_billing_feature = norm.startswith("features/billing")
+        self.is_feature = norm.startswith("features/")
+
         self.findings: List[Dict[str, Any]] = []
         self.scope_stack: List[Union[ast.FunctionDef, ast.AsyncFunctionDef]] = []
 
@@ -116,6 +136,7 @@ class ArchitectureVisitor(ast.NodeVisitor):
         self.importlib_aliases: Set[str] = {"importlib"}
         self.import_module_aliases: Set[str] = {"import_module"}
         self.dunder_import_aliases: Set[str] = {"__import__"}
+        self.builtins_aliases: Set[str] = {"builtins"}
 
     def _record_finding(self, rule: str, target: str, line: int, detail: str, suggestion: str):
         scope_name = self.scope_stack[-1].name if self.scope_stack else "<module>"
@@ -129,6 +150,19 @@ class ArchitectureVisitor(ast.NodeVisitor):
             "scope": scope_name,
             "scope_args": scope_args,
         })
+
+    def _resolve_relative_module(self, module: Optional[str], level: int) -> str:
+        """根据 relative level 解析规范化模块全名。"""
+        if level == 0:
+            return module or ""
+        parts = self.rel_path.split("/")[:-1]
+        if level <= len(parts):
+            base = parts[:len(parts) - level + 1]
+        else:
+            base = []
+        if module:
+            return ".".join(base + [module]) if base else module
+        return ".".join(base)
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
         self.scope_stack.append(node)
@@ -148,6 +182,8 @@ class ArchitectureVisitor(ast.NodeVisitor):
 
             if root_mod == "importlib":
                 self.importlib_aliases.add(asname)
+            if root_mod == "builtins":
+                self.builtins_aliases.add(asname)
 
             # 规则 1: 禁止直接导入 parser 模块
             if root_mod in PARSER_MODULES:
@@ -159,14 +195,35 @@ class ArchitectureVisitor(ast.NodeVisitor):
                     "改用 MailCLI 或 integrations 适配器进行跨仓调用",
                 )
 
-            # 规则 2: core 禁止导入 skills / scripts
-            if self.is_core and root_mod in ("skills", "scripts"):
+            # 规则 2: 基础内核代码禁止导入业务特性、技能与脚本
+            if self.is_kernel and root_mod in ("features", "skills", "scripts"):
+                rule_name = "RULE_NO_CORE_REVERSE_DEPENDENCY" if self.is_core else "RULE_NO_KERNEL_BUSINESS_DEPENDENCY"
                 self._record_finding(
-                    "RULE_NO_CORE_REVERSE_DEPENDENCY",
+                    rule_name,
                     mod_name,
                     node.lineno,
-                    f"core 导入反向模块: {mod_name}",
-                    "将业务或技能逻辑下沉或使用端口注入，避免 core 依赖外层",
+                    f"基础内核代码导入业务模块: {mod_name}",
+                    "将业务逻辑解耦迁出至 features/ 或通过端口注入",
+                )
+
+            # 规则 3: contracts 严禁依赖任何外部运行时
+            if self.is_contracts and root_mod not in CONTRACT_STDLIB | {"contracts"}:
+                self._record_finding(
+                    "RULE_NO_CONTRACTS_DEPENDENCY",
+                    mod_name,
+                    node.lineno,
+                    f"contracts 契约层依赖外部运行时模块: {mod_name}",
+                    "contracts 必须保持纯净，仅依赖 Python 标准库",
+                )
+
+            # 规则 4: services 严禁反向依赖完整 agent 运行时
+            if self.is_services and root_mod == "agent":
+                self._record_finding(
+                    "RULE_NO_SERVICES_DEPENDENCY",
+                    mod_name,
+                    node.lineno,
+                    f"services 服务层反向依赖完整 agent 运行时: {mod_name}",
+                    "services 必须通过 contracts 消息类型与参数传递解耦，禁止直接导入 agent",
                 )
 
             # 规则 5: features/billing 禁止直接导入 sqlite3
@@ -182,14 +239,14 @@ class ArchitectureVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom):
-        mod_name = node.module or ""
-        root_mod = mod_name.split(".")[0]
+        resolved_mod = self._resolve_relative_module(node.module, node.level)
+        root_mod = resolved_mod.split(".")[0]
 
-        if mod_name == "importlib":
+        if resolved_mod == "importlib":
             for alias in node.names:
                 if alias.name == "import_module":
                     self.import_module_aliases.add(alias.asname or alias.name)
-        elif mod_name == "builtins":
+        elif resolved_mod == "builtins":
             for alias in node.names:
                 if alias.name == "__import__":
                     self.dunder_import_aliases.add(alias.asname or alias.name)
@@ -200,24 +257,26 @@ class ArchitectureVisitor(ast.NodeVisitor):
                 "RULE_NO_DIRECT_PARSER_IMPORT",
                 root_mod,
                 node.lineno,
-                f"from {mod_name} import ...",
+                f"from {resolved_mod} import ...",
                 "改用 MailCLI 或 integrations 适配器进行跨仓调用",
             )
 
-        # 规则 2: core 禁止反向依赖
-        if self.is_core:
+        # 规则 2: 基础内核代码禁止导入业务特性、技能与脚本 (支持绝对与相对导入解析)
+        if self.is_kernel:
             for alias in node.names:
-                full_mod = f"{mod_name}.{alias.name}" if mod_name else alias.name
+                full_mod = f"{resolved_mod}.{alias.name}" if resolved_mod else alias.name
                 root_item = full_mod.split(".")[0]
-                if root_item in ("skills", "scripts"):
+
+                if root_item in ("features", "skills", "scripts"):
+                    rule_name = "RULE_NO_CORE_REVERSE_DEPENDENCY" if self.is_core else "RULE_NO_KERNEL_BUSINESS_DEPENDENCY"
                     self._record_finding(
-                        "RULE_NO_CORE_REVERSE_DEPENDENCY",
+                        rule_name,
                         full_mod,
                         node.lineno,
-                        f"core 导入反向模块: {full_mod}",
-                        "将业务逻辑解耦，避免 core 导入 skills/scripts",
+                        f"基础内核代码导入业务模块: {full_mod}",
+                        "将业务逻辑解耦迁出至 features/ 或通过插件机制装配",
                     )
-                if "billing_workflow" in full_mod and alias.name == "BillingWorkflow":
+                elif "billing_workflow" in full_mod and alias.name == "BillingWorkflow":
                     self._record_finding(
                         "RULE_NO_CORE_REVERSE_DEPENDENCY",
                         "core.billing_workflow.BillingWorkflow",
@@ -226,13 +285,41 @@ class ArchitectureVisitor(ast.NodeVisitor):
                         "使用工作流注册表在启动时装配，解耦通用编排器与具体业务",
                     )
 
+        # 规则 3: contracts 严禁依赖任何外部运行时
+        if self.is_contracts:
+            for alias in node.names:
+                full_mod = f"{resolved_mod}.{alias.name}" if resolved_mod else alias.name
+                root_item = full_mod.split(".")[0]
+                if root_item not in CONTRACT_STDLIB | {"contracts"}:
+                    self._record_finding(
+                        "RULE_NO_CONTRACTS_DEPENDENCY",
+                        full_mod,
+                        node.lineno,
+                        f"contracts 契约层依赖外部运行时模块: {full_mod}",
+                        "contracts 必须保持纯净，仅依赖 Python 标准库",
+                    )
+
+        # 规则 4: services 严禁反向依赖完整 agent 运行时
+        if self.is_services:
+            for alias in node.names:
+                full_mod = f"{resolved_mod}.{alias.name}" if resolved_mod else alias.name
+                root_item = full_mod.split(".")[0]
+                if root_item == "agent":
+                    self._record_finding(
+                        "RULE_NO_SERVICES_DEPENDENCY",
+                        full_mod,
+                        node.lineno,
+                        f"services 服务层反向依赖完整 agent 运行时: {full_mod}",
+                        "services 必须通过 contracts 消息类型与参数传递解耦，禁止直接导入 agent",
+                    )
+
         # 规则 5: features/billing 禁止从 sqlite3 导入
         if self.is_billing_feature and root_mod == "sqlite3":
             self._record_finding(
                 "RULE_NO_DIRECT_SQLITE_IN_BILLING",
                 "sqlite3",
                 node.lineno,
-                f"from {mod_name} import ...",
+                f"from {resolved_mod} import ...",
                 "features/billing 必须通过 MailCLI 调用外部 Parser 读模型，禁止直接连接数据库",
             )
 
@@ -273,6 +360,20 @@ class ArchitectureVisitor(ast.NodeVisitor):
                                     )
         self.generic_visit(node)
 
+    def visit_Assign(self, node: ast.Assign):
+        value = node.value
+        imported = (isinstance(value, ast.Name) and value.id in self.import_module_aliases)
+        builtin = (isinstance(value, ast.Name) and value.id in self.dunder_import_aliases)
+        if isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name):
+            imported = value.attr == "import_module" and value.value.id in self.importlib_aliases
+            builtin = value.attr == "__import__" and value.value.id in self.builtins_aliases
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                if imported:
+                    self.import_module_aliases.add(target.id)
+                if builtin:
+                    self.dunder_import_aliases.add(target.id)
+        self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call):
         func = node.func
@@ -282,14 +383,17 @@ class ArchitectureVisitor(ast.NodeVisitor):
         if isinstance(func, ast.Name):
             if func.id in self.import_module_aliases or func.id in self.dunder_import_aliases:
                 is_dynamic = True
-        elif isinstance(func, ast.Attribute) and func.attr == "import_module":
-            if isinstance(func.value, ast.Name) and func.value.id in self.importlib_aliases:
-                is_dynamic = True
+        elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            is_dynamic = (
+                (func.attr == "import_module" and func.value.id in self.importlib_aliases)
+                or (func.attr == "__import__" and func.value.id in self.builtins_aliases)
+            )
 
         if is_dynamic:
             target_name = ""
-            if node.args:
-                first_arg = node.args[0]
+            keyword_name = next((kw.value for kw in node.keywords if kw.arg == "name"), None)
+            if node.args or keyword_name is not None:
+                first_arg = node.args[0] if node.args else keyword_name
                 if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
                     target_name = first_arg.value
                 else:
@@ -307,7 +411,10 @@ class ArchitectureVisitor(ast.NodeVisitor):
                 )
             else:
                 root_mod = target_name.split(".")[0]
-                if root_mod in PARSER_MODULES or (self.is_core and root_mod in ("skills", "scripts")):
+                if (root_mod in PARSER_MODULES
+                        or (self.is_kernel and root_mod in ("features", "skills", "scripts"))
+                        or (self.is_contracts and root_mod not in CONTRACT_STDLIB | {"contracts"})
+                        or (self.is_services and root_mod == "agent")):
                     self._record_finding(
                         "RULE_DYNAMIC_IMPORT_REGISTERED",
                         target_name,
@@ -316,7 +423,7 @@ class ArchitectureVisitor(ast.NodeVisitor):
                         "动态导入跨仓/敏感模块必须在 architecture_rules.json 中显式登记精确例外",
                     )
 
-        # 规则 4: 检查生产代码与测试代码中的 sys.path 跨仓动态修改
+        # 检查生产代码与测试代码中的 sys.path 跨仓动态修改
         is_sys_path_mod = False
         target_arg = None
         if isinstance(func, ast.Attribute) and func.attr in ("insert", "append", "extend"):
@@ -350,23 +457,26 @@ class ArchitectureVisitor(ast.NodeVisitor):
 
 
 def match_exception(finding: dict, rel_path: str, exceptions: List[dict]) -> Optional[dict]:
-    """严格匹配已登记的例外清单（禁止通配符 *，禁止任意双向前缀匹配）。"""
-    norm_file = os.path.normpath(rel_path)
+    """严格匹配文件、规则、目标和可选作用域，不允许别名或包前缀吞并。"""
+    norm_file = os.path.normpath(rel_path).replace("\\", "/")
     rule = finding["rule"]
     target = finding["target"]
     scope = finding.get("scope", "<module>")
 
     for exc in exceptions:
-        exc_file = os.path.normpath(exc.get("file", ""))
+        exc_file = os.path.normpath(exc.get("file", "")).replace("\\", "/")
         exc_rule = exc.get("rule", "")
         exc_target = exc.get("target", "")
         exc_scope = exc.get("scope")
 
-        # 严格精确匹配 file, rule, target 以及可选的 scope
-        if norm_file == exc_file and rule == exc_rule and target == exc_target:
-            if exc_scope is not None and exc_scope != scope:
-                continue
-            return exc
+        # 文件、规则和目标都必须精确匹配，禁止包前缀和规则别名放宽例外。
+        if norm_file != exc_file or rule != exc_rule or target != exc_target:
+            continue
+
+        if exc_scope is not None and exc_scope != scope:
+            continue
+
+        return exc
     return None
 
 
@@ -379,7 +489,7 @@ def verify_exception_requirements(
     scope = finding.get("scope", "<module>")
     scope_args = finding.get("scope_args", [])
 
-    # 对 tests/ 目录中跨仓相关的例外，强制验证具体发生违规的作用域绑定了受控临时上下文/fixture
+    # 1. 对 tests/ 目录中跨仓相关的例外，强制验证具体发生违规的作用域绑定了受控临时上下文/fixture
     if rel_path.startswith("tests/") and rule in (
         "RULE_NO_DIRECT_PARSER_IMPORT", "RULE_DYNAMIC_IMPORT_REGISTERED", "RULE_NO_CROSS_REPO_SYS_PATH"
     ):
@@ -392,6 +502,37 @@ def verify_exception_requirements(
                 f"违规所在函数 '{scope}' 未声明受控临时上下文 fixture 参数 "
                 f"(必须包含 tmp_path / parser_repo / mail_store 之一，实测参数: {scope_args})"
             )
+
+    # 2. 对 app/plugins.py 受控插件加载器例外，强制验证函数内部包含白名单校验
+    norm_file = os.path.normpath(rel_path).replace("\\", "/")
+    if norm_file == "app/plugins.py" and rule == "RULE_DYNAMIC_IMPORT_REGISTERED":
+        fn_nodes = [
+            n for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == scope
+        ]
+        if len(fn_nodes) != 1:
+            return False, "受控插件加载器作用域不唯一或缺失"
+        body = fn_nodes[0].body
+        guarded = False
+        for statement in body:
+            if isinstance(statement, ast.If):
+                test = statement.test
+                if (isinstance(test, ast.Compare) and len(test.ops) == 1
+                        and isinstance(test.ops[0], ast.NotIn)
+                        and isinstance(test.left, ast.Name) and test.left.id == "entry_name"
+                        and len(test.comparators) == 1
+                        and isinstance(test.comparators[0], ast.Attribute)
+                        and isinstance(test.comparators[0].value, ast.Name)
+                        and test.comparators[0].value.id == "self"
+                        and test.comparators[0].attr == "allowed_entries"
+                        and statement.body and isinstance(statement.body[0], ast.Raise)):
+                    guarded = True
+            for call in ast.walk(statement):
+                if (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                        and call.func.attr == "import_module" and not guarded):
+                    return False, "动态加载前缺少无条件 entry_name not in self.allowed_entries 拒绝门禁"
+        if not guarded:
+            return False, "缺少无条件的白名单拒绝门禁"
 
     return True, ""
 
@@ -424,6 +565,7 @@ def run_checks(
 
     violations = []
     approved_exceptions = []
+    exception_hits = {}
 
     for rel_path in files:
         abs_path = os.path.join(repo_root, rel_path)
@@ -457,6 +599,13 @@ def run_checks(
                 "detail": finding["detail"],
                 "suggestion": finding["suggestion"],
             }
+            if matched:
+                key = id(matched)
+                exception_hits[key] = exception_hits.get(key, 0) + 1
+                limit = matched.get("max_occurrences")
+                if limit is not None and exception_hits[key] > limit:
+                    matched = None
+                    fail_reason = f"例外命中超过冻结上限 {limit}"
             if matched:
                 item["exception_owner"] = matched.get("owner", "unknown")
                 item["removal_stage"] = matched.get("removal_stage", "unknown")
