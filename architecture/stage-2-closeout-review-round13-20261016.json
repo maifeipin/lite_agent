@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "review_round": 13,
+  "units": [
+    {
+      "id": "S2-C01",
+      "status": "已通过",
+      "scope": "本轮审查捕获的冻结源码；结束时再次校验"
+    },
+    {
+      "id": "S2-C02",
+      "status": "阻塞",
+      "scope": "56项纯搬迁已验证；80项通用说明未证明等价，且实际签名/安全边界改变"
+    },
+    {
+      "id": "S2-C03",
+      "status": "阻塞",
+      "scope": "上轮备份/resolver两项已修；博客路径、Sentinel过滤、剪藏旧参数三个当前反例失败"
+    },
+    {
+      "id": "S2-C04",
+      "status": "待复核",
+      "scope": "唯一实现结构改善；原能力与参数未全部保持"
+    },
+    {
+      "id": "S2-C05",
+      "status": "阻塞",
+      "scope": "15条mapped_old旧文件或符号不存在于冻结基线"
+    },
+    {
+      "id": "S2-C06",
+      "status": "阻塞",
+      "scope": "既有8/8脚本通过，Python3.9真实zip行为测试1 skipped，仍待补验证"
+    }
+  ],
+  "verified_pure_migrations": 56,
+  "generic_equivalence_rationales": 80,
+  "invalid_old_mappings": [
+    [
+      "features/billing/service.py:fetch_and_consume",
+      "skills/ops_billing.py:billing_fetch_and_consume",
+      "missing symbol"
+    ],
+    [
+      "features/billing/service.py:check_parse_health",
+      "skills/ops_billing.py:billing_check_parse_health",
+      "missing symbol"
+    ],
+    [
+      "features/content_ops/content_service.py:upload_markdown_to_hedgedoc",
+      "skills/ops_hedgedoc.py:upload_markdown_to_hedgedoc",
+      "missing file"
+    ],
+    [
+      "features/content_ops/content_service.py:get_rss_node_status",
+      "skills/ops_rss_node.py:rss_node_status",
+      "missing symbol"
+    ],
+    [
+      "features/content_ops/media_service.py:get_music_stats",
+      "skills/ops_media.py:music_stats",
+      "missing symbol"
+    ],
+    [
+      "features/content_ops/media_service.py:get_music_duplicates",
+      "skills/ops_media.py:music_duplicates",
+      "missing symbol"
+    ],
+    [
+      "features/content_ops/meili_sync_service.py:sync_meili_command",
+      "skills/ops_meili_sync.py:meili_sync",
+      "missing symbol"
+    ],
+    [
+      "features/content_ops/rss_service.py:cmd_rss_fetch",
+      "skills/ops_rss.py:rss_fetch",
+      "missing symbol"
+    ],
+    [
+      "features/content_ops/rss_service.py:rss_push_job",
+      "skills/ops_rss.py:rss_push_job",
+      "missing symbol"
+    ],
+    [
+      "features/review_meeting/invitation_service.py:get_meeting_status",
+      "skills/ops_review_meeting.py:meeting_status",
+      "missing symbol"
+    ],
+    [
+      "features/review_meeting/invitation_service.py:get_meeting_show",
+      "skills/ops_review_meeting.py:meeting_show",
+      "missing symbol"
+    ],
+    [
+      "features/review_meeting/invitation_service.py:join_meeting",
+      "skills/ops_review_meeting.py:meeting_join",
+      "missing symbol"
+    ],
+    [
+      "features/review_meeting/invitation_service.py:leave_meeting",
+      "skills/ops_review_meeting.py:meeting_leave",
+      "missing symbol"
+    ],
+    [
+      "features/review_meeting/invitation_service.py:submit_review",
+      "skills/ops_review_meeting.py:meeting_review",
+      "missing symbol"
+    ],
+    [
+      "features/review_meeting/invitation_service.py:add_comment",
+      "skills/ops_review_meeting.py:meeting_comment",
+      "missing symbol"
+    ]
+  ],
+  "independent_behavior_tests": {
+    "passed_previous_regressions": 5,
+    "failed_current_contracts": 3
+  },
+  "source_manifest_sha256": "08db71f72e6aa9f54e95306f31df0ca146f1f061186c98f1ab674e4693411d0c",
+  "note": "不改实施方原始分类，按原六单元记录独立验收结果；不是新增范围",
+  "final_verification": {
+    "verify_e0_exit": 0,
+    "legacy_gates": "8/8",
+    "agent_local": "1056 passed, 4 subtests passed",
+    "agent_python39": "1055 passed, 1 skipped",
+    "parser": "205 passed both",
+    "independent_contract_probes": "3 failed",
+    "captured_source_hashes_unchanged": true
+  }
+}

@@ -10,7 +10,7 @@ import pytest
 from integrations.mail.client import MailCLI, MailCLIError
 from integrations.mail.sync_service import sync_and_consume, drain_quality_events
 from integrations.mail.sync_receipt import evaluate_sync_receipt
-from core.billing_workflow import BillingWorkflow
+from features.billing.workflow import BillingWorkflow
 from skills import ops_billing, ops_todo
 from tests.test_mail_quality_closeout import parser_repo
 

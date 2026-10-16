@@ -10,6 +10,7 @@ import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from typing import Optional, Any, Dict, List, Callable
 import sqlite3
 from openai import OpenAI
 import openai
@@ -97,7 +98,12 @@ class Agent:
     - 自然语言走 Tool Call Loop，自动调度技能
     """
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict,
+                 skill_engine: Optional[Any] = None,
+                 command_registry: Optional[Any] = None,
+                 workflow_registry: Optional[Any] = None,
+                 cron: Optional[Any] = None,
+                 domain_map: Optional[dict] = None):
         self._config = config
         llm_cfg = config["llm"]
         session_cfg = config.get("session", {})
@@ -165,12 +171,19 @@ class Agent:
         self._request_model_router = request_router
         self._request_model_router_lock = threading.Lock()
 
+        from services.commands import default_command_registry
+        from services.workflows import default_workflow_registry
+        from services.cron import default_cron_service
+        self.command_registry = command_registry or default_command_registry
+        self.workflow_registry = workflow_registry or default_workflow_registry
+        self.cron = cron or default_cron_service
+
         # 技能引擎
-        self.skill_engine = SkillEngine()
+        self.skill_engine = skill_engine if skill_engine is not None else SkillEngine()
 
         # RequestSelector: 动态工具选择（设计 3.5，仅在此初始化一次，启动校验随构造完成）
         # 代码能力一次交付；Phase 1/2 仅通过环境变量切换 Shadow/Enabled。
-        self.request_selector = RequestSelector(self.skill_engine)
+        self.request_selector = RequestSelector(self.skill_engine, domain_map=domain_map)
 
         # 安全限制
         self.max_steps = session_cfg.get("max_steps_per_goal", 30)
@@ -292,15 +305,19 @@ class Agent:
                 return f"已将下面这条移入 **{section_short}** / 手动校正:\n\n{moved}"
             return "未知子命令。可用: `/memory_persona` (查看), `/memory_persona confirm <序号>` (升格)"
 
-        _registry.register('/memory_stats', _cmd_memory_stats,
-                           category='记忆管理', description='查看记忆池统计信息',
-                           show_in_dashboard=True, guest_ok=False)
-        _registry.register('/memory_add', _cmd_memory_add,
-                           category='记忆管理', description='手动添加记忆条目',
-                           show_in_dashboard=False, guest_ok=False)
-        _registry.register('/memory_persona', _cmd_memory_persona,
-                           category='记忆管理', description='查看/管理个人画像',
-                           show_in_dashboard=False, guest_ok=False)
+        reg = getattr(self, "command_registry", None) or _registry
+        reg.unregister('/memory_stats')
+        reg.register('/memory_stats', _cmd_memory_stats,
+                     category='记忆管理', description='查看记忆池统计信息',
+                     show_in_dashboard=True, guest_ok=False)
+        reg.unregister('/memory_add')
+        reg.register('/memory_add', _cmd_memory_add,
+                     category='记忆管理', description='手动添加记忆条目',
+                     show_in_dashboard=False, guest_ok=False)
+        reg.unregister('/memory_persona')
+        reg.register('/memory_persona', _cmd_memory_persona,
+                     category='记忆管理', description='查看/管理个人画像',
+                     show_in_dashboard=False, guest_ok=False)
 
         # 定时任务引擎
         self.cron = CronManager()
@@ -463,16 +480,6 @@ class Agent:
         造成 assistant tool_calls 与 tool 消息错位 (导致 LLM API 400 错误)。
         不同 session_key (不同用户/会话) 之间不互斥, 仍可并行。
         """
-        from core.meeting_channel_commands import handle as meeting_command
-        try:
-            meeting_reply = meeting_command(self._config, msg)
-        except (ValueError, OSError) as exc:
-            meeting_reply = f'会议操作未完成：{exc}'
-        except sqlite3.Error:
-            meeting_reply = '会议数据库暂不可用，请稍后重试；本次操作未确认成功。'
-        if meeting_reply is not None:
-            # Capability URLs and confirmation codes must never be auto-published.
-            return AgentResponse(meeting_reply, title='会议操作', color='blue')
         if not msg._session_key:
             msg.bind_session(self.session_mgr.resolve_active_session(msg.scope_key))
 
@@ -631,7 +638,9 @@ class Agent:
         is_guest = getattr(msg, "is_guest", True)
 
         # 权限检查优先走注册表
-        perm_denied = _registry.check_permission(cmd, is_guest)
+        cmd_reg = getattr(self, "command_registry", None)
+        registry = cmd_reg if cmd_reg is not None else _registry
+        perm_denied = registry.check_permission(cmd, is_guest)
         if perm_denied:
             return AgentResponse(perm_denied, title="⚠️ 权限不足", color="red")
 
@@ -640,9 +649,12 @@ class Agent:
             return AgentResponse("❌ 权限不足：只有管理员可使用该指令", title="⚠️ 权限不足", color="red")
  
  
-        # 优先查注册表（@slash_command 装饰器注册的指令）
+        # 显式实例注册表是能力边界；仅旧宿主未注入时使用全局兼容入口。
         try:
-            reg_resp = _registry_dispatch(cmd, self, msg, args)
+            reg_resp = (
+                cmd_reg.dispatch(cmd, self, msg, args)
+                if cmd_reg is not None else _registry_dispatch(cmd, self, msg, args)
+            )
         except Exception as e:
             return AgentResponse(f"指令执行异常: {e}", title="❌ 错误", color="red")
         if reg_resp is not None:
@@ -701,29 +713,6 @@ class Agent:
                 return AgentResponse("请在 /ai 后面输入您想对 AI 说的话，例如：/ai 查一下系统负载", title="提示", color="grey")
             return self._run_ai_loop(msg)
 
-        if cmd == "/cmd":
-            args = parts[1:]
-            if not args:
-                return AgentResponse("请提供具体账单指令，例如：`/cmd report 3`\n可用命令: report, due_soon_bills, reconcile, recent, fetch (结合了exec和validate)", title="提示", color="grey")
-            try:
-                import sys, os
-                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-                from skills.ops_billing import _run_billing_cmd, billing_fetch
-                
-                if args[0] == "fetch":
-                    months = int(args[1]) if len(args) > 1 else 1
-                    result = billing_fetch(months)
-                elif args[0] in ("fetch_summaries", "fs"):
-                    # 邮件 LLM 摘要走 mail_fetch_summaries (解析 JSON_PUSH)
-                    months = int(args[1]) if len(args) > 1 else 1
-                    from skills.ops_mail_reader import mail_fetch_summaries
-                    result = mail_fetch_summaries(months=months)
-                else:
-                    result = _run_billing_cmd(args)
-                return AgentResponse(result, title=f"执行结果: {args[0]}", color="blue")
-            except Exception as e:
-                return AgentResponse(f"执行失败: {e}", title="错误", color="red")
-
         if cmd == "/cron":
             if not args:
                 return AgentResponse(self.cron.list_jobs(), title="📅 定时任务", color="blue")
@@ -742,15 +731,6 @@ class Agent:
                     title="📅 定时任务", color="grey"
                 )
             return AgentResponse(self.cron.run_job_manually(job_id), title="🚀 手动执行", color="green")
-
-        if cmd == "/check":
-            try:
-                import sys, os
-                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-                from skills.ops_self_check import _get_health_report
-                return AgentResponse(_get_health_report(), title="🏥 健康检查", color="green")
-            except Exception as e:
-                return AgentResponse(f"自检失败: {e}", title="⚠️", color="red")
 
         if cmd == "/tools" or (cmd == "/help" and args):
             page = int(args[-1]) if args and args[-1].isdigit() else 1
@@ -833,11 +813,16 @@ class Agent:
         # 优先查注册表 (@slash_command 注册的指令; ::xxx 映射到 /xxx)
         reg_cmd = cmd if cmd.startswith("/") else "/" + cmd
         is_guest = getattr(msg, "is_guest", True)
-        perm_denied = _registry.check_permission(reg_cmd, is_guest)
+        cmd_reg = getattr(self, "command_registry", None)
+        registry = cmd_reg if cmd_reg is not None else _registry
+        perm_denied = registry.check_permission(reg_cmd, is_guest)
         if perm_denied:
             return AgentResponse(perm_denied, title="⚠️ 权限不足", color="red")
         try:
-            reg_resp = _registry_dispatch(reg_cmd, self, msg, args_list)
+            reg_resp = (
+                cmd_reg.dispatch(reg_cmd, self, msg, args_list)
+                if cmd_reg is not None else _registry_dispatch(reg_cmd, self, msg, args_list)
+            )
         except Exception as e:
             return AgentResponse(f"指令执行异常: {e}", title="❌ 错误", color="red")
         if reg_resp is not None:
@@ -910,15 +895,30 @@ class Agent:
         ]
         return any(kw in text for kw in keywords)
 
-    @staticmethod
-    def _matches_billing_workflow(config, text: str) -> bool:
-        """账单确定性工作流前置判定，与复杂任务关键词解耦。
+    def _matches_billing_workflow(self_or_config, *args) -> bool:
+        """确定性工作流前置判定，委托给通用 WorkflowRegistry。
 
-        IM 与流式入口共用：非访客请求先判专用流程，再走通用路由。
-        matches 只读取 config，不触网。
+        支持实例调用: agent._matches_billing_workflow(config, text)
+        支持类/静态调用: Agent._matches_billing_workflow(config, text)
         """
-        from core.billing_workflow import BillingWorkflow
-        return BillingWorkflow(config, None, None).matches(text)
+        from services.workflows import default_workflow_registry
+        if len(args) == 2:
+            self = self_or_config
+            config, text = args
+            wf_reg = getattr(self, "workflow_registry", None) or getattr(self, "_workflow_registry", None) or default_workflow_registry
+        elif len(args) == 1:
+            if isinstance(self_or_config, dict):
+                config = self_or_config
+                text = args[0]
+                wf_reg = default_workflow_registry
+            else:
+                self = self_or_config
+                text = args[0]
+                config = getattr(self, "_config", {})
+                wf_reg = getattr(self, "workflow_registry", None) or getattr(self, "_workflow_registry", None) or default_workflow_registry
+        else:
+            return False
+        return wf_reg.match(config, text) is not None
 
     def _extract_model_override(self, text: str):
         """Return a configured model key explicitly requested by the user.

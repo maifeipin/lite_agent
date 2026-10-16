@@ -14,7 +14,7 @@ import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
-from scripts import review_meeting as room
+from features.review_meeting import room
 
 INVITE_TTL_DEFAULT = 24 * 60 * 60
 INVITE_TTL_MIN = 5 * 60

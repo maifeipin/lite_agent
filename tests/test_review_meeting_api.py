@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from channels.api import ApiHandler
 from channels import api as api_module
-from core import review_meeting_api as access
+from features.review_meeting import api as access
 from scripts import review_meeting as room
 
 
@@ -36,12 +36,26 @@ class ReviewMeetingAPITests(unittest.TestCase):
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), QuietHandler)
         self.addCleanup(self.server.server_close)
+        from services.routes import RouteRegistry
+        from features import review_meeting
+        route_reg = RouteRegistry()
+        ctx = SimpleNamespace(
+            register_skill=lambda *a, **k: None,
+            register_command=lambda *a, **k: None,
+            register_route=lambda *a, **k: route_reg.register(*a, **k),
+            config={"guest_token": "guest-secret",
+                    "review_allow_legacy_invites": True,
+                    "review_meeting_base_url": f"http://127.0.0.1:{self.server.server_port}"},
+        )
+        review_meeting.register(ctx)
+
         self.server.api_server = SimpleNamespace(
             auth_token="admin-secret",
             config={"guest_token": "guest-secret",
                     "review_allow_legacy_invites": True,
                     "review_meeting_base_url": f"http://127.0.0.1:{self.server.server_port}"},
             port=self.server.server_port,
+            route_registry=route_reg,
         )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()

@@ -120,14 +120,14 @@ class TaskSpecService:
                  request_selector=None):
         self.config = config
         self.skill_engine = skill_engine
-        self.store = store or TaskSpecStore()
+        task_cfg = (config or {}).get("task_specs", {}) or {}
+        self.task_cfg = task_cfg
+        self.store = store or TaskSpecStore(db_path=task_cfg.get("db_path"))
         self.ledger = ledger
         self.router = ModelRouter(config)
         self.model_selector = ModelSelector(config)
         self.llm = LLMGateway(self.router, ledger)
         self.request_selector = request_selector
-        task_cfg = config.get("task_specs", {}) or {}
-        self.task_cfg = task_cfg
         routing = config.get("task_routing", {}) or {}
         llm = config.get("llm", {}) or {}
         self.author_model = task_cfg.get(

@@ -17,9 +17,15 @@
 import base64
 import os
 
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
-from cryptography.exceptions import InvalidSignature
+try:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+    from cryptography.exceptions import InvalidSignature
+except ImportError:
+    serialization = None
+    Ed25519PrivateKey = None
+    Ed25519PublicKey = None
+    InvalidSignature = Exception
 
 
 def _b64_wrap(pem_bytes: bytes) -> str:

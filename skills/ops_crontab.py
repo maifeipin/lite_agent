@@ -1,23 +1,15 @@
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.skill_engine import skill
-import subprocess
-import re
+from features.sys_ops import health_service
+
 
 @skill(
     name='ops_list_crontab',
     description='查看当前用户的 crontab 定时任务列表'
 )
 def ops_list_crontab() -> str:
-    try:
-        r = subprocess.run(['crontab', '-l'], capture_output=True, text=True, timeout=5)
-        if r.returncode != 0:
-            if "no crontab" in r.stderr.lower():
-                return '当前用户没有配置 crontab 定时任务'
-            return f'❌ 获取失败: {r.stderr.strip()}'
-        return r.stdout.strip()
-    except Exception as e:
-        return f'❌ 获取失败: {e}'
+    return health_service.ops_list_crontab()
 
 
 @skill(
@@ -36,42 +28,4 @@ def ops_list_crontab() -> str:
     }
 )
 def ops_run_script(script_path: str, args: str = '') -> str:
-    if not os.path.isabs(script_path):
-        return '❌ 拒绝访问: 请提供绝对路径'
-    if not os.path.exists(script_path):
-        return f'❌ 脚本不存在: {script_path}'
-    
-    ext = os.path.splitext(script_path)[1].lower()
-    if ext == '.sh':
-        cmd_list = ['bash', script_path]
-    elif ext == '.py':
-        cmd_list = ['python3', script_path]
-    else:
-        return f'❌ 安全拦截: 不支持的脚本类型 {ext}，仅支持执行 .sh 和 .py 脚本'
-    
-    import shlex
-    if args:
-        cmd_list.extend(shlex.split(args))
-    
-    try:
-        r = subprocess.run(cmd_list, capture_output=True, text=True, timeout=60)
-        output = r.stdout.strip()
-        stderr = r.stderr.strip()
-        
-        # 过滤掉 curl 的进度条噪音
-        if stderr:
-            filtered = []
-            for line in stderr.splitlines():
-                if re.match(r'^[\s\d:%\-a-zA-Z]+$', line) and ('Dload' in line or '% Total' in line):
-                    continue
-                filtered.append(line)
-            
-            if filtered:
-                output += f"\n\n[标准错误输出 stderr]:\n" + '\n'.join(filtered)
-                
-        return output or f"✅ 脚本执行完成，无输出内容 (退出码: {r.returncode})"
-    
-    except subprocess.TimeoutExpired:
-        return '❌ 脚本执行超时 (强制中断，超时时间 60s)'
-    except Exception as e:
-        return f'❌ 脚本执行失败: {e}'
+    return health_service.ops_run_script(script_path=script_path, args=args)

@@ -1,31 +1,25 @@
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.skill_engine import skill
+from features.billing import service as billing_service
+from features.billing.snapshot import build_snapshot, render_report
+
 from core.config_loader import load_config
-import subprocess
+from core.cron_engine import CronManager
 
-# 账单解析程序目录：从 config.json 的 billing.script_dir 读取，未配置时回退默认路径。
-# 路径由部署环境决定（如 vps1 用 /home/liteagent/mail-statement-parser），故放配置而非硬编码。
+# 向后兼容常量、配置与函数代理
 _cfg = load_config() or {}
-BILLING_SCRIPT_DIR = _cfg.get("billing", {}).get("script_dir", "/home/liteagent/mail-statement-parser")
-MAIL_CLIENT_PY = os.path.join(BILLING_SCRIPT_DIR, "mail_client.py")
+_mgr = CronManager()
+BILLING_SCRIPT_DIR = billing_service.get_billing_env()["script_dir"]
+MAIL_CLIENT_PY = billing_service.get_billing_env()["mail_client_py"]
+_run_billing_cmd = billing_service.run_billing_cmd
+_billing_health_cron = billing_service.billing_health_cron
 
-def _run_billing_cmd(cmd_args: list, timeout=60) -> str:
-    """内部通用函数：执行账单解析脚本"""
-    if not os.path.exists(MAIL_CLIENT_PY):
-        return f"❌ 找不到账单脚本: {MAIL_CLIENT_PY}，请确认账单解析程序是否在该目录。"
-        
-    cmd = ["python3", MAIL_CLIENT_PY] + cmd_args
-    try:
-        r = subprocess.run(cmd, cwd=BILLING_SCRIPT_DIR, capture_output=True, text=True, timeout=timeout)
-        output = r.stdout.strip()
-        if r.returncode != 0:
-            return f"⚠️ 账单脚本执行出错 (代码 {r.returncode}):\n{r.stderr.strip()}"
-        return output or "✅ 账单脚本执行成功，无额外输出。"
-    except subprocess.TimeoutExpired:
-        return f"❌ 账单脚本执行超时 (> {timeout}秒)"
-    except Exception as e:
-        return f"❌ 账单脚本调用失败: {e}"
+def _billing_fetch_cron():
+    res = billing_fetch(months=1)
+    print(f"[billing_fetch_cron] 自动同步账单结果: {res}")
+    return None
+
 
 @skill(
     name='billing_report',
@@ -39,7 +33,8 @@ def _run_billing_cmd(cmd_args: list, timeout=60) -> str:
     }
 )
 def billing_report(months: int = 3) -> str:
-    return _run_billing_cmd(["report", str(months)])
+    return billing_service.get_report(months=months)
+
 
 @skill(
     name='billing_due_soon',
@@ -58,7 +53,8 @@ def billing_report(months: int = 3) -> str:
     }
 )
 def billing_due_soon(months: int = 3, days: int = 7) -> str:
-    return _run_billing_cmd(["due_soon_bills", str(months), str(days)])
+    return billing_service.get_due_soon(months=months, days=days)
+
 
 @skill(
     name='billing_unpaid',
@@ -66,7 +62,8 @@ def billing_due_soon(months: int = 3, days: int = 7) -> str:
     params={}
 )
 def billing_unpaid() -> str:
-    return _run_billing_cmd(["unpaid"])
+    return billing_service.get_unpaid()
+
 
 @skill(
     name='billing_mark_paid',
@@ -80,21 +77,8 @@ def billing_unpaid() -> str:
     }
 )
 def billing_mark_paid(statement_id: int, confirmed: bool = False) -> str:
-    from integrations.mail.client import MailCLI
-    if not isinstance(statement_id, int) or isinstance(statement_id, bool) or statement_id <= 0:
-        return '❌ 必须提供已确认账单的正整数 ID'
-    if confirmed is not True:
-        return '❌ 请明确确认该账单已经还款；不会自动标记已还。'
-    try:
-        from features.billing.repayment_todo import confirm_repayment
-        settings = (load_config() or {}).get('billing') or {}
-        result = confirm_repayment(statement_id, confirmed=True, client=MailCLI(), db_path=settings.get('todo_db_path'))
-        if result.get('updated') is True or result.get('already_paid') is True:
-            return f'✅ 账单 #{statement_id} 已标记为已还款' + ('；还款提醒同步待重试，下一次账单同步将补齐。' if result.get('todo_sync') == 'retry_required' else '；对应还款待办已处理。')
-        return f'❌ 未找到可更新的账单 #{statement_id}'
-    except Exception as exc:
-        from core.utils.masker import mask_secrets
-        return '❌ 标记还款失败：' + mask_secrets(str(exc))
+    return billing_service.mark_paid(statement_id=statement_id, confirmed=confirmed)
+
 
 @skill(
     name='billing_reconcile',
@@ -113,7 +97,8 @@ def billing_mark_paid(statement_id: int, confirmed: bool = False) -> str:
     }
 )
 def billing_reconcile(months: int = 3, tolerance: float = 1.0) -> str:
-    return _run_billing_cmd(["reconcile", str(months), str(tolerance)])
+    return billing_service.reconcile(months=months, tolerance=tolerance)
+
 
 @skill(
     name='billing_recent',
@@ -127,17 +112,21 @@ def billing_reconcile(months: int = 3, tolerance: float = 1.0) -> str:
     }
 )
 def billing_recent(months: int = 3) -> str:
-    return _run_billing_cmd(["recent", str(months)])
+    return billing_service.get_recent(months=months)
 
 
-@skill(name='billing_snapshot', description='外币分析优先使用：读取权威账单快照，含分币种汇总、交易样例、原币金额/币种及来源、币种缺失与用途门禁。无需自行写 SQL；样例不是全量，UNKNOWN 不猜币种，境外位置不等于币种；只读',
-       params={'months': {'type': 'integer', 'default': 1},
-               'detail_limit': {'type': 'integer', 'default': 20}}, side_effect=False)
+@skill(
+    name='billing_snapshot',
+    description='外币分析优先使用：读取权威账单快照，含分币种汇总、交易样例、原币金额/币种及来源、币种缺失与用途门禁。无需自行写 SQL；样例不是全量，UNKNOWN 不猜币种，境外位置不等于币种；只读',
+    params={
+        'months': {'type': 'integer', 'default': 1},
+        'detail_limit': {'type': 'integer', 'default': 20}
+    },
+    side_effect=False
+)
 def billing_snapshot(months: int = 1, detail_limit: int = 20) -> str:
-    import json
-    from core.billing_snapshot import build_snapshot, model_evidence
-    path = _cfg.get('billing', {}).get('statement_db_path', os.path.join(BILLING_SCRIPT_DIR, 'statements.db'))
-    return json.dumps(model_evidence(build_snapshot(path, months, detail_limit)), ensure_ascii=False)
+    return billing_service.get_snapshot(months=months, detail_limit=detail_limit)
+
 
 @skill(
     name='billing_fetch',
@@ -157,57 +146,8 @@ def billing_snapshot(months: int = 1, detail_limit: int = 20) -> str:
     }
 )
 def billing_fetch(months: int = 1, account: str = '') -> str:
-    # 统一单次遍历流水线：下载归档 + 解析入库，并自动有上限消费落库的质量事件进入 Todo
-    from integrations.mail.sync_service import sync_and_consume
-    billing = _cfg.get("billing") or {}
-    stmt_db = billing.get("statement_db_path") or os.path.join(BILLING_SCRIPT_DIR, "statements.db")
-    res = sync_and_consume(
-        script_dir=BILLING_SCRIPT_DIR,
-        statement_db_path=stmt_db,
-        todo_db_path=billing.get("todo_db_path"),
-        months=months,
-        account=account or None
-    )
+    return billing_service.fetch_and_consume(months=months, account=account, cfg=_cfg)
 
-    lines = []
-    summary = res.get("summary")
-    fetch_errors = res.get("fetch_errors", [])
-    if summary and not fetch_errors:
-        accounts = summary.get("accounts", [])
-        lines.append(f"✅ 账单邮箱同步完成 ({len(accounts)} 个账户)")
-        for a in accounts:
-            name = a.get("account", "?")
-            lines.append(f"  - 账户 {name}: 状态 {a.get('status', 'ok')}, 新增 {a.get('new_bills', a.get('inserted', 0))} 封")
-    elif fetch_errors:
-        lines.append("⚠️ 账单邮箱同步存在异常:")
-        for err in fetch_errors:
-            lines.append(f"  - {err}")
-    else:
-        lines.append("✅ 账单邮箱同步执行完毕。")
-
-    # 质量事件与待办处理情况
-    q = res.get("quality_stats", {})
-    q_errors = q.get("errors", [])
-    if q.get("total", 0) > 0:
-        lines.append(
-            f"\n📋 质量事件与待办处理: 共扫描 {q.get('total')} 个事件 "
-            f"(新增待办 {q.get('created')}, 更新 {q.get('updated')}, 解决 {q.get('resolved')}, "
-            f"跳过出账 {q.get('skipped')}, 成功确认 {q.get('acked')})"
-        )
-    elif q.get("failed", 0) or q.get("failed_acks", 0) or q_errors:
-        lines.append("\n⚠️ 质量事件读取/确认失败，无法判断是否有待处理解析异常。")
-    else:
-        lines.append("\n📋 质量事件: 本轮未发现待处理事件（既有未完成 Todo 仍需处理）。")
-
-    if q.get("backlog_hit"):
-        lines.append("⚠️ 提示: 达到批次消费上限，仍有未确认质量事件积压，将在下次同步时继续处理。")
-    if q.get("failed", 0) > 0 or q.get("failed_acks", 0) > 0 or (q_errors and not q.get("backlog_hit")):
-        lines.append(f"⚠️ 待办处理异常: 写入失败 {q.get('failed', 0)} 笔, 确认失败 {q.get('failed_acks', 0)} 笔")
-        for q_err in q_errors[:3]:
-            lines.append(f"  - {q_err}")
-
-    from core.utils.masker import mask_secrets
-    return mask_secrets("\n".join(lines))
 
 @skill(
     name='billing_txns_over',
@@ -225,14 +165,8 @@ def billing_fetch(months: int = 1, account: str = '') -> str:
     }
 )
 def billing_txns_over(amount: float, months: int = 3) -> str:
-    args = ["txns_over", str(amount)]
-    if months > 0:
-        args.append(str(months))
-    return _run_billing_cmd(args)
+    return billing_service.get_txns_over(amount=amount, months=months)
 
-import sqlite3
-from datetime import datetime, timedelta
-from core.cron_engine import CronManager
 
 @skill(
     name="billing_parse_health",
@@ -243,69 +177,4 @@ from core.cron_engine import CronManager
     }
 )
 def billing_parse_health(threshold: float = 0.5, days: int = 30) -> str:
-    db_path = os.path.join(BILLING_SCRIPT_DIR, "statements.db")
-    if not os.path.exists(db_path):
-        return f"❌ 找不到数据库文件: {db_path}"
-    
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
-    cutoff_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-    
-    cursor.execute("""
-        SELECT bank_code, COUNT(*) as total, SUM(CASE WHEN total_due IS NULL THEN 1 ELSE 0 END) as null_count
-        FROM statements 
-        WHERE created_at > ?
-        GROUP BY bank_code
-    """, (cutoff_date,))
-    
-    rows = cursor.fetchall()
-    conn.close()
-    
-    if not rows:
-        return f"✅ 近 {days} 天无新账单入库，暂无解析异常。"
-        
-    lines = [f"📊 **账单解析健康度检查 (近 {days} 天)**\n"]
-    has_warning = False
-    
-    for row in rows:
-        bank, total, null_count = row
-        null_count = null_count or 0
-        ratio = null_count / total if total > 0 else 0
-        
-        status = "✅"
-        if ratio > threshold:
-            status = "⚠️"
-            has_warning = True
-            
-        lines.append(f"{status} **{bank}**: 总计 {total} 笔，NULL {null_count} 笔 (占比 {ratio*100:.1f}%)")
-        
-    if has_warning:
-        lines.append("\n⚠️ 发现解析异常！某些银行的 NULL 比例过高，可能是邮件模板格式发生变更导致正则失效，建议尽快排查。")
-    else:
-        lines.append("\n✅ 所有银行解析健康，未超出报警阈值。")
-        
-    return "\n".join(lines)
-
-def _billing_health_cron():
-    # 每周日跑 (0=周一, 6=周日)
-    if datetime.now().weekday() != 6:
-        return None
-    res = billing_parse_health(threshold=0.5, days=30)
-    # 只有存在告警才推送
-    if "⚠️" in res:
-        return res
-    return None
-
-def _billing_fetch_cron():
-    # 每日执行自动抓取，确保数据库账单状态最新
-    res = billing_fetch(months=1)
-    # 只打印到日志，不推送到通道
-    print(f"[billing_fetch_cron] 自动同步账单结果: {res}")
-    return None
-
-_mgr = CronManager()
-if not any(j.name == 'billing_parse_health_tick' for j in _mgr.jobs.values()):
-    _mgr.add_job('billing_parse_health_tick', '09:00', _billing_health_cron)
-if not any(j.name == 'billing_fetch_tick' for j in _mgr.jobs.values()):
-    _mgr.add_job('billing_fetch_tick', '03:00', _billing_fetch_cron)
+    return billing_service.check_parse_health(threshold=threshold, days=days)

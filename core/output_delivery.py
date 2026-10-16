@@ -8,11 +8,9 @@ configuration-driven and independent from model providers.
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import html as _html
-import importlib
 import os
 import re
 import sqlite3
-import sys
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -124,7 +122,6 @@ DEFAULT_CHANNEL_LIMITS = {
     "wechat": 2000,
 }
 VALID_FULL_DELIVERY = {"auto", "email", "hedgedoc", "sqlite", "inline"}
-_MAIL_CONFIG_LOCK = threading.Lock()
 
 
 def resolve_output_policy(config: dict, overrides: dict = None) -> dict:
@@ -205,81 +202,14 @@ def get_archived_output(archive_id: str, config: dict) -> Optional[dict]:
 
 
 def _send_email(text: str, config: dict, title: str = "") -> str:
-    """Reuse the deployed ops_mail account stack; return provider on success."""
-    output_cfg = config.get("output_delivery", {}) or {}
-    email_cfg = output_cfg.get("email", {}) or {}
-    if not email_cfg.get("enabled"):
-        return ""
-    recipient = str(email_cfg.get("recipient") or "").strip()
-    if not recipient:
-        return ""
-    script_dir = email_cfg.get("script_dir") or (
-        config.get("billing", {}) or {}
-    ).get("script_dir", "/home/liteagent/mail-statement-parser")
-    if not os.path.isfile(os.path.join(script_dir, "mail_client.py")):
-        return ""
-
-    if script_dir not in sys.path:
-        sys.path.insert(0, script_dir)
-    mail_client = importlib.import_module("mail_client")
-    mail_connect = importlib.import_module("mail_connect")
-    # The reused ops_mail module defines config candidates relative to its
-    # process cwd. Lite Agent runs from a different project directory, so make
-    # those candidates absolute without changing the process-wide cwd.
-    with _MAIL_CONFIG_LOCK:
-        original_candidates = getattr(mail_client, "CONFIG_CANDIDATES", None)
-        if isinstance(original_candidates, list):
-            mail_client.CONFIG_CANDIDATES = [
-                value if os.path.isabs(value) else os.path.join(script_dir, value)
-                for value in original_candidates
-            ]
-        try:
-            accounts = list(mail_client.load_accounts() or [])
-        except SystemExit:
-            print("  ⚠️ [OutputDelivery] 邮件账号配置加载失败")
-            return ""
-        finally:
-            if isinstance(original_candidates, list):
-                mail_client.CONFIG_CANDIDATES = original_candidates
-    provider_order = list(
-        email_cfg.get("provider_order") or ["qq", "163", "outlook", "gmail"]
+    """标准 SMTP 邮件发送（完全解耦外部 Parser，零 sys.path 污染）。"""
+    from integrations.smtp import send_email_delivery
+    return send_email_delivery(
+        text=text,
+        config=config,
+        title=title,
+        html_converter=_markdown_to_html,
     )
-    rank = {name: index for index, name in enumerate(provider_order)}
-    accounts.sort(key=lambda item: rank.get(item.get("provider"), len(rank)))
-    subject = f"{email_cfg.get('subject_prefix', '[Lite Agent 完整回复]')} {title}".strip()
-
-    last_error = None
-    for account in accounts:
-        provider = str(account.get("provider") or "unknown")
-        if provider not in rank:
-            continue
-        try:
-            if mail_connect.is_graph_api(account):
-                mail_connect.send_email_graph(account, recipient, subject, text)
-            else:
-                smtp = mail_connect.connect_smtp(account)
-                try:
-                    message = MIMEMultipart("alternative")
-                    message["From"] = account["account"]
-                    message["To"] = recipient
-                    message["Subject"] = subject
-                    message.attach(MIMEText(text, "plain", "utf-8"))
-                    message.attach(MIMEText(_markdown_to_html(text), "html", "utf-8"))
-                    smtp.send_message(message)
-                finally:
-                    try:
-                        smtp.quit()
-                    except Exception:
-                        # A teardown failure does not invalidate an accepted
-                        # message or justify sending it again via another account.
-                        pass
-            return provider
-        except Exception as exc:
-            last_error = exc
-            print(f"  ⚠️ [OutputDelivery] 邮件通道 {provider} 失败: {type(exc).__name__}")
-    if last_error:
-        print("  ⚠️ [OutputDelivery] 所有已配置邮件通道均发送失败")
-    return ""
 
 
 def _delivery_order(policy: dict) -> list[str]:

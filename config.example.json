@@ -107,11 +107,28 @@
     },
     "output_delivery": {
         "email": {
-            "_comment": "完整回复/账单报告的邮件投递。recipient 为收件人；发信账户取 mail-statement-parser 的 accounts 配置，按 provider_order 顺序尝试",
+            "_comment": "完整回复/交付物邮件外发。直接配置标准 SMTP 账户信息，或通过环境变量 LITE_AGENT_SMTP_* 配置，支持 provider_order 优先级尝试",
             "enabled": false,
-            "recipient": "",
-            "subject_prefix": "[Lite Agent 完整回复]"
+            "recipient": "your_email@example.com",
+            "subject_prefix": "[Lite Agent 完整回复]",
+            "provider_order": ["default_smtp"],
+            "host": "smtp.example.com",
+            "port": 465,
+            "username": "agent@example.com",
+            "password": "your_smtp_password_here",
+            "use_ssl": true
         }
+    },
+    "smtp": {
+        "_comment": "系统级标准 SMTP 发信配置 (零 Parser 外部依赖)。支持 465(SSL) 与 587(STARTTLS)",
+        "enabled": false,
+        "host": "smtp.example.com",
+        "port": 465,
+        "username": "agent@example.com",
+        "password": "your_smtp_password_here",
+        "use_ssl": true,
+        "recipient": "your_email@example.com",
+        "subject_prefix": "[Lite Agent]"
     },
     "edge": {
         "_comment": "Edge Sentinel 阶段二下行指令。密钥(EDGE_HOT_PRIV_KEY/EDGE_HOT_PUBKEY/EDGE_ROOT_PUBKEY)与 EDGE_TOKEN 均在 .env, 不在此处。whitelist 与边缘 /opt/edge_sentinel/whitelist.json 必须一致 (可参考 edge_node/whitelist.json)。",

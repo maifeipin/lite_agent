@@ -21,8 +21,9 @@ Python 3.9 兼容: 禁止裸写 list[str] / X | None (PEP 585/604 均为 3.10+)�
 
 import os
 import re
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 # ---------------------------------------------------------------------------
 # 漏选检测信号 (设计 3.3；接入 agent.py DONE 分支属 Phase 1/2)
@@ -98,139 +99,7 @@ def detect_miss(result: Optional["SelectionResult"], raw_content: str,
 #                         同族动作 pattern 必须互斥: 具体规则在前 + 通用规则负向断言）
 # ---------------------------------------------------------------------------
 
-DOMAIN_MAP: Dict[str, Dict] = {
-    "mail": {
-        "pattern": r"(邮件|邮箱|收件箱|mail|inbox)",
-        "default_tools": [
-            "mail_list", "mail_headers",
-            "mail_missed", "mail_search", "mail_stats",
-        ],
-        "explicit_intent_tools": [
-            # v5: mail_fetch_summaries 抓取邮件+账单入库+LLM 摘要（耗时且有数据变更），从 default 移入
-            "mail_fetch_summaries", "mail_fetch_only", "mail_llm_enrich",
-            "mail_view_original", "mail_reprocess", "backfill_bodies",
-        ],
-        "explicit_patterns": r"(拉取|抓取|重新处理|重新解析|回填|补全|ocr|识别|摘要)",
-        # v7 P2-1 互斥修正——具体规则在前 + 负向后行断言，
-        # "只抓取邮件"/"仅拉取邮件"不再同时命中通用规则（fetch_only 与 fetch_summaries 二选一）
-        "explicit_routes": [
-            (r"仅拉取|只抓取|只拉取", ["mail_fetch_only"]),
-            (r"抓取.*摘要|拉取.*摘要|摘要.*邮件|(?<!只)(?<!仅)抓取邮件|(?<!只)(?<!仅)拉取邮件",
-             ["mail_fetch_summaries"]),
-            (r"重新处理|重新解析", ["mail_reprocess"]),
-            (r"回填|补全", ["backfill_bodies"]),
-        ],
-    },
-    "billing": {
-        "pattern": r"([账帐]单|外币|原币|汇率|bill|invoice|还款|信用卡|交易|流水|对账|大额)",
-        "default_tools": [
-            "billing_report", "billing_due_soon", "billing_unpaid",
-            "billing_reconcile", "billing_recent",
-            "billing_snapshot",
-            "billing_txns_over", "billing_parse_health",
-        ],
-        "explicit_intent_tools": [
-            "billing_mark_paid", "billing_fetch",
-        ],
-        "explicit_patterns": r"(标记.*已还|拉取|下载[账帐]单|同步[账帐]单|更新[账帐]单)",
-    },
-    "todo": {
-        "pattern": r"(待办|todo|提醒|延期|搁置)",
-        "default_tools": [
-            "todo_list", "todo_get",
-        ],
-        "explicit_intent_tools": [
-            # v5: todo_push_brief 向 IM 频道推送（外部推送副作用），从 default 移入
-            "todo_push_brief",
-            "todo_add", "todo_start", "todo_done", "todo_drop",
-            "todo_snooze", "todo_shelve", "todo_resume",
-            "todo_update", "todo_dispatch",
-        ],
-        # 实施修正: "标记完成"→"标记.*完成"——验收 #6/#16 的"标记这个待办为完成"
-        # 非连续命中原 pattern，与 explicit_routes 的 r"标记.*完成" 语义对齐
-        "explicit_patterns": r"(添加|新建|标记.*完成|标记.*延期|搁置|恢复|更新|派发|删除|放弃|推送)",
-        # v6 P1-2：动作级路由——命中后只注入对应子集，而非全量 explicit_intent_tools。
-        # 避免"标记完成"一次注入 9 个写工具，也保证 max_tools 裁剪优先保留明确命中的动作。
-        "explicit_routes": [
-            (r"标记.*完成|完成.*待办", ["todo_done"]),
-            (r"删除|放弃", ["todo_drop"]),
-            (r"推送|简报", ["todo_push_brief"]),
-            (r"添加|新建", ["todo_add"]),
-            (r"延期|搁置", ["todo_snooze", "todo_shelve"]),
-        ],
-        # 兜底：命中 explicit_patterns 但未命中任何 explicit_routes 时，仍注入全量 explicit_intent_tools
-        #（保持 v5 行为，防止动作词改写漏给）
-    },
-    "socks5": {
-        "pattern": r"(代理|socks5|节点|出站)",
-        "default_tools": [
-            "socks5_list", "socks5_get_active",
-            "socks5_test", "socks5_test_outbound",
-        ],
-        "explicit_intent_tools": [
-            "socks5_add", "socks5_update", "socks5_delete",
-            "socks5_set_active",
-        ],
-        "explicit_patterns": r"(添加|新增|删除|切换|设为.*主节点|更新.*节点)",
-    },
-    "security": {
-        "pattern": r"(巡检|安全扫描|入侵|爆破|基线|漂移|审计)",
-        "default_tools": [
-            # v5: sentinel_scan 留在 default——findings 落盘属于审计记录（允许的内部副作用）
-            "sentinel_scan", "sentinel_findings",
-            "fleet_audit", "ops_security_audit",
-            "edge_health", "edge_query",
-        ],
-        "explicit_intent_tools": [
-            "sentinel_baseline", "edge_cmd", "edge_sweep",
-        ],
-        "explicit_patterns": r"(刷新基线|接受基线|下发命令|清理)",
-    },
-    "gaokao": {
-        "pattern": r"(高考|位次|志愿|录取|院校|专业)",
-        "default_tools": [
-            "gaokao_score_rank", "gaokao_school_admission",
-            "gaokao_major_admission", "gaokao_recommend",
-            "gaokao_school_info", "gaokao_sql", "gaokao_stats",
-        ],
-        "explicit_intent_tools": [],
-        "explicit_patterns": None,
-    },
-    "web": {
-        "pattern": r"(网页|剪藏|全网搜|联网搜索|网上搜索|http://|https://|剪藏.*链接)",
-        "default_tools": [
-            # v5: web_clip 留在 default——抓取用户显式给出的 URL 并交付 Markdown 属查询意图，
-            # 缓存与 HedgeDoc 投递（>2500 字自动）属结果交付机制，不改变业务系统状态
-            "web_search", "web_clip", "ops_web_fetch",
-        ],
-        "explicit_intent_tools": [
-            "hedgedoc_upload", "ops_workspace_run",
-        ],
-        "explicit_patterns": r"(上传到\s*hedgedoc|写入|保存到)",
-    },
-    "blog": {
-        "pattern": r"(博客|halo)",
-        "default_tools": [
-            "blog_list_articles",
-        ],
-        "explicit_intent_tools": [
-            # v4 从 read 移入（导出落盘）；v5 重命名并按"导出=显式交付意图"归入 explicit_intent_tools
-            "blog_export_articles",
-            "blog_publish_article",
-        ],
-        "explicit_patterns": r"(发布|发表|更新文章|导出|导出文章)",
-    },
-    "backup": {
-        "pattern": r"(备份|网盘|百度网盘|bypy)",
-        "default_tools": [
-            "bypy_info",
-        ],
-        "explicit_intent_tools": [
-            "bypy_mkdir", "bypy_syncup", "bypy_syncdown",
-            "ops_backup_data", "ops_backup_cloud",
-        ],
-        "explicit_patterns": r"(同步|备份|创建目录|上传|下载)",
-    },
+CORE_DOMAIN_MAP: Dict[str, Dict] = {
     "system": {
         "pattern": r"(系统状态|负载|内存|磁盘|日志|进程|crontab|定时任务)",
         "default_tools": [
@@ -242,14 +111,6 @@ DOMAIN_MAP: Dict[str, Dict] = {
         ],
         "explicit_patterns": r"(执行|运行|跑一下)",
     },
-    "media": {
-        "pattern": r"(音乐|歌曲|媒体库|封面|重复歌曲)",
-        "default_tools": [
-            "ops_media_music_stats", "ops_media_music_duplicates",
-        ],
-        "explicit_intent_tools": [],
-        "explicit_patterns": None,
-    },
     "llm": {
         "pattern": r"(模型余额|API费用|token用量|模型消耗|大模型消耗)",
         "default_tools": [
@@ -258,34 +119,21 @@ DOMAIN_MAP: Dict[str, Dict] = {
         "explicit_intent_tools": [],
         "explicit_patterns": None,
     },
-    "decision": {
-        "pattern": r"(多模型评判|评判委员会|委员会评估|委员会决策)",
-        "default_tools": [],
-        "explicit_intent_tools": ["ops_decision"],
-        "explicit_patterns": r"(多模型评判|评判委员会|委员会评估|委员会决策)",
-    },
-    "review_meeting": {
-        "pattern": r"(会审|评审会议|评审会|review[_ -]?meeting)",
-        "default_tools": ["ops_review_meeting_status", "ops_review_meeting_show"],
-        "explicit_intent_tools": [
-            "ops_review_meeting_join", "ops_review_meeting_leave",
-            "ops_review_meeting_submit", "ops_review_meeting_comment",
-        ],
-        "explicit_patterns": r"(入会|加入|#invite=|离会|退出|提交|发言|评论|回复|补充)",
-        "explicit_routes": [
-            (r"入会|加入|#invite=", ["ops_review_meeting_join"]),
-            (r"离会|退出", ["ops_review_meeting_leave"]),
-            (r"提交.*(?:意见|评审)|(?<!补充)发言", ["ops_review_meeting_submit"]),
-            (r"评论|回复|补充", ["ops_review_meeting_comment"]),
-        ],
-    },
-    "rss_search": {
-        "pattern": r"(RSS节点|RSS订阅|Meilisearch|Meili索引)",
-        "default_tools": ["ops_rss_node_status"],
-        "explicit_intent_tools": ["sync_meili"],
-        "explicit_patterns": r"(同步|重建.*索引|更新.*索引)",
-    },
 }
+
+# 全局领域映射字典（默认只包含内核核心通用领域；业务领域由各 features 插件装配时注册）
+DOMAIN_MAP: Dict[str, Dict] = dict(CORE_DOMAIN_MAP)
+
+
+def register_domain(domain_name: str, domain_spec: Dict[str, Any]) -> None:
+    """向全局 DOMAIN_MAP 注册业务领域（由插件装配或测试初始化注入）。"""
+    DOMAIN_MAP[domain_name] = domain_spec
+
+
+def unregister_domain(domain_name: str) -> None:
+    """从全局 DOMAIN_MAP 注销业务领域。"""
+    DOMAIN_MAP.pop(domain_name, None)
+
 
 
 # ---------------------------------------------------------------------------
@@ -307,15 +155,37 @@ class RequestSelector:
     __init__ 内完成启动校验: DOMAIN_MAP 引用有效性 + 未映射技能可见 (设计 3.6)。
     """
 
-    def __init__(self, skill_engine):
+    def __init__(self, skill_engine, domain_map: Optional[Dict[str, Dict]] = None):
         self.engine = skill_engine
         self._registered = skill_engine.get_all_names()
         self._miss_count = 0
+        self.domain_map = deepcopy(domain_map if domain_map is not None else DOMAIN_MAP)
+        self._rebuild_cache()
 
-        # 校验 1: DOMAIN_MAP 引用了不存在的技能
+    def register_domain(self, domain: str, cfg: Dict[str, Any]) -> None:
+        """动态注册业务领域（由插件装配或测试注入）。"""
+        if domain in self.domain_map:
+            raise ValueError(f"领域已登记，禁止覆盖: {domain}")
+        old_cache = self._name_to_domain
+        self.domain_map[domain] = deepcopy(cfg)
+        try:
+            self._rebuild_cache()
+        except Exception:
+            self.domain_map.pop(domain, None)
+            self._name_to_domain = old_cache
+            raise
+
+    def unregister_domain(self, domain: str) -> None:
+        """动态注销业务领域。"""
+        self.domain_map.pop(domain, None)
+        self._rebuild_cache()
+
+    def _rebuild_cache(self) -> None:
+        self._registered = self.engine.get_all_names()
+        # 校验 1: domain_map 引用了不存在的技能
         mapped = set()
         unmapped_refs = []
-        for domain, cfg in DOMAIN_MAP.items():
+        for domain, cfg in self.domain_map.items():
             for name in cfg.get("default_tools", []) + cfg.get("explicit_intent_tools", []):
                 mapped.add(name)
                 if name not in self._registered:
@@ -335,7 +205,7 @@ class RequestSelector:
 
         # name -> domain 反查表（用于 tool_calls 反推与 miss 分析）
         self._name_to_domain: Dict[str, str] = {}
-        for domain, cfg in DOMAIN_MAP.items():
+        for domain, cfg in self.domain_map.items():
             for name in cfg.get("default_tools", []) + cfg.get("explicit_intent_tools", []):
                 self._name_to_domain[name] = domain
 
@@ -376,10 +246,10 @@ class RequestSelector:
     # ------------------------------------------------------------------
 
     def _match_domains(self, text: str) -> List[str]:
-        """按 DOMAIN_MAP 声明顺序返回命中领域（即命中优先级顺序）。"""
+        """按 self.domain_map 声明顺序返回命中领域（即命中优先级顺序）。"""
         text = text or ""
-        return [d for d, cfg in DOMAIN_MAP.items()
-                if cfg["pattern"] and re.search(cfg["pattern"], text)]
+        return [d for d, cfg in self.domain_map.items()
+                if cfg.get("pattern") and re.search(cfg["pattern"], text)]
 
     def _domains_from_tool_calls(self, tool_calls) -> List[str]:
         """由 assistant 消息的 tool_calls 反推领域（设计 3.4 步骤 2）。"""
@@ -417,9 +287,13 @@ class RequestSelector:
                     return False
                 # v7 P2-2 domain 相关性：只认本 domain 的 pattern / explicit_patterns
                 #（explicit_patterns 为 None 的域用永不匹配的 r"$^"）
-                domain_hit = any(re.search(DOMAIN_MAP[d]["pattern"], c) for d in domains)
+                domain_hit = any(
+                    self.domain_map.get(d, {}).get("pattern") and
+                    re.search(self.domain_map[d]["pattern"], c)
+                    for d in domains
+                )
                 domain_action_hit = any(
-                    re.search(DOMAIN_MAP[d].get("explicit_patterns") or r"$^", c)
+                    re.search(self.domain_map.get(d, {}).get("explicit_patterns") or r"$^", c)
                     for d in domains
                 )
                 return bool(domain_hit or domain_action_hit)
@@ -478,7 +352,7 @@ class RequestSelector:
         action_names: List[str] = []      # v6 P1-2：explicit_routes 明确命中的动作工具，最高优先级
         other_explicit: List[str] = []    # 兜底 explicit_intent_tools（未走 routes 的域）
         for d in domains:                                  # domains 按命中优先级排序
-            cfg = DOMAIN_MAP[d]
+            cfg = self.domain_map[d]
             default_names += cfg["default_tools"]
             ep = cfg.get("explicit_patterns")
             # 写意图唯一来源 = write_scope_text（3.4 写意图继承）:
@@ -487,10 +361,8 @@ class RequestSelector:
             if ep and write_scope_text and re.search(ep, write_scope_text):
                 explicit_matched = True
                 routes = cfg.get("explicit_routes")
-                # v7 P2-1 匹配语义（写死）：routes 允许多匹配——不同 route 代表正交动作
-                # （如"抓取摘要并回填"应同时得到两个动作工具）；但同族动作（如
-                # mail_fetch_only / mail_fetch_summaries）必须通过互斥 pattern 保证只命中
-                # 一个：具体规则排在前面 + 通用规则用负向后行断言排除细分词。
+                # v7 P2-1 匹配语义（写死）：routes 允许多匹配——不同 route 代表正交动作；
+                # 但同族动作必须通过互斥 pattern 保证只命中一个：具体规则排在前面 + 通用规则用负向后行断言排除细分词。
                 if routes:
                     routed = False
                     for pat, tools in routes:

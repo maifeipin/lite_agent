@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from core.agent_runtime import AgentRuntime, RuntimeEventType
-from core.billing_workflow import BillingWorkflow
+from features.billing.workflow import BillingWorkflow
 from integrations.mail.client import MailCLI
 from features.billing.sync_service import sync_and_consume
 from tests.test_agent_runtime import _make_ctx, _make_sync_result

@@ -5,7 +5,7 @@ import uuid
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor, wait
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from core.model_router import ModelRouter
 from core.model_policy import ExecutionPolicy, ModelLock, ModelSelector
@@ -81,12 +81,14 @@ class TaskOrchestrator:
 
     def __init__(self, config: dict, skill_engine: SkillEngine,
                  session_mgr, channels: list = None,
-                 ledger: Optional[ExecutionLedger] = None):
+                 ledger: Optional[ExecutionLedger] = None,
+                 workflow_registry: Optional[Any] = None):
         self.config = config
         self.router = ModelRouter(config)
         self.skill_engine = skill_engine
         self.session_mgr = session_mgr
         self.channels = channels or []
+        self.workflow_registry = workflow_registry
         # 共享执行账本 (旁路, 不阻断主流程)
         # TaskOrchestrator 创建父 execution，所有 Worker 子任务挂载其下
         self.ledger = ledger
@@ -113,16 +115,19 @@ class TaskOrchestrator:
     #  Phase 1: 拆解
     # ==================================================================
     def execute_result(self, goal, session_key, output_mode="", **kwargs):
-        from core.billing_workflow import BillingWorkflow
-        workflow = BillingWorkflow(self.config, self.router, self.ledger)
-        if workflow.matches(goal) and not kwargs.get('planned_subtasks'):
-            result = workflow.run(goal, session_key, kwargs.get('execution_policy'),
-                                  output_mode=output_mode)
-            self.session_mgr.save_subtask_dag(session_key, kwargs.get('task_id') or uuid.uuid4().hex[:8],
-                json.dumps({'workflow': 'billing', 'status': result.status,
-                            'final_result': result.content, 'usage': result.usage,
-                            'delivery': result.delivery}, ensure_ascii=False), "delivering")
-            return result
+        from services.workflows import default_workflow_registry
+        wf_registry = getattr(self, "workflow_registry", None) or default_workflow_registry
+        wf_name = wf_registry.match(self.config, goal)
+        if wf_name and not kwargs.get('planned_subtasks'):
+            workflow = wf_registry.create(wf_name, self.config, self.router, self.ledger)
+            if workflow:
+                result = workflow.run(goal, session_key, kwargs.get('execution_policy'),
+                                      output_mode=output_mode)
+                self.session_mgr.save_subtask_dag(session_key, kwargs.get('task_id') or uuid.uuid4().hex[:8],
+                    json.dumps({'workflow': wf_name, 'status': result.status,
+                                'final_result': result.content, 'usage': result.usage,
+                                'delivery': result.delivery}, ensure_ascii=False), "delivering")
+                return result
         self.last_result = None
         self._shared_delivery_pending = True
         try:

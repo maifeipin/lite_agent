@@ -141,10 +141,11 @@ class SkillEngine:
             from core.constants import PROJECT_ROOT
             skills_dir = os.path.join(PROJECT_ROOT, "skills")
         self.skills_dir = skills_dir
+        self._isolated_tools = tools is not None
         if tools is not None:
             self._instance_registry = dict(tools)
         else:
-            self._instance_registry = None
+            self._instance_registry = dict(_skill_registry)
             if auto_load:
                 self._load_skills()
 
@@ -157,7 +158,9 @@ class SkillEngine:
     def register_tool(self, name: str, tool_def: Dict[str, Any]) -> None:
         """向本实例显式登记工具，不污染其它实例。"""
         if self._instance_registry is None:
-            self._instance_registry = dict(_skill_registry)
+            self._instance_registry = {}
+        if name in self._instance_registry:
+            raise ValueError(f"工具已存在，禁止重复登记: {name}")
         self._instance_registry[name] = tool_def
 
     def unregister_tool(self, name: str) -> bool:
@@ -165,6 +168,17 @@ class SkillEngine:
         if self._instance_registry is None:
             self._instance_registry = dict(_skill_registry)
         return self._instance_registry.pop(name, None) is not None
+
+    def get_tool(self, name: str) -> Optional[Dict[str, Any]]:
+        """获取指定名称的工具定义，未找到返回 None。"""
+        return self._registry.get(name)
+
+    def clear(self) -> None:
+        """清空本实例注册的所有工具。"""
+        if self._instance_registry is not None:
+            self._instance_registry.clear()
+        else:
+            self._instance_registry = {}
 
     def _load_skills(self):
         """扫描 skills/ 目录，自动导入所有技能模块"""

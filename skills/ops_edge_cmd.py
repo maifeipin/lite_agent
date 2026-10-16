@@ -1,35 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Edge Sentinel 阶段二: 远程只读命令下发 skill (中枢侧 agent 入口)。
-
-设计见 implementation_plan_phase2.md §4.A4。不硬编码检查项 —— agent 自由传
-白名单内 cmd, skill 负责白名单预校验 → 热私钥签名 → 插入 edge_tasks(pending)
-→ 同步等待结果 30s, 超时则返回异步提示 (边缘靠 cron 5min 拉取, 非长连接)。
-
-节点: vps2 / vps3 / bwg / oracle1 / vps5
-白名单: config.json 的 edge.whitelist (默认见 edge_whitelist.DEFAULT_WHITELIST)
-高危命令 (白名单外, 如需管道): 管理员本地用根私钥离线签名, 经 POST /api/edge_task 上传。
-"""
-import hashlib
-import os
-import sys
-import time
-import uuid
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+"""Edge Sentinel 阶段二: 远程只读命令下发 skill (薄入口)"""
 
 from core.skill_engine import skill
-from core.config_loader import load_config
-from edge_node import edge_crypto
-from core import edge_db
-from edge_node import edge_whitelist
+from features.network_ops import edge_service
 
-_cfg = load_config() or {}
-_edge_cfg = _cfg.get("edge", {})
-_fleet_cfg = _cfg.get("fleet", {})
-_whitelist = _edge_cfg.get("whitelist") or edge_whitelist.DEFAULT_WHITELIST
-_sync_wait_sec = int(_fleet_cfg.get("sync_wait_sec", 70))
-_NODES = _fleet_cfg.get("nodes", [])
+_NODES = edge_service._get_edge_context()["nodes"]
 
 
 @skill(
@@ -54,47 +30,7 @@ _NODES = _fleet_cfg.get("nodes", [])
     tags=['security', 'sysadmin'],
 )
 def edge_cmd(node: str, cmd: str) -> str:
-    node = (node or '').strip()
-    cmd = (cmd or '').strip()
-    if node not in _NODES:
-        return f"❌ 未知节点 '{node}'。可选: {', '.join(_NODES)}"
-    if not cmd:
-        return "❌ cmd 不能为空"
-
-    hot_priv = os.environ.get("EDGE_HOT_PRIV_KEY", "")
-    if not hot_priv:
-        return "❌ EDGE_HOT_PRIV_KEY 未配置 (vps1 .env), 无法签名下发。"
-
-    # 1. 白名单预校验 (中枢侧提前拒绝, 避免下发无意义任务; 边缘仍会做最终校验)
-    ok, reason = edge_whitelist.validate_cmd(cmd, _whitelist)
-    if not ok:
-        return (
-            f"❌ 命令被白名单拒绝: {reason}\n"
-            f"仅白名单内只读命令允许热私钥下发。高危/管道命令需根私钥离线签名后经 /api/edge_task 上传。"
-        )
-
-    # 2. 生成 task_id / nonce(不可变, hash(task_id)) / ts / 签名
-    task_id = uuid.uuid4().hex
-    nonce = hashlib.sha256(task_id.encode()).hexdigest()[:16]
-    ts = str(int(time.time()))
-    try:
-        sig = edge_crypto.sign_task(cmd, ts, nonce, hot_priv)
-    except Exception as e:
-        return f"❌ 签名失败: {e}"
-    edge_db.create_task(task_id, node, cmd, ts, nonce, sig, "hot")
-
-    # 3. 同步等待结果 (边缘靠 cron 5min 拉取, 多数情况会超时走异步)
-    deadline = time.time() + _sync_wait_sec
-    while time.time() < deadline:
-        t = edge_db.get_task(task_id)
-        if t and t["status"] in ("done", "failed"):
-            return edge_db.task_result_text(task_id)
-        time.sleep(1)
-
-    return (
-        f"⏳ 命令已签名下发到 {node}, 等待边缘节点下次 cron 拉取执行 (task_id={task_id})。\n"
-        f"边缘每 5 分钟拉取一次, 稍后用 edge_query(task_id='{task_id}') 查询结果。"
-    )
+    return edge_service.edge_cmd(node=node, cmd=cmd)
 
 
 @skill(
@@ -109,10 +45,7 @@ def edge_cmd(node: str, cmd: str) -> str:
     tags=['security', 'sysadmin'],
 )
 def edge_query(task_id: str) -> str:
-    task_id = (task_id or '').strip()
-    if not task_id:
-        return "❌ task_id 不能为空"
-    return edge_db.task_result_text(task_id)
+    return edge_service.edge_query(task_id=task_id)
 
 
 @skill(
@@ -122,32 +55,4 @@ def edge_query(task_id: str) -> str:
     tags=['system']
 )
 def edge_sweep() -> str:
-    from datetime import datetime
-    retransmit_timeout_sec = _fleet_cfg.get("retransmit_timeout_sec", 120)
-    max_retries = _fleet_cfg.get("max_retries", 2)
-    hot_priv = os.environ.get("EDGE_HOT_PRIV_KEY", "")
-    
-    if not hot_priv:
-        return "❌ 无法执行 edge_sweep: 缺失 EDGE_HOT_PRIV_KEY"
-
-    stuck_tasks = edge_db.get_stuck_tasks(retransmit_timeout_sec)
-    if not stuck_tasks:
-        return ""
-        
-    retransmitted = 0
-    lost = 0
-    for task in stuck_tasks:
-        ts = str(int(time.time()))
-        sig = edge_crypto.sign_task(task["cmd"], ts, task["nonce"], hot_priv)
-        if edge_db.update_retransmitted_task(task["id"], ts, sig, max_retries):
-            retransmitted += 1
-        else:
-            lost += 1
-            
-    summary = []
-    if retransmitted > 0:
-        summary.append(f"✅ 成功重签并重传 {retransmitted} 个超时任务。")
-    if lost > 0:
-        summary.append(f"❌ {lost} 个任务重传超限，已标记为节点失联。")
-        
-    return "\n".join(summary)
+    return edge_service.edge_sweep()

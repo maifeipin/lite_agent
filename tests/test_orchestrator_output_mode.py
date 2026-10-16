@@ -3,12 +3,22 @@ from unittest.mock import Mock, patch
 import pytest
 from core.task_orchestrator import TaskOrchestrator
 from core.task_result import TaskResult
+from features.billing.workflow import BillingWorkflow
+from services.workflows import default_workflow_registry
+
+if "billing" not in default_workflow_registry._workflows:
+    default_workflow_registry.register(
+        "billing",
+        factory=lambda cfg, router, ledger: BillingWorkflow(cfg, router, ledger),
+        matcher=lambda cfg, text: BillingWorkflow(cfg, None, None).matches(text),
+    )
 
 
 def orchestrator():
     orch=TaskOrchestrator.__new__(TaskOrchestrator)
     orch.config={'task_routing':{'billing_workflow':{'enabled':True}}}
     orch.router=Mock();orch.ledger=Mock();orch.session_mgr=Mock()
+    orch.workflow_registry=default_workflow_registry
     return orch
 
 
@@ -28,7 +38,7 @@ def test_generic_execute_uses_real_signature_and_excludes_delivery_option(mode):
 def test_billing_branch_keeps_delivery_option(mode):
     orch=orchestrator()
     expected=TaskResult('succeeded','billing result')
-    with patch('core.billing_workflow.BillingWorkflow.run',return_value=expected) as run, patch.object(orch,'execute',autospec=True) as execute:
+    with patch('features.billing.workflow.BillingWorkflow.run',return_value=expected) as run, patch.object(orch,'execute',autospec=True) as execute:
         result=orch.execute_result('拉取最新账单并分析到邮箱','session',output_mode=mode,task_id='bill')
     run.assert_called_once_with('拉取最新账单并分析到邮箱','session',None,output_mode=mode)
     execute.assert_not_called()

@@ -17,12 +17,15 @@ class CommandRegistry:
                  description: str = '',
                  show_in_dashboard: bool = False,
                  admin_only: bool = False,
-                 guest_ok: bool = True):
+                 guest_ok: bool = True,
+                 **kwargs):
         """注册一个 slash 指令。
         handler 签名: handler(agent, msg, args) -> str | AgentResponse
         admin_only / guest_ok=False 均表示需要管理员权限。
         """
-        self._commands[name] = {
+        if name in self._commands:
+            raise ValueError(f"指令已存在，禁止重复注册: {name}")
+        entry = {
             'handler': handler,
             'category': category,
             'description': description,
@@ -30,6 +33,8 @@ class CommandRegistry:
             'admin_only': admin_only,
             'guest_ok': guest_ok,
         }
+        entry.update(kwargs)
+        self._commands[name] = entry
 
     def unregister(self, name: str) -> bool:
         """注销指定指令。用于插件卸载或测试隔离。"""

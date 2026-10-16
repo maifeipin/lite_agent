@@ -13,16 +13,43 @@ FULL_MODE_PLUGINS: List[Dict[str, Any]] = [
     {
         "name": "billing",
         "entry": "features.billing",
-        "description": "账单工作流、证据展示与提醒策略",
+        "description": "账单确定性工作流、报表与提醒",
+        "dependencies": [],
     },
     {
         "name": "todo",
         "entry": "features.todo",
-        "description": "待办生命周期、仓储与周期提醒",
+        "description": "待办事项全生命周期、仓储与周期提醒",
+        "dependencies": [],
     },
     {
         "name": "review_meeting",
         "entry": "features.review_meeting",
-        "description": "评审会议状态、授权与通知",
+        "description": "会审决策系统状态机、授权与出箱",
+        "dependencies": [],
+    },
+    {
+        "name": "mail_ops",
+        "entry": "features.mail_ops",
+        "description": "邮件抓取、LLM摘要打标与检索",
+        "dependencies": [],
+    },
+    {
+        "name": "sys_ops",
+        "entry": "features.sys_ops",
+        "description": "系统健康自检、备份、日志与安全巡检",
+        "dependencies": [],
+    },
+    {
+        "name": "network_ops",
+        "entry": "features.network_ops",
+        "description": "Socks5代理管理与Edge边缘节点网络调度",
+        "dependencies": [],
+    },
+    {
+        "name": "content_ops",
+        "entry": "features.content_ops",
+        "description": "RSS订阅早报、网页剪藏、搜索与知识归档",
+        "dependencies": [],
     },
 ]

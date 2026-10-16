@@ -4,8 +4,8 @@ import sqlite3
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from core.billing_snapshot import build_snapshot, decimal_amount, render_report
-from core.billing_workflow import BillingWorkflow, _parse_json_summary
+from features.billing.snapshot import build_snapshot, decimal_amount, render_report
+from features.billing.workflow import BillingWorkflow, _parse_json_summary
 from core.execution_budget import ExecutionBudget, BudgetAdmissionError
 from core.llm_gateway import LLMGateway
 from core.output_delivery import prepare_channel_output
@@ -17,6 +17,14 @@ from core.task_orchestrator import TaskOrchestrator
 from core.model_policy import ExecutionPolicy
 import threading
 import pytest
+from services.workflows import default_workflow_registry
+
+if "billing" not in default_workflow_registry._workflows:
+    default_workflow_registry.register(
+        "billing",
+        factory=lambda cfg, router, ledger: BillingWorkflow(cfg, router, ledger),
+        matcher=lambda cfg, text: BillingWorkflow(cfg, None, None).matches(text),
+    )
 
 
 @pytest.fixture
@@ -302,7 +310,7 @@ def test_stream_parses_output_mode_before_routing_like_im():
     from agent import Agent
     src = inspect.getsource(Agent.handle_stream)
     assert src.index('_extract_output_mode') < src.index('_matches_billing_workflow')
-    from core.billing_workflow import BillingWorkflow as BW
+    from features.billing.workflow import BillingWorkflow as BW
     wf = BW({'task_routing': {'billing_workflow': {'enabled': True}}}, MagicMock())
     # 指令剥离后, 带不带 [output=...] 分流结论一致
     for body, expected in [

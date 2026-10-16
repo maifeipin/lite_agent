@@ -1,122 +1,34 @@
 #!/usr/bin/env python3
-"""邮件搜索技能 - /search [replytype] <keyword>
+"""邮件搜索技能 - /search [replytype] <keyword> (薄入口)"""
 
-replytype: 0=截断摘要(默认), 1=分批(待实现), 2=上传HedgeDoc+链接
-搜 email_bodies 正文库(Phase 2 已存),不连邮箱,毫秒级。
-"""
-import os
-from datetime import datetime
 from core.skill_engine import skill
 from core.command_registry import slash_command
-from core.utils.hedgedoc import upload_to_hedgedoc
-
-from integrations.mail.paths import get_statement_db_path
+from features.mail_ops import query_service
 
 
-def _get_db_path():
-    return get_statement_db_path()
-
-
-def _do_search(keyword, limit=20, account_name=None, db_path=None):
-    """查 email_bodies JOIN email_summaries，通过 MailCLI 统一接口"""
-    from integrations.mail.client import MailCLI
-    try:
-        limit_val = int(limit)
-        if limit_val <= 0:
-            limit_val = 20
-        elif limit_val > 100:
-            limit_val = 100
-    except (ValueError, TypeError):
-        limit_val = 20
-
-    cli = MailCLI(db_path=db_path)
-    try:
-        return cli.mail_search(keyword=keyword, limit=limit_val, account_name=account_name)
-    except Exception:
-        return []
-
-
-
-def _format_summary(keyword, rows):
-    """默认:截断摘要(每封 80 字符 snippet)"""
-    if not rows:
-        return f"🔍 未找到包含 '{keyword}' 的邮件。"
-    lines = [f"🔍 搜索 '{keyword}' 找到 {len(rows)} 封:"]
-    for r in rows:
-        snippet = (r["plain_text"] or "")[:80].replace("\n", " ")
-        lines.append(
-            f"\n[{r['category']}/{r['importance']}] {r['subject'][:50]}\n"
-            f"  发件人: {r['sender']}\n"
-            f"  摘录: {snippet}"
-        )
-    return "\n".join(lines)
-
-
-def _format_full_markdown(keyword, rows):
-    """完整 Markdown(上传 HedgeDoc 用)"""
-    lines = [
-        f"# 邮件搜索: {keyword}",
-        f"\n> 共 {len(rows)} 封 · {datetime.now().isoformat()}",
-        "\n---",
-    ]
-    for i, r in enumerate(rows, 1):
-        lines.append(f"\n## {i}. {r['subject']}")
-        lines.append(f"- 发件人: {r['sender']}")
-        lines.append(f"- 日期: {r['email_date']}")
-        lines.append(f"- 分类: {r['category']} / 重要性: {r['importance']} / 状态: {r['status']}")
-        lines.append(f"- 账户: {r['account_name']} (uid: {r['uid']})")
-        lines.append(f"\n### 正文\n\n{r['plain_text'] or '(无正文)'}")
-        lines.append("\n---")
-    return "\n".join(lines)
-
-
-def _get_hedgedoc_config():
-    """复用 ops_web_clipper 的 HedgeDoc 配置读取"""
-    from skills.ops_web_clipper import _get_hedgedoc_config as _ghc
-    return _ghc()
+_do_search = query_service.do_search
+_format_summary = query_service._format_summary
+_format_full_markdown = query_service._format_full_markdown
 
 
 @skill(
     name="mail_search",
-    description="全文搜索邮件正文/主题/发件人(replytype:0=摘要,1=分批,2=HedgeDoc完整文档)",
+    description="全文搜索邮件正文/主题/发件人(email_bodies库毫秒级)，支持replytype:0=摘要(默认),2=上传HedgeDoc",
     params={
         "keyword": {"type": "string", "description": "搜索关键词"},
-        "replytype": {"type": "integer", "description": "0=摘要(默认),1=分批,2=HedgeDoc完整文档", "default": 0},
-        "limit": {"type": "integer", "description": "返回上限(默认20)", "default": 20},
-        "account_name": {"type": "string", "description": "账户(可选)", "default": None},
+        "replytype": {"type": "integer", "description": "返回格式:0=摘要(默认),2=完整Markdown上传HedgeDoc", "default": 0},
+        "limit": {"type": "integer", "description": "最大条数(默认20,上限100)", "default": 20},
     },
     guest_ok=False,
 )
-def mail_search(keyword: str, replytype: int = 0, limit: int = 20, account_name: str = None) -> str:
-    rows = _do_search(keyword, limit, account_name)
-    if not rows:
-        return f"🔍 未找到包含 '{keyword}' 的邮件(已搜 email_bodies 正文库)。"
+def mail_search(keyword: str, replytype: int = 0, limit: int = 20) -> str:
+    return query_service.mail_search(keyword=keyword, replytype=replytype, limit=limit)
 
-    if replytype == 2:
-        # 上传完整 Markdown 到 HedgeDoc,返回链接 + 前 3 封摘要
-        md = _format_full_markdown(keyword, rows)
-        hc = _get_hedgedoc_config()
-        url = upload_to_hedgedoc(md, hc)
-        if url:
-            summary = _format_summary(keyword, rows[:3])
-            return (
-                f"📊 搜索 '{keyword}' 找到 {len(rows)} 封,完整内容已上传 HedgeDoc:\n"
-                f"🔗 {url}\n\n"
-                f"{summary}\n\n"
-                f"_(完整正文见上方链接)_"
-            )
-        return f"❌ HedgeDoc 上传失败,改用摘要:\n\n{_format_summary(keyword, rows)}"
 
-    elif replytype == 1:
-        # 分批待实现,暂用摘要兜底
-        return f"_(分批待实现,先用摘要)_\n\n{_format_summary(keyword, rows)}"
+def _cmd_mail_search(agent, msg, args):
+    return query_service.cmd_mail_search(agent, msg, args)
 
-    return _format_summary(keyword, rows)
 
 slash_command('/mail_search', category='邮件管理',
               description='全文搜索邮件正文/主题/发件人',
-              show_in_dashboard=False, guest_ok=False)(
-    lambda agent, msg, args: mail_search(
-        keyword=args[0] if args else '',
-        replytype=int(args[1]) if len(args) > 1 else 0,
-        limit=int(args[2]) if len(args) > 2 else 20))
+              show_in_dashboard=False, guest_ok=False)(_cmd_mail_search)

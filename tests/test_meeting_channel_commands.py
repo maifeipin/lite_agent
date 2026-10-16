@@ -1,7 +1,7 @@
 import json
 from types import SimpleNamespace
 import pytest
-from core.meeting_channel_commands import handle
+from features.review_meeting.channel_commands import handle
 from scripts import review_meeting as room
 
 

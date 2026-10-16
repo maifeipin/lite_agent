@@ -22,6 +22,14 @@ from tests.support.isolation_guard import (
 )
 install_side_effect_guards()
 
+# 装配测试期全量业务领域映射到 core.request_selector.DOMAIN_MAP
+try:
+    from tests.support.manifest_domains import get_all_manifest_domains
+    from core.request_selector import DOMAIN_MAP
+    DOMAIN_MAP.update(get_all_manifest_domains())
+except Exception:
+    pass
+
 # 2. 建立测试会话独占临时根目录
 _TEST_SESSION_DIR = tempfile.mkdtemp(prefix="lite_agent_test_session_")
 set_active_test_root(_TEST_SESSION_DIR)

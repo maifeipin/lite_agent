@@ -4,7 +4,7 @@
 """
 
 import logging
-from typing import Callable, List, Tuple
+from typing import Callable, List, Tuple, Set
 
 logger = logging.getLogger("app.lifecycle")
 
@@ -25,6 +25,19 @@ class LifecycleManager:
         if self._is_shutdown:
             raise RuntimeError(f"应用正在关闭或已关闭，无法登记新资源: {name}")
         self._resources.append((name, cleanup_fn))
+
+    def unregister_resource(self, name: str) -> bool:
+        """从受管列表中注销指定名称的资源。"""
+        for i, (res_name, _) in enumerate(self._resources):
+            if res_name == name:
+                self._resources.pop(i)
+                return True
+        return False
+
+    def unregister_resources(self, names: List[str]) -> None:
+        """批量注销指定名称集合的资源。"""
+        name_set = set(names)
+        self._resources = [res for res in self._resources if res[0] not in name_set]
 
     def shutdown(self) -> List[str]:
         """按注册倒序逆序释放所有受管资源，即使单个资源失败也继续清理其余资源。"""

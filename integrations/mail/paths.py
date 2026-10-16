@@ -40,7 +40,7 @@ def get_parser_script_dir() -> str:
         if os.path.isdir(candidate):
             return candidate
 
-    return "/home/liteagent/mail-statement-parser"
+    return os.path.expanduser("~/mail-statement-parser")
 
 
 def get_statement_db_path(custom_db_path: Optional[str] = None, script_dir: Optional[str] = None) -> str:

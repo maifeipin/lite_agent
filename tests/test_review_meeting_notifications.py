@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from core.review_meeting_notifications import deliver_once, private_owner_target
+from features.review_meeting.notifications import deliver_once, private_owner_target
 from scripts import review_meeting as room
 
 

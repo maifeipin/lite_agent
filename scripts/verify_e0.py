@@ -42,7 +42,7 @@ ALLOWED_PARSER_FIXTURES = {
 ALLOWED_AGENT_ROOT_FILES = {
     'agent.py', 'session.py', 'security.py', 'main.py',
     'config.example.json', 'architecture_rules.json', 'requirements-test.txt',
-    'pytest.ini', 'Dockerfile.test'
+    'requirements.txt', 'pytest.ini', 'Dockerfile.test'
 }
 
 ALLOWED_AGENT_EXACT_FILES = {
@@ -52,6 +52,7 @@ ALLOWED_AGENT_EXACT_FILES = {
     'tests/wechat_ilink/fixtures/getupdates_success.json',
     'tests/wechat_ilink/fixtures/sendmessage_success_octet_stream.json',
     'tests/test_review_meeting_frontend.js',
+    'architecture/stage-2-migration-inventory.md',
 }
 
 ALLOWED_AGENT_CODE_DIRS = [

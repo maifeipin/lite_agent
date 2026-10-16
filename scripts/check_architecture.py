@@ -122,6 +122,7 @@ class ArchitectureVisitor(ast.NodeVisitor):
         self.is_services = norm.startswith("services/") or norm == "services.py"
         self.is_app = norm.startswith("app/") or norm == "app.py"
         self.is_core = norm.startswith("core/") or norm == "core.py"
+        self.is_channels = norm.startswith("channels/") or norm == "channels.py"
         self.is_kernel_root = norm in ("main.py", "agent.py", "session.py", "security.py")
         self.is_kernel = self.is_contracts or self.is_services or self.is_app or self.is_core or self.is_kernel_root
 
@@ -195,14 +196,14 @@ class ArchitectureVisitor(ast.NodeVisitor):
                     "改用 MailCLI 或 integrations 适配器进行跨仓调用",
                 )
 
-            # 规则 2: 基础内核代码禁止导入业务特性、技能与脚本
-            if self.is_kernel and root_mod in ("features", "skills", "scripts"):
+            # 规则 2: 基础内核代码与公共 channels 严禁导入业务特性、技能与脚本
+            if (self.is_kernel or self.is_channels) and root_mod in ("features", "skills", "scripts"):
                 rule_name = "RULE_NO_CORE_REVERSE_DEPENDENCY" if self.is_core else "RULE_NO_KERNEL_BUSINESS_DEPENDENCY"
                 self._record_finding(
                     rule_name,
                     mod_name,
                     node.lineno,
-                    f"基础内核代码导入业务模块: {mod_name}",
+                    f"公共通道或内核代码导入业务模块: {mod_name}",
                     "将业务逻辑解耦迁出至 features/ 或通过端口注入",
                 )
 
@@ -261,8 +262,8 @@ class ArchitectureVisitor(ast.NodeVisitor):
                 "改用 MailCLI 或 integrations 适配器进行跨仓调用",
             )
 
-        # 规则 2: 基础内核代码禁止导入业务特性、技能与脚本 (支持绝对与相对导入解析)
-        if self.is_kernel:
+        # 规则 2: 基础内核代码与公共 channels 严禁导入业务特性、技能与脚本 (支持绝对与相对导入解析)
+        if self.is_kernel or self.is_channels:
             for alias in node.names:
                 full_mod = f"{resolved_mod}.{alias.name}" if resolved_mod else alias.name
                 root_item = full_mod.split(".")[0]
@@ -273,16 +274,8 @@ class ArchitectureVisitor(ast.NodeVisitor):
                         rule_name,
                         full_mod,
                         node.lineno,
-                        f"基础内核代码导入业务模块: {full_mod}",
+                        f"公共通道或内核代码导入业务模块: {full_mod}",
                         "将业务逻辑解耦迁出至 features/ 或通过插件机制装配",
-                    )
-                elif "billing_workflow" in full_mod and alias.name == "BillingWorkflow":
-                    self._record_finding(
-                        "RULE_NO_CORE_REVERSE_DEPENDENCY",
-                        "core.billing_workflow.BillingWorkflow",
-                        node.lineno,
-                        "core 直接导入具体业务 BillingWorkflow",
-                        "使用工作流注册表在启动时装配，解耦通用编排器与具体业务",
                     )
 
         # 规则 3: contracts 严禁依赖任何外部运行时
@@ -412,7 +405,7 @@ class ArchitectureVisitor(ast.NodeVisitor):
             else:
                 root_mod = target_name.split(".")[0]
                 if (root_mod in PARSER_MODULES
-                        or (self.is_kernel and root_mod in ("features", "skills", "scripts"))
+                        or ((self.is_kernel or self.is_channels) and root_mod in ("features", "skills", "scripts"))
                         or (self.is_contracts and root_mod not in CONTRACT_STDLIB | {"contracts"})
                         or (self.is_services and root_mod == "agent")):
                     self._record_finding(

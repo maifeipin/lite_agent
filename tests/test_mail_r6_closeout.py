@@ -7,7 +7,7 @@ from email.message import EmailMessage
 
 import pytest
 
-from core.billing_snapshot import build_snapshot, model_evidence, render_report
+from features.billing.snapshot import build_snapshot, model_evidence, render_report
 from tests.test_mail_quality_closeout import parser_repo
 
 
@@ -334,7 +334,7 @@ def test_semantic_reordering_is_not_drift_and_numeric_zero_is_valid(mail_store):
     indices=[3,7,4,1,2,6,5,0]
     result,_=parse_case(mail_store,[HEADER[i] for i in indices],[[ROWS[0][i] for i in indices]])
     assert 'FORMAT_CHANGED' not in {d['code'] for d in result['diagnostics']}
-    from core.billing_snapshot import decimal_amount
+    from features.billing.snapshot import decimal_amount
     assert decimal_amount(0)==0
 
 

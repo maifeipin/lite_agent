@@ -11,8 +11,9 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from types import SimpleNamespace
+from typing import Any, Optional, Dict, List
 
-# ---- 会审会议长轮询（P0）与派生在线状态（P1）----
+# ---- 会审会议长轮询与限流状态 (供 API 传输与单元测试透明访问) ----
 _REVIEW_MAX_WAIT = 25.0      # 秒；须小于 nginx proxy_read_timeout
 _REVIEW_ONLINE_WINDOW = 90   # 秒；窗口内该席位有轮询即视为在线
 _REVIEW_WAITERS = {}         # (meeting_id, seat) -> True；单席位同时只允许一个挂起
@@ -22,6 +23,11 @@ _REVIEW_AUTH_LOCK = threading.Lock()
 _REVIEW_LAST_POLL = {}       # (meeting_id, seat) -> 最近轮询 epoch（易变状态，不入 audit 链）
 _REVIEW_POLL_SLOTS = threading.BoundedSemaphore(64)
 _REVIEW_REQUESTS = {}
+
+def _extract_api_server(handler: Any) -> Any:
+    srv = getattr(handler, "server", None)
+    return getattr(srv, "api_server", None) if srv is not None else None
+
 
 class ApiHandler(BaseHTTPRequestHandler):
     """
@@ -37,16 +43,31 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.connection.settimeout(15)
     
     def _send_cors_headers(self):
-        path = urlparse(self.path).path
-        if path.startswith('/agent/'):
-            path = path[6:]
-        if path == '/api/v1/auth' or path.startswith('/api/v1/review-meetings'):
-            origin = self.headers.get('Origin')
-            api = self.server.api_server
-            base = api.config.get('review_meeting_base_url') or f'http://127.0.0.1:{api.port}'
+        origin = self.headers.get('Origin')
+        api = getattr(self.server, "api_server", None)
+        cfg = getattr(api, "config", {}) if api else {}
+        route_reg = getattr(api, "route_registry", None)
+
+        req_path = urlparse(self.path).path
+        if req_path.startswith('/agent/'):
+            req_path = req_path[6:]
+        elif req_path == '/agent':
+            req_path = '/'
+
+        is_restricted = False
+        if route_reg and hasattr(route_reg, 'is_cors_restricted') and route_reg.is_cors_restricted(req_path):
+            is_restricted = True
+        elif req_path == '/api/v1/auth':
+            is_restricted = True
+
+        if is_restricted:
+            base = cfg.get('review_meeting_base_url') or f'http://127.0.0.1:{getattr(api, "port", 8080)}'
             parsed = urlparse(base)
-            allowed = {api.config.get('review_dashboard_origin', 'https://mail.maifeipin.com'),
-                       f'{parsed.scheme}://{parsed.netloc}'}
+            allowed = {cfg.get('review_dashboard_origin', 'https://mail.maifeipin.com')}
+            if parsed.scheme and parsed.netloc:
+                allowed.add(f'{parsed.scheme}://{parsed.netloc}')
+            extra = cfg.get('cors_origins') or []
+            allowed.update(str(h).strip() for h in extra if str(h).strip())
             if origin in allowed:
                 self.send_header('Access-Control-Allow-Origin', origin)
             self.send_header('Vary', 'Origin')
@@ -105,15 +126,22 @@ class ApiHandler(BaseHTTPRequestHandler):
         elif req_path == '/agent':
             req_path = '/'
 
-        if req_path.startswith('/api/v1/review-meetings'):
-            self._handle_review_meeting_api('GET', req_path, parsed_url.query)
-            return
+        api_srv = _extract_api_server(self)
+        route_reg = getattr(api_srv, "route_registry", None) if api_srv else None
 
-        # 仪表盘 API 无需认证（仅返回注册表指令列表，无敏感数据）
+        # 1. 允许公开免认证路由 (auth_required=False)
+        if route_reg is not None:
+            matched = route_reg.match("GET", req_path)
+            if matched and not matched.get("auth_required", True):
+                matched["handler"](self, parsed_url)
+                return
+
+        # 2. 仪表盘 API 无需认证（仅返回注册表指令列表，无敏感数据）
         if req_path == '/api/v1/dashboard':
             self._handle_dashboard()
             return
 
+        # 4. 严格执行认证与权限隔离
         if not self._auth():
             return
         if self.is_guest and req_path not in ('/v1/models', '/api/v1/task/stream'):
@@ -131,18 +159,22 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_error(403, "Forbidden: Edge token is limited to /api/report, /api/pull_task")
             return
 
+        # 5. 鉴权通过后派发受保护的插件登记路由
+        if route_reg is not None:
+            matched = route_reg.match("GET", req_path)
+            if matched:
+                matched["handler"](self, parsed_url)
+                return
+
         if req_path == '/api/pull_task':
-            self._handle_pull_task(parsed_url.query)
+            self.send_error(404, "Not Found")
+            return
         elif req_path == '/api/v1/sessions':
             self._handle_sessions(parsed_url.query)
         elif req_path == '/api/v1/sessions/messages':
             self._handle_session_messages(parsed_url.query)
         elif req_path == '/api/v1/task/stream':
             self._handle_task_stream(parsed_url.query)
-        elif req_path == '/api/v1/email/html':
-            self._handle_email_html(parsed_url.query)
-        elif req_path == '/api/v1/todos':
-            self._handle_todos(parsed_url.query)
         elif req_path == '/api/v1/task-specs':
             self._handle_task_specs_get(parsed_url.query)
         elif req_path == '/api/v1/task-specs/meta':
@@ -151,22 +183,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_task_spec_get(req_path)
         elif req_path.startswith('/api/v1/output-archive/'):
             self._handle_output_archive_get(req_path)
-        elif req_path == '/api/v1/socks5':
-            self._handle_socks5_get(parsed_url.query)
-        elif req_path == '/api/v1/socks5/active':
-            self._handle_socks5_active_get()
-        elif req_path == '/api/v1/socks5/health':
-            self._handle_socks5_health(parsed_url.query)
-        elif req_path == '/api/v1/socks5/test':
-            self._handle_socks5_test(parsed_url.query)
-        elif req_path == '/api/v1/socks5/script':
-            self._handle_socks5_script(parsed_url.query)
         elif req_path == '/api/v1/dashboard':
             self._handle_dashboard()
         elif req_path == '/v1/models':
             self._handle_openai_models()
-        elif req_path == '/api/v1/rss/brief':
-            self._handle_rss_brief()
         else:
             self.send_error(404, "Not Found")
 
@@ -178,15 +198,25 @@ class ApiHandler(BaseHTTPRequestHandler):
         elif req_path == '/agent':
             req_path = '/'
 
-        if req_path.startswith('/api/v1/review-meetings'):
-            self._handle_review_meeting_api('POST', req_path, parsed_url.query)
-            return
+        api_srv = _extract_api_server(self)
+        route_reg = getattr(api_srv, "route_registry", None) if api_srv else None
 
-        # 登录接口无需认证
+        # 1. 允许公开免认证路由 (auth_required=False)
+        if route_reg is not None:
+            matched = route_reg.match("POST", req_path)
+            if matched and not matched.get("auth_required", True):
+                matched["handler"](self, parsed_url)
+                return
+
+        # 2. 登录接口无需认证 (若开启了路由注册表且插件未注册，则为未启用会议业务，直接 404)
         if req_path == '/api/v1/auth':
+            if route_reg is not None:
+                self.send_error(404, "Not Found")
+                return
             self._handle_auth()
             return
 
+        # 3. 严格执行认证与权限隔离
         if not self._auth():
             return
         if self.is_guest and req_path not in ('/api/v1/chat', '/api/v1/task', '/v1/chat/completions'):
@@ -199,6 +229,17 @@ class ApiHandler(BaseHTTPRequestHandler):
         # 边缘节点权限隔离：仅允许 /api/report, /api/task_result
         if getattr(self, 'is_edge', False) and req_path not in ('/api/report', '/api/task_result'):
             self.send_error(403, "Forbidden: Edge token is limited to /api/report, /api/task_result")
+            return
+
+        # 4. 鉴权通过后派发受保护的插件登记路由
+        if route_reg is not None:
+            matched = route_reg.match("POST", req_path)
+            if matched:
+                matched["handler"](self, parsed_url)
+                return
+
+        if req_path in ('/api/report', '/api/task_result', '/api/edge_task'):
+            self.send_error(404, "Not Found")
             return
 
         if req_path in ('/api/v1/chat', '/api/v1/task'):
@@ -215,24 +256,14 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_task_result()
         elif req_path == '/api/edge_task':
             self._handle_edge_task()
-        elif req_path == '/api/v1/ocr':
-            self._handle_ocr_proxy()
-        elif req_path == '/api/v1/todos':
-            self._handle_post_todo()
         elif req_path == '/api/v1/task-specs':
             self._handle_task_spec_create()
         elif req_path == '/api/v1/task-specs/generate':
             self._handle_task_spec_generate()
         elif req_path.startswith('/api/v1/task-specs/'):
             self._handle_task_spec_action(req_path)
-        elif req_path == '/api/v1/todos/brief/push':
-            self._handle_post_todo_brief_push()
         elif req_path == '/api/v1/session/title':
             self._handle_post_session_title()
-        elif req_path == '/api/v1/socks5':
-            self._handle_socks5_post()
-        elif req_path == '/api/v1/socks5/active':
-            self._handle_socks5_active_post()
         else:
             self.send_error(404, "Not Found")
 
@@ -241,25 +272,39 @@ class ApiHandler(BaseHTTPRequestHandler):
         if getattr(self, 'is_edge', False):
             self.send_error(403, "Forbidden")
             return
-        if not self._auth():
-            return
-        if self.is_guest or self.is_edge:
-            self.send_error(403, 'Forbidden: admin access required')
-            return
         req_path = parsed_url.path
         if req_path.startswith('/agent/'):
             req_path = req_path[6:]
         elif req_path == '/agent':
             req_path = '/'
+
+        api_srv = _extract_api_server(self)
+        route_reg = getattr(api_srv, "route_registry", None) if api_srv else None
+
+        # 1. 允许公开免认证路由 (auth_required=False)
+        if route_reg is not None:
+            matched = route_reg.match("PATCH", req_path)
+            if matched and not matched.get("auth_required", True):
+                matched["handler"](self, parsed_url)
+                return
+
+        if not self._auth():
+            return
+        if self.is_guest or self.is_edge:
+            self.send_error(403, 'Forbidden: admin access required')
+            return
         if self.is_guest and req_path.startswith('/api/v1/task-specs'):
             self.send_error(403, "Forbidden: TaskSpec management requires admin")
             return
-        if req_path.startswith('/api/v1/todos/'):
-            self._handle_patch_todo(req_path)
-        elif req_path.startswith('/api/v1/task-specs/'):
+
+        if route_reg is not None:
+            matched = route_reg.match("PATCH", req_path)
+            if matched:
+                matched["handler"](self, parsed_url)
+                return
+
+        if req_path.startswith('/api/v1/task-specs/'):
             self._handle_task_spec_update(req_path)
-        elif req_path.startswith('/api/v1/socks5/'):
-            self._handle_socks5_patch(req_path)
         else:
             self.send_error(404, "Not Found")
 
@@ -268,25 +313,39 @@ class ApiHandler(BaseHTTPRequestHandler):
         if getattr(self, 'is_edge', False):
             self.send_error(403, "Forbidden")
             return
-        if not self._auth():
-            return
-        if self.is_guest or self.is_edge:
-            self.send_error(403, 'Forbidden: admin access required')
-            return
         req_path = parsed_url.path
         if req_path.startswith('/agent/'):
             req_path = req_path[6:]
         elif req_path == '/agent':
             req_path = '/'
+
+        api_srv = _extract_api_server(self)
+        route_reg = getattr(api_srv, "route_registry", None) if api_srv else None
+
+        # 1. 允许公开免认证路由 (auth_required=False)
+        if route_reg is not None:
+            matched = route_reg.match("DELETE", req_path)
+            if matched and not matched.get("auth_required", True):
+                matched["handler"](self, parsed_url)
+                return
+
+        if not self._auth():
+            return
+        if self.is_guest or self.is_edge:
+            self.send_error(403, 'Forbidden: admin access required')
+            return
         if self.is_guest and req_path.startswith('/api/v1/task-specs'):
             self.send_error(403, "Forbidden: TaskSpec management requires admin")
             return
-        if req_path.startswith('/api/v1/todos/'):
-            self._handle_delete_todo(req_path)
-        elif req_path.startswith('/api/v1/task-specs/'):
+
+        if route_reg is not None:
+            matched = route_reg.match("DELETE", req_path)
+            if matched:
+                matched["handler"](self, parsed_url)
+                return
+
+        if req_path.startswith('/api/v1/task-specs/'):
             self._handle_task_spec_delete(req_path)
-        elif req_path.startswith('/api/v1/socks5/'):
-            self._handle_socks5_delete(req_path)
         else:
             self.send_error(404, "Not Found")
 
@@ -319,47 +378,6 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"detail": f"OCR Proxy error: {str(e)}"}).encode('utf-8'))
 
-    def _handle_rss_brief(self):
-        import os
-        
-        # Load vps_work_dir dynamically from paths.json if exists to prevent hardcoding
-        vps_work_dir = '/home/liteagent/rss_topic_work'
-        paths_json_path = '/home/liteagent/rss_topic_work/paths.json'
-        
-        env_vps_work = os.environ.get("RSS_VPS_WORK_DIR")
-        if env_vps_work:
-            vps_work_dir = os.path.expanduser(env_vps_work)
-        elif os.path.exists(paths_json_path):
-            try:
-                with open(paths_json_path, 'r', encoding='utf-8') as f:
-                    pcfg = json.load(f)
-                    vps_work_dir = os.path.expanduser(pcfg.get("vps_work_dir", vps_work_dir))
-            except Exception:
-                pass
-                
-        brief_path = os.path.join(vps_work_dir, 'latest_brief.json')
-        if not os.path.exists(brief_path):
-            self.send_response(404)
-            self._send_cors_headers()
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({"detail": "Brief not found"}).encode('utf-8'))
-            return
-            
-        try:
-            with open(brief_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            self.send_response(200)
-            self._send_cors_headers()
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(content.encode('utf-8'))
-        except Exception as e:
-            self.send_response(500)
-            self._send_cors_headers()
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({"detail": str(e)}).encode('utf-8'))
 
     def _handle_chat_or_task(self):
         try:
@@ -545,416 +563,6 @@ class ApiHandler(BaseHTTPRequestHandler):
             # successful persisted operation into a second, impossible response.
             self._quiet = True
             return False
-
-    def _review_json(self, value, status: int = 200):
-        body = json.dumps(value, ensure_ascii=False).encode('utf-8')
-        try:
-            self.send_response(status)
-            self._send_cors_headers()
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Content-Length', str(len(body)))
-            self.send_header('Cache-Control', 'no-store')
-            self.send_header('Referrer-Policy', 'no-referrer')
-            self.end_headers()
-            self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
-            self._quiet = True
-
-    def _review_body(self) -> dict:
-        try:
-            size = int(self.headers.get('Content-Length', '0'))
-        except ValueError as exc:
-            raise ValueError('Content-Length 无效') from exc
-        if size <= 0 or size > 65536:
-            raise ValueError('JSON 请求体必须为 1 到 65536 字节')
-        try:
-            value = json.loads(self.rfile.read(size).decode('utf-8'))
-        except (UnicodeError, json.JSONDecodeError) as exc:
-            raise ValueError('JSON 请求体无效') from exc
-        if not isinstance(value, dict):
-            raise ValueError('JSON 请求体必须是对象')
-        return value
-
-    def _review_bearer(self) -> str:
-        authorization = self.headers.get('Authorization', '')
-        if not authorization.startswith('Bearer ') or authorization.count(' ') != 1:
-            return ''
-        value = authorization[7:]
-        return value if value.isascii() and len(value) <= 128 else ''
-
-    def _review_admin(self) -> bool:
-        token = self.server.api_server.auth_token
-        bearer = self._review_bearer()
-        if token and secrets.compare_digest(bearer, token):
-            return True
-        if not 32 <= len(bearer) <= 128:
-            return False
-        from core import review_meeting_api as access
-        from scripts import review_meeting as room
-        db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
-        try:
-            with closing(sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)) as db:
-                db.row_factory = sqlite3.Row
-                return access.is_host_session(db, bearer)
-        except sqlite3.Error:
-            return False
-
-    def _review_invite_url(self, meeting_id: str, token: str) -> str:
-        api = self.server.api_server
-        base = api.config.get('review_meeting_base_url') or f'http://127.0.0.1:{api.port}'
-        parsed = urlparse(base)
-        if (parsed.scheme not in ('http', 'https') or not parsed.netloc or parsed.username
-                or parsed.password or parsed.query or parsed.fragment or parsed.path not in ('', '/')
-                or (parsed.scheme == 'http' and parsed.hostname not in ('127.0.0.1', 'localhost'))):
-            raise ValueError('review_meeting_base_url 必须是 HTTPS 地址或本机 HTTP 地址')
-        return (base.rstrip('/') + f'/agent/api/v1/review-meetings/{meeting_id}/invite'
-                + f'#invite={token}')
-
-    def _review_operator(self, meeting_id, action='read'):
-        if self._review_admin():
-            return 'host'
-        if not meeting_id:
-            return None
-        from core import review_meeting_api as access
-        from scripts import review_meeting as room
-        db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
-        try:
-            with closing(sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)) as db:
-                db.row_factory = sqlite3.Row
-                return access.cohost_actor(db, meeting_id, self._review_bearer(), action)
-        except sqlite3.Error:
-            return None
-
-    def _review_host_allowed(self) -> bool:
-        api = self.server.api_server
-        base = api.config.get('review_meeting_base_url') or f'http://127.0.0.1:{api.port}'
-        expected = urlparse(base).hostname
-        extra = api.config.get('review_meeting_allowed_hosts') or []
-        allowed = {expected, '127.0.0.1', 'localhost'}
-        allowed.update(str(h).strip().lower() for h in extra if str(h).strip())
-        request_host = (self.headers.get('Host') or '').split(':', 1)[0].lower()
-        return request_host in allowed
-
-    @staticmethod
-    def _review_default_owner_hash(db_path: Path, room) -> str:
-        """管理员从 Dashboard 发起会议时，复用/预置本机主持人审批密钥（0600）。
-
-        原始密钥只留在本机 owner.key，decide 仍需持该文件人工审批。
-        """
-        key_path = db_path.parent / 'owner.key'
-        if key_path.exists():
-            return room.sha(key_path.read_text(encoding='utf-8').strip())
-        return room.new_owner_key(str(key_path))
-
-    def _review_long_wait(self, db_path: Path, meeting_id: str, since: int,
-                          wait: float, seat):
-        """P0 长轮询挂起：独立 autocommit 只读连接轮询 DB（CLI 跨进程写入同样可见）。
-
-        唤醒条件：有新事件 / 会议终态（approved/rejected）或已归档 / 超时。
-        每席位同时只允许一个挂起请求（第二个立即 409）；admin 不受限。
-        """
-        from core import review_meeting_api as access
-
-        if not _REVIEW_POLL_SLOTS.acquire(blocking=False):
-            raise access.ReviewAPIError('长轮询并发已满，请稍后重试', 429)
-        key = None
-        if seat is not None:
-            key = (meeting_id, seat)
-            with _REVIEW_WAITERS_LOCK:
-                if key in _REVIEW_WAITERS:
-                    _REVIEW_POLL_SLOTS.release()
-                    raise access.ReviewAPIError('该席位已有挂起的轮询请求', 409)
-                _REVIEW_WAITERS[key] = True
-        try:
-            deadline = time.monotonic() + wait
-            uri = f'file:{db_path}?mode=ro'
-            with closing(sqlite3.connect(uri, uri=True, isolation_level=None, timeout=30)) as probe:
-                while True:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        return
-                    row = probe.execute(
-                        "SELECT (SELECT COALESCE(MAX(seq),0) FROM events WHERE meeting_id=?),"
-                        " (SELECT state FROM meetings WHERE id=?),"
-                        " (SELECT archived_at FROM meetings WHERE id=?)",
-                        (meeting_id, meeting_id, meeting_id)).fetchone()
-                    if row[0] > since:
-                        return  # 新事件
-                    if row[1] is None or row[1] in ('approved', 'rejected') or row[2] is not None:
-                        return  # 终态即醒
-                    time.sleep(min(0.5, remaining))
-        finally:
-            _REVIEW_POLL_SLOTS.release()
-            if key is not None:
-                with _REVIEW_WAITERS_LOCK:
-                    _REVIEW_WAITERS.pop(key, None)
-
-    def _review_enrich(self, result: dict, db, room, meeting_id: str,
-                       seat, is_admin: bool):
-        """P1：附加 hint（state×角色×轮次的纯函数）与派生在线状态（不入 audit 链）。"""
-        now = time.time()
-        for p in result.get('participants', []):
-            seen = _REVIEW_LAST_POLL.get((meeting_id, p['name']))
-            p['last_poll_at'] = int(seen) if seen else None
-            p['online'] = bool(seen and now - seen <= _REVIEW_ONLINE_WINDOW)
-            grant = db.execute('SELECT participant_id,metadata FROM meeting_seat_grants WHERE meeting_id=? AND participant=?',
-                               (meeting_id, p['name'])).fetchone()
-            if grant:
-                p['participant_id'] = grant['participant_id']
-                p['metadata'] = json.loads(grant['metadata'])
-                p['identity_source'] = 'self-reported'
-        result['hint'] = self._review_hint(db, room, meeting_id, result, seat, is_admin)
-
-    @staticmethod
-    def _review_hint(db, room, meeting_id: str, snap: dict,
-                     seat, is_admin: bool) -> str:
-        state = snap.get('state')
-        if snap.get('archived_at'):
-            return '会议已归档，仅供查阅'
-        if state in ('approved', 'rejected'):
-            return '会议已裁决' + ('，可 leave 离场' if not is_admin else '')
-        if is_admin:
-            if state == 'awaiting_approval':
-                return '议题待你人工裁决：review-meeting decide --confirm（仅人类可执行）'
-            if state == 'changes_requested':
-                return '已要求修改：resume 发布新 brief 后讨论继续'
-            return '讨论进行中：可在记录弹窗插话引导；全员提交后可 advance 推进轮次'
-        if state == 'awaiting_approval':
-            return '等待主持人人工裁决，无需动作'
-        if state == 'changes_requested':
-            return '主持人要求修改，等待新 brief 恢复讨论'
-        row = room.get(db, meeting_id)
-        done = room.submitted(db, meeting_id, row['round'])
-        if seat in done:
-            pending = room.missing(db, row)
-            tail = f'，等待：{"、".join(pending)}' if pending else '，全员已齐，等待主持人推进轮次'
-            return f'本轮已提交正式意见{tail}；可用 comments 自由交流'
-        if row['round'] >= 2:
-            return '请提交本轮正式意见（reviews）：第 2 轮起必须 responds_to_seq 回应一位评委此前发言'
-        return '请阅读 brief 与他人发言，提交本轮正式意见（reviews）'
-
-    def _handle_review_meeting_api(self, method: str, path: str, query: str):
-        """Meeting capabilities bypass generic API auth only inside this exact route group."""
-        from core import review_meeting_api as access
-        from scripts import review_meeting as room
-        api = self.server.api_server
-
-        now = time.monotonic()
-        client = self.client_address[0]
-        with _REVIEW_AUTH_LOCK:
-            for ip in list(_REVIEW_REQUESTS):
-                if not _REVIEW_REQUESTS[ip] or now - _REVIEW_REQUESTS[ip][-1] >= 60:
-                    del _REVIEW_REQUESTS[ip]
-            hits = [t for t in _REVIEW_REQUESTS.get(client, []) if now - t < 60]
-            limited = len(hits) >= 120 or (client not in _REVIEW_REQUESTS and len(_REVIEW_REQUESTS) >= 2048)
-            if not limited:
-                hits.append(now)
-                _REVIEW_REQUESTS[client] = hits
-        if limited:
-            self._review_json({'error': '会议请求过于频繁'}, 429)
-            return
-
-        if not self._review_host_allowed():
-            self._review_json({'error': 'Meeting API host is not allowed'}, 421)
-            return
-
-        if method == 'POST' and path == '/api/v1/review-meetings/logout':
-            try:
-                self._review_body()
-                db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
-                with closing(room.connect(db_path)) as db:
-                    access.ensure_tables(db)
-                    with db:
-                        access.revoke_host_session(db, self._review_bearer())
-                self._review_json({'success': True})
-            except access.ReviewAPIError as exc:
-                self._review_json({'error': str(exc)}, exc.status)
-            except ValueError as exc:
-                self._review_json({'error': str(exc)}, 400)
-            except (OSError, sqlite3.Error):
-                self._review_json({'error': '会审室存储暂不可用'}, 503)
-            return
-
-        route = re.fullmatch(
-            r'/api/v1/review-meetings(?:/([0-9a-f]{12})(?:/(invite|invites|join|reviews|comments|leave|advance|waive|cohosts|revoke-cohost|revoke-seat|request-approval|recover))?)?',
-            path)
-        if route is None:
-            self._review_json({'error': 'Not Found'}, 404)
-            return
-        meeting_id, action = route.groups()
-        if method == 'GET' and action == 'invite':
-            self._review_json({
-                'meeting_id': meeting_id,
-                'join_endpoint': f'/agent/api/v1/review-meetings/{meeting_id}/join',
-                'usage': '把链接中的 invite 值作为 POST JSON 的 invite_token；可选 label 为 IDE 名称。'
-            })
-            return
-
-        try:
-            if ((method == 'POST' and action in (None, 'cohosts', 'revoke-cohost'))
-                    and not self._review_admin()):
-                raise access.ReviewAPIError('仅主持人可创建会议或授权共管', 403)
-            if ((method == 'POST' and action in ('invites', 'advance', 'waive', 'revoke-seat', 'request-approval'))
-                    and not self._review_operator(meeting_id, action)):
-                raise access.ReviewAPIError('仅主持人可创建会议、更新邀请或推进轮次', 403)
-            payload = (self._review_body() if method == 'POST' and action != 'leave'
-                       else {})
-            db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
-            with closing(room.connect(db_path)) as db:
-                access.ensure_tables(db)
-                with db:
-                    if method == 'POST':
-                        db.execute('BEGIN IMMEDIATE')
-                        if action in ('invites', 'advance', 'waive', 'revoke-seat', 'request-approval'):
-                            actor = self._review_operator(meeting_id, action)
-                            if not actor:
-                                raise access.ReviewAPIError('共管授权无效或已撤销', 403)
-                            room.append(db, room.get(db, meeting_id), actor, 'management_action', {'action': action})
-                    if method == 'POST' and meeting_id is None:
-                        owner_key_hash = payload.get('owner_key_hash')
-                        if owner_key_hash is None:
-                            owner_key_hash = self._review_default_owner_hash(db_path, room)
-                        result = access.create(
-                            db, title=payload.get('title'), brief=payload.get('brief'),
-                            owner_key_hash=owner_key_hash,
-                            invite_ttl_seconds=payload.get('invite_ttl_seconds', access.INVITE_TTL_DEFAULT),
-                            legacy=api.config.get('review_allow_legacy_invites') is True)
-                        result['invite_url'] = self._review_invite_url(result['id'], result.pop('invite_token'))
-                        status = 201
-                    elif method == 'POST' and action == 'invites':
-                        result = access.issue_seat_invite(
-                            db, meeting_id, payload.get('label', 'agent'), payload.get('invite_ttl_seconds', access.INVITE_TTL_DEFAULT))
-                        result['id'] = meeting_id
-                        result['invite_url'] = self._review_invite_url(meeting_id, result.pop('invite_token'))
-                        status = 201
-                    elif method == 'POST' and action == 'join':
-                        result = access.join(db, meeting_id, payload.get('invite_token'), payload.get('label', 'agent'),
-                                             allow_legacy=api.config.get('review_allow_legacy_invites') is True,
-                                             metadata=payload.get('metadata'), recovery_hash=payload.get('recovery_hash'))
-                        result['protocol'] = (
-                            '参会协议：会议期间保持驻留轮询——循环 GET 本会议 ?since=<已读最大seq>&wait=20；'
-                            '每次响应后按 hint 字段行动（交 reviews / 发 comments），并立即发起下一次轮询；'
-                            '直到 state 为 approved/rejected 或已归档方可退出。'
-                            '不要在提交意见后停止轮询，否则无法感知后续讨论。')
-                        status = 201
-                    elif method == 'POST' and action == 'recover':
-                        result = access.recover_seat(db, meeting_id, payload.get('participant_id'), payload.get('recovery_secret'))
-                        status = 200
-                    elif method == 'POST' and action == 'cohosts':
-                        result = access.issue_cohost(db, meeting_id)
-                        status = 201
-                    elif method == 'POST' and action in ('revoke-cohost', 'revoke-seat'):
-                        result = access.revoke_capability(db, meeting_id, payload.get('operator_id' if action == 'revoke-cohost' else 'participant_id'), cohost=action == 'revoke-cohost')
-                        status = 200
-                    elif method == 'POST' and action == 'request-approval':
-                        import tempfile
-                        summary = access._text(payload.get('summary'), 'summary')
-                        with tempfile.TemporaryDirectory(prefix='meeting_approval_') as directory:
-                            summary_file = Path(directory) / 'summary.md'
-                            summary_file.write_text(summary, encoding='utf-8')
-                            result = room.execute(db, SimpleNamespace(action='request-approval', id=meeting_id, summary_file=str(summary_file)))
-                        status = 200
-                    elif method == 'GET' and meeting_id is None:
-                        if not self._review_admin():
-                            raise access.ReviewAPIError('仅主持人可查看会议列表', 403)
-                        rows = db.execute(
-                            "SELECT id,title,state,round,created_at,updated_at,archived_at"
-                            " FROM meetings ORDER BY updated_at DESC LIMIT 200").fetchall()
-                        result = {'meetings': [dict(r) for r in rows]}
-                        status = 200
-                    elif method == 'GET' and meeting_id and action is None:
-                        qs = parse_qs(query)
-                        value = (qs.get('since') or ['0'])[0]
-                        try:
-                            since = int(value)
-                        except ValueError as exc:
-                            raise access.ReviewAPIError('since 必须为非负整数') from exc
-                        if since < 0:
-                            raise access.ReviewAPIError('since 必须为非负整数')
-                        wait_value = (qs.get('wait') or ['0'])[0]
-                        try:
-                            wait = float(wait_value)
-                        except ValueError as exc:
-                            raise access.ReviewAPIError('wait 必须为非负秒数') from exc
-                        if not math.isfinite(wait) or wait < 0:
-                            raise access.ReviewAPIError('wait 必须为非负秒数')
-                        wait = min(wait, _REVIEW_MAX_WAIT)
-                        is_admin = bool(self._review_operator(meeting_id))
-                        seat = None
-                        if not is_admin:
-                            seat = access.authenticate(db, meeting_id, self._review_bearer())
-                            now = time.time()
-                            with _REVIEW_WAITERS_LOCK:
-                                for key in list(_REVIEW_LAST_POLL):
-                                    if now - _REVIEW_LAST_POLL[key] > _REVIEW_ONLINE_WINDOW * 2:
-                                        del _REVIEW_LAST_POLL[key]
-                                _REVIEW_LAST_POLL[(meeting_id, seat)] = now
-                        if wait > 0:
-                            db.rollback()  # 结束挂起前的读视图
-                            self._review_long_wait(db_path, meeting_id, since, wait, seat)
-                            db.rollback()  # 唤醒后以新读视图取快照
-                        if is_admin and not self._review_operator(meeting_id):
-                            raise access.ReviewAPIError('主持人会话无效或已过期', 401)
-                        if is_admin:
-                            result = room.snapshot(db, meeting_id, since=since, full=True)
-                        else:
-                            result = access.show(db, meeting_id, self._review_bearer(), since)
-                        self._review_enrich(result, db, room, meeting_id, seat, is_admin)
-                        status = 200
-                    elif method == 'POST' and action == 'reviews':
-                        result = access.review(
-                            db, meeting_id, self._review_bearer(), payload.get('text'),
-                            payload.get('position'), payload.get('responds_to_seq'))
-                        status = 201
-                    elif method == 'POST' and action == 'comments':
-                        operator = self._review_operator(meeting_id, 'comments')
-                        if operator:
-                            text = access._text(payload.get('text'), 'text')
-                            access.check_write_budget(db, meeting_id, 'human' if operator == 'host' else operator)
-                            ref = payload.get('responds_to_seq')
-                            if ref is not None and (isinstance(ref, bool)
-                                                    or not isinstance(ref, int) or ref <= 0):
-                                raise access.ReviewAPIError('responds_to_seq 必须为正整数', 400)
-                            row = room.get(db, meeting_id)
-                            if not (operator == 'host' and row['state'] == room.WAITING
-                                    and row['archived_at'] is None):
-                                room.require_open(row)
-                            event = room.append(db, row, 'human' if operator == 'host' else operator, 'comment',
-                                                {'text': text, 'responds_to_seq': ref})
-                            result = {'id': meeting_id, 'event_seq': event['seq'],
-                                      'round': event['round'], 'actor': event['actor']}
-                        else:
-                            result = access.comment(
-                                db, meeting_id, self._review_bearer(), payload.get('text'),
-                                payload.get('responds_to_seq'))
-                        status = 201
-                    elif method == 'POST' and action == 'advance':
-                        expected = payload.get('expected_round')
-                        row = room.get(db, meeting_id)
-                        if isinstance(expected, bool) or not isinstance(expected, int) or expected != row['round']:
-                            raise access.ReviewAPIError('expected_round 与当前轮次不一致', 409)
-                        result = room.execute(db, SimpleNamespace(action='advance', id=meeting_id))
-                        status = 200
-                    elif method == 'POST' and action == 'waive':
-                        names = payload.get('names', '')
-                        if isinstance(names, list):
-                            names = ','.join(str(n) for n in names)
-                        result = room.execute(db, SimpleNamespace(
-                            action='waive', id=meeting_id,
-                            participants=str(names), reason=str(payload.get('reason') or '')))
-                        status = 200
-                    elif method == 'POST' and action == 'leave':
-                        result = access.leave(db, meeting_id, self._review_bearer())
-                        status = 200
-                    else:
-                        raise access.ReviewAPIError('Not Found', 404)
-            self._review_json(result, status)
-        except access.ReviewAPIError as exc:
-            self._review_json({'error': str(exc)}, exc.status)
-        except ValueError as exc:
-            self._review_json({'error': str(exc)}, 400)
-        except (OSError, sqlite3.Error):
-            self._review_json({'error': '会审室存储暂不可用'}, 503)
 
     @property
     def _task_specs(self):
@@ -1281,253 +889,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_error(500, str(e))
 
     def _handle_auth(self):
-        """登录验证：读取 htpasswd 文件校验用户名/密码。用于 Dashboard 表单登录。"""
-        now = time.monotonic()
-        client = self.client_address[0]  # Do not trust arbitrary X-Forwarded-For.
-        with _REVIEW_AUTH_LOCK:
-            for key in list(_REVIEW_AUTH_ATTEMPTS):
-                if not _REVIEW_AUTH_ATTEMPTS[key] or now - _REVIEW_AUTH_ATTEMPTS[key][-1] >= 60:
-                    del _REVIEW_AUTH_ATTEMPTS[key]
-            hits = [t for t in _REVIEW_AUTH_ATTEMPTS.get(client, []) if now - t < 60]
-            limited = len(hits) >= 10 or (client not in _REVIEW_AUTH_ATTEMPTS and len(_REVIEW_AUTH_ATTEMPTS) >= 2048)
-            if not limited:
-                hits.append(now)
-                _REVIEW_AUTH_ATTEMPTS[client] = hits
-        if limited:
-            self._review_json({'success': False, 'error': '登录请求过多，请稍后重试'}, 429)
-            return
-        try:
-            body = self._review_body()
-        except ValueError as exc:
-            self._review_json({'success': False, 'error': str(exc)}, 400)
-            return
-        username = body.get('username')
-        password = body.get('password')
-        if not isinstance(username, str) or not isinstance(password, str) or not username.strip() or not password:
-            self._send_auth_fail('账号和密码不能为空')
-            return
-        username = username.strip()
+        self.send_error(404, "Not Found")
 
-        # 读取 htpasswd 文件
-        htpasswd_path = self.server.api_server.config.get('dashboard_htpasswd_path', '/etc/nginx/conf.d/dashboard.htpasswd')
-        if not os.path.exists(htpasswd_path):
-            self._send_auth_fail('服务端配置错误')
-            return
-
-        try:
-            with open(htpasswd_path, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if ':' not in line:
-                        continue
-                    u, pwd_hash = line.split(':', 1)
-                    if u != username:
-                        continue
-
-                    if self._verify_htpasswd(password, pwd_hash):
-                        from core import review_meeting_api as access
-                        from scripts import review_meeting as room
-                        db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
-                        with closing(room.connect(db_path)) as db:
-                            access.ensure_tables(db)
-                            with db:
-                                session = access.issue_host_session(db, username)
-                        self._review_json({'success': True, **session})
-                        return
-                    else:
-                        self._send_auth_fail('账号或密码错误')
-                        return
-        except (OSError, sqlite3.Error):
-            self._review_json({'success': False, 'error': '登录服务暂不可用'}, 503)
-            return
-
-        self._send_auth_fail('账号或密码错误')
-
-    def _send_auth_fail(self, msg: str):
-        self.send_response(401)
-        self._send_cors_headers()
-        self.send_header('Content-Type', 'application/json; charset=utf-8')
-        self.end_headers()
-        self.wfile.write(json.dumps({'success': False, 'error': msg}, ensure_ascii=False).encode('utf-8'))
-
-    @staticmethod
-    def _verify_htpasswd(password: str, stored_hash: str) -> bool:
-        """验证 Apache htpasswd 格式密码。支持 bcrypt $2b$ / $2y$ / $apr1$ / {SHA} / 明文。"""
-        import hashlib
-        # bcrypt ($2b$ or $2y$)
-        if stored_hash.startswith('$2b$') or stored_hash.startswith('$2y$'):
-            try:
-                import bcrypt
-                return bcrypt.checkpw(password.encode('utf-8'), stored_hash.encode('utf-8'))
-            except ImportError:
-                return False
-        # apr1
-        if stored_hash.startswith('$apr1$'):
-            parts = stored_hash.split('$')
-            if len(parts) < 4:
-                return False
-            salt = parts[2]
-            return stored_hash == ApiHandler._apr1_hash(password, salt)
-        # SHA
-        if stored_hash.startswith('{SHA}'):
-            import base64
-            return stored_hash == '{SHA}' + base64.b64encode(hashlib.sha1(password.encode()).digest()).decode()
-        # 明文
-        return password == stored_hash
-
-    @staticmethod
-    def _apr1_hash(password: str, salt: str) -> str:
-        """Apache $apr1$ MD5 哈希实现。"""
-        import hashlib
-        def _apr1_md5(pw, slt):
-            ctx = hashlib.md5((pw + '$apr1$' + slt).encode('utf-8')).digest()
-            ctx = hashlib.md5((pw + slt + pw).encode('utf-8')).digest()
-            # 迭代 1000 次
-            final = pw + '$apr1$' + slt
-            for i in range(1000):
-                digest = hashlib.md5()
-                if i & 1:
-                    digest.update(pw.encode('utf-8'))
-                else:
-                    digest.update(ctx)
-                if i % 3:
-                    digest.update(slt.encode('utf-8'))
-                if i % 7:
-                    digest.update(pw.encode('utf-8'))
-                if i & 1:
-                    digest.update(ctx)
-                else:
-                    digest.update(pw.encode('utf-8'))
-                ctx = digest.digest()
-            # 转 base64
-            b64 = './0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
-            result = ''
-            for a, b, c in ((ctx[i], ctx[i+1] if i+1 < 16 else 0, ctx[i+2] if i+2 < 16 else 0)
-                            for i in range(0, 16, 3)):
-                result += b64[a & 0x3f]
-                result += b64[((a >> 6) & 0x03) | ((b << 2) & 0x3c)]
-                result += b64[((b >> 4) & 0x0f)]
-                if i + 1 < 16:
-                    result += b64[((b >> 2) & 0x03) | ((c << 4) & 0x30)]
-                if i + 2 < 16:
-                    result += b64[(c >> 2) & 0x3f]
-            return '$apr1$' + slt + '$' + result
-        return _apr1_md5(password, salt)
-
-    def _handle_edge_report(self):
-        content_length = int(self.headers.get('Content-Length', 0))
-        if content_length == 0:
-            self.send_error(400, "Bad Request: Empty body")
-            return
-            
-        body = self.rfile.read(content_length)
-        try:
-            req_data = json.loads(body.decode('utf-8'))
-        except json.JSONDecodeError:
-            self.send_error(400, "Bad Request: Invalid JSON")
-            return
-            
-        node_id = req_data.get('node_id')
-        if not node_id:
-            self.send_error(400, "Bad Request: Missing node_id")
-            return
-            
-        import os
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        report_dir = os.path.join(project_root, 'data', 'sentinel', 'edge_reports')
-        os.makedirs(report_dir, exist_ok=True)
-        
-        # 安全过滤 node_id 防止目录穿越
-        import re
-        safe_node_id = re.sub(r'[^a-zA-Z0-9_-]', '', node_id)
-        if not safe_node_id:
-            self.send_error(400, "Bad Request: Invalid node_id")
-            return
-            
-        file_path = os.path.join(report_dir, f"{safe_node_id}.json")
-        try:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(req_data, f, ensure_ascii=False, indent=2)
-
-            # ── 1. 先 ACK 边缘 (解锁, 不等 IM) ──
-            body_bytes = json.dumps({"status": "success", "message": "Report saved"}).encode('utf-8')
-            self.send_response(200)
-            self._send_cors_headers()
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Content-Length', str(len(body_bytes)))
-            self.end_headers()
-            self.wfile.write(body_bytes)
-            self.wfile.flush()                       # ← 保证边缘立刻收到
-
-            # ── 2. 再评估告警 (失败不影响 ACK) ──
-            try:
-                agent = self.server.api_server.agent
-                self._evaluate_edge_alert(agent, safe_node_id, req_data)
-            except Exception as e:
-                print(f"  ⚠️ [edge_report] 告警评估异常: {e}")
-        except Exception as e:
-            self.send_error(500, f"Internal Server Error: {str(e)}")
-
-    def _evaluate_edge_alert(self, agent, node: str, data: dict):
-        """根据报告内容评估并推送告警。
-
-        三档:
-          A. 安全事件 — 按 report_reason (边缘已 diff, 中心不重算)
-          B. 绝对资源阈值 — 每次都查 (含心跳/首次, 补 sub-threshold 漂移盲区)
-          C. (失联由 cron skill 处理, 见 2.4)
-        """
-        from core.config_loader import load_config
-        from core.alerts import push_alert
-        import time
-
-        cfg = load_config() or {}
-        acfg = cfg.get('edge', {}).get('alerts', {}) or {}
-        if not acfg.get('enabled', True):
-            return
-
-        dedup_window = int(acfg.get('dedup_window_min', 10)) * 60
-        win = int(time.time() // dedup_window)  # 时间窗进 key
-
-        reason = data.get('report_reason') or ''
-        metrics = data.get('metrics', {}) or {}
-        security = data.get('security', {}) or {}
-
-        # ── A. 安全事件 (非心跳/非首次 即视为变化) ──
-        is_routine = (reason == '首次上报') or reason.startswith('心跳') or ('变化(' in reason) or (reason == '常规登录')
-        if reason and not is_routine:
-            text = f"🚨 [{node}] 边缘安全事件\n原因: {reason}"
-            # 把关键安全字段带上
-            af = security.get('auth_fails', 0)
-            if af and af > 0: text += f"\nauth_fails(近1h): {af}"
-            logins = security.get('recent_logins') or []
-            if logins:
-                last = logins[-1]
-                text += f"\n最近登录: {last.get('user','?')} @ {last.get('ip','?')} ({last.get('method','?')})"
-            push_alert(agent, text, title='🚨 Edge 安全告警', color='red',
-                       dedup_key=f"{node}:security:{win}:{reason[:30]}")
-
-        # ── B. 绝对资源阈值 (每次都查, 含 routine) ──
-        disk = metrics.get('disk_percent', 0) or 0
-        mem = metrics.get('mem_percent', 0) or 0
-        cpu = metrics.get('cpu_load', (0, 0, 0))
-        cpu1 = cpu[0] if isinstance(cpu, (list, tuple)) and cpu else 0
-
-        d_thr = acfg.get('disk_percent', 85)
-        m_thr = acfg.get('mem_percent', 90)
-        c_thr = acfg.get('cpu_load', 5.0)
-
-        if disk >= d_thr:
-            push_alert(agent, f"⚠️ [{node}] 磁盘 {disk:.1f}% ≥ 阈值 {d_thr}%",
-                       title='⚠️ Edge 资源告警', color='orange',
-                       dedup_key=f"{node}:disk:{win}")
-        if mem >= m_thr:
-            push_alert(agent, f"⚠️ [{node}] 内存 {mem:.1f}% ≥ 阈值 {m_thr}%",
-                       title='⚠️ Edge 资源告警', color='orange',
-                       dedup_key=f"{node}:mem:{win}")
-        if cpu1 >= c_thr:
-            push_alert(agent, f"⚠️ [{node}] 1min load {cpu1:.1f} ≥ 阈值 {c_thr}",
-                       title='⚠️ Edge 资源告警', color='orange',
-                       dedup_key=f"{node}:cpu:{win}")
 
     def _read_json(self):
         content_length = int(self.headers.get('Content-Length', 0))
@@ -1548,77 +911,6 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(obj, ensure_ascii=False).encode('utf-8'))
 
-    def _handle_pull_task(self, query: str):
-        """边缘节点拉取下发任务: GET /api/pull_task?node=<node_id>。
-
-        拉取即 dispatched (原子 claim), 返回验签执行所需 payload 或 {task: null}。"""
-        from core import edge_db
-        qs = parse_qs(query)
-        node = (qs.get('node', [None])[0] or '').strip()
-        if not node:
-            self.send_error(400, "Bad Request: Missing node")
-            return
-        task = edge_db.claim_task(node)
-        if not task:
-            self._quiet = True  # 空轮询不打 access log
-            self._json(200, {"task": None})
-            return
-        payload = {
-            "task_id": task["id"],
-            "node": task["node"],
-            "cmd": task["cmd"],
-            "ts": task["ts"],
-            "nonce": task["nonce"],
-            "sig": task["sig"],
-            "key_tier": task["key_tier"],
-        }
-        self._json(200, {"task": payload})
-
-    def _handle_task_result(self):
-        """边缘回传执行结果: POST /api/task_result {task_id, exit_code, stdout, stderr}。"""
-        from core import edge_db
-        body = self._read_json()
-        if body is None:
-            return
-        task_id = body.get('task_id')
-        if not task_id:
-            self.send_error(400, "Bad Request: Missing task_id")
-            return
-        try:
-            exit_code = int(body.get('exit_code', -1))
-        except (TypeError, ValueError):
-            exit_code = -1
-        updated = edge_db.submit_result(
-            task_id, exit_code, body.get('stdout', ''), body.get('stderr', '')
-        )
-        self._json(200, {"status": "ok" if updated else "noop"})
-
-    def _handle_edge_task(self):
-        """管理员上传根私钥签名的高危任务: POST /api/edge_task (admin auth only)。
-
-        cmd 写入后不可变 (id 冲突报 409)。仅接受 key_tier=root。"""
-        import uuid
-        from core import edge_db
-        if getattr(self, 'is_edge', False) or getattr(self, 'is_guest', False):
-            self.send_error(403, "Forbidden: admin only")
-            return
-        body = self._read_json()
-        if body is None:
-            return
-        node, cmd, ts, nonce, sig = (body.get(k) for k in ('node', 'cmd', 'ts', 'nonce', 'sig'))
-        if not all([node, cmd, ts, nonce, sig]):
-            self.send_error(400, "Bad Request: Missing required fields (node,cmd,ts,nonce,sig)")
-            return
-        if body.get('key_tier', 'root') != 'root':
-            self.send_error(400, "Bad Request: /api/edge_task only accepts key_tier=root")
-            return
-        task_id = body.get('task_id') or uuid.uuid4().hex
-        try:
-            edge_db.create_task(task_id, node, cmd, ts, nonce, sig, 'root')
-        except Exception as e:
-            self.send_error(409, f"Conflict: {e}")
-            return
-        self._json(200, {"status": "ok", "task_id": task_id})
 
     def _handle_task_stream(self, query: str):
         qs = parse_qs(query)
@@ -1685,201 +977,6 @@ class ApiHandler(BaseHTTPRequestHandler):
                 
             time.sleep(1)
 
-    def _handle_email_html(self, query: str):
-        """直接返回邮件原始 HTML，供浏览器原生渲染预览。
-        GET /api/v1/email/html?account=<account>&uid=<uid>
-        """
-        import os, sqlite3
-        qs = parse_qs(query)
-        account = (qs.get('account', [None])[0] or '').strip()
-        uid = (qs.get('uid', [None])[0] or '').strip()
-        if not account or not uid:
-            self.send_error(400, "Bad Request: Missing account or uid")
-            return
-
-        from core.config_loader import load_config
-        cfg = load_config() or {}
-        billing_dir = cfg.get('billing', {}).get('script_dir', '/home/liteagent/mail-statement-parser')
-        db_path = os.path.join(billing_dir, 'statements.db')
-        if not os.path.exists(db_path):
-            self.send_error(500, "Database not found")
-            return
-
-        try:
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT es.subject, es.sender, es.email_date, eb.raw_html, eb.plain_text "
-                "FROM email_bodies eb "
-                "JOIN email_summaries es ON eb.account_name=es.account_name AND eb.uid=es.uid "
-                "WHERE eb.account_name=? AND eb.uid=?", (account, uid)
-            )
-            row = cur.fetchone()
-            conn.close()
-        except Exception as e:
-            self.send_error(500, f"Database error: {e}")
-            return
-
-        if not row:
-            self.send_error(404, "Email not found")
-            return
-
-        subject, sender, email_date, raw_html, plain_text = row
-        if raw_html:
-            html_content = raw_html
-        elif plain_text:
-            # 纯文本用 <pre> 包裹
-            import html
-            html_content = f"<html><head><meta charset='utf-8'><title>{html.escape(subject or '')}</title></head><body><pre>{html.escape(plain_text)}</pre></body></html>"
-        else:
-            self.send_error(404, "Email body is empty")
-            return
-
-        body_bytes = html_content.encode('utf-8')
-        self.send_response(200)
-        self._send_cors_headers()
-        self.send_header('Content-Type', 'text/html; charset=utf-8')
-        self.send_header('Content-Length', str(len(body_bytes)))
-        self.end_headers()
-        self.wfile.write(body_bytes)
-
-    def _handle_todos(self, query: str):
-        qs = parse_qs(query)
-        status = qs.get("status", ["pending,active"])[0]
-        try:
-            from features.todo import TodoService
-            todos = TodoService().get_json(status=status)
-            self.send_response(200)
-            self._send_cors_headers()
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(json.dumps({"success": True, "data": todos}).encode('utf-8'))
-        except Exception as e:
-            self.send_error(500, str(e))
-
-    def _handle_post_todo(self):
-        content_length = int(self.headers.get('Content-Length', 0))
-        if content_length == 0:
-            self.send_error(400, "Bad Request: Empty body")
-            return
-        body = self.rfile.read(content_length)
-        try:
-            data = json.loads(body.decode('utf-8'))
-            if 'notify_enabled' in data and not isinstance(data['notify_enabled'], bool):
-                self.send_error(400, 'notify_enabled must be boolean')
-                return
-            title = data.get("title")
-            if not title:
-                self.send_error(400, "Bad Request: Missing title")
-                return
-            kind = data.get("kind", "misc")
-            project = data.get("project")
-            description = data.get("description")
-            due_at = data.get("due_at")
-            remind_interval_mins = data.get("remind_interval_mins", 0)
-            remind_before_mins = data.get("remind_before_mins", 30)
-            notify_enabled = data.get('notify_enabled', True)
-
-            from features.todo import TodoService
-            msg = TodoService().add(title=title, kind=kind, project=project, description=description, due_at=due_at, remind_interval_mins=remind_interval_mins, remind_before_mins=remind_before_mins, notify_enabled=notify_enabled)
-            
-            self.send_response(200)
-            self._send_cors_headers()
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(json.dumps({"success": True, "message": msg}).encode('utf-8'))
-        except Exception as e:
-            self.send_error(500, str(e))
-
-    def _handle_post_todo_brief_push(self):
-        try:
-            from features.todo import TodoService
-            msg = TodoService().push_brief()
-            self.send_response(200)
-            self._send_cors_headers()
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(json.dumps({"success": True, "message": msg}).encode('utf-8'))
-        except Exception as e:
-            self.send_error(500, str(e))
-
-    def _handle_patch_todo(self, path: str):
-        tid = path.split('/')[-1]
-        content_length = int(self.headers.get('Content-Length', 0))
-        if content_length == 0:
-            self.send_error(400, "Bad Request: Empty body")
-            return
-        body = self.rfile.read(content_length)
-        try:
-            data = json.loads(body.decode('utf-8'))
-            if 'notify_enabled' in data and not isinstance(data['notify_enabled'], bool):
-                self.send_error(400, 'notify_enabled must be boolean')
-                return
-            msg = []
-
-            from features.todo import TodoService
-            svc = TodoService()
-
-            status = data.get("status")
-            if status:
-                if status == 'done':
-                    msg.append(svc.done(tid))
-                elif status == 'active':
-                    msg.append(svc.start(tid))
-                elif status == 'pending':
-                    msg.append(svc.resume(tid))
-                else:
-                    self.send_error(400, f"Unsupported status: {status}")
-                    return
-
-            title = data.get("title")
-            description = data.get("description")
-            due_at = data.get("due_at")
-            project = data.get("project")
-            recur_cron = data.get("recur_cron")
-            kind = data.get("kind")
-            remind_interval_mins = data.get("remind_interval_mins")
-            remind_before_mins = data.get("remind_before_mins")
-            notify_enabled = data.get('notify_enabled')
-
-            if any(x is not None for x in [title, description, due_at, project, recur_cron, kind, remind_interval_mins, remind_before_mins, notify_enabled]):
-                msg.append(svc.update(tid, title=title, description=description, due_at=due_at, project=project, recur_cron=recur_cron, kind=kind, remind_interval_mins=remind_interval_mins, remind_before_mins=remind_before_mins, notify_enabled=notify_enabled))
-
-            if not msg:
-                self.send_error(400, "Bad Request: No fields to update")
-                return
-
-            self.send_response(200)
-            self._send_cors_headers()
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(json.dumps({"success": True, "message": " | ".join(msg)}).encode('utf-8'))
-        except Exception as e:
-            self.send_error(500, str(e))
-
-    def _handle_delete_todo(self, path: str):
-        tid = path.split('/')[-1]
-        try:
-            from features.todo import TodoService
-            deleted = TodoService().delete(tid)
-
-            if deleted:
-                msg = f"✅ 任务 {tid} 已被永久删除"
-            else:
-                self.send_response(404)
-                self._send_cors_headers()
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({"success": False, "detail": f"Todo {tid} not found"}).encode('utf-8'))
-                return
-
-            self.send_response(200)
-            self._send_cors_headers()
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(json.dumps({"success": True, "message": msg}).encode('utf-8'))
-        except Exception as e:
-            self.send_error(500, str(e))
 
     def _handle_openai_models(self):
         models_obj = {
@@ -2011,199 +1108,6 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(resp_obj, ensure_ascii=False).encode('utf-8'))
 
-    # ── Socks5 Proxy Management Handlers ──
-    def _handle_socks5_get(self, query: str):
-        qs = parse_qs(query)
-        q = qs.get("q", [None])[0]
-        try:
-            from skills.ops_socks5 import get_socks5_proxies
-            proxies = get_socks5_proxies(query=q)
-            self.send_response(200)
-            self._send_cors_headers()
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(json.dumps({"success": True, "data": proxies}).encode('utf-8'))
-        except Exception as e:
-            self.send_error(500, str(e))
-
-    def _handle_socks5_post(self):
-        content_length = int(self.headers.get('Content-Length', 0))
-        if content_length == 0:
-            self.send_error(400, "Bad Request: Empty body")
-            return
-        body = self.rfile.read(content_length)
-        try:
-            data = json.loads(body.decode('utf-8'))
-            servername = data.get("servername")
-            host = data.get("host")
-            if not servername or not host:
-                self.send_error(400, "Bad Request: Missing servername or host")
-                return
-            runcmd = data.get("runcmd", "")
-            clientproxy = data.get("clientproxy", "")
-            memo = data.get("memo", "")
-
-            from skills.ops_socks5 import add_socks5_proxy
-            new_id = add_socks5_proxy(host=host, runcmd=runcmd, servername=servername, clientproxy=clientproxy, memo=memo)
-            self.send_response(200)
-            self._send_cors_headers()
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(json.dumps({"success": True, "id": new_id}).encode('utf-8'))
-        except Exception as e:
-            self.send_error(500, str(e))
-
-    def _handle_socks5_patch(self, path: str):
-        proxy_id_str = path.rsplit('/', 1)[-1]
-        try:
-            proxy_id = int(proxy_id_str)
-        except ValueError:
-            self.send_error(400, "Invalid proxy ID")
-            return
-        content_length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(content_length) if content_length > 0 else b"{}"
-        try:
-            data = json.loads(body.decode('utf-8'))
-            from skills.ops_socks5 import update_socks5_proxy
-            ok = update_socks5_proxy(
-                proxy_id=proxy_id,
-                host=data.get("host"),
-                runcmd=data.get("runcmd"),
-                servername=data.get("servername"),
-                clientproxy=data.get("clientproxy"),
-                memo=data.get("memo")
-            )
-            self.send_response(200)
-            self._send_cors_headers()
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(json.dumps({"success": ok}).encode('utf-8'))
-        except Exception as e:
-            self.send_error(500, str(e))
-
-    def _handle_socks5_delete(self, path: str):
-        proxy_id_str = path.rsplit('/', 1)[-1]
-        try:
-            proxy_id = int(proxy_id_str)
-        except ValueError:
-            self.send_error(400, "Invalid proxy ID")
-            return
-        try:
-            from skills.ops_socks5 import delete_socks5_proxy
-            ok = delete_socks5_proxy(proxy_id)
-            self.send_response(200)
-            self._send_cors_headers()
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(json.dumps({"success": ok}).encode('utf-8'))
-        except Exception as e:
-            self.send_error(500, str(e))
-
-    def _handle_socks5_test(self, query: str):
-        qs = parse_qs(query)
-        proxy_id_str = qs.get("id", [None])[0]
-        host = qs.get("host", [None])[0]
-        port_str = qs.get("port", [None])[0]
-        port = int(port_str) if port_str and port_str.isdigit() else None
-
-        from skills.ops_socks5 import test_socks5_host, get_socks5_proxy_by_id
-        runcmd = ""
-        if proxy_id_str and proxy_id_str.isdigit():
-            proxy = get_socks5_proxy_by_id(int(proxy_id_str))
-            if proxy:
-                host = proxy.get("host")
-                runcmd = proxy.get("runcmd", "")
-
-        if not host:
-            self.send_error(400, "Missing host or valid proxy id")
-            return
-
-        res = test_socks5_host(host=host, runcmd=runcmd, port=port)
-        self.send_response(200)
-        self._send_cors_headers()
-        self.send_header('Content-Type', 'application/json; charset=utf-8')
-        self.end_headers()
-        self.wfile.write(json.dumps({"success": res["success"], "result": res}).encode('utf-8'))
-
-    def _handle_socks5_script(self, query: str):
-        qs = parse_qs(query)
-        proxy_id_str = qs.get("id", [None])[0]
-        script_type = qs.get("type", ["ps1"])[0].lower()
-        if not proxy_id_str or not proxy_id_str.isdigit():
-            self.send_error(400, "Missing proxy id")
-            return
-        
-        from skills.ops_socks5 import get_socks5_proxy_by_id, generate_ps1_script, generate_sh_script
-        proxy = get_socks5_proxy_by_id(int(proxy_id_str))
-        if not proxy:
-            self.send_error(404, "Proxy not found")
-            return
-        
-        if script_type == "sh":
-            script_content = generate_sh_script(proxy)
-        else:
-            script_content = generate_ps1_script(proxy)
-            
-        self.send_response(200)
-        self._send_cors_headers()
-        self.send_header('Content-Type', 'application/json; charset=utf-8')
-        self.end_headers()
-        self.wfile.write(json.dumps({"success": True, "type": script_type, "script": script_content}).encode('utf-8'))
-
-    def _handle_socks5_active_get(self):
-        from skills.ops_socks5 import get_current_active_proxy
-        active = get_current_active_proxy()
-        self.send_response(200)
-        self._send_cors_headers()
-        self.send_header('Content-Type', 'application/json; charset=utf-8')
-        self.end_headers()
-        self.wfile.write(json.dumps({"success": True, "data": active}).encode('utf-8'))
-
-    def _handle_socks5_active_post(self):
-        if getattr(self, 'is_edge', False) or getattr(self, 'is_guest', False):
-            self.send_error(403, "Forbidden: Only master token can perform active proxy switching")
-            return
-        content_length = int(self.headers.get('Content-Length', 0))
-        if content_length == 0:
-            self.send_error(400, "Bad Request: Empty body")
-            return
-        body = self.rfile.read(content_length)
-        try:
-            data = json.loads(body.decode('utf-8'))
-            proxy_id = data.get("id")
-            if not proxy_id:
-                self.send_error(400, "Missing proxy id")
-                return
-            from skills.ops_socks5 import apply_active_proxy_to_vps1
-            ok, msg = apply_active_proxy_to_vps1(int(proxy_id))
-            self.send_response(200 if ok else 400)
-            self._send_cors_headers()
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(json.dumps({"success": ok, "message": msg}).encode('utf-8'))
-        except Exception as e:
-            self.send_error(500, str(e))
-
-    def _handle_socks5_health(self, query: str = ""):
-        try:
-            from urllib.parse import parse_qs
-            qs = parse_qs(query)
-            proxy_id_list = qs.get("id") or qs.get("proxy_id")
-            
-            if proxy_id_list and proxy_id_list[0].isdigit():
-                from skills.ops_socks5 import test_socks5_proxy_outbound
-                res = test_socks5_proxy_outbound(int(proxy_id_list[0]))
-            else:
-                from skills.ops_socks5 import test_socks5_outbound_http
-                res = test_socks5_outbound_http()
-                
-            self.send_response(200)
-            self._send_cors_headers()
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(json.dumps({"success": res.get("success", False), "result": res}).encode('utf-8'))
-        except Exception as e:
-            self.send_error(500, f"Socks5 Health probe error: {str(e)}")
 
 
 class ApiServer:
@@ -2215,6 +1119,7 @@ class ApiServer:
         self.host = self.config.get("host", "0.0.0.0")
         self.port = self.config.get("port", 8080)
         self.auth_token = self.config.get("auth_token", "")
+        self.route_registry = getattr(agent, "route_registry", None)
         self.server = None
         self._thread = None
         from core.task_spec_service import TaskSpecService
@@ -2333,13 +1238,6 @@ class ApiServer:
         self._thread = threading.Thread(target=self.server.serve_forever, daemon=True, name="ApiServer")
         self._thread.start()
         print(f"  📡 API Server 启动成功 (http://{self.host}:{self.port})")
-
-        # 启动 Auto-Failover Worker (S-5)
-        try:
-            from skills.ops_socks5 import start_failover_worker
-            start_failover_worker()
-        except Exception as e:
-            print(f"  ⚠️ 启动 Failover Worker 异常: {str(e)}")
 
     def stop(self):
         if self.server:

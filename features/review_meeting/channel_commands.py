@@ -6,9 +6,9 @@ import time
 from contextlib import closing
 from pathlib import Path
 
-from core.review_meeting_notifications import private_owner_target
-from core import review_meeting_api as access
-from scripts import review_meeting as room
+from features.review_meeting.notifications import private_owner_target
+from features.review_meeting import api as access
+from features.review_meeting import room
 
 
 def handle(config, msg, db_path=None):
@@ -34,7 +34,7 @@ def handle(config, msg, db_path=None):
                 '/meeting decide 会议ID approve|revise|reject\n/meeting cancel 会议ID\n'
                 '/meeting confirm 确认码\n最终批准只记录裁决，不自动执行方案。')
     if action == 'join':
-        from skills.ops_review_meeting import invitation_parts, claim_invitation
+        from features.review_meeting.invitation_service import invitation_parts, claim_invitation
         mid, token = invitation_parts(args)
         joined = json.loads(claim_invitation(mid, token, db_path=db_path))
         return (f'已入会：{mid}；席位：{joined["participant"]}。\n'
@@ -126,3 +126,7 @@ def handle(config, msg, db_path=None):
                 result['invite_url'] = f'{base}/agent/api/v1/review-meetings/{result["id"]}/invite#invite={result.pop("invite_token")}'
                 result['usage'] = '每位评委使用独立链接。lite_agent 频道私聊可发送 /meeting join <完整邀请链接>，再要求读取议题并提交正式评审意见；其他代理需 POST /join。'
             return json.dumps(result, ensure_ascii=False)
+
+
+# 兼容别名
+handle_meeting_command = handle

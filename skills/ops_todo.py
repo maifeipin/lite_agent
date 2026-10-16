@@ -152,9 +152,10 @@ def todo_add(
     recur_cron: str = None,
     remind_interval_mins: int = 0,
     remind_before_mins: int = 30,
-    notify_enabled: bool = True
+    notify_enabled: bool = True,
+    db_path: Optional[str] = None
 ) -> str:
-    return get_service().add(
+    return get_service(db_path).add(
         title=title,
         kind=kind,
         project=project,
@@ -177,23 +178,23 @@ def todo_add(
         "limit": {"type": "integer", "description": "限制返回数量", "default": 20}
     }
 )
-def todo_list(status: str = "pending,active", project: str = None, kind: str = None, limit: int = 20) -> str:
-    return get_service().list(status=status, project=project, kind=kind, limit=limit)
+def todo_list(status: str = "pending,active", project: str = None, kind: str = None, limit: int = 20, db_path: Optional[str] = None) -> str:
+    return get_service(db_path).list(status=status, project=project, kind=kind, limit=limit)
 
 
 @skill(name="todo_get", description="获取待办事项详情", params={"id": {"type": "string", "description": "任务 ID"}})
-def todo_get(id: str) -> str:
-    return get_service().get(id)
+def todo_get(id: str, db_path: Optional[str] = None) -> str:
+    return get_service(db_path).get(id)
 
 
 @skill(name="todo_start", description="开始处理待办事项", params={"id": {"type": "string"}})
-def todo_start(id: str) -> str:
-    return get_service().start(id)
+def todo_start(id: str, db_path: Optional[str] = None) -> str:
+    return get_service(db_path).start(id)
 
 
 @skill(name="todo_done", description="将待办事项标记为完成", params={"id": {"type": "string"}})
-def todo_done(id: str) -> str:
-    return get_service().done(id)
+def todo_done(id: str, db_path: Optional[str] = None) -> str:
+    return get_service(db_path).done(id)
 
 
 @skill(
@@ -201,8 +202,8 @@ def todo_done(id: str) -> str:
     description="放弃待办事项（不再做但保留记录）",
     params={"id": {"type": "string"}, "reason": {"type": "string", "description": "放弃原因，可选"}}
 )
-def todo_drop(id: str, reason: str = None) -> str:
-    return get_service().drop(id, reason)
+def todo_drop(id: str, reason: str = None, db_path: Optional[str] = None) -> str:
+    return get_service(db_path).drop(id, reason)
 
 
 @skill(
@@ -210,8 +211,8 @@ def todo_drop(id: str, reason: str = None) -> str:
     description="将任务延期挂起",
     params={"id": {"type": "string"}, "until": {"type": "string", "description": "唤醒时间 ISO8601 格式或 +Nm/+Nh/+Nd 相对时间（如 +2m, +3d）"}}
 )
-def todo_snooze(id: str, until: str) -> str:
-    return get_service().snooze(id, until)
+def todo_snooze(id: str, until: str, db_path: Optional[str] = None) -> str:
+    return get_service(db_path).snooze(id, until)
 
 
 @skill(
@@ -219,13 +220,13 @@ def todo_snooze(id: str, until: str) -> str:
     description="无限期搁置任务（不知何时做）",
     params={"id": {"type": "string"}, "reason": {"type": "string", "description": "搁置原因，可选"}}
 )
-def todo_shelve(id: str, reason: str = None) -> str:
-    return get_service().shelve(id, reason)
+def todo_shelve(id: str, reason: str = None, db_path: Optional[str] = None) -> str:
+    return get_service(db_path).shelve(id, reason)
 
 
 @skill(name="todo_resume", description="恢复被延期或搁置的任务为待办状态", params={"id": {"type": "string"}})
-def todo_resume(id: str) -> str:
-    return get_service().resume(id)
+def todo_resume(id: str, db_path: Optional[str] = None) -> str:
+    return get_service(db_path).resume(id)
 
 
 @skill(
@@ -254,9 +255,10 @@ def todo_update(
     kind: str = None,
     remind_interval_mins: int = None,
     remind_before_mins: int = None,
-    notify_enabled: bool = None
+    notify_enabled: bool = None,
+    db_path: Optional[str] = None
 ) -> str:
-    return get_service().update(
+    return get_service(db_path).update(
         tid=id,
         title=title,
         description=description,
@@ -271,13 +273,13 @@ def todo_update(
 
 
 @skill(name="todo_dispatch", description="派发代码任务以供本地 IDE 处理", params={"id": {"type": "string"}, "target": {"type": "string", "default": "manual"}})
-def todo_dispatch(id: str, target: str = "manual") -> str:
-    return get_service().dispatch(id, target)
+def todo_dispatch(id: str, target: str = "manual", db_path: Optional[str] = None) -> str:
+    return get_service(db_path).dispatch(id, target)
 
 
 @skill(name="todo_push_brief", description="汇总当前待办事项并推送到 IM 聊天频道", params={})
-def todo_push_brief() -> str:
-    return get_service().push_brief()
+def todo_push_brief(db_path: Optional[str] = None) -> str:
+    return get_service(db_path).push_brief()
 
 
 def _todo_tick():
@@ -291,7 +293,3 @@ def register_todo_cron(mgr: Optional[CronManager] = None) -> None:
         cron.add_job('todo_tick', 'every_minute', _todo_tick)
     if not any(j.name == 'todo_brief' for j in cron.jobs.values()):
         cron.add_job('todo_brief', '08:30', todo_push_brief)
-
-
-# 装配处：技能模块加载时显式幂等注册
-register_todo_cron()

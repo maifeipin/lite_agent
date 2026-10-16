@@ -9,7 +9,7 @@ import time
 from contextlib import closing
 from pathlib import Path
 
-from scripts import review_meeting as room
+from features.review_meeting import room
 
 
 def private_owner_target(name, channels_config):
@@ -90,14 +90,20 @@ def deliver_once(agent, config, db_path=None, now=None):
         return bool(delivered)
 
 
-def start_notifier(agent, config):
+def start_notifier(agent, config, stop_event=None):
     if config.get('review_meeting_notifications', {}).get('enabled') is not True:
-        return
+        return None
+    stop = stop_event or threading.Event()
     def loop():
-        while True:
+        while not stop.is_set():
             try:
                 deliver_once(agent, config)
             except Exception as exc:
                 print(f'  [Meeting] notification worker error ({type(exc).__name__})')
-            time.sleep(5)
-    threading.Thread(target=loop, name='MeetingNotifications', daemon=True).start()
+            stop.wait(5)
+    t = threading.Thread(target=loop, name='MeetingNotifications', daemon=True)
+    t.start()
+    def stop_fn():
+        stop.set()
+        t.join(timeout=3.0)
+    return stop_fn

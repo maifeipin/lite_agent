@@ -1,694 +1,75 @@
-import sqlite3
-import os
-import sys
-import json
-import socket
-import time
-import re
-import shlex
-import subprocess
-import threading
-from urllib.parse import urlsplit
+"""
+Skills Ops Socks5 (skills.ops_socks5).
+Socks5 代理模型工具薄入口（保留 @skill 契约与薄委托）。
+业务、数据库与后台 Worker 守护主体位于 canonical 服务 features/network_ops/socks5_service.py。
+"""
+
+import sys, os, threading
+from typing import Optional, Callable, Tuple, Any, Dict, List, Set
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.skill_engine import skill
+from features.network_ops import socks5_service
 
-LOCAL_PORT_EXCLUDES = {1080, 1081, 1082, 7890, 7891, 8080, 8887, 8888, 18988}
-_socks5_lock = threading.Lock()
-_failover_backoff_until = 0
-_failover_worker_started = False
-_consecutive_failures = 0
+# 导入所有 canonical 常用函数以支持静态导出与调用
+from features.network_ops.socks5_service import (
+    LOCAL_PORT_EXCLUDES,
+    get_socks5_db_path,
+    _ensure_socks5_schema,
+    get_socks5_proxies,
+    get_socks5_proxy_by_id,
+    get_current_active_proxy,
+    add_socks5_proxy,
+    update_socks5_proxy,
+    delete_socks5_proxy,
+    apply_active_proxy_to_vps1,
+    test_socks5_host,
+    test_socks5_outbound_http,
+    test_socks5_proxy_outbound,
+    failover_worker_loop,
+    stop_failover_worker,
+    generate_ps1_script,
+    generate_sh_script,
+    parse_host_port,
+    parse_runcmd_to_naive_config,
+)
 
-def get_socks5_db_path() -> str:
-    """获取 ai.db 的完整路径（支持环境变量、Windows 路径及项目内部 fallback）。"""
-    env_path = os.environ.get("SOCKS5_DB_PATH") or os.environ.get("AI_DB_PATH")
-    if env_path and os.path.exists(env_path):
-        return env_path
-    
-    default_win = r"C:\app\WebGPT\src\bin\Debug\ai.db"
-    if os.path.exists(default_win):
-        return default_win
-        
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    fallback_path = os.path.join(project_root, "data", "ai.db")
-    return fallback_path
 
-def _ensure_socks5_schema():
-    """确保 proxyserver 数据表存在，并幂等增加 is_active 和 priority 列 (S-7)。"""
-    db_path = get_socks5_db_path()
-    db_dir = os.path.dirname(db_path)
-    if db_dir:
-        os.makedirs(db_dir, exist_ok=True)
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS proxyserver (
-                ID INTEGER PRIMARY KEY AUTOINCREMENT,
-                host TEXT,
-                runcmd TEXT,
-                servername TEXT,
-                clientproxy TEXT,
-                memo TEXT
-            )
-        """)
-        # 检查并幂等增加 is_active 和 priority 列
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(proxyserver)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if 'is_active' not in columns:
-            cursor.execute("ALTER TABLE proxyserver ADD COLUMN is_active INTEGER DEFAULT 0")
-        if 'priority' not in columns:
-            cursor.execute("ALTER TABLE proxyserver ADD COLUMN priority INTEGER DEFAULT 0")
-        conn.commit()
+def start_failover_worker(
+    poll_interval: float = 180.0,
+    probe_fn: Optional[Callable[[], dict]] = None,
+    apply_fn: Optional[Callable[[int], Tuple[bool, str]]] = None,
+    alert_fn: Optional[Callable[..., None]] = None,
+    stop_event: Optional[threading.Event] = None,
+    get_proxies_fn: Optional[Callable[[], List[dict]]] = None,
+    get_active_fn: Optional[Callable[[], Optional[dict]]] = None,
+) -> Callable[[], None]:
+    """薄委托：将外部/测试参数显式单向转发至 canonical 服务，绝不污染 canonical 模块。"""
+    return socks5_service.start_failover_worker(
+        poll_interval=poll_interval,
+        probe_fn=probe_fn,
+        apply_fn=apply_fn,
+        alert_fn=alert_fn,
+        stop_event=stop_event,
+        get_proxies_fn=get_proxies_fn,
+        get_active_fn=get_active_fn,
+    )
 
-def get_socks5_proxies(query: str = None) -> list:
-    """获取 Socks5 代理列表（支持模糊搜索，按 is_active、priority 及 ID 排序）。"""
-    _ensure_socks5_schema()
-    db_path = get_socks5_db_path()
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        if query:
-            q = f"%{query.strip()}%"
-            cursor.execute("""
-                SELECT ID as id, host, runcmd, servername, clientproxy, memo, COALESCE(is_active, 0) as is_active, COALESCE(priority, 0) as priority
-                FROM proxyserver
-                WHERE servername LIKE ? OR host LIKE ? OR runcmd LIKE ? OR clientproxy LIKE ? OR memo LIKE ?
-                ORDER BY is_active DESC, priority DESC, ID DESC
-            """, (q, q, q, q, q))
-        else:
-            cursor.execute("""
-                SELECT ID as id, host, runcmd, servername, clientproxy, memo, COALESCE(is_active, 0) as is_active, COALESCE(priority, 0) as priority
-                FROM proxyserver
-                ORDER BY is_active DESC, priority DESC, ID DESC
-            """)
-        rows = cursor.fetchall()
-        return [dict(r) for r in rows]
 
-def get_socks5_proxy_by_id(proxy_id: int) -> dict:
-    """根据 ID 获取单个代理节点。"""
-    _ensure_socks5_schema()
-    db_path = get_socks5_db_path()
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT ID as id, host, runcmd, servername, clientproxy, memo, COALESCE(is_active, 0) as is_active, COALESCE(priority, 0) as priority
-            FROM proxyserver WHERE ID = ?
-        """, (proxy_id,))
-        row = cursor.fetchone()
-        return dict(row) if row else None
+# PEP 562 模块级延迟只读代理（仅用于读取 canonical 模块中的动态属性，如 _failover_worker_thread 等）
+# 绝不拦截 __setattr__，绝不覆盖模块 class，绝不污染 canonical 服务
+def __getattr__(name: str) -> Any:
+    if hasattr(socks5_service, name):
+        return getattr(socks5_service, name)
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
-def get_current_active_proxy() -> dict:
-    """获取当前标记为生效的主节点。"""
-    _ensure_socks5_schema()
-    db_path = get_socks5_db_path()
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT ID as id, host, runcmd, servername, clientproxy, memo, COALESCE(is_active, 0) as is_active, COALESCE(priority, 0) as priority
-            FROM proxyserver WHERE is_active = 1 LIMIT 1
-        """)
-        row = cursor.fetchone()
-        return dict(row) if row else None
 
-def add_socks5_proxy(host: str, runcmd: str, servername: str, clientproxy: str = "", memo: str = "", priority: int = 0) -> int:
-    """添加新的 Socks5 代理节点。"""
-    _ensure_socks5_schema()
-    db_path = get_socks5_db_path()
-    with sqlite3.connect(db_path) as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO proxyserver (host, runcmd, servername, clientproxy, memo, priority)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (host.strip(), runcmd.strip(), servername.strip(), clientproxy.strip(), memo.strip(), priority))
-        conn.commit()
-        return cursor.lastrowid
+# ── Agent Skills (薄工具入口，保留 schema 与参数) ──
 
-def update_socks5_proxy(proxy_id: int, host: str = None, runcmd: str = None, servername: str = None, clientproxy: str = None, memo: str = None, priority: int = None) -> bool:
-    """更新 Socks5 代理节点。"""
-    _ensure_socks5_schema()
-    db_path = get_socks5_db_path()
-    current = get_socks5_proxy_by_id(proxy_id)
-    if not current:
-        return False
-    
-    new_host = host.strip() if host is not None else current["host"]
-    new_runcmd = runcmd.strip() if runcmd is not None else current["runcmd"]
-    new_servername = servername.strip() if servername is not None else current["servername"]
-    new_clientproxy = clientproxy.strip() if clientproxy is not None else current["clientproxy"]
-    new_memo = memo.strip() if memo is not None else current["memo"]
-    new_priority = int(priority) if priority is not None else current["priority"]
-
-    with sqlite3.connect(db_path) as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE proxyserver
-            SET host = ?, runcmd = ?, servername = ?, clientproxy = ?, memo = ?, priority = ?
-            WHERE ID = ?
-        """, (new_host, new_runcmd, new_servername, new_clientproxy, new_memo, new_priority, proxy_id))
-        conn.commit()
-        return cursor.rowcount > 0
-
-def delete_socks5_proxy(proxy_id: int) -> bool:
-    """删除 Socks5 代理节点。"""
-    _ensure_socks5_schema()
-    db_path = get_socks5_db_path()
-    with sqlite3.connect(db_path) as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM proxyserver WHERE ID = ?", (proxy_id,))
-        conn.commit()
-        return cursor.rowcount > 0
-
-# ── 转换与 Helper 函数 ──
-def parse_host_port(host_str: str) -> tuple:
-    """从 host 字符串解析 (clean_host, port)，支持 IPv4、IPv6 (带中括号) 及域名。"""
-    if not host_str:
-        return "", None
-    s = host_str.strip()
-    if s.startswith("["):
-        m = re.match(r'^\[([^\]]+)\](?::(\d+))?$', s)
-        if m:
-            clean = m.group(1)
-            port = int(m.group(2)) if m.group(2) else None
-            return clean, port
-    elif ":" in s and s.count(":") == 1:
-        h, p = s.split(":", 1)
-        if p.isdigit():
-            return h, int(p)
-    return s, None
-
-def parse_runcmd_to_naive_config(runcmd: str, host: str = "", current_listen: str = "socks://127.0.0.1:18988") -> dict:
-    """
-    使用 shlex 准确解析 runcmd 命令行参数，并转换为 /etc/proxy/config.json 格式 (P-1, R-1)。
-    保持 listen 为宿主不变量 (R-1)，只更新 proxy 与 host-resolver-rules。
-    """
-    try:
-        tokens = shlex.split(runcmd)
-    except Exception:
-        tokens = runcmd.split()
-        
-    proxy_val = ""
-    rules_val = ""
-    
-    for token in tokens:
-        if token.startswith("--proxy="):
-            proxy_val = token.split("=", 1)[1]
-        elif token.startswith("--host-resolver-rules="):
-            rules_val = token.split("=", 1)[1]
-            
-    if not rules_val and proxy_val and host:
-        try:
-            domain = urlsplit(proxy_val).hostname
-            if domain and host and domain != host:
-                rules_val = f"MAP {domain} {host}"
-        except Exception:
-            pass
-            
-    return {
-        "listen": current_listen or "socks://127.0.0.1:18988",
-        "proxy": proxy_val,
-        "host-resolver-rules": rules_val,
-        "log": ""
-    }
-
-def apply_active_proxy_to_vps1(proxy_id: int) -> tuple[bool, str]:
-    """
-    将指定节点应用为 VPS1 的生效主节点 (P-2, P-4, B-1, B-2, S-1, S-6)。
-    具备特权隔离、安全校验、原子备份、5s短轮询校验、故障自动回滚及 DB 状态一致性保证。
-    """
-    global _failover_backoff_until, _consecutive_failures
-    proxy = get_socks5_proxy_by_id(proxy_id)
-    if not proxy:
-        return False, f"未找到 ID 为 {proxy_id} 的节点"
-        
-    runcmd = proxy.get("runcmd", "")
-    # 校验是否为 Naive 协议节点 (P-2 Guard)
-    is_naive = "naive" in runcmd.lower() or "--proxy=" in runcmd.lower()
-    if not is_naive:
-        return False, f"节点 [{proxy.get('servername')}] 为 Brook 协议，不可应用为 VPS1 的 Naive 服务主节点"
-
-    with _socks5_lock:
-        # 非 POSIX 环境（如 Windows 开发机）直接更新数据库标记并返回提醒
-        if os.name != 'posix':
-            _update_db_is_active(proxy_id)
-            _failover_backoff_until = 0
-            _consecutive_failures = 0
-            return True, f"开发环境提醒：已更新数据库标记为 active，跳过 Linux 服务重启"
-
-        # 读取宿主环境现网 config.json 提取 current_listen (S-6)
-        config_path = "/etc/proxy/config.json"
-        current_listen = "socks://127.0.0.1:18988"
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    old_cfg = json.load(f)
-                    current_listen = old_cfg.get("listen", current_listen)
-            except Exception:
-                pass
-
-        config_dict = parse_runcmd_to_naive_config(runcmd, proxy.get("host", ""), current_listen)
-        
-        # 预校验 JSON 语法正确性 (S-3)
-        try:
-            json_str = json.dumps(config_dict, indent=2)
-            json.loads(json_str)
-        except Exception as e:
-            return False, f"生成 JSON 格式异常: {str(e)}"
-
-        # 写入临时文件
-        tmp_json_path = "/tmp/naive_new_config.json"
-        try:
-            with open(tmp_json_path, 'w', encoding='utf-8') as f:
-                f.write(json_str)
-        except Exception as e:
-            # 若在 Windows 开发机上无法写 /tmp，更新数据库标记并给出开发环境提醒
-            _update_db_is_active(proxy_id)
-            _failover_backoff_until = 0
-            _consecutive_failures = 0
-            return True, f"开发环境提醒：已更新数据库标记为 active，跳过 Linux 服务重启 ({str(e)})"
-
-        # 寻找特权切换 Helper 脚本 (S-1)
-        helper_path = "/usr/local/sbin/switch_naive_config.sh"
-        if not os.path.exists(helper_path):
-            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            helper_path = os.path.join(project_root, "scripts", "switch_naive_config.sh")
-            
-        if not os.path.exists(helper_path):
-            _update_db_is_active(proxy_id)
-            _failover_backoff_until = 0
-            _consecutive_failures = 0
-            return True, "已更新数据库主节点标记（当前节点已设为 Active）"
-
-        # 执行 Helper 脚本 (备份->原子替换->重启->5s短轮询校验->自动回滚)
-        try:
-            is_root = hasattr(os, 'geteuid') and os.geteuid() == 0  # B-2 跨平台安全守卫
-            cmd = [helper_path, tmp_json_path] if is_root else ["sudo", helper_path, tmp_json_path]
-            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
-            
-            if proc.returncode == 0:
-                # Helper 执行成功后再更新 DB is_active 状态 (B-1 修复)
-                _update_db_is_active(proxy_id)
-                _failover_backoff_until = 0
-                _consecutive_failures = 0
-                return True, f"成功切至主节点 [{proxy.get('servername')}] 并已重启 VPS1 代理服务"
-            else:
-                # Helper 失败已自动回滚系统配置，保持 DB is_active 仍为原节点 (B-1 修复)
-                err_msg = proc.stderr or proc.stdout
-                return False, f"切换代理服务失败已自动恢复原服务: {err_msg.strip()}"
-        except Exception as e:
-            return False, f"执行 Helper 脚本异常: {str(e)}"
-
-def _update_db_is_active(active_id: int):
-    """更新数据库中 is_active 状态。"""
-    db_path = get_socks5_db_path()
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("UPDATE proxyserver SET is_active = CASE WHEN ID = ? THEN 1 ELSE 0 END", (active_id,))
-        conn.commit()
-
-def extract_proxy_port(runcmd: str = "", host: str = "") -> int:
-    """从 host 或 runcmd 命令行中提取代理服务端的真实连接端口，排除本地监听端口。"""
-    _, host_port = parse_host_port(host)
-    if host_port and host_port not in LOCAL_PORT_EXCLUDES:
-        return host_port
-
-    if runcmd:
-        clean_cmd = re.sub(r'(?:--listen|-l|-L|--socks5|--local)\s*(?:=\s*|\s+)\S+', '', runcmd)
-        server_matches = re.findall(r'(?:--proxy=|-s\s+|-F\s+|--server\s+)(?:[^\s]+)', clean_cmd)
-        target_tokens = server_matches if server_matches else [clean_cmd]
-        
-        for token in target_tokens:
-            url_str = re.sub(r'^(?:--proxy=|-s|-F|--server)\s*', '', token).strip()
-            if "://" not in url_str and not url_str.startswith("//"):
-                url_str = "proxy://" + url_str
-            try:
-                parsed = urlsplit(url_str)
-                if parsed.port and parsed.port not in LOCAL_PORT_EXCLUDES:
-                    return parsed.port
-                if parsed.scheme in ("https", "wss") and 443 not in LOCAL_PORT_EXCLUDES:
-                    return 443
-                if parsed.scheme in ("http", "ws") and 80 not in LOCAL_PORT_EXCLUDES:
-                    return 80
-            except Exception:
-                pass
-                
-        for p_str in re.findall(r':(\d{2,5})', " ".join(target_tokens)):
-            p = int(p_str)
-            if p not in LOCAL_PORT_EXCLUDES and 1 <= p <= 65535:
-                return p
-
-    return 4431
-
-def test_socks5_host(host: str, runcmd: str = "", port: int = None, timeout: float = 3.0) -> dict:
-    """测试主机 TCP 端口连通性及延迟（支持 IPv4/IPv6 双栈回退与端口自动解析）。"""
-    if not host:
-        return {"success": False, "error": "Empty host", "latency_ms": -1}
-    
-    clean_host, host_port = parse_host_port(host)
-    target_port = port
-    if target_port is None or target_port <= 0:
-        target_port = host_port or extract_proxy_port(runcmd=runcmd, host=host)
-    
-    start_time = time.time()
-    try:
-        addr_info = socket.getaddrinfo(clean_host, target_port, socket.AF_UNSPEC, socket.SOCK_STREAM)
-        if not addr_info:
-            return {"success": False, "host": clean_host, "port": target_port, "error": "DNS resolution failed", "latency_ms": -1}
-        
-        last_error = None
-        for family, socktype, proto, canonname, sockaddr in addr_info:
-            try:
-                sock = socket.socket(family, socktype, proto)
-                sock.settimeout(timeout)
-                result = sock.connect_ex(sockaddr)
-                latency = round((time.time() - start_time) * 1000, 1)
-                sock.close()
-                if result == 0:
-                    return {"success": True, "host": clean_host, "port": target_port, "latency_ms": latency}
-                else:
-                    last_error = f"Port {target_port} unreachable (code {result})"
-            except Exception as se:
-                last_error = str(se)
-        
-        return {"success": False, "host": clean_host, "port": target_port, "error": last_error or "Connection failed", "latency_ms": -1}
-    except Exception as e:
-        return {"success": False, "host": clean_host, "port": target_port, "error": str(e), "latency_ms": -1}
-
-def _get_free_local_port() -> int:
-    """获取一个随机未被占用的本地空闲端口。"""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(('127.0.0.1', 0))
-        return s.getsockname()[1]
-
-def test_socks5_outbound_http(proxy_url: str = "socks5://127.0.0.1:18988", test_url: str = None, timeout: int = 5) -> dict:
-    """
-    通过指定的 Socks5 本地代理端点发起真实 HTTP 网页访问测试 (P-9, R-4)。
-    测试数据包真实出站连通性，并提取回显实际出站公网出口 IP 及地理区域。
-    """
-    start_time = time.time()
-    # 解析代理主机与端口 (例如 socks5://127.0.0.1:18995 -> 127.0.0.1:18995)
-    proxy_target = "127.0.0.1:18988"
-    if proxy_url:
-        m_target = re.search(r'(?:socks5h?://|socks://)?([^/]+)', proxy_url)
-        if m_target:
-            proxy_target = m_target.group(1)
-
-    endpoints = [test_url] if test_url else [
-        "https://cloudflare.com/cdn-cgi/trace",
-        "https://api.ipify.org",
-        "https://icanhazip.com"
-    ]
-    
-    last_error = None
-    for url in endpoints:
-        cmd = ["curl", "-s", "-w", "\n__HTTP_CODE__:%{http_code}", "--socks5-hostname", proxy_target, "-m", str(timeout), url]
-        try:
-            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout + 2)
-            latency_ms = round((time.time() - start_time) * 1000, 1)
-            raw_output = proc.stdout.strip()
-            
-            http_code = "000"
-            body = raw_output
-            if "__HTTP_CODE__:" in raw_output:
-                parts = raw_output.rsplit("__HTTP_CODE__:", 1)
-                body = parts[0].strip()
-                http_code = parts[1].strip()
-            
-            if http_code in ("200", "204", "301", "302"):
-                ip = ""
-                loc = ""
-                
-                # 尝试从 Cloudflare trace 解析 (ip=..., loc=...)
-                m_ip = re.search(r'(?:^|\n)ip=([^\r\n]+)', body)
-                if m_ip:
-                    ip = m_ip.group(1).strip()
-                else:
-                    m_raw_ip = re.search(r'\b(?:\d{1,3}\.){3}\d{1,3}\b|[0-9a-fA-F:]{4,}', body)
-                    if m_raw_ip:
-                        ip = m_raw_ip.group(0).strip()
-                        
-                m_loc = re.search(r'(?:^|\n)loc=([^\r\n]+)', body)
-                if m_loc:
-                    loc = m_loc.group(1).strip()
-                    
-                return {
-                    "success": True,
-                    "http_code": http_code,
-                    "ip": ip,
-                    "loc": loc,
-                    "latency_ms": latency_ms,
-                    "url": url,
-                    "proxy_target": proxy_target
-                }
-            else:
-                last_error = f"HTTP response status {http_code}"
-        except Exception as e:
-            last_error = str(e)
-            
-    return {
-        "success": False,
-        "http_code": "000",
-        "ip": "",
-        "loc": "",
-        "latency_ms": -1,
-        "error": last_error or "所有出站测试端点均不可达",
-        "proxy_target": proxy_target
-    }
-
-def test_socks5_proxy_outbound(proxy_id: int, timeout: int = 5) -> dict:
-    """
-    对特定的 Socks5/Naive 节点发起真实 HTTP 出站网络与出口 IP 回显测试。
-    - 若该节点为当前 Active 节点：直接复用本地 127.0.0.1:18988 发起测试。
-    - 若该节点为候选/非活动节点：动态分配随机空闲端口，启动隔离的临时 naive 进程进行独立测试，测试完成后立即销毁，互不干扰且绝不端口冲突。
-    """
-    proxy = get_socks5_proxy_by_id(proxy_id)
-    if not proxy:
-        return {"success": False, "error": f"未找到 ID 为 {proxy_id} 的节点", "latency_ms": -1}
-        
-    runcmd = proxy.get("runcmd", "")
-    is_naive = "naive" in runcmd.lower() or "--proxy=" in runcmd.lower()
-    if not is_naive:
-        return {"success": False, "error": "非 Naive 协议节点（如 Brook）暂不支持独立出站探针测试", "latency_ms": -1}
-        
-    # 如果刚好是当前已在 18988 运行的主节点，直接测 18988
-    active_proxy = get_current_active_proxy()
-    if active_proxy and active_proxy["id"] == proxy_id:
-        return test_socks5_outbound_http(proxy_url="socks5://127.0.0.1:18988", timeout=timeout)
-        
-    # 非当前主节点，在 Linux 环境下寻找 naive 二进制启动临时实例
-    if os.name != 'posix':
-        return {"success": False, "error": "独立候选节点出站探针仅支持 Linux 环境 (Windows 开发环境请直接使用当前生效主节点)", "latency_ms": -1}
-
-    naive_bin = "/etc/proxy/naive"
-    if not os.path.exists(naive_bin):
-        naive_bin = "naive"
-        
-    free_port = _get_free_local_port()
-    temp_listen = f"socks://127.0.0.1:{free_port}"
-    config_dict = parse_runcmd_to_naive_config(runcmd, proxy.get("host", ""), temp_listen)
-    
-    proc = None
-    tmp_json_path = None
-    try:
-        import tempfile
-        tmp_fd, tmp_json_path = tempfile.mkstemp(prefix="naive_test_", suffix=".json")
-        with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
-            json.dump(config_dict, f)
-            
-        proc = subprocess.Popen(
-            [naive_bin, "--config", tmp_json_path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        # 等待临时 naive 进程端口就绪（最多等待 1.5s）
-        port_ready = False
-        for _ in range(15):
-            time.sleep(0.1)
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(0.1)
-                if s.connect_ex(('127.0.0.1', free_port)) == 0:
-                    port_ready = True
-                    break
-                    
-        if not port_ready:
-            return {"success": False, "error": f"临时 Naive 实例启动失败 (端口 {free_port} 未就绪)", "latency_ms": -1}
-            
-        # 发起经过该独立临时端口的真实出站测试
-        res = test_socks5_outbound_http(proxy_url=f"socks5://127.0.0.1:{free_port}", timeout=timeout)
-        return res
-    except Exception as e:
-        return {"success": False, "error": f"独立节点测试异常: {str(e)}", "latency_ms": -1}
-    finally:
-        if proc:
-            try:
-                proc.terminate()
-                proc.wait(timeout=2)
-            except Exception:
-                try:
-                    proc.kill()
-                    proc.wait(timeout=2)
-                except Exception:
-                    pass
-        if tmp_json_path and os.path.exists(tmp_json_path):
-            try:
-                os.remove(tmp_json_path)
-            except Exception:
-                pass
-
-# ── Auto-Failover 后台守护逻辑 (P-5, R-5, R-6, B-4) ──
-def failover_worker_loop():
-    """后台 Auto-Failover Worker 定时探针与自动故障转移。"""
-    global _consecutive_failures, _failover_backoff_until
-    failed_round_node_ids = set()  # 记录本轮已失败的节点集合，防止 A<=>B 乒乓无休止切换 (B-4 修复)
-    print("  [*] Socks5 Auto-Failover Worker daemon started (polling every 3m)")
-    
-    while True:
-        try:
-            time.sleep(180) # 每 3 分钟轮询
-            
-            # 若处于退避冷却期，跳过 (R-6)
-            if time.time() < _failover_backoff_until:
-                continue
-
-            # 探测当前 127.0.0.1:18988 出站健康
-            res = test_socks5_outbound_http()
-            if res["success"]:
-                _consecutive_failures = 0
-                failed_round_node_ids.clear()
-            else:
-                _consecutive_failures += 1
-                current_active = get_current_active_proxy()
-                curr_id = current_active["id"] if current_active else -1
-                curr_name = current_active.get("servername", f"节点#{curr_id}") if current_active else "未知节点"
-                if curr_id != -1:
-                    failed_round_node_ids.add(curr_id)
-                    
-                print(f"  [!] Socks5 outbound probe failed [{_consecutive_failures}/2]: {res.get('error')}")
-                
-                # 连续 2 次探针失败触发自动回退
-                if _consecutive_failures >= 2:
-                    # 查找尚未在本轮标记失败、且优先级最高的备用 Naive 节点 (B-4, P-5, R-5)
-                    all_proxies = get_socks5_proxies()
-                    candidate = None
-                    for p in all_proxies:
-                        runcmd = p.get("runcmd", "").lower()
-                        is_naive = "naive" in runcmd or "--proxy=" in runcmd
-                        if is_naive and p["id"] not in failed_round_node_ids:
-                            candidate = p
-                            break
-                            
-                    from skills.ops_todo import send_im_alert
-                    if candidate:
-                        print(f"  [*] Triggering Auto-Failover: switching from [{curr_name}] to [{candidate['servername']}]")
-                        ok, msg = apply_active_proxy_to_vps1(candidate["id"])
-                        if ok:
-                            send_im_alert(
-                                title="⚠️ Socks5 自动回退成功",
-                                text=f"原节点 [{curr_name}] (ID: {curr_id}) 出站失效，已自动切换至备用节点 [{candidate['servername']}] (ID: {candidate['id']})",
-                                color="yellow",
-                                dedup_key=f"socks5_failover:{curr_id}->{candidate['id']}:{int(time.time() // 600)}"
-                            )
-                        else:
-                            print(f"  [!] Failed to switch to candidate [{candidate['servername']}]: {msg}")
-                            failed_round_node_ids.add(candidate["id"])
-                            send_im_alert(
-                                title="🚨 Socks5 自动回退失败",
-                                text=f"原节点 [{curr_name}] (ID: {curr_id}) 出站失效，尝试切换至备用节点 [{candidate['servername']}] (ID: {candidate['id']}) 失败: {msg}",
-                                color="red",
-                                dedup_key=f"socks5_failover_err:{candidate['id']}:{int(time.time() // 300)}"
-                            )
-                    else:
-                        print("  [!] Warning: All Naive proxy nodes failed in this round. Entering 15m backoff...")
-                        _failover_backoff_until = time.time() + 900 # 15 分钟退避
-                        _consecutive_failures = 0
-                        failed_round_node_ids.clear()
-                        send_im_alert(
-                            title="🚨 Socks5 全部备用节点耗尽",
-                            text=f"原节点 [{curr_name}] (ID: {curr_id}) 出站失效，且本轮所有备用 Naive 节点均探测失败或不可用！系统进入 15 分钟退避冷却，请运维人员尽快介入排查。",
-                            color="red",
-                            dedup_key=f"socks5_all_exhausted:{int(time.time() // 900)}"
-                        )
-        except Exception as e:
-            print(f"  [!] Failover Worker error: {str(e)}")
-
-def start_failover_worker():
-    """启动后台 Auto-Failover 线程 (S-5)。"""
-    global _failover_worker_started
-    if _failover_worker_started:
-        return
-    _failover_worker_started = True
-    t = threading.Thread(target=failover_worker_loop, daemon=True, name="Socks5FailoverWorker")
-    t.start()
-
-def generate_ps1_script(proxy: dict) -> str:
-    """生成 Windows PowerShell (.ps1) 检查安装与启动脚本。"""
-    servername = proxy.get("servername", "Socks5 Proxy")
-    host = proxy.get("host", "")
-    runcmd = proxy.get("runcmd", "")
-    
-    bin_name = "naive"
-    if "brook" in runcmd.lower():
-        bin_name = "brook"
-    
-    script = f"""# ========================================================
-# Windows Client Script for {servername} ({host})
-# Generated by Lite Agent
-# ========================================================
-
-Write-Host "[*] Checking dependency '{bin_name}'..." -ForegroundColor Cyan
-if (-not (Get-Command '{bin_name}' -ErrorAction SilentlyContinue)) {{
-    Write-Host "[!] Warning: '{bin_name}' was not found in PATH." -ForegroundColor Yellow
-    Write-Host "    Please ensure '{bin_name}.exe' is installed or present in current folder." -ForegroundColor Yellow
-}} else {{
-    Write-Host "[+] Found '{bin_name}' executable." -ForegroundColor Green
-}}
-
-Write-Host "[*] Starting Socks5 Proxy Node: {servername}..." -ForegroundColor Cyan
-Write-Host "    Command: {runcmd}" -ForegroundColor Gray
-
-{runcmd}
-"""
-    return script
-
-def generate_sh_script(proxy: dict) -> str:
-    """生成 Linux/macOS Shell (.sh) 检查安装与启动脚本。"""
-    servername = proxy.get("servername", "Socks5 Proxy")
-    host = proxy.get("host", "")
-    runcmd = proxy.get("runcmd", "")
-    
-    bin_name = "naive"
-    if "brook" in runcmd.lower():
-        bin_name = "brook"
-        
-    script = f"""#!/usr/bin/env bash
-# ========================================================
-# Linux/macOS Client Script for {servername} ({host})
-# Generated by Lite Agent
-# ========================================================
-
-CMD="{runcmd}"
-BIN_NAME="{bin_name}"
-
-echo -e "\\033[36m[*] Checking dependency '$BIN_NAME'...\\033[0m"
-if ! command -v "$BIN_NAME" &> /dev/null; then
-    echo -e "\\033[33m[!] Warning: '$BIN_NAME' was not found in PATH.\\033[0m"
-    echo -e "\\033[33m    Please install $BIN_NAME or add it to PATH.\\033[0m"
-else
-    echo -e "\\033[32m[+] Found '$BIN_NAME' executable.\\033[0m"
-fi
-
-echo -e "\\033[36m[*] Starting Socks5 Proxy Node: {servername}...\\033[0m"
-echo -e "\\033[90m    Command: $CMD\\033[0m"
-
-eval "$CMD"
-"""
-    return script
-
-# ── Agent Skills ──
 @skill(name="socks5_list", description="列出所有 Socks5 代理节点配置（支持关键词过滤）")
 def ops_socks5_list(query: str = "") -> str:
     """列出所有 Socks5 代理节点配置（支持关键词过滤）。"""
-    proxies = get_socks5_proxies(query)
+    proxies = socks5_service.get_socks5_proxies(query)
     if not proxies:
         return "未找到匹配的 Socks5 代理节点。"
     
@@ -698,54 +79,61 @@ def ops_socks5_list(query: str = "") -> str:
         lines.append(f"| {p['id']} | {active_tag} | {p['servername']} | `{p['host']}` | `{p['clientproxy']}` | {p['memo']} |")
     return "\n".join(lines)
 
+
 @skill(name="socks5_add", description="新增 Socks5 代理节点配置")
 def ops_socks5_add(servername: str, host: str, runcmd: str = "", clientproxy: str = "", memo: str = "", priority: int = 0) -> str:
     """新增 Socks5 代理节点配置。"""
     if not servername or not host:
         return "错误：节点名称(servername)和主机地址(host)为必填项。"
-    new_id = add_socks5_proxy(host, runcmd, servername, clientproxy, memo, priority)
+    new_id = socks5_service.add_socks5_proxy(host, runcmd, servername, clientproxy, memo, priority)
     return f"成功添加 Socks5 节点 [ID: {new_id}] {servername} ({host})"
+
 
 @skill(name="socks5_set_active", description="将指定的 Socks5 代理节点切换为 VPS1 的当前生效主节点")
 def ops_socks5_set_active(id: int) -> str:
     """将指定的 Socks5 代理节点切换为 VPS1 的当前生效主节点。"""
-    ok, msg = apply_active_proxy_to_vps1(id)
+    ok, msg = socks5_service.apply_active_proxy_to_vps1(id)
     return msg
+
 
 @skill(name="socks5_get_active", description="获取 VPS1 当前生效的 Socks5 代理主节点信息")
 def ops_socks5_get_active() -> str:
     """获取 VPS1 当前生效的 Socks5 代理主节点信息。"""
-    active = get_current_active_proxy()
+    active = socks5_service.get_current_active_proxy()
     if not active:
         return "当前未选择生效的 Socks5 主节点。"
     return f"VPS1 当前主节点 [ID: {active['id']}] {active['servername']} ({active['host']})"
 
+
 @skill(name="socks5_update", description="更新已有的 Socks5 代理节点配置")
 def ops_socks5_update(id: int, servername: str = None, host: str = None, runcmd: str = None, clientproxy: str = None, memo: str = None, priority: int = None) -> str:
     """更新已有的 Socks5 代理节点配置。"""
-    ok = update_socks5_proxy(id, host, runcmd, servername, clientproxy, memo, priority)
+    ok = socks5_service.update_socks5_proxy(id, host, runcmd, servername, clientproxy, memo, priority)
     if ok:
         return f"成功更新 Socks5 节点 [ID: {id}]"
     return f"更新失败：未找到 ID 为 {id} 的节点。"
 
+
 @skill(name="socks5_delete", description="删除指定的 Socks5 代理节点配置")
 def ops_socks5_delete(id: int) -> str:
     """删除指定的 Socks5 代理节点配置。"""
-    ok = delete_socks5_proxy(id)
+    ok = socks5_service.delete_socks5_proxy(id)
     if ok:
         return f"成功删除 Socks5 节点 [ID: {id}]"
     return f"删除失败：未找到 ID 为 {id} 的节点。"
 
+
 @skill(name="socks5_test", description="测试指定 Socks5 节点的服务器 TCP 连通性")
 def ops_socks5_test(id: int) -> str:
     """测试指定 Socks5 节点的服务器 TCP 连通性。"""
-    proxy = get_socks5_proxy_by_id(id)
+    proxy = socks5_service.get_socks5_proxy_by_id(id)
     if not proxy:
         return f"测试失败：未找到 ID 为 {id} 的节点。"
-    res = test_socks5_host(host=proxy["host"], runcmd=proxy.get("runcmd", ""))
+    res = socks5_service.test_socks5_host(host=proxy["host"], runcmd=proxy.get("runcmd", ""))
     if res["success"]:
         return f"节点 [{proxy['servername']}] (端口 {res['port']}) 连通正常，延迟: {res['latency_ms']} ms"
     return f"节点 [{proxy['servername']}] (端口 {res['port']}) 无法连接：{res.get('error', '未知错误')}"
+
 
 @skill(
     name="socks5_test_outbound", 
@@ -755,10 +143,10 @@ def ops_socks5_test(id: int) -> str:
 def ops_socks5_test_outbound(id: int = None) -> str:
     """测试指定节点（或当前在用主节点）的真实 HTTP 出站网络连通测试与出口 IP 回显。"""
     if id is not None:
-        res = test_socks5_proxy_outbound(id)
+        res = socks5_service.test_socks5_proxy_outbound(id)
         node_prefix = f"节点 [ID:{id}] "
     else:
-        res = test_socks5_outbound_http()
+        res = socks5_service.test_socks5_outbound_http()
         node_prefix = "VPS1 当前生效代理 (18988) "
         
     if res["success"]:
@@ -767,3 +155,49 @@ def ops_socks5_test_outbound(id: int = None) -> str:
         return f"{node_prefix}出站访问正常 (HTTP {res['http_code']}){ip_info}{loc_info}，端到端延迟: {res['latency_ms']} ms"
     return f"{node_prefix}出站访问异常: {res.get('error')}"
 
+
+# 向后兼容别名与函数映射
+socks5_list = ops_socks5_list
+socks5_add = ops_socks5_add
+socks5_set_active = ops_socks5_set_active
+socks5_get_active = ops_socks5_get_active
+socks5_update = ops_socks5_update
+socks5_delete = ops_socks5_delete
+socks5_test = ops_socks5_test
+socks5_test_outbound = ops_socks5_test_outbound
+
+__all__ = [
+    "ops_socks5_list",
+    "ops_socks5_add",
+    "ops_socks5_set_active",
+    "ops_socks5_get_active",
+    "ops_socks5_update",
+    "ops_socks5_delete",
+    "ops_socks5_test",
+    "ops_socks5_test_outbound",
+    "socks5_list",
+    "socks5_add",
+    "socks5_set_active",
+    "socks5_get_active",
+    "socks5_update",
+    "socks5_delete",
+    "socks5_test",
+    "socks5_test_outbound",
+    "apply_active_proxy_to_vps1",
+    "test_socks5_host",
+    "test_socks5_outbound_http",
+    "test_socks5_proxy_outbound",
+    "get_socks5_proxies",
+    "get_socks5_proxy_by_id",
+    "get_current_active_proxy",
+    "add_socks5_proxy",
+    "update_socks5_proxy",
+    "delete_socks5_proxy",
+    "start_failover_worker",
+    "stop_failover_worker",
+    "failover_worker_loop",
+    "generate_ps1_script",
+    "generate_sh_script",
+    "parse_host_port",
+    "parse_runcmd_to_naive_config",
+]

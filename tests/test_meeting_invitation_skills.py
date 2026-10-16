@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from core.meeting_channel_commands import handle
-from core.review_meeting_api import ReviewAPIError
+from features.review_meeting.channel_commands import handle
+from features.review_meeting.api import ReviewAPIError
 from skills import ops_review_meeting as skills
 from scripts import review_meeting as room
 

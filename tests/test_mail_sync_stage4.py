@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from core.billing_workflow import BillingWorkflow
+from features.billing.workflow import BillingWorkflow
 from integrations.mail.client import MailCLI, MailCLIError
 from integrations.mail.sync_receipt import (
     extract_raw_json_summary,

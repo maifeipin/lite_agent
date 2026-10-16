@@ -88,10 +88,13 @@ def test_non_boolean_flag_rejected_without_creating_task(tmp_path,enabled):
 
 
 def test_api_rejects_invalid_switch_before_status_mutation(monkeypatch):
-    service=Mock();monkeypatch.setattr('features.todo.TodoService',lambda:service)
+    from urllib.parse import urlparse
+    from features.todo import adapter
+    service=Mock()
+    monkeypatch.setattr('features.todo.adapter.get_todo_service',lambda _:service)
     body=json.dumps({'status':'done','notify_enabled':'false'}).encode()
     h=SimpleNamespace(headers={'Content-Length':str(len(body))},rfile=io.BytesIO(body),send_error=Mock())
-    ApiHandler._handle_patch_todo(h,'/api/v1/todos/fixture')
+    adapter.handle_todos_patch(h, urlparse('/api/v1/todos/fixture'))
     h.send_error.assert_called_once_with(400,'notify_enabled must be boolean')
     service.done.assert_not_called()
 

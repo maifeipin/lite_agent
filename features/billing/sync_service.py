@@ -104,10 +104,15 @@ def sync_and_consume(
     max_batches = _bounded_int(max_batches, 'max_batches', 3)
     billing = (config_loader.load_config() or {}).get('billing') or {}
     if client is None:
-        directory = os.path.abspath(script_dir or billing.get('script_dir') or
-                                    '/home/liteagent/mail-statement-parser')
-        database = os.path.abspath(statement_db_path or billing.get('statement_db_path') or
-                                    os.path.join(directory, 'statements.db'))
+        from integrations.mail.paths import get_parser_script_dir, get_statement_db_path
+        directory = os.path.abspath(
+            script_dir or billing.get('script_dir') or
+            get_parser_script_dir()
+        )
+        database = os.path.abspath(
+            statement_db_path or billing.get('statement_db_path') or
+            get_statement_db_path(custom_db_path=statement_db_path, script_dir=directory)
+        )
         client = MailCLI(script_dir=directory, db_path=database)
     elif statement_db_path and isinstance(client, MailCLI):
         if client.db_path is None or os.path.abspath(client.db_path) != os.path.abspath(statement_db_path):

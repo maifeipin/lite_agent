@@ -21,6 +21,8 @@ from core.request_selector import (
     detect_miss,
     strip_miss_mark,
 )
+from tests.support.manifest_domains import get_all_manifest_domains
+DOMAIN_MAP.update(get_all_manifest_domains())
 
 AGENT_PY = os.path.join(os.path.dirname(__file__), "..", "agent.py")
 
@@ -106,10 +108,19 @@ class TestStartupValidation:
 class TestAgentInitOnce:
 
     def test_selector_instantiated_once_in_agent_init(self):
+        import ast
         with open(AGENT_PY, encoding="utf-8") as f:
             src = f.read()
-        assert "self.request_selector = RequestSelector(self.skill_engine)" in src
-        assert src.count("= RequestSelector(") == 1
+        tree = ast.parse(src)
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name) and node.func.id == 'RequestSelector']
+        assert len(calls) == 1
+        agent_class = next(node for node in tree.body
+                           if isinstance(node, ast.ClassDef) and node.name == 'Agent')
+        init = next(node for node in agent_class.body
+                    if isinstance(node, ast.FunctionDef) and node.name == '__init__')
+        assert calls[0] in list(ast.walk(init))
+        assert ast.unparse(calls[0].args[0]) == 'self.skill_engine'
 
 
 # ---------------------------------------------------------------------------

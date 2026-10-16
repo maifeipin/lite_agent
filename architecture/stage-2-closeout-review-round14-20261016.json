@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "review_round": 14,
+  "units": [
+    {
+      "id": "S2-C01",
+      "status": "已通过",
+      "evidence": "收到交付与Codex小修哈希分开记录，验证后源码未变化"
+    },
+    {
+      "id": "S2-C02",
+      "status": "阻塞",
+      "evidence": "理由已具体化；剪藏协议/缓存/智能投递仍未等价"
+    },
+    {
+      "id": "S2-C03",
+      "status": "阻塞",
+      "evidence": "旧三项反例通过；博客与Sentinel默认契约修补通过，剪藏协议仍失败"
+    },
+    {
+      "id": "S2-C04",
+      "status": "阻塞",
+      "evidence": "剪藏旧能力链未完整保持"
+    },
+    {
+      "id": "S2-C05",
+      "status": "已通过",
+      "evidence": "原15条错误旧映射已在冻结基线中核实存在"
+    },
+    {
+      "id": "S2-C06",
+      "status": "已通过",
+      "evidence": "完整8/8，Agent两环境1063 passed，Docker真实zip反例0 skipped，Parser各205"
+    }
+  ],
+  "independent_assessment": true,
+  "reviewer_repairs": [
+    "恢复博客列表limit与默认5",
+    "恢复发布第三位置参数status和旧请求语义",
+    "恢复Sentinel默认不截断记录"
+  ],
+  "known_remaining_chain": "web_clip: original protocol/cache/batch/response/smart delivery",
+  "verification": {
+    "local_agent": "1063 passed, 4 subtests passed",
+    "docker_agent": "1063 passed, 0 skipped",
+    "parser": "205 passed both",
+    "remaining_independent_probe": "1 failed"
+  },
+  "post_fix_manifest_sha256": "512a4cc4feee326f73abd934569787641f037e4c35a90b5010e862795fa64b93"
+}

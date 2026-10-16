@@ -184,6 +184,7 @@ def test_skill_schema_preserves_declared_parameter_default(engine):
     def test_with_default(months=3):
         return months
 
+    engine.register_tool("test_with_default", _skill_registry["test_with_default"])
     schema = engine.get_schemas_by_names(["test_with_default"])[0]
     months = schema["function"]["parameters"]["properties"]["months"]
 

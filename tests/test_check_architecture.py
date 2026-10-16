@@ -169,3 +169,22 @@ def test_d3_unregistered_scope_cross_repo_import_rejected(repo_root, rules_confi
     assert violations[0]["rule"] == "RULE_DYNAMIC_IMPORT_REGISTERED"
     assert violations[0]["target"] == "statement_parser"
 
+
+def test_channels_skills_dependency_rejected(repo_root, rules_config, tmp_path):
+    # 第六轮门禁强化: 公共 channels/ 严禁直接导入 skills/ (例如 ops_socks5 worker)
+    fake_file = tmp_path / "channels" / "api_socks5_leak.py"
+    fake_file.parent.mkdir(parents=True, exist_ok=True)
+    fake_file.write_text(
+        "from skills.ops_socks5 import start_failover_worker\n"
+        "start_failover_worker()\n",
+        encoding="utf-8"
+    )
+
+    file_count, violations, approved = run_checks(
+        str(tmp_path), rules_config, explicit_files=["channels/api_socks5_leak.py"]
+    )
+    assert len(violations) == 1
+    v = violations[0]
+    assert v["rule"] == "RULE_NO_KERNEL_BUSINESS_DEPENDENCY"
+    assert "skills.ops_socks5.start_failover_worker" in v["target"]
+
