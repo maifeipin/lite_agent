@@ -108,7 +108,23 @@ def register(context: Any) -> None:
 
     # 4. 注册定时作业 (边缘健康巡检)
     from features.network_ops import edge_service
-    context.register_cron("edge_health", "*/10 * * * *", edge_service.edge_health)
+    def _edge_health_handler(**kwargs):
+        try:
+            text = edge_service.edge_health(**kwargs)
+            if "🔴" in text:
+                import time
+                from core.alerts import push_alert
+                push_alert(
+                    context.agent, text, title="🛡️ Edge 失联告警", color="red",
+                    dedup_key=f"stale_batch:{int(time.time() // 600)}",
+                )
+            return text
+        except Exception as exc:
+            return f"edge_health 失败: {exc}"
+
+    context.register_cron("edge_health", "*/10 * * * *", _edge_health_handler)
+    if hasattr(context, "register_job_handler"):
+        context.register_job_handler("ops_edge_health::edge_health", _edge_health_handler)
 
     # 5. 注册 Socks5 自动故障转移后台守护 (由 network_ops 插件拥有该能力与生命周期)
     net_cfg = getattr(context, "config", {}) or {}

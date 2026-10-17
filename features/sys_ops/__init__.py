@@ -110,7 +110,15 @@ def register(context: Any) -> None:
 
     if hasattr(context, "register_job_handler"):
         context.register_job_handler("ops_self_check::daily_health", _daily_health_handler)
-        context.register_job_handler("ops_sentinel::sentinel_scan", lambda **kw: sentinel_scan(**kw))
+        def _sentinel_scan_handler(**kwargs):
+            text = sentinel_scan(**kwargs)
+            if "⚠️" in text or "[HIGH]" in text or "High:" in text:
+                context.send_owner_response(AgentResponse(
+                    text, title="🛡️ Sentinel 安全告警", color="red"
+                ))
+            return text
+
+        context.register_job_handler("ops_sentinel::sentinel_scan", _sentinel_scan_handler)
 
     # 5. 注册运维与安全 RequestSelector 领域路由
     if hasattr(context, "register_domain"):

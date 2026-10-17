@@ -56,6 +56,12 @@ def register(context: Any) -> None:
                 meta = dict(meta, func=enrich_for_host)
             context.register_skill(t_name, meta)
 
+    # 定时入口不是模型工具；绑定当前宿主，保留邮件服务内部的高优推送。
+    if hasattr(context, "register_job_handler"):
+        def _mail_fetch_cron_handler(**kwargs):
+            return reader_service.mail_fetch_cron(agent=context.agent, **kwargs)
+        context.register_job_handler("ops_mail_reader::mail_fetch_cron", _mail_fetch_cron_handler)
+
     # 2. 注册邮件运维 Slash 指令
     context.register_command(
         "/mail_search",

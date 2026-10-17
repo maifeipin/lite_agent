@@ -86,7 +86,7 @@ def _register_configured_cron_jobs(app, agent, config: dict):
     cron_srv = app.cron_service
 
     for job in config.get("cron_jobs", []):
-        if "name" not in job or "_comment" in job:
+        if "name" not in job:
             continue
         name = job["name"]
 
@@ -129,7 +129,8 @@ def _register_configured_cron_jobs(app, agent, config: dict):
             kwargs = job.get("kwargs", {})
             for t in times:
                 j_name = name if len(times) <= 1 else f"{name}#{t}"
-                def _make_skill_task(target=skill_target, kw=kwargs):
+                def _make_skill_task(target=skill_target, kw=kwargs,
+                                     job_name=name, push=job.get("push_on_output", False)):
                     def _task():
                         # 1. 优先从 cron_service 的专属 job_handlers 获取
                         handler = cron_srv.get_handler(target) if hasattr(cron_srv, "get_handler") else None
@@ -140,7 +141,19 @@ def _register_configured_cron_jobs(app, agent, config: dict):
                         engine = getattr(app, "skill_engine", None)
                         tool_info = engine.get_tool(fn_name) if engine else None
                         if tool_info and "func" in tool_info:
-                            return tool_info["func"](**kw) if kw else tool_info["func"]()
+                            text = tool_info["func"](**kw) if kw else tool_info["func"]()
+                            if push and text and not text.startswith("✅") and not text.startswith("("):
+                                from contracts.message import AgentResponse
+                                from services.owner_delivery import send_owner_response
+                                color = "red" if any(err in text for err in (
+                                    "✉️", "⚠️", "❌", "失败", "错误", "Error", "Exception"
+                                )) else "blue"
+                                send_owner_response(
+                                    getattr(agent, "channels", []) or [],
+                                    config.get("channels", {}) or {},
+                                    AgentResponse(text, title=job_name, color=color),
+                                )
+                            return text
                         raise RuntimeError(f"未找到指定的 Cron 技能: {target}")
                     return _task
                 try:
