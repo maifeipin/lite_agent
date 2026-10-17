@@ -12,6 +12,7 @@ E0 阶段可复现验证门禁入口 (scripts/verify_e0.py)
    - Agent 全量 pytest (只读挂载 :ro)
 """
 
+import argparse
 import os
 import re
 import shutil
@@ -42,7 +43,7 @@ ALLOWED_PARSER_FIXTURES = {
 ALLOWED_AGENT_ROOT_FILES = {
     'agent.py', 'session.py', 'security.py', 'main.py',
     'config.example.json', 'architecture_rules.json', 'requirements-test.txt',
-    'requirements.txt', 'pytest.ini', 'Dockerfile.test'
+    'requirements-core.txt', 'requirements.txt', 'pytest.ini', 'Dockerfile.test'
 }
 
 ALLOWED_AGENT_EXACT_FILES = {
@@ -53,12 +54,46 @@ ALLOWED_AGENT_EXACT_FILES = {
     'tests/wechat_ilink/fixtures/sendmessage_success_octet_stream.json',
     'tests/test_review_meeting_frontend.js',
     'architecture/stage-2-migration-inventory.md',
+    'architecture/kernel-core-manifest.txt',
+    'architecture/kernel-acceptance-matrix.md',
+    'architecture/release-runbook.md',
+    'scripts/export_core.py',
+    'scripts/verify_clean_core_environment.py',
 }
 
 ALLOWED_AGENT_CODE_DIRS = [
     'app', 'architecture', 'channels', 'contracts', 'core', 'edge_node', 'features',
     'integrations', 'memory_engine', 'services', 'skills', 'scripts',
     'tests', 'web_dashboard', 'conf.d'
+]
+
+CORE_TEST_FILES = [
+    "tests/test_adaptive_budget.py",
+    "tests/test_agent_runtime.py",
+    "tests/test_check_architecture.py",
+    "tests/test_clean_core_environment.py",
+    "tests/test_config_loader_settings.py",
+    "tests/test_core_manifest_and_export.py",
+    "tests/test_cron_engine.py",
+    "tests/test_execution.py",
+    "tests/test_execution_budget.py",
+    "tests/test_execution_ledger.py",
+    "tests/test_llm_gateway.py",
+    "tests/test_model_config.py",
+    "tests/test_model_invoker.py",
+    "tests/test_model_policy.py",
+    "tests/test_output_delivery.py",
+    "tests/test_phase1_boundaries.py",
+    "tests/test_phase1_closeout.py",
+    "tests/test_phase2_registration_lifecycle.py",
+    "tests/test_request_selector.py",
+    "tests/test_security_paths.py",
+    "tests/test_skill_engine.py",
+    "tests/test_stage3_export_closeout.py",
+    "tests/test_task_spec.py",
+    "tests/test_task_spec_service.py",
+    "tests/test_verify_e0_args.py",
+    "tests/test_stage3_acceptance_closeout.py",
 ]
 
 
@@ -153,7 +188,7 @@ def create_sanitized_snapshots(agent_root: str, parser_root: str) -> Tuple[str, 
                 validate_safe_path(root, agent_root)
                 dirs[:] = [
                     sub for sub in dirs
-                    if sub not in ('.git', '__pycache__', 'data', 'scratch', 'deploy', 'validation-reports', 'email-downloads')
+                    if sub not in ('.git', '__pycache__', '.pytest_cache', 'data', 'scratch', 'deploy', 'validation-reports', 'email-downloads')
                 ]
                 rel_dir = os.path.relpath(root, src_d)
                 target_dir = os.path.join(dst_d, rel_dir) if rel_dir != '.' else dst_d
@@ -163,8 +198,8 @@ def create_sanitized_snapshots(agent_root: str, parser_root: str) -> Tuple[str, 
                     validate_safe_path(src_file, agent_root)
                     rel_from_agent = os.path.relpath(src_file, agent_root)
 
-                    # 排除数据库文件与所有 sidecar 扩展名 (无论命名)
-                    if any(f.endswith(ext) for ext in ('.db', '.sqlite', '.sqlite3', '.db-wal', '.db-shm', '.sqlite-wal', '.sqlite-shm', '.sqlite3-wal', '.sqlite3-shm')):
+                    # 排除数据库文件、锁文件、临时文件与所有 sidecar 扩展名 (无论命名)
+                    if any(f.endswith(ext) for ext in ('.db', '.sqlite', '.sqlite3', '.db-wal', '.db-shm', '.sqlite-wal', '.sqlite-shm', '.sqlite3-wal', '.sqlite3-shm', '.lock', '.tmp')):
                         continue
                     # 排除所有 .env 文件
                     if f.startswith('.env') or f.endswith('.env'):
@@ -205,9 +240,9 @@ def create_sanitized_snapshots(agent_root: str, parser_root: str) -> Tuple[str, 
 
 
 def ensure_docker_image(agent_root: str, force_rebuild: bool = False) -> bool:
-    """确认 lite_agent_test:3.9 镜像存在，不存在则使用独立隔离构建上下文目录构建。"""
+    """确认 lite_agent_test:3.9 镜像存在且包含离线 wheel 缓存，不满足则使用独立隔离构建上下文目录构建。"""
     if not force_rebuild:
-        check_cmd = ["docker", "image", "inspect", "lite_agent_test:3.9"]
+        check_cmd = ["docker", "run", "--rm", "lite_agent_test:3.9", "test", "-d", "/wheels"]
         res = subprocess.run(check_cmd, capture_output=True, text=True)
         if res.returncode == 0:
             return True
@@ -280,6 +315,11 @@ def run_step(name: str, cmd: list, cwd: str, timeout: int = 180) -> Dict[str, An
         stdout_snippet = proc.stdout.strip()
         stderr_snippet = proc.stderr.strip()
         combined = stdout_snippet + "\n" + stderr_snippet
+        fd, raw_log_path = tempfile.mkstemp(prefix="kernel-gate-output-", suffix=".log")
+        with os.fdopen(fd, "w", encoding="utf-8") as raw_log:
+            raw_log.write("COMMAND: " + repr(cmd) + "\n")
+            raw_log.write(f"EXIT: {proc.returncode}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
+        print(f"  完整原始输出: {raw_log_path}")
         test_metric = extract_test_counts(combined)
 
         if passed:
@@ -305,6 +345,7 @@ def run_step(name: str, cmd: list, cwd: str, timeout: int = 180) -> Dict[str, An
             "elapsed": elapsed,
             "metric": test_metric,
             "error_tail": stderr_snippet[-500:] if stderr_snippet else "",
+            "raw_log": raw_log_path,
         }
     except subprocess.TimeoutExpired:
         elapsed = time.time() - start_time
@@ -330,98 +371,271 @@ def run_step(name: str, cmd: list, cwd: str, timeout: int = 180) -> Dict[str, An
         }
 
 
-def main():
-    agent_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    parser_root = os.path.abspath(os.path.join(agent_root, "..", "dev", "mail-statement-parser"))
+def check_formatting(repo_root: str) -> Tuple[bool, str]:
+    """检查 tracked working diff、staged diff 以及 untracked 新文件的格式与末尾空白。"""
+    if not shutil.which("git"):
+        return False, "环境未安装 git，无法完成格式与 diff 检查"
+
+    # 1. 检查 unstaged diff
+    r1 = subprocess.run(["git", "diff", "--check"], cwd=repo_root, capture_output=True, text=True)
+    if r1.returncode != 0:
+        return False, (r1.stdout + "\n" + r1.stderr).strip()
+
+    # 2. 检查 staged diff
+    r2 = subprocess.run(["git", "diff", "--cached", "--check"], cwd=repo_root, capture_output=True, text=True)
+    if r2.returncode != 0:
+        return False, (r2.stdout + "\n" + r2.stderr).strip()
+
+    # 3. 检查新增未跟踪文件 (untracked files) 的末尾空白和换行
+    r3 = subprocess.run(["git", "ls-files", "--others", "--exclude-standard"], cwd=repo_root, capture_output=True, text=True)
+    if r3.returncode != 0:
+        return False, (r3.stdout + "\n" + r3.stderr).strip()
+    if r3.returncode == 0:
+        errs = []
+        for rel_path in r3.stdout.splitlines():
+            abs_path = os.path.join(repo_root, rel_path)
+            if not os.path.isfile(abs_path):
+                continue
+            if any(rel_path.endswith(ext) for ext in ('.png', '.jpg', '.tar.gz', '.zip', '.pyc', '.sqlite', '.db')):
+                continue
+            try:
+                with open(abs_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    for line_no, line in enumerate(f, 1):
+                        stripped_nl = line.rstrip('\r\n')
+                        if stripped_nl != stripped_nl.rstrip():
+                            errs.append(f"{rel_path}:{line_no}: 存在末尾空白字符 (trailing whitespace)")
+            except Exception as e:
+                errs.append(f"{rel_path}: 读取失败 {e}")
+        if errs:
+            return False, "\n".join(errs[:15])
+
+    return True, ""
+
+
+def run_format_step(name: str, repo_root: str) -> Dict[str, Any]:
+    start_time = time.time()
+    print(f"\n==================================================")
+    print(f"▶ 正在执行: {name}")
+    print(f"  工作目录: {repo_root}")
+    print(f"==================================================")
+    passed, msg = check_formatting(repo_root)
+    elapsed = time.time() - start_time
+    if passed:
+        print(f"✅ {name} 通过 (耗时 {elapsed:.2f}s)")
+        return {
+            "name": name,
+            "passed": True,
+            "exit_code": 0,
+            "elapsed": elapsed,
+            "metric": "git & whitespace clean",
+            "error_tail": "",
+        }
+    else:
+        print(f"❌ {name} 失败 (耗时 {elapsed:.2f}s):\n{msg}")
+        return {
+            "name": name,
+            "passed": False,
+            "exit_code": 1,
+            "elapsed": elapsed,
+            "metric": "format error",
+            "error_tail": msg[-500:],
+        }
+
+
+def parse_args(argv=None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Lite Agent 全量门禁与隔离验证入口 (scripts/verify_e0.py)",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--agent-root",
+        type=str,
+        default=None,
+        help="Agent 仓库根路径 (默认根据脚本位置自动推导)",
+    )
+    parser.add_argument(
+        "--parser-root",
+        type=str,
+        default=None,
+        help="Parser 仓库根路径 (默认兼容 ../dev/mail-statement-parser)",
+    )
+    parser.add_argument(
+        "--core-only",
+        action="store_true",
+        help="纯基础 core 门禁模式 (无需 Parser 仓库，执行 AST 门禁、core 测试、前端及隔离验证)",
+    )
+    parser.add_argument(
+        "--skip-docker",
+        action="store_true",
+        help="跳过 Docker Python 3.9 容器验证",
+    )
+    parser.add_argument(
+        "--skip-parser",
+        action="store_true",
+        help="跳过 Parser 跨仓测试 (明确声明缺权限或纯内核构建)",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+
+    agent_root = os.path.abspath(args.agent_root) if args.agent_root else os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..")
+    )
+    if not os.path.isdir(agent_root):
+        print(f"❌ 关键错误: 找不到 Agent 根目录: {agent_root}", file=sys.stderr)
+        sys.exit(2)
+
+    default_parser = os.path.abspath(os.path.join(agent_root, "..", "dev", "mail-statement-parser"))
+    parser_root = os.path.abspath(args.parser_root) if args.parser_root else default_parser
+
+    need_parser = not args.core_only and not args.skip_parser
+    if need_parser and not os.path.isdir(parser_root):
+        print(f"❌ 关键错误: 找不到 parser 兄弟仓库: {parser_root}", file=sys.stderr)
+        print("💡 若需独立验证无需 Parser 的基础内核门禁，请使用 --core-only 或 --skip-parser", file=sys.stderr)
+        sys.exit(2)
 
     print("==================================================")
-    print("🚀 Lite Agent E0 阶段全量门禁与隔离验证启动")
+    print("🚀 Lite Agent 全量门禁与隔离验证启动")
+    print(f"  模式:        {'CORE 独立基础门禁' if args.core_only else 'FULL 全量门禁 (含跨仓 Parser)'}")
     print(f"  Agent 目录:  {agent_root}")
-    print(f"  Parser 目录: {parser_root}")
+    if need_parser:
+        print(f"  Parser 目录: {parser_root}")
     print(f"  当前 Python: {sys.executable} ({sys.version.split()[0]})")
     print("==================================================")
 
-    if not os.path.isdir(parser_root):
-        print(f"❌ 关键错误: 找不到 parser 兄弟仓库: {parser_root}")
-        sys.exit(2)
-
     results = []
 
-    # 1. 本机架构静态依赖门禁
+    # 1. 本机架构静态依赖门禁 (AST check_architecture)
     results.append(run_step(
         "1. 静态架构门禁 (AST check_architecture)",
         [sys.executable, os.path.join(agent_root, "scripts", "check_architecture.py")],
         cwd=agent_root,
     ))
 
-    # 2. Agent 全量测试套件 (动态检测 pytest 可执行入口)
-    pytest_cmd = None
+    # 2. S3-A1 核心基础源码清单与导出安全检查
+    manifest_test = os.path.join(agent_root, "tests", "test_core_manifest_and_export.py")
+    if os.path.isfile(manifest_test):
+        results.append(run_step(
+            "2. 基础源码清单与导出安全防御 (S3-A1 unittest)",
+            [sys.executable, "-m", "unittest", manifest_test, "-q"],
+            cwd=agent_root,
+        ))
+    else:
+        print(f"❌ 关键错误: 缺少必要门禁测试文件: {manifest_test}", file=sys.stderr)
+        results.append({
+            "name": "2. 基础源码清单与导出安全防御 (S3-A1 unittest)",
+            "passed": False,
+            "exit_code": 1,
+            "elapsed": 0,
+            "metric": "",
+            "error_tail": f"缺少文件: {manifest_test}",
+        })
+
+    # 3. 前端独立 JavaScript 契约检查 (若存在 Node 环境)
+    frontend_test = os.path.join(agent_root, "tests", "test_review_meeting_frontend.js")
+    if not os.path.isfile(frontend_test):
+        print(f"❌ 关键错误: 缺少必要前端测试文件: {frontend_test}", file=sys.stderr)
+        results.append({
+            "name": "3. 前端独立 JavaScript 契约 (Node.js)",
+            "passed": False,
+            "exit_code": 1,
+            "elapsed": 0,
+            "metric": "",
+            "error_tail": f"缺少文件: {frontend_test}",
+        })
+    else:
+        node_bin = shutil.which("node")
+        if node_bin:
+            results.append(run_step(
+                "3. 前端独立 JavaScript 契约 (Node.js)",
+                [node_bin, frontend_test],
+                cwd=agent_root,
+            ))
+        else:
+            print("⚠️ 未检测到 Node.js，前端检查标记为 PENDING")
+            results.append({
+                "name": "3. 前端独立 JavaScript 契约 (Node.js)",
+                "passed": False,
+                "exit_code": 1,
+                "elapsed": 0,
+                "metric": "PENDING (Node not installed)",
+                "error_tail": "Node not installed",
+            })
+
+    # 4. Agent 回归测试套件 (严格使用当前解释器 sys.executable，缺依赖报错，禁止隐式回退)
     try:
         import pytest  # noqa: F401
         pytest_cmd = [sys.executable, "-m", "pytest"]
     except ImportError:
-        pytest_bin = shutil.which("pytest")
-        if pytest_bin:
-            pytest_cmd = [pytest_bin]
+        print(f"❌ 关键错误: 当前解释器 ({sys.executable}) 缺少 pytest 依赖，拒绝隐式回退外部解释器", file=sys.stderr)
+        pytest_cmd = None
+
+    if pytest_cmd is None:
+        results.append({
+            "name": f"4. Agent {'基础核心' if args.core_only else '全量业务'}回归 (pytest)",
+            "passed": False,
+            "exit_code": 1,
+            "elapsed": 0,
+            "metric": "",
+            "error_tail": f"当前解释器 {sys.executable} 未安装 pytest",
+        })
+    else:
+        if args.core_only:
+            test_target_args = list(CORE_TEST_FILES)
+            step_title = "4. Agent 基础核心回归与边界测试 (pytest --core-only)"
         else:
-            py313 = shutil.which("python3.13") or "/opt/homebrew/opt/python@3.13/bin/python3.13"
-            if os.path.isfile(py313):
-                pytest_cmd = [py313, "-m", "pytest"]
-            else:
-                pytest_cmd = [sys.executable, "-m", "pytest"]
+            test_target_args = ["tests/"]
+            step_title = "4. Agent 全量回归与副作用隔离 (pytest)"
 
-    results.append(run_step(
-        "2. Agent 全量回归与副作用隔离 (pytest)",
-        pytest_cmd + ["-q", "-p", "no:cacheprovider", "--tb=short"],
-        cwd=agent_root,
-        timeout=180,
-    ))
+        results.append(run_step(
+            step_title,
+            pytest_cmd + test_target_args + ["-q", "-p", "no:cacheprovider", "-p", "tests.support.no_skips", "--tb=short"],
+            cwd=agent_root,
+            timeout=180,
+        ))
 
-    # 3. Parser 全量测试套件 (unittest)
-    results.append(run_step(
-        "3. Parser 路径隔离与全量回归 (unittest)",
-        [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"],
-        cwd=parser_root,
-        timeout=60,
-    ))
+    # 5. Parser 全量测试套件 (unittest，仅在非 core-only 模式下执行)
+    if need_parser:
+        results.append(run_step(
+            "5. Parser 路径隔离与全量回归 (unittest)",
+            [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"],
+            cwd=parser_root,
+            timeout=60,
+        ))
 
-    # 4. Git Diff 格式检查
-    results.append(run_step(
-        "4. Agent Git Diff 格式规范",
-        ["git", "diff", "--check"],
-        cwd=agent_root,
-    ))
-    results.append(run_step(
-        "5. Parser Git Diff 格式规范",
-        ["git", "diff", "--check"],
-        cwd=parser_root,
-    ))
+    # 6. Git Diff 与新增文件格式规范检查
+    results.append(run_format_step("6. Agent Git 格式与末尾空白规范", agent_root))
+    if need_parser:
+        results.append(run_format_step("7. Parser Git 格式与末尾空白规范", parser_root))
 
-    # 5. Docker Python 3.9 隔离环境验证
-    has_docker = shutil.which("docker") is not None
+    # 7. Docker Python 3.9 隔离环境验证
+    has_docker = shutil.which("docker") is not None and not args.skip_docker
     if has_docker:
         print("\n📦 正在构建并验证代码脱敏快照...")
-        tmp_base, agent_snap, parser_snap = create_sanitized_snapshots(agent_root, parser_root)
+        tmp_base, agent_snap, parser_snap = create_sanitized_snapshots(agent_root, parser_root if need_parser else agent_root)
         try:
-            # Step 6: Docker Python 3.9: Parser 全量测试 (代码只读挂载 :ro，禁外网)
-            results.append(run_step(
-                "6. Docker Python 3.9: Parser 全量测试 (代码只读 :ro, 无外网)",
-                [
-                    "docker", "run", "--rm", "--network=none",
-                    "-v", f"{parser_snap}:/parser:ro",
-                    "-e", "MAIL_STATEMENT_DATA_ROOT=/tmp/data_root",
-                    "-e", "PYTHONDONTWRITEBYTECODE=1",
-                    "-w", "/parser",
-                    "python:3.9-slim",
-                    "python", "-m", "unittest", "discover", "-s", "tests", "-q"
-                ],
-                cwd=agent_root,
-                timeout=120,
-            ))
+            if need_parser:
+                # Docker Python 3.9: Parser 全量测试 (代码只读挂载 :ro，禁外网)
+                results.append(run_step(
+                    "8. Docker Python 3.9: Parser 全量测试 (代码只读 :ro, 无外网)",
+                    [
+                        "docker", "run", "--rm", "--network=none",
+                        "-v", f"{parser_snap}:/parser:ro",
+                        "-e", "MAIL_STATEMENT_DATA_ROOT=/tmp/data_root",
+                        "-e", "PYTHONDONTWRITEBYTECODE=1",
+                        "-w", "/parser",
+                        "python:3.9-slim",
+                        "python", "-m", "unittest", "discover", "-s", "tests", "-q"
+                    ],
+                    cwd=agent_root,
+                    timeout=120,
+                ))
 
-            # Step 7: Docker Python 3.9: AST 架构门禁 (代码只读挂载 :ro, 禁外网)
+            # Docker Python 3.9: AST 架构门禁 (代码只读挂载 :ro, 禁外网)
             results.append(run_step(
-                "7. Docker Python 3.9: AST 架构依赖门禁 (代码只读 :ro, 无外网)",
+                f"{'9' if need_parser else '7'}. Docker Python 3.9: AST 架构依赖门禁 (代码只读 :ro, 无外网)",
                 [
                     "docker", "run", "--rm", "--network=none",
                     "-v", f"{agent_snap}:/app:ro",
@@ -434,27 +648,33 @@ def main():
                 timeout=60,
             ))
 
-            # Step 8: Docker Python 3.9: Agent 全量 pytest (代码只读挂载 :ro, 禁外网)
+            # Docker Python 3.9: Agent 回归 pytest (按模式精确选择 core / full，代码只读挂载 :ro, 禁外网)
             has_agent_image = ensure_docker_image(agent_root)
             if has_agent_image:
+                agent_test_cmd = [
+                    "docker", "run", "--rm", "--network=none",
+                    "-v", f"{agent_snap}:/app:ro",
+                ]
+                if need_parser:
+                    agent_test_cmd.extend(["-v", f"{parser_snap}:/parser:ro", "-e", "MAIL_STATEMENT_PARSER_DIR=/parser"])
+                target_pytest_args = list(CORE_TEST_FILES) if args.core_only else ["tests/"]
+                agent_test_cmd.extend([
+                    "-e", "PYTHONDONTWRITEBYTECODE=1",
+                    "-w", "/app",
+                    "lite_agent_test:3.9",
+                    "python", "-m", "pytest"
+                ] + target_pytest_args + [
+                    "-q", "-p", "no:cacheprovider", "-p", "tests.support.no_skips", "-o", "cache_dir=/tmp/.pytest_cache", "--tb=short"
+                ])
                 results.append(run_step(
-                    "8. Docker Python 3.9: Agent 全量回归测试 (代码只读 :ro, 无外网)",
-                    [
-                        "docker", "run", "--rm", "--network=none",
-                        "-v", f"{agent_snap}:/app:ro",
-                        "-v", f"{parser_snap}:/parser:ro",
-                        "-e", "PYTHONDONTWRITEBYTECODE=1",
-                        "-e", "MAIL_STATEMENT_PARSER_DIR=/parser",
-                        "-w", "/app",
-                        "lite_agent_test:3.9",
-                        "python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "-o", "cache_dir=/tmp/.pytest_cache", "--tb=short"
-                    ],
+                    f"{'10' if need_parser else '8'}. Docker Python 3.9: Agent {'核心' if args.core_only else '全量'}回归测试 (代码只读 :ro, 无外网)",
+                    agent_test_cmd,
                     cwd=agent_root,
                     timeout=180,
                 ))
             else:
                 results.append({
-                    "name": "8. Docker Python 3.9: Agent 全量回归测试 (代码只读 :ro, 无外网)",
+                    "name": f"{'10' if need_parser else '8'}. Docker Python 3.9: Agent 回归测试",
                     "passed": False,
                     "exit_code": 1,
                     "elapsed": 0,
@@ -463,10 +683,12 @@ def main():
                 })
         finally:
             shutil.rmtree(tmp_base, ignore_errors=True)
+    elif args.skip_docker:
+        print("\n⏩ 显式指定 --skip-docker，跳过容器验证")
     else:
         print("\n⚠️ 未检测到 Docker 环境，Python 3.9 容器验证项标记为 PENDING")
         results.append({
-            "name": "6-8. Docker Python 3.9 容器验证",
+            "name": "Docker Python 3.9 容器验证",
             "passed": False,
             "exit_code": 1,
             "elapsed": 0,
@@ -476,19 +698,32 @@ def main():
 
     # 汇总输出
     print("\n==================================================")
-    print("📊 E0 阶段全量门禁验证汇总报告")
+    print("📊 门禁验证汇总报告")
     print("==================================================")
     all_passed = True
     for r in results:
         status_icon = "✅ PASS" if r["passed"] else "❌ FAIL"
         metric_disp = f" [{r['metric']}]" if r.get("metric") else ""
-        print(f"{status_icon} | {r['name']:<50} | 耗时 {r['elapsed']:>6.2f}s{metric_disp}")
+        print(f"{status_icon} | {r['name']:<55} | 耗时 {r['elapsed']:>6.2f}s{metric_disp}")
         if not r["passed"]:
             all_passed = False
 
+    skipped_items = []
+    if args.core_only:
+        skipped_items.append("全量业务与跨仓集成 (模式: --core-only)")
+    if args.skip_parser:
+        skipped_items.append("Parser 跨仓测试 (--skip-parser)")
+    if args.skip_docker:
+        skipped_items.append("Docker 容器双回归 (--skip-docker)")
+
     print("==================================================")
     if all_passed:
-        print("🎉 恭喜！E0 阶段所有 8 项硬性门禁（含本机与 Docker Python 3.9 全量双回归）全部通过！")
+        if skipped_items:
+            print("⚠️ 缩减验证通过！本次运行包含以下跳过项，非完整双环境全量验收：")
+            for item in skipped_items:
+                print(f"   - {item}")
+        else:
+            print("🎉 恭喜！所有硬性门禁（含本机与 Docker Python 3.9 全量双回归）全部通过！")
         sys.exit(0)
     else:
         print("⚠️ 存在未通过门禁项，请排查上方失败信息。")

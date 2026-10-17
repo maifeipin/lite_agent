@@ -829,7 +829,6 @@ __all__ = [
     "do_backup_and_sync",
     "_bdpan_sync_dir",
     "_backup_vaultwarden",
-    "_backup_meilisearch",
     "_backup_mongodb",
     "_backup_halo",
     "_backup_hedgedoc",

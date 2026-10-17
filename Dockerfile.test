@@ -3,7 +3,12 @@ FROM python:3.9-slim
 
 WORKDIR /app
 
-# 安装系统工具 (zip 用于真实备份测试验证) 与最小测试依赖
-RUN apt-get update && apt-get install -y --no-install-recommends zip && rm -rf /var/lib/apt/lists/*
+# 安装系统工具 (zip 用于真实备份测试验证，git 供格式防御测试使用) 与最小测试依赖
+RUN apt-get update && apt-get install -y --no-install-recommends zip git && rm -rf /var/lib/apt/lists/*
 COPY requirements-test.txt /tmp/requirements-test.txt
 RUN pip install --no-cache-dir -r /tmp/requirements-test.txt
+
+# 预先构建离线 wheels 缓存，支持无外网环境下干净隔离 venv 的离线安装
+RUN pip wheel --no-cache-dir --wheel-dir=/wheels -r /tmp/requirements-test.txt
+ENV PIP_FIND_LINKS=/wheels
+ENV PIP_NO_INDEX=1

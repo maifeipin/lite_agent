@@ -531,8 +531,13 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def _handle_dashboard(self):
         """返回仪表盘可用的指令列表（来自注册表）。"""
-        from core.command_registry import CommandRegistry
-        items = CommandRegistry().items_for_dashboard()
+        host = _extract_api_server(self)
+        agent = getattr(host, "agent", None)
+        registry = getattr(agent, "command_registry", None)
+        if registry is None:
+            self.send_error(503, "Command registry unavailable")
+            return
+        items = registry.items_for_dashboard()
         self.send_response(200)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Access-Control-Allow-Origin', '*')
@@ -1229,6 +1234,7 @@ class ApiServer:
 
         self.server = ThreadingHTTPServer((self.host, self.port), ApiHandler)
         self.server.api_server = self  # 给 Handler 注入引用
+        self.port = self.server.server_address[1]
 
         if not any(job.name == "task_specs_tick" for job in self.agent.cron.jobs.values()):
             self.agent.cron.add_job(

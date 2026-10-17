@@ -1,0 +1,46 @@
+{
+  "runs": [
+    {
+      "run": 1,
+      "stdout_hash_matches": true,
+      "summary": [
+        "1108 passed in 119.62s (0:01:59)"
+      ],
+      "stderr_bytes": 0,
+      "exit_file": "exit=0"
+    },
+    {
+      "run": 2,
+      "stdout_hash_matches": true,
+      "summary": [
+        "1108 passed in 119.37s (0:01:59)"
+      ],
+      "stderr_bytes": 0,
+      "exit_file": "exit=0"
+    },
+    {
+      "run": 3,
+      "stdout_hash_matches": true,
+      "summary": [
+        "1108 passed in 118.15s (0:01:58)"
+      ],
+      "stderr_bytes": 0,
+      "exit_file": "docker_exit=0 host_exit=1"
+    }
+  ],
+  "manifest_hash_matches": true,
+  "snapshot_hash_mismatches": [],
+  "current_vs_tested": {
+    "agent": {
+      "added": [],
+      "removed": [],
+      "changed": []
+    },
+    "parser": {
+      "added": [],
+      "removed": [],
+      "changed": []
+    }
+  },
+  "host_load_attempt": "/Users/lilee/.workbuddy/binaries/python/versions/3.13.12/bin/python3.13: No module named pytest"
+}

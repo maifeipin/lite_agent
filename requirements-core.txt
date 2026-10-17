@@ -1,0 +1,7 @@
+# Lite Agent 核心基础运行依赖清单 (Stage 3 - S3-A1)
+# 仅包含 core 基础模式运行必需的最小依赖，不含业务插件、第三方通道或可选依赖
+
+openai>=1.30.0
+httpx[socks]>=0.24.0
+cryptography>=41.0.0
+requests>=2.28.0

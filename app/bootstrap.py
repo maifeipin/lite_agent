@@ -88,6 +88,36 @@ def create_app(
         show_in_dashboard=True,
     )
 
+    # 注册核心系统内置免认证健康状态路由 (基础能力，不依赖任何业务)
+    import json as _json
+
+    def _handle_health(handler, parsed_url):
+        handler.send_response(200)
+        handler._send_cors_headers()
+        handler.send_header("Content-Type", "application/json")
+        handler.end_headers()
+        data = {
+            "status": "healthy",
+            "mode": mode,
+            "version": "1.0.0",
+        }
+        handler.wfile.write(_json.dumps(data).encode("utf-8"))
+
+    route_registry.register(
+        "GET",
+        "/health",
+        _handle_health,
+        auth_required=False,
+        description="系统核心健康检查端点",
+    )
+    route_registry.register(
+        "GET",
+        "/api/v1/health",
+        _handle_health,
+        auth_required=False,
+        description="系统核心健康检查端点",
+    )
+
     if agent is None and "llm" in cfg:
         try:
             from agent import Agent
