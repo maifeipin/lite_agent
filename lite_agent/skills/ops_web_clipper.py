@@ -26,7 +26,7 @@ from lite_agent.features.content_ops import content_service
 
 工作机制：调用 Mac 端 Playwright 有头浏览器，自动处理懒加载、反盗链、登录态。
 内容 > 2500 字、含图、或命中 content_ops.force_upload_hosts 的域名时自动上传 HedgeDoc 并返回在线链接，否则直接返回 Markdown。
-上传后的链接是**单篇开放匿名只读**的存档（邮件/账单等其他路径仍默认仅本人可见），手机/微信里可直接打开。
+上传后的链接是**单篇私有的存档**（匿名打不开，所有者在网页里可手动切换为公开分享；邮件/账单等其他路径同样默认私有），不要说"手机可直接打开"。
 
 使用场景：
 - 用户给出具体 URL："帮我把这个链接转成笔记" / "再转一个 https://..." → 直接传入 url
@@ -67,18 +67,18 @@ def web_clip(urls: str = "", screenshot: bool = False, force_hedgedoc: bool = Fa
 
 @skill(
     name='hedgedoc_upload',
-    description="""把任意 Markdown 文本直接上传到 HedgeDoc，返回公网可访问链接。
+    description="""把任意 Markdown 文本直接上传到 HedgeDoc，返回笔记链接（默认私有：匿名打不开，所有者在网页里可手动切换为公开分享）。
 
 ✅ **专用于"上传已有内容"**：当你已经生成了一份报告/总结/文档（Markdown 或纯文本），
 需要把它变成一个可分享的在线链接时，用本工具。**不需要提供 URL，直接传内容即可。**
 
 ❌ 不要用本工具抓取网页（那是 web_clip 的职责）。也不要自己写 Python/requests 代码
-去调 HedgeDoc API——本工具已封装登录+创建笔记+返回公网链接的全流程，直接调用即可。
+去调 HedgeDoc API——本工具已封装登录+创建笔记+设置权限（私有 + 归到所有者）的全流程，直接调用即可。
 
 💡 典型用法示例：
   场景：上游子任务生成了安全巡检报告，需要上传到 HedgeDoc 获取链接。
   正确做法：hedgedoc_upload(content="<报告的完整 Markdown 内容>")
-  返回：一个 https://md.maifeipin.com/xxxx 形式的公网链接，原样转给用户即可。
+  返回：一个 https://md.maifeipin.com/n/xxxx 形式的链接，原样转给用户即可（默认私有，需登录 md 账号查看）。
 
 注意：content 参数放完整的 Markdown 内容（支持标题、列表、表格、代码块等所有 Markdown 语法）。""",
     params={

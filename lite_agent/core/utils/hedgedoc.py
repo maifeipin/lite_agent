@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import re
+from urllib.parse import quote
 
 import requests
 
@@ -95,6 +96,59 @@ def _share_note_readonly(session, base_url: str, alias: str) -> bool:
         return False
 
 
+def _share_note_with_user(session, base_url: str, alias: str, username: str,
+                          can_edit: bool = False) -> bool:
+    """把单篇笔记共享给某个注册用户（默认只读），返回是否成功。
+
+    PUT /api/private/notes/{alias}/metadata/permissions/users/{username}
+    需要调用者是 owner（FULL）。用于"上传者不是最终管理者"的场景：
+    笔记由 liteagent 上传，但人用 bot2 登录查看。
+    """
+    try:
+        csrf = session.get(f"{base_url}/api/private/csrf/token", timeout=5).json().get("token")
+        if not csrf or not username:
+            return False
+        resp = session.put(
+            f"{base_url}/api/private/notes/{alias}/metadata/permissions/users/{quote(username, safe='')}",
+            json={"canEdit": bool(can_edit)},
+            headers={"csrf-token": csrf, "Content-Type": "application/json"}, timeout=10)
+        if resp.status_code not in (200, 201):
+            return False
+        data = resp.json() if resp.content else {}
+        return any((u.get("username") or "").lower() == username.lower()
+                   for u in (data.get("sharedToUsers") or []))
+    except Exception:
+        return False
+
+
+def _transfer_note_owner(session, base_url: str, alias: str, username: str) -> bool:
+    """把笔记所有者转给另一个注册用户，返回是否成功。
+
+    HedgeDoc v2 里只有 owner 拿到 PermissionLevel.FULL，而"公开分享/权限设置"
+    这些操作全部要求 FULL（notes.controller.ts 的 visibility / users / groups
+    路由都是 @RequirePermission(PermissionLevel.FULL)）。也就是说：想让某人在
+    网页上手动切换公开分享，他必须是 owner，光有读写共享是不够的。
+
+    PUT /api/private/notes/{alias}/metadata/permissions/owner  {"owner": "..."}
+    仅有只读/读写共享无法调用本接口，所以必须在创建者仍是 owner 时调用，
+    且要放在所有权限设置（收紧/共享）之后。
+    """
+    try:
+        csrf = session.get(f"{base_url}/api/private/csrf/token", timeout=5).json().get("token")
+        if not csrf or not username:
+            return False
+        resp = session.put(
+            f"{base_url}/api/private/notes/{alias}/metadata/permissions/owner",
+            json={"owner": username},
+            headers={"csrf-token": csrf, "Content-Type": "application/json"}, timeout=10)
+        if resp.status_code not in (200, 201):
+            return False
+        data = resp.json() if resp.content else {}
+        return (data.get("owner") or "").lower() == username.lower()
+    except Exception:
+        return False
+
+
 def _delete_note(session, base_url: str, alias: str) -> bool:
     """尽力删除笔记（keepMedia=true 仅解除媒体关联），用于收紧权限失败后的止损。
 
@@ -113,23 +167,33 @@ def _delete_note(session, base_url: str, alias: str) -> bool:
         return False
 
 
-def upload_to_hedgedoc(markdown_text: str, hc_config: dict, public: bool = False) -> str:
+def upload_to_hedgedoc(markdown_text: str, hc_config: dict, public: bool = False,
+                       owner: str = "", share_readers=None) -> str:
     """上传 Markdown 文本至 HedgeDoc 并返回笔记 URL
 
     仅支持 HedgeDoc v2（Fastify/NestJS 后端，含 CSRF token 与 /api/private/notes）。
-    创建接口没有 share/public 参数，权限必须创建后按单篇设置：
-      - public=False（默认）：收紧为仅登录 owner 可见，用于账单/邮件等私密内容；
-      - public=True：把这一篇开放为匿名只读（_EVERYONE=read + publiclyVisible），
-        用于要给手机直接点开看的文章存档。只影响本篇，不改服务端默认权限。
+    创建接口没有 share/public 参数，权限必须创建后按【单篇】设置：
+      - public=False（默认）：收紧为仅 owner 可见，用于账单/邮件/文章存档；
+        链接不再匿名可开，需要分享时由 owner 在网页里手动切换公开分享；
+      - public=True：把这一篇开放为匿名只读（_EVERYONE=read + publiclyVisible）；
+      - owner：创建后把所有者转给该账号。只有 owner 有 FULL 权限，才能在网页上
+        改权限/切换公开分享；转交放在所有权限设置之后执行；
+      - share_readers：额外共享只读的账号列表（上传者不是查看者的场景）。
     v1 无权限接口，已拒绝静默降级。
 
     :param markdown_text: 待上传的完整内容
     :param hc_config: 从 config.json 中读取的 "hedgedoc" 配置字典
     :param public: 是否为这一篇单独开放匿名只读
+    :param owner: 上传后把笔记所有者转给谁（留空则用 hc_config["owner"]）
+    :param share_readers: 额外共享只读的账号（留空则用 hc_config["share_readers"]）
     :return: 成功返回笔记 URL（/n/{alias}），失败返回空字符串 ""
     """
     if not hc_config or not hc_config.get("enabled"):
         return ""
+
+    owner = owner or (hc_config.get("owner") or "")
+    if share_readers is None:
+        share_readers = hc_config.get("share_readers") or []
 
     markdown_text = _CONTROL_CHARS_RE.sub("", markdown_text or "")
 
@@ -185,8 +249,7 @@ def upload_to_hedgedoc(markdown_text: str, hc_config: dict, public: bool = False
                                         _restrict_note_to_owner(s, target_url, primary_alias)
                                         print("⚠️ [HedgeDoc Uploader] 本篇公开设置失败，"
                                               f"已退回仅本人可见：{_note_url(public_url, primary_alias)}")
-                                    return _note_url(public_url, primary_alias)
-                                if not _restrict_note_to_owner(s, target_url, primary_alias):
+                                elif not _restrict_note_to_owner(s, target_url, primary_alias):
                                     # 收紧失败 = 内容可能处于非 owner-only 状态，删除止损
                                     if _delete_note(s, target_url, primary_alias):
                                         print("❌ [HedgeDoc Uploader] 无法收紧为仅本人可见，已删除笔记并放弃上传")
@@ -194,6 +257,22 @@ def upload_to_hedgedoc(markdown_text: str, hc_config: dict, public: bool = False
                                         print(f"❌ [HedgeDoc Uploader] 无法收紧为仅本人可见，且删除未确认："
                                               f"笔记 {primary_alias} 可能残留在 {target_url}，需人工核查清理")
                                     return ""
+
+                                # 额外共享只读（必须在转移 owner 之前，调用者还是 owner）
+                                for reader in share_readers:
+                                    if not _share_note_with_user(s, target_url, primary_alias, reader):
+                                        print("⚠️ [HedgeDoc Uploader] 共享只读失败："
+                                              f"{reader} @ {_note_url(public_url, primary_alias)}")
+
+                                # 转移 owner 放最后：转完原账号就没有 FULL 权限了
+                                if owner and not _transfer_note_owner(s, target_url, primary_alias, owner):
+                                    if _share_note_with_user(s, target_url, primary_alias, owner):
+                                        print(f"⚠️ [HedgeDoc Uploader] 所有者转给 {owner} 失败，"
+                                              "已改为共享只读（该账号无法在界面切换公开分享）")
+                                    else:
+                                        print(f"⚠️ [HedgeDoc Uploader] 所有者转给 {owner} 失败，"
+                                              "且共享只读也失败，仅上传账号可见")
+
                                 return _note_url(public_url, primary_alias)
         except Exception:
             pass

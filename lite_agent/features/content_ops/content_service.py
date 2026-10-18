@@ -318,16 +318,17 @@ def _cache_put(url: str, result: dict, hedgedoc_url: str = ''):
 
 
 def _upload_to_hedgedoc(markdown_text: str) -> str:
-    """上传 Markdown 到 HedgeDoc，返回公网链接（复用通用工具包）
+    """上传 Markdown 到 HedgeDoc，返回笔记链接（复用通用工具包）
 
-    文章存档需要能在手机/微信里直接点开，所以对【这一篇】单独开放匿名只读；
-    权限是创建后按单篇设置的，不改 HedgeDoc 服务端默认，也不影响邮件账单等
-    其他上传路径（它们仍走 upload_to_hedgedoc 的默认 owner-only）。
+    上传一律按【单篇私有】处理：匿名打不开，只有笔记所有者（配置
+    hedgedoc.owner，默认 bot2）登录后可见；需要分享时由所有者在网页里
+    手动切换公开。权限只在创建后按单篇设置，不改 HedgeDoc 服务端默认，
+    邮件账单等其他上传路径同样走这套逻辑。
     """
     hc = _get_hedgedoc_config()
     if not hc.get("enabled"):
         return ""
-    return upload_to_hedgedoc(markdown_text, hc, public=True) or ""
+    return upload_to_hedgedoc(markdown_text, hc) or ""
 
 
 def _call_url2md(url: str, screenshot: bool = False) -> dict:
@@ -410,7 +411,8 @@ def _smart_deliver(result: dict, force_hedgedoc: bool = False, auto_upload: bool
                     f"📄 **{title}**",
                     f"",
                     f"📊 全文 {len(markdown)} 字 | 🖼 {image_count} 张图片",
-                    f"🔗 **存档链接（已存档，手机/微信里可直接打开；不要在对话里再去抓取它）**：{hedgedoc_url}",
+                    f"🔗 **存档链接（已存到 md，需登录 md 账号查看，页面里可切换为公开分享；"
+                    f"不要在对话里再去抓取它）**：{hedgedoc_url}",
                 ]
                 if source_url:
                     lines.append(f"📎 [原文链接]({source_url})")

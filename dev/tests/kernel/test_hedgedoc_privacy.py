@@ -158,3 +158,88 @@ def test_nul_control_chars_are_stripped_before_upload():
         upload_to_hedgedoc("a\x00b", CONFIG)
     create_call = [c for c in session.post.call_args_list if c.args[0].endswith("/notes")][0]
     assert create_call.kwargs["data"] == b"ab"
+
+
+def _owner_session(owner_ok=True, share_ok=True):
+    """私有上传 + owner 转移：put 按 URL 分流，能配置失败。"""
+    from urllib.parse import unquote
+
+    session = MagicMock()
+
+    def _get(url, **kwargs):
+        if "csrf" in url:
+            return _resp(200, {"token": "csrf"})
+        return _resp(200, {"publiclyVisible": False, "sharedToGroups": []})
+
+    def _put(url, **kwargs):
+        if url.endswith("/permissions/owner"):
+            if not owner_ok:
+                return _resp(500, {})
+            return _resp(200, {"owner": (kwargs.get("json") or {}).get("owner")})
+        if "/permissions/users/" in url:
+            if not share_ok:
+                return _resp(500, {})
+            username = unquote(url.rsplit("/", 1)[-1])
+            return _resp(200, {"sharedToUsers": [{"username": username, "canEdit": False}]})
+        return _resp(200, {"publiclyVisible": False})
+
+    session.get.side_effect = _get
+    session.put.side_effect = _put
+    session.post.side_effect = [
+        _resp(200),  # login
+        _resp(201, {"metadata": {"primaryAlias": "abc123"}}),  # create note
+    ]
+    session.delete.return_value = _resp(200)
+    return session
+
+
+def test_owner_is_transferred_after_note_is_locked_down():
+    """配置 hedgedoc.owner 时：先收紧/共享，最后才转 owner（转完就没 FULL 了）。"""
+    session = _owner_session()
+    cfg = dict(CONFIG, owner="bot2@bot.com")
+    with patch("lite_agent.core.utils.hedgedoc.requests") as rq:
+        rq.Session.return_value = session
+        url = upload_to_hedgedoc("# 文章", cfg)
+    assert url == "https://md.example/n/abc123"
+    puts = [c.args[0] for c in session.put.call_args_list]
+    assert puts[-1].endswith("/permissions/owner")
+    assert session.put.call_args.kwargs["json"] == {"owner": "bot2@bot.com"}
+    vis_idx = next(i for i, u in enumerate(puts) if "visibility" in u)
+    assert vis_idx < len(puts) - 1, "必须先把笔记设成私有，再转 owner"
+    # 私有分支仍要清掉 _EVERYONE/_LOGGED_IN
+    deleted = [c.args[0] for c in session.delete.call_args_list]
+    assert any("_EVERYONE" in u for u in deleted)
+
+
+def test_owner_transfer_failure_falls_back_to_readonly_share(capsys):
+    """转 owner 失败时退化为共享只读，并说明该账号无法在界面切换公开。"""
+    session = _owner_session(owner_ok=False)
+    cfg = dict(CONFIG, owner="bot2@bot.com")
+    with patch("lite_agent.core.utils.hedgedoc.requests") as rq:
+        rq.Session.return_value = session
+        url = upload_to_hedgedoc("# 文章", cfg)
+    assert url == "https://md.example/n/abc123"
+    assert any("/permissions/users/" in c.args[0] for c in session.put.call_args_list)
+    assert "无法在界面切换公开分享" in capsys.readouterr().out
+
+
+def test_share_readers_granted_before_owner_transfer():
+    """额外只读账号必须在转 owner 之前授权（之后原账号已无 FULL）。"""
+    session = _owner_session()
+    cfg = dict(CONFIG, owner="bot2@bot.com", share_readers=["reader@example.com"])
+    with patch("lite_agent.core.utils.hedgedoc.requests") as rq:
+        rq.Session.return_value = session
+        upload_to_hedgedoc("# 文章", cfg)
+    puts = [c.args[0] for c in session.put.call_args_list]
+    reader_idx = next(i for i, u in enumerate(puts) if "/permissions/users/" in u)
+    owner_idx = next(i for i, u in enumerate(puts) if u.endswith("/permissions/owner"))
+    assert reader_idx < owner_idx
+
+
+def test_upload_without_owner_config_keeps_ownership():
+    """没配 owner 时不做转移，保持原行为（仅收紧为 owner-only）。"""
+    session = _owner_session()
+    with patch("lite_agent.core.utils.hedgedoc.requests") as rq:
+        rq.Session.return_value = session
+        upload_to_hedgedoc("# 账单", CONFIG)
+    assert not any(c.args[0].endswith("/permissions/owner") for c in session.put.call_args_list)
