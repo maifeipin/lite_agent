@@ -36,41 +36,34 @@ class JdAdapter:
         if deadline is not None and time.monotonic() >= deadline:
             return {"status": "timeout", "items": [], "error": "搜索前超出总时限预算 (DEADLINE_EXCEEDED)"}
 
-        # 1. 确保进入搜索输入状态
-        tapped = self.driver.tap("#b51")
-        if not tapped:
-            ui_check = self.driver.dump_ui("table", timeout=1.5)
-            if "EditText" not in ui_check:
-                tapped = self.driver.tap((540, 285))
-                time.sleep(0.4)
-                ui_check = self.driver.dump_ui("table", timeout=1.5)
-                if "EditText" not in ui_check:
-                    self.restore_ready(timeout_sec=5.0)
-                    self.driver.tap("#b51")
-        time.sleep(0.5)
+        # 1. 确保进入搜索输入状态：若当前不在首页，先复位到首页 (E03)
+        ui_check = self.driver.dump_ui("table", timeout=1.5, deadline=deadline)
+        if not ("#b51" in ui_check or ("扫啊扫" in ui_check and "首页" in ui_check)):
+            self.restore_ready(timeout_sec=10.0, deadline=deadline)
 
-        if cancel_event and cancel_event.is_set():
-            return {"status": "cancelled", "items": [], "error": "搜索中收到取消信号"}
-        if deadline is not None and time.monotonic() >= deadline:
-            return {"status": "timeout", "items": [], "error": "搜索中超出总时限预算 (DEADLINE_EXCEEDED)"}
+        tapped = self.driver.tap("#b51", deadline=deadline)
+        if not tapped:
+            tapped = self.driver.tap((540, 285), deadline=deadline)
+        time.sleep(0.5)
 
         # 2. 中文原子注入
         filled = self.driver.fill("id=com.jd.lib.search.feature:id/zt", query)
         if not filled:
             filled = self.driver.fill("id=com.jd.lib.search.feature:id/zs", query)
         if not filled:
-            self.driver.fill("class=android.widget.EditText", query)
+            filled = self.driver.fill("class=android.widget.EditText", query)
         time.sleep(0.4)
 
-        if cancel_event and cancel_event.is_set():
-            return {"status": "cancelled", "items": [], "error": "搜索中收到取消信号"}
-        if deadline is not None and time.monotonic() >= deadline:
-            return {"status": "timeout", "items": [], "error": "搜索中超出总时限预算 (DEADLINE_EXCEEDED)"}
+        # 3. 提交搜索 (优先直接触发输入框 IME ACTION_SEARCH，后备点击搜索按钮)
+        submitted = self.driver.submit()
+        if not submitted:
+            tapped_search = self.driver.tap("搜索 按钮")
+            if not tapped_search:
+                self.driver.tap("搜索")
 
-        # 3. 提交搜索
-        tapped_search = self.driver.tap("搜索")
-        if not tapped_search:
-            self.driver.submit()
+
+
+
 
         # 4. 轮询等待结果页呈现并提取卡片
         loaded = False
@@ -404,14 +397,29 @@ class JdAdapter:
             "evidence": f"物流页提取: free_shipping={is_free_shipping}, partner={is_jd}"
         }
 
+    def restore_to_product_list(self, deadline: Optional[float] = None) -> bool:
+        """从商品详情或店铺页返回至搜索结果列表 (C04: 详情返回隔离)。"""
+        for _ in range(3):
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            ui = self.driver.dump_ui("table", deadline=deadline)
+            if "综合推荐" in ui or "显示模式" in ui or ("筛选" in ui and "销量" in ui):
+                return True
+            if "返回" in ui:
+                self.driver.tap("返回", deadline=deadline)
+            else:
+                self.driver.go_back(deadline=deadline)
+            time.sleep(0.4)
+        return False
+
     # --- 7. restore_ready ---
-    def restore_ready(self, timeout_sec: float = 10.0, deadline: Optional[float] = None) -> bool:
+    def restore_ready(self, timeout_sec: float = 12.0, deadline: Optional[float] = None) -> bool:
         """复位返回首页就绪状态 (E03 & F03: 严格受限于独立安全预算与截止时间，杜绝超时后判定为就绪)。"""
         eff_deadline = time.monotonic() + timeout_sec
         if deadline is not None:
             eff_deadline = min(eff_deadline, deadline)
 
-        for _ in range(4):
+        for _ in range(5):
             if time.monotonic() >= eff_deadline:
                 return False
             # 传入 eff_deadline 约束底层 dump_ui 阻塞
@@ -424,11 +432,15 @@ class JdAdapter:
 
             if time.monotonic() >= eff_deadline:
                 return False
-            self.driver.go_back(deadline=eff_deadline)
+            # 优先点击界面的“返回”控件，防止软键盘拦截物理返回键
+            if "返回" in ui:
+                self.driver.tap("返回", deadline=eff_deadline)
+            else:
+                self.driver.go_back(deadline=eff_deadline)
             rem = eff_deadline - time.monotonic()
             if rem <= 0:
                 return False
-            time.sleep(min(0.5, rem))
+            time.sleep(min(0.4, rem))
 
         if time.monotonic() >= eff_deadline:
             return False
@@ -446,3 +458,4 @@ class JdAdapter:
         if time.monotonic() >= eff_deadline:
             return False
         return "#b51" in ui or ("扫啊扫" in ui and "首页" in ui)
+

@@ -161,10 +161,14 @@ class MacWorkerClient:
                                 warnings.append(f"详情补充提取异常 [{title[:10]}]: {d_err}")
                             finally:
                                 # 严格保障每步详情导航复位回到搜索结果页 (C04 & F03)
-                                self.driver.go_back(deadline=deadline)
+                                if aid == "jd" and hasattr(self.jd_adapter, "restore_to_product_list"):
+                                    self.jd_adapter.restore_to_product_list(deadline=deadline)
+                                else:
+                                    self.driver.go_back(deadline=deadline)
                                 rem = deadline - time.monotonic()
                                 if rem > 0:
                                     time.sleep(min(0.3, rem))
+
                     t_det_end = time.monotonic()
                     t_details_ms = int((t_det_end - t_det_start) * 1000)
 
@@ -201,7 +205,7 @@ class MacWorkerClient:
 
         # 4. 复位回到就绪状态 (门禁检查，R07 & E03: 独立保护预算与安全截止时间)
         t_rst_start = time.monotonic()
-        reset_ok = self.jd_adapter.restore_ready(timeout_sec=10.0, deadline=time.monotonic() + 10.0) if aid == "jd" else True
+        reset_ok = self.jd_adapter.restore_ready(timeout_sec=12.0, deadline=time.monotonic() + 12.0) if aid == "jd" else True
         t_rst_end = time.monotonic()
         reset_status = "ready" if reset_ok else "failed"
         t_restore_ms = int((t_rst_end - t_rst_start) * 1000)
