@@ -76,7 +76,7 @@ def create_app(
     cmd_registry = CommandRegistry()
     workflow_registry = WorkflowRegistry()
     route_registry = RouteRegistry()
-    cron_service = CronService()
+    cron_service = CronService(log_callback=print)
     lifecycle = LifecycleManager()
 
     # 注册核心系统内置指令 (基础能力，不依赖任何业务)

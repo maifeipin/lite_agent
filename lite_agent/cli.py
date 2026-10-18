@@ -7,6 +7,7 @@ Lite Agent 生产唯一主入口 (main.py)。
 import argparse
 import logging
 import os
+import re
 import signal
 import sys
 import threading
@@ -80,6 +81,23 @@ def session_cleanup_task(agent: Agent, interval: int = 300, stop_event: threadin
             logger.warning(f"清理任务异常: {e}")
 
 
+def _is_noop_enrich_output(text: str) -> bool:
+    """识别 mail_llm_enrich 的纯空转输出（pending=0 且成功/降噪/失败/跳过全为 0）。
+
+    仅当输出**完整等于**已知空转结构时才算空转（re.fullmatch，含数值边界）：
+    “📋 待处理 pending 邮件: 0 封 (限量 N)” + “🏁 处理完成: ✅成功 0, 🔕降噪 0, ❌失败 0, ⏭️跳过 0”。
+    末尾附带任何额外内容（如 `Error: database unavailable`）或任一计数非零，
+    都不匹配、照常推送——异常通知不得被空转过滤吞掉。
+    """
+    if not isinstance(text, str):
+        return False
+    return re.fullmatch(
+        r"📋 待处理 pending 邮件: 0 封 \(限量 \d+\)\s*"
+        r"🏁 处理完成: ✅成功 0, 🔕降噪 0, ❌失败 0, ⏭️跳过 0\s*",
+        text,
+    ) is not None
+
+
 def _register_configured_cron_jobs(app, agent, config: dict):
     """从 config.json 的 cron_jobs 列表注册通用定时任务。"""
     import subprocess
@@ -144,7 +162,8 @@ def _register_configured_cron_jobs(app, agent, config: dict):
                         tool_info = engine.get_tool(fn_name) if engine else None
                         if tool_info and "func" in tool_info:
                             text = tool_info["func"](**kw) if kw else tool_info["func"]()
-                            if push and text and not text.startswith("✅") and not text.startswith("("):
+                            if push and text and not text.startswith("✅") and not text.startswith("(") \
+                                    and not (fn_name == "mail_llm_enrich" and _is_noop_enrich_output(text)):
                                 from lite_agent.contracts.message import AgentResponse
                                 from lite_agent.services.owner_delivery import send_owner_response
                                 color = "red" if any(err in text for err in (

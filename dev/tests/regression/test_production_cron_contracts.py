@@ -65,6 +65,37 @@ def test_generic_output_delivery_rules_and_return_value(monkeypatch, push, text,
         send.assert_not_called()
 
 
+ENRICH_NOOP = '📋 待处理 pending 邮件: 0 封 (限量 30)\n\n🏁 处理完成: ✅成功 0, 🔕降噪 0, ❌失败 0, ⏭️跳过 0'
+
+
+@pytest.mark.parametrize('skill,text,expect_push', [
+    # 纯空转：不推送（每小时一条“0 封”卡片属噪音）
+    ('legacy::mail_llm_enrich', ENRICH_NOOP, False),
+    # 空转结构后附带异常诊断：必须推送（异常通知不得被吞）
+    ('legacy::mail_llm_enrich', ENRICH_NOOP + '\nError: database unavailable', True),
+    # 有实际处理结果（含非零失败）：必须推送
+    ('legacy::mail_llm_enrich',
+     '📋 待处理 pending 邮件: 2 封 (限量 30)\n\n🏁 处理完成: ✅成功 1, 🔕降噪 0, ❌失败 1, ⏭️跳过 0', True),
+    # 数值边界：❌失败 01 不等于失败 0
+    ('legacy::mail_llm_enrich',
+     '📋 待处理 pending 邮件: 0 封 (限量 30)\n\n🏁 处理完成: ✅成功 0, 🔕降噪 0, ❌失败 01, ⏭️跳过 0', True),
+    # 其他任务输出同样的文本：不受此规则抑制
+    ('legacy::probe', ENRICH_NOOP, True),
+])
+def test_enrich_noop_push_suppression_scoped_to_full_structure(monkeypatch, skill, text, expect_push):
+    send = Mock(return_value=True)
+    monkeypatch.setattr('lite_agent.services.owner_delivery.send_owner_response', send)
+    fn_name = skill.split('::')[-1]
+    app = bare_app({fn_name: {'func': Mock(return_value=text)}})
+    agent = SimpleNamespace(channels=['host-channel'])
+    _register_configured_cron_jobs(app, agent, {
+        'channels': {'wechat': {'admin_wxid': 'test-owner'}},
+        'cron_jobs': [{'name': 'report', 'time': '07:00', 'skill': skill, 'push_on_output': True}],
+    })
+    assert run_job(app, 'report') == text
+    assert send.called == expect_push
+
+
 def test_job_output_options_are_bound_per_job_and_errors_propagate(monkeypatch):
     send = Mock(return_value=True)
     monkeypatch.setattr('lite_agent.services.owner_delivery.send_owner_response', send)
@@ -102,6 +133,19 @@ def test_mail_cron_resolves_with_current_host_and_no_second_push(monkeypatch):
     finally:
         for app in apps:
             app.shutdown()
+
+
+def test_cron_service_log_callback_is_wired_to_stdout():
+    """回归：cron 引擎的执行日志必须落到 stdout（journald 采集）。
+
+    2026-10-18 布局迁移后 `CronService()` 以默认静默回调实例化，所有
+    “正在自动执行定时任务/执行完毕”日志丢失，线上任务变成黑盒。
+    """
+    app = create_app(mode='core')
+    try:
+        assert app.cron_service._log_callback is print
+    finally:
+        app.shutdown()
 
 
 @pytest.mark.parametrize('text,expected', [('✅ clean', False), ('⚠️ risk', True), ('[HIGH] risk', True), ('High: 1', True)])
