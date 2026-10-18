@@ -5,42 +5,50 @@
 ## 目录与边界
 
 ```text
-main.py                 唯一启动入口，支持 core / full
-agent.py                Agent 宿主与消息处理
-session.py              会话与消息状态
-security.py             权限与安全检查
-app/                    应用装配、插件清单与生命周期
-contracts/              纯数据契约
-core/                   模型调用、执行、路由与编排
-services/               通用注册表、调度和投递
-channels/               通信适配器
-features/               七个业务插件及规范服务
-skills/                 工具元数据与现有兼容入口
-integrations/           SMTP、通知、邮件解析等外部集成
-memory_engine/          长期记忆
+main.py                 唯一启动入口（薄垫片），支持 core / full
+agent.py                薄垫片，转发 lite_agent.agent
+session.py              薄垫片，转发 lite_agent.session
+security.py             薄垫片，转发 lite_agent.security
+
+lite_agent/             运行时包，唯一的规范实现所在
+  cli.py                命令行解析、模式与插件装配
+  agent.py              Agent 宿主与消息处理
+  session.py            会话与消息状态
+  security.py           权限与安全检查
+  app/                  应用装配、插件清单与生命周期
+  contracts/            纯数据契约
+  core/                 模型调用、执行、路由与编排
+  services/             通用注册表、调度和投递
+  channels/             通信适配器
+  features/             七个业务插件及规范服务
+  skills/               工具元数据与兼容入口
+  integrations/         SMTP、通知、邮件解析等外部集成
+  memory_engine/        长期记忆
+
+dev/                    开发资产，生产运行不依赖
+  config/               架构规则、示例、pytest 与容器配置
+  requirements/         core / test / full 依赖
+  tests/                按职责归类的自动化测试
+
 edge_node/              边缘节点组件
 web_dashboard/          Web 控制台
-config/                 架构规则、示例、测试与容器配置
-requirements/           core / test / full 依赖
-scripts/                当前运维与验证入口；rss_topic 为外部任务链
-rules/                  业务规则
+scripts/                运维与验证入口；rss_topic 为外部任务链
 assets/                 图片与许可证
 conf.d/                 配置分片示例；私有 JSON 不入库
-tests/                  按职责归类的自动化测试
 ```
 
-内核不得反向依赖业务插件；业务由 `app` 显式加载。`skills/` 中的装饰器与薄入口仍有实际消费者，不按“未使用导入”机械删除。架构规则在 `config/architecture/rules.json`，核心导出清单在 `config/architecture/core-manifest.txt`。
+内核不得反向依赖业务插件；业务由 `lite_agent.app` 显式加载。`lite_agent/skills/` 中的装饰器与薄入口仍有实际消费者，不按“未使用导入”机械删除。架构规则在 `dev/config/architecture/rules.json`，核心导出清单在 `dev/config/architecture/core-manifest.txt`。
 
-历史设计、复核报告、执行日志与旧手工验证脚本保存在本机 `.local/archive/`，不进入后续提交；`architecture/`、`docs/` 也已忽略。运行数据、密钥、`.env` 和私有配置不提交。历史材料从当前树退出不等于清除了 Git 历史。
+历史设计、复核报告、执行日志与旧手工验证脚本已从工作树移除，归档在本机 `.local/archive/20261018-code-hygiene/`（含逐文件 SHA256 清单），不进入后续提交。运行数据、密钥、`.env` 和私有配置不提交。历史材料从当前树退出不等于清除了 Git 历史。
 
 ## 安装与配置
 
 在仓库根目录执行：
 
 ```bash
-python3 -m pip install -r requirements/full.txt
-cp config/examples/env.example .env
-cp config/examples/agent.json config.json
+python3 -m pip install -r dev/requirements/full.txt
+cp dev/config/examples/env.example .env
+cp dev/config/examples/agent.json config.json
 mkdir -p conf.d
 cp conf.d/llm.json.example conf.d/llm.json
 cp conf.d/task_routing.json.example conf.d/task_routing.json
@@ -62,7 +70,7 @@ full 模式默认装配 billing、todo、review_meeting、mail_ops、sys_ops、n
 微信 iLink 登录必须使用运行服务的同一系统用户；账号状态写在自己的 `data/` 中：
 
 ```bash
-python3 -m channels.wechat_ilink --login --session-file data/wechat_session.json
+python3 -m lite_agent.channels.wechat_ilink --login --session-file data/wechat_session.json
 ```
 
 ## 开发验证

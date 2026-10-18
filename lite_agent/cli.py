@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
         "--plugins",
         type=str,
         default=None,
-        help="显式指定启用的插件列表 (逗号分隔，如 'features.billing,features.todo'，空字符串 '' 表示禁用全部业务插件)",
+        help="显式指定启用的插件列表 (逗号分隔，如 'billing,todo'，空字符串 '' 表示禁用全部业务插件)",
     )
     return parser.parse_args()
 
