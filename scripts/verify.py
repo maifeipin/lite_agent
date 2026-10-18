@@ -69,6 +69,7 @@ ALLOWED_AGENT_EXACT_FILES = {
     'dev/config/architecture/core-manifest.txt',
     'scripts/export_core.py',
     'scripts/verify_core.py',
+    'lite_agent/integrations/phone_app/worker/README.md',
 }
 
 ALLOWED_AGENT_CODE_DIRS = [
