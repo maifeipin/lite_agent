@@ -30,8 +30,8 @@ def get_rss_db() -> Tuple[Any, str]:
     """从 config.json 读取 MongoDB 连接，不硬编码凭据"""
     import pymongo
     rssdb = get_rss_config().get("rssdb", {})
-    uri = rssdb.get("uri", "mongodb://localhost:27017")
-    database = rssdb.get("database", "rsslite")
+    uri = rssdb.get("uri") or "mongodb://localhost:27017"
+    database = rssdb.get("database") or "rsslite"
     return pymongo.MongoClient(uri, serverSelectionTimeoutMS=5000), database
 
 

@@ -131,7 +131,8 @@ def test_v3_full_manifest_loads_safely_without_crashing_on_pymongo():
 
         # 验证 ops_meili_sync 在无 pymongo 时的安全降级行为
         from lite_agent.skills.ops_meili_sync import _get_mongodb
-        with patch("lite_agent.skills.ops_meili_sync.pymongo", None):
+        with patch("lite_agent.features.content_ops.meili_sync_service.pymongo", None), \
+             patch("lite_agent.skills.ops_meili_sync.pymongo", None):
             with pytest.raises(RuntimeError, match="未安装 pymongo"):
                 _get_mongodb()
     finally:

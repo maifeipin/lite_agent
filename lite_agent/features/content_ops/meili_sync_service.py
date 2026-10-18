@@ -168,8 +168,8 @@ def _get_mongodb():
     if pymongo is None:
         raise RuntimeError("未安装 pymongo，无法连接 MongoDB 进行数据同步")
     rssdb = _cfg.get('rssdb', {})
-    uri = rssdb.get('uri', 'mongodb://localhost:27017')
-    db_name = rssdb.get('database', 'rsslite')
+    uri = rssdb.get('uri') or 'mongodb://localhost:27017'
+    db_name = rssdb.get('database') or 'rsslite'
     client = pymongo.MongoClient(uri, serverSelectionTimeoutMS=5000)
     return client[db_name]
 
