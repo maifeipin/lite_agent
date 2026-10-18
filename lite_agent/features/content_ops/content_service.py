@@ -189,6 +189,21 @@ def _get_hedgedoc_config() -> dict:
     return cfg.get("hedgedoc", {})
 
 
+def _force_upload_for(url: str) -> bool:
+    """该 URL 是否无视长度阈值强制上传 HedgeDoc。
+
+    公众号文章常见几百字，按长度阈值永远不上传，用户就只拿到纯文本、
+    没有可回看的存档链接。config 里 content_ops.force_upload_hosts 列出
+    的域名（如 mp.weixin.qq.com）命中即上传。
+    """
+    hosts = ((load_config() or {}).get("content_ops") or {}).get("force_upload_hosts") or []
+    try:
+        host = (urllib.parse.urlparse(url or "").hostname or "").lower()
+    except Exception:
+        return False
+    return any(host == h.lower() or host.endswith("." + h.lower()) for h in hosts if h)
+
+
 def _normalize_url(url: str) -> str:
     """规范化 URL：剥掉跟踪参数 + 排序剩余参数，保证同一资源命中同一缓存键"""
     try:
@@ -303,11 +318,16 @@ def _cache_put(url: str, result: dict, hedgedoc_url: str = ''):
 
 
 def _upload_to_hedgedoc(markdown_text: str) -> str:
-    """上传 Markdown 到 HedgeDoc，返回公网链接（复用通用工具包）"""
+    """上传 Markdown 到 HedgeDoc，返回公网链接（复用通用工具包）
+
+    文章存档需要能在手机/微信里直接点开，所以对【这一篇】单独开放匿名只读；
+    权限是创建后按单篇设置的，不改 HedgeDoc 服务端默认，也不影响邮件账单等
+    其他上传路径（它们仍走 upload_to_hedgedoc 的默认 owner-only）。
+    """
     hc = _get_hedgedoc_config()
     if not hc.get("enabled"):
         return ""
-    return upload_to_hedgedoc(markdown_text, hc) or ""
+    return upload_to_hedgedoc(markdown_text, hc, public=True) or ""
 
 
 def _call_url2md(url: str, screenshot: bool = False) -> dict:
@@ -373,7 +393,8 @@ def _smart_deliver(result: dict, force_hedgedoc: bool = False, auto_upload: bool
     image_count = int(result.get("imageCount") or result.get("ImageCount") or 0)
     source_url = result.get("url") or result.get("Url") or ""
 
-    should_upload = auto_upload and (force_hedgedoc or len(markdown) > 2500 or image_count > 0)
+    should_upload = auto_upload and (force_hedgedoc or _force_upload_for(source_url)
+                                     or len(markdown) > 2500 or image_count > 0)
     if should_upload:
         try:
             hedgedoc_url = result.get('hedgedoc_url', '')
@@ -382,17 +403,20 @@ def _smart_deliver(result: dict, force_hedgedoc: bool = False, auto_upload: bool
                 if hedgedoc_url and source_url:
                     _cache_put(source_url, result, hedgedoc_url=hedgedoc_url)
             if hedgedoc_url:
-                summary = markdown[:800].replace('\n', ' ').strip()
+                # 只回 800 字预览时 LLM 拿不到全文、无法满足"总结这篇"的请求，
+                # 它会转而抓存档链接（匿名访问受权限限制）然后误判成上传失败。
+                # 这里改成：元信息 + 链接 + 全文，并说明全文的用途。
                 lines = [
                     f"📄 **{title}**",
                     f"",
-                    f"> {summary}{'...' if len(markdown) > 800 else ''}",
-                    f"",
                     f"📊 全文 {len(markdown)} 字 | 🖼 {image_count} 张图片",
-                    f"🔗 [点击查看完整图文（需登录 HedgeDoc 账号）]({hedgedoc_url})",
+                    f"🔗 **存档链接（已存档，手机/微信里可直接打开；不要在对话里再去抓取它）**：{hedgedoc_url}",
                 ]
                 if source_url:
                     lines.append(f"📎 [原文链接]({source_url})")
+                lines.append("")
+                lines.append("<!-- 以下为正文全文，供你总结/提炼使用，不要原样粘贴给用户 -->")
+                lines.append(markdown)
                 return "\n".join(lines)
         except Exception:
             pass
@@ -426,6 +450,25 @@ def web_clip(
         return "❌ 请提供至少一个有效的 URL"
     if len(url_list) > 3:
         return "❌ 单次最多支持 3 个 URL"
+
+    # HedgeDoc 存档链接：内容已经存下来了，再抓一次纯属浪费，也别据此判定上传失败。
+    _hc = _get_hedgedoc_config() or {}
+    _hd_hosts = set()
+    for _key in ("public_url", "internal_url"):
+        try:
+            _host = (urllib.parse.urlparse(_hc.get(_key) or "").hostname or "").lower()
+            if _host:
+                _hd_hosts.add(_host)
+        except Exception:
+            pass
+    for _u in url_list:
+        try:
+            _host = (urllib.parse.urlparse(_u).hostname or "").lower()
+        except Exception:
+            _host = ""
+        if _host and _host in _hd_hosts:
+            return ("❌ 这是本系统的 HedgeDoc 存档链接，内容已存档，不是待抓取的网页。"
+                    "直接把链接发给用户即可，不要再抓。")
 
     if len(url_list) == 1:
         result = _call_url2md(url_list[0], screenshot=screenshot)

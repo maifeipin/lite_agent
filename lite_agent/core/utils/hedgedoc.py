@@ -1,5 +1,24 @@
 # -*- coding: utf-8 -*-
+import re
+
 import requests
+
+# PostgreSQL 的 text 类型不接受 0x00：抓取来的 HTML 转 Markdown 时常混入 NUL
+# 等控制字符，直接入库会让 HedgeDoc 后端 500
+# （invalid byte sequence for encoding "UTF8": 0x00）。
+# 上传前统一清洗，保留换行与制表符。
+_CONTROL_CHARS_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _note_url(public_url: str, alias: str) -> str:
+    """拼接笔记的公网访问地址。
+
+    HedgeDoc v2 的笔记路由是 /n/{alias}；根路径 /{alias} 只是 v1 直链的
+    兼容入口（frontend/src/app/(editor)/[id]/page.tsx 里 getNote 后判
+    metadata.version !== 1 即 notFound），直接给 /{alias} 会得到
+    "Page not found"。因此统一走 /n/。
+    """
+    return f"{public_url.rstrip('/')}/n/{alias}"
 
 
 def _restrict_note_to_owner(session, base_url: str, alias: str) -> bool:
@@ -31,6 +50,51 @@ def _restrict_note_to_owner(session, base_url: str, alias: str) -> bool:
         return False
 
 
+def _share_note_readonly(session, base_url: str, alias: str) -> bool:
+    """把【这一篇】笔记开放为匿名只读，返回是否成功。
+
+    HedgeDoc v2 的创建接口没有任何 share/public 参数：
+    backend/src/api/private/notes/notes.controller.ts 的 createNote 只接
+    @MarkdownBody() 的 Markdown 正文（createNamedNote 多一个 alias），
+    笔记的 publiclyVisible 与 _EVERYONE/_LOGGED_IN 权限全部取自服务端
+    全局默认（note.config.ts / note.service.ts 的 createNote）。
+    所以“单篇可分享”只能在创建后对这篇的 metadata 调权限接口：
+      PUT /api/private/notes/{alias}/metadata/permissions/groups/_EVERYONE
+          {"canEdit": false}          -> 匿名组只读
+      PUT /api/private/notes/{alias}/metadata/permissions/visibility
+          {"publiclyVisible": true}   -> 允许未登录访问
+    两步都只作用于当前 alias，不影响其他笔记，也不改服务端默认。
+    注意 HD_NOTE_PERMISSIONS_MAX_GUEST_LEVEL 必须 >= read，否则组权限
+    设置会被后端拒绝。
+    """
+    try:
+        csrf = session.get(f"{base_url}/api/private/csrf/token", timeout=5).json().get("token")
+        if not csrf:
+            return False
+        group = session.put(
+            f"{base_url}/api/private/notes/{alias}/metadata/permissions/groups/_EVERYONE",
+            json={"canEdit": False},
+            headers={"csrf-token": csrf, "Content-Type": "application/json"}, timeout=10)
+        if group.status_code not in (200, 201):
+            return False
+        vis = session.put(
+            f"{base_url}/api/private/notes/{alias}/metadata/permissions/visibility",
+            json={"publiclyVisible": True},
+            headers={"csrf-token": csrf, "Content-Type": "application/json"}, timeout=10)
+        if vis.status_code not in (200, 201, 204):
+            return False
+        # 复核：确认这篇笔记的权限确实变成“匿名只读 + 公开可见”
+        check = session.get(
+            f"{base_url}/api/private/notes/{alias}/metadata/permissions", timeout=10)
+        if check.status_code != 200:
+            return False
+        data = check.json()
+        groups = {g.get("groupName"): g.get("canEdit") for g in data.get("sharedToGroups", [])}
+        return data.get("publiclyVisible") is True and groups.get("_EVERYONE") is False
+    except Exception:
+        return False
+
+
 def _delete_note(session, base_url: str, alias: str) -> bool:
     """尽力删除笔记（keepMedia=true 仅解除媒体关联），用于收紧权限失败后的止损。
 
@@ -49,18 +113,25 @@ def _delete_note(session, base_url: str, alias: str) -> bool:
         return False
 
 
-def upload_to_hedgedoc(markdown_text: str, hc_config: dict) -> str:
+def upload_to_hedgedoc(markdown_text: str, hc_config: dict, public: bool = False) -> str:
     """上传 Markdown 文本至 HedgeDoc 并返回笔记 URL
 
     仅支持 HedgeDoc v2（Fastify/NestJS 后端，含 CSRF token 与 /api/private/notes）。
-    v2 上传后强制收紧为仅登录 owner 可见；v1 无权限收紧接口，已拒绝静默降级。
+    创建接口没有 share/public 参数，权限必须创建后按单篇设置：
+      - public=False（默认）：收紧为仅登录 owner 可见，用于账单/邮件等私密内容；
+      - public=True：把这一篇开放为匿名只读（_EVERYONE=read + publiclyVisible），
+        用于要给手机直接点开看的文章存档。只影响本篇，不改服务端默认权限。
+    v1 无权限接口，已拒绝静默降级。
 
     :param markdown_text: 待上传的完整内容
     :param hc_config: 从 config.json 中读取的 "hedgedoc" 配置字典
-    :return: 成功返回仅本人可见的笔记 URL，失败返回空字符串 ""
+    :param public: 是否为这一篇单独开放匿名只读
+    :return: 成功返回笔记 URL（/n/{alias}），失败返回空字符串 ""
     """
     if not hc_config or not hc_config.get("enabled"):
         return ""
+
+    markdown_text = _CONTROL_CHARS_RE.sub("", markdown_text or "")
 
     s = requests.Session()
     public_url = hc_config.get("public_url", "https://md.maifeipin.com").rstrip('/')
@@ -108,6 +179,13 @@ def upload_to_hedgedoc(markdown_text: str, hc_config: dict) -> str:
                             note_data = note_resp.json()
                             primary_alias = note_data.get("metadata", {}).get("primaryAlias")
                             if primary_alias:
+                                if public:
+                                    # 单篇开放匿名只读；失败则退回仅本人可见（不删笔记）
+                                    if not _share_note_readonly(s, target_url, primary_alias):
+                                        _restrict_note_to_owner(s, target_url, primary_alias)
+                                        print("⚠️ [HedgeDoc Uploader] 本篇公开设置失败，"
+                                              f"已退回仅本人可见：{_note_url(public_url, primary_alias)}")
+                                    return _note_url(public_url, primary_alias)
                                 if not _restrict_note_to_owner(s, target_url, primary_alias):
                                     # 收紧失败 = 内容可能处于非 owner-only 状态，删除止损
                                     if _delete_note(s, target_url, primary_alias):
@@ -116,7 +194,7 @@ def upload_to_hedgedoc(markdown_text: str, hc_config: dict) -> str:
                                         print(f"❌ [HedgeDoc Uploader] 无法收紧为仅本人可见，且删除未确认："
                                               f"笔记 {primary_alias} 可能残留在 {target_url}，需人工核查清理")
                                     return ""
-                                return f"{public_url}/{primary_alias}"
+                                return _note_url(public_url, primary_alias)
         except Exception:
             pass
 

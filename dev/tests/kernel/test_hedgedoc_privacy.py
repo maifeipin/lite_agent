@@ -36,7 +36,7 @@ def test_upload_restricts_note_to_owner_before_returning_url():
     with patch("lite_agent.core.utils.hedgedoc.requests") as rq:
         rq.Session.return_value = session
         url = upload_to_hedgedoc("# 账单", CONFIG)
-    assert url == "https://md.example/abc123"
+    assert url == "https://md.example/n/abc123"
     deleted_groups = [c.args[0] for c in session.delete.call_args_list]
     assert any("_EVERYONE" in u for u in deleted_groups)
     assert any("_LOGGED_IN" in u for u in deleted_groups)
@@ -99,3 +99,62 @@ def test_v1_fallback_refused_when_v2_unavailable(capsys):
     assert url == ""
     assert not any("/new" in str(c) for c in session.post.call_args_list)
     assert "拒绝降级" in capsys.readouterr().out
+
+
+def _public_session(verify_public=True):
+    """public=True 分支：put 全部成功，回读的权限 DTO 可配置。"""
+    session = MagicMock()
+
+    def _get(url, **kwargs):
+        if "csrf" in url:
+            return _resp(200, {"token": "csrf"})
+        return _resp(200, {
+            "publiclyVisible": verify_public,
+            "sharedToGroups": [{"groupName": "_EVERYONE", "canEdit": False}],
+        })
+
+    session.get.side_effect = _get
+    session.post.side_effect = [
+        _resp(200),  # login
+        _resp(201, {"metadata": {"primaryAlias": "abc123"}}),  # create note
+    ]
+    session.delete.return_value = _resp(200)
+    session.put.return_value = _resp(200, {})
+    return session
+
+
+def test_public_upload_opens_only_this_note_for_anonymous_read():
+    """public=True：给本篇 _EVERYONE=read + publiclyVisible，返回 /n/ 链接。"""
+    session = _public_session()
+    with patch("lite_agent.core.utils.hedgedoc.requests") as rq:
+        rq.Session.return_value = session
+        url = upload_to_hedgedoc("# 文章", CONFIG, public=True)
+    assert url == "https://md.example/n/abc123"
+    puts = [c.args[0] for c in session.put.call_args_list]
+    assert any("_EVERYONE" in u for u in puts)
+    assert any("visibility" in u for u in puts)
+    # 公开分支不得再删除组权限（否则链接会退化成仅本人可见）
+    session.delete.assert_not_called()
+    session.request.assert_not_called()
+
+
+def test_public_failure_falls_back_to_owner_only(capsys):
+    """设置公开失败时退回 owner-only，并如实提示，不删笔记。"""
+    session = _public_session(verify_public=False)
+    with patch("lite_agent.core.utils.hedgedoc.requests") as rq:
+        rq.Session.return_value = session
+        url = upload_to_hedgedoc("# 文章", CONFIG, public=True)
+    assert url == "https://md.example/n/abc123"
+    assert session.delete.called, "退回 owner-only 需要清掉已加的组权限"
+    assert "本篇公开设置失败" in capsys.readouterr().out
+    session.request.assert_not_called()
+
+
+def test_nul_control_chars_are_stripped_before_upload():
+    """HedgeDoc 后端 PostgreSQL 不接受 0x00，上传前必须清掉控制字符。"""
+    session = _public_session()
+    with patch("lite_agent.core.utils.hedgedoc.requests") as rq:
+        rq.Session.return_value = session
+        upload_to_hedgedoc("a\x00b", CONFIG)
+    create_call = [c for c in session.post.call_args_list if c.args[0].endswith("/notes")][0]
+    assert create_call.kwargs["data"] == b"ab"

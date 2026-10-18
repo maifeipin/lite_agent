@@ -118,3 +118,44 @@ def test_batch_uses_legacy_endpoint_and_delivers_each_result(clipper):
         {'url': 'https://example.invalid/two', 'screenshot': False}]
     assert 'first body' in result and 'second body' in result
     upload.assert_not_called()
+
+
+def _config_with(**content_ops):
+    return {
+        'rssadapter': {'url': 'http://127.0.0.1:5216'},
+        'hedgedoc': {'enabled': True, 'public_url': 'https://md.maifeipin.com'},
+        'content_ops': content_ops,
+    }
+
+
+def test_force_upload_hosts_uploads_short_wechat_article(clipper, monkeypatch):
+    """公众号短文过不了 2500 字阈值，force_upload_hosts 命中时必须上传。"""
+    c, server, upload = clipper
+    monkeypatch.setattr(c, 'load_config',
+                        lambda: _config_with(force_upload_hosts=['mp.weixin.qq.com']))
+    server.side_effect = None
+    server.return_value = response(dict(success=True, markdown='短文正文',
+                                        Url='https://mp.weixin.qq.com/s/abc'))
+    assert 'https://example.invalid/note' in c.web_clip('https://mp.weixin.qq.com/s/abc')
+    upload.assert_called_once()
+
+
+def test_archive_link_is_not_refetched(clipper, monkeypatch):
+    """存档链接不是待抓网页：直接提示，不能再打一次 Url2Md。"""
+    c, server, upload = clipper
+    monkeypatch.setattr(c, 'load_config', lambda: _config_with())
+    result = c.web_clip('https://md.maifeipin.com/n/abc123')
+    assert '内容已存档' in result
+    server.assert_not_called()
+    upload.assert_not_called()
+
+
+def test_uploaded_article_delivers_full_text(clipper):
+    """上传后必须回全文（供总结），不能只回 800 字预览。"""
+    c, server, upload = clipper
+    server.side_effect = None
+    server.return_value = response(dict(success=True, Markdown='A' * 2600 + 'TAIL',
+                                        Url='https://example.invalid/article'))
+    result = c.web_clip('https://example.invalid/article')
+    assert 'TAIL' in result
+    assert '供你总结' in result
