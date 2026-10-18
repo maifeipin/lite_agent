@@ -89,7 +89,7 @@ registerTabModule({
             html += `<button class="modal-btn modal-btn-primary" style="font-size:12px; padding:3px 10px; background:#e6a23c; border-color:#e6a23c;" onclick="event.stopPropagation(); window.PhoneAppUI.openBatchDetail('${batch.batch_id}')">审核脚本 🛡️</button>`;
             html += `<button class="modal-btn modal-btn-danger" style="font-size:12px; padding:3px 10px; background:#dc2626; color:#fff; border:none; border-radius:3px; cursor:pointer;" onclick="event.stopPropagation(); window.PhoneAppUI.rejectBatch('${batch.batch_id}')">驳回 ❌</button>`;
         } else if (batch.status === 'approved') {
-            html += `<button class="modal-btn modal-btn-primary" style="font-size:12px; padding:3px 10px;" onclick="event.stopPropagation(); window.PhoneAppUI.approveAndRun('${batch.batch_id}')">执行任务 ▶️</button>`;
+            html += `<button class="modal-btn modal-btn-primary" style="font-size:12px; padding:3px 10px;" onclick="event.stopPropagation(); window.PhoneAppUI.executeBatch('${batch.batch_id}')">执行任务 ▶️</button>`;
         } else if (batch.status === 'queued' || batch.status === 'running') {
             html += `<button class="modal-btn modal-btn-danger" style="font-size:12px; padding:3px 10px; background:#ef4444; color:#fff; border:none; border-radius:3px; cursor:pointer;" onclick="event.stopPropagation(); window.PhoneAppUI.cancelBatch('${batch.batch_id}')">取消执行 🛑</button>`;
         }
@@ -528,7 +528,7 @@ window.PhoneAppUI = {
             ${b.status === 'approved' ? `
             <div style="background:#f0fdf4; border:1px solid #bbf7d0; padding:12px; border-radius:6px; margin-bottom:16px; display:flex; justify-content:space-between; align-items:center;">
                 <span style="color:#15803d; font-weight:bold;">已获得有效授权哈希，等待派发执行。</span>
-                <button class="modal-btn modal-btn-primary" style="padding:6px 14px;" onclick="window.PhoneAppUI.approveAndRun('${b.batch_id}')">${isFake ? "▶️ 立即执行 Fake 测试" : "▶️ 立即派发手机执行"}</button>
+                <button class="modal-btn modal-btn-primary" style="padding:6px 14px;" onclick="window.PhoneAppUI.executeBatch('${b.batch_id}')">${isFake ? "▶️ 立即执行 Fake 测试" : "▶️ 立即派发手机执行"}</button>
             </div>
             ` : ''}
 
@@ -641,15 +641,8 @@ window.PhoneAppUI = {
         }
     },
 
-    async approveAndRun(batchId) {
+    async executeBatch(batchId) {
         try {
-            const rAppr = await fetch(`/agent/api/v1/phone-app/batches/${batchId}/approve`, { method: 'POST' });
-            const dAppr = await rAppr.json();
-            if (!rAppr.ok || !dAppr.success) {
-                alert('审核批准失败 (HTTP ' + rAppr.status + '): ' + (dAppr.error || rAppr.statusText));
-                return;
-            }
-
             const rExec = await fetch(`/agent/api/v1/phone-app/batches/${batchId}/execute`, { method: 'POST' });
             const dExec = await rExec.json();
             if (!rExec.ok || !dExec.success) {
@@ -657,8 +650,27 @@ window.PhoneAppUI = {
                 return;
             }
 
-            alert(window.PHONE_APP_TEST_MODE === true ? 'FAKE 测试已排队，不操作手机。' : '✅ 审批通过，已派发手机执行！');
+            alert(window.PHONE_APP_TEST_MODE === true ? 'FAKE 测试已排队，不操作手机。' : '✅ 任务已派发手机执行！');
             this.openBatchDetail(batchId);
+            this.loadBatches();
+        } catch (e) {
+            alert('请求异常: ' + e);
+        }
+    },
+
+    async approveAndRun(batchId) {
+        try {
+            const rAppr = await fetch(`/agent/api/v1/phone-app/batches/${batchId}/approve`, { method: 'POST' });
+            const dAppr = await rAppr.json();
+            if (!rAppr.ok) {
+                const errMsg = (dAppr && dAppr.error) || rAppr.statusText;
+                if (!errMsg.includes('approved') && !errMsg.includes('已处于审批通过状态')) {
+                    alert('审核批准失败 (HTTP ' + rAppr.status + '): ' + errMsg);
+                    return;
+                }
+            }
+
+            await this.executeBatch(batchId);
         } catch (e) {
             alert('请求异常: ' + e);
         }

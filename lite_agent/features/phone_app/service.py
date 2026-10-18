@@ -420,6 +420,17 @@ class PhoneAppService:
         if not batch:
             return False, {"error": "批次不存在"}
 
+        # 若批次已处于 approved 状态（例如固定搜索模式或已通过审批），幂等返回成功
+        if batch["status"] == BatchStatus.APPROVED.value:
+            approval_rec = self.repo.get_approval(batch_id)
+            canonical_hash = approval_rec.get("canonical_hash", "") if approval_rec else ""
+            return True, {
+                "batch_id": batch_id,
+                "status": BatchStatus.APPROVED.value,
+                "hash": canonical_hash,
+                "message": "批次已处于审批通过状态",
+            }
+
         if batch["status"] not in (BatchStatus.PENDING_REVIEW.value, BatchStatus.DRAFT.value):
             return False, {"error": f"当前状态不可审批: {batch['status']}"}
 

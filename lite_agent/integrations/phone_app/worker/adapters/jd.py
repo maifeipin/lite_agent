@@ -55,7 +55,7 @@ class JdAdapter:
         time.sleep(0.4)
 
         # 3. 提交搜索 (优先直接触发输入框 IME ACTION_SEARCH，后备点击搜索按钮)
-        submitted = self.driver.submit()
+        submitted = self.driver.submit() if hasattr(self.driver, "submit") else False
         if not submitted:
             tapped_search = self.driver.tap("搜索 按钮")
             if not tapped_search:

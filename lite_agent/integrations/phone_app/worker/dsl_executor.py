@@ -73,7 +73,7 @@ class DslExecutor:
                     time.sleep(0.3)
 
                 elif action == "submit":
-                    ok = self.driver.submit()
+                    ok = self.driver.submit() if hasattr(self.driver, "submit") else False
                     if not ok:
                         target = step.get("target", "搜索")
                         ok = self.driver.tap(target)
