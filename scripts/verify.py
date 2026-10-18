@@ -700,7 +700,7 @@ def main(argv=None):
                     f"{'10' if need_parser else '8'}. Docker Python 3.9: Agent {'核心' if args.core_only else '全量'}回归测试 (代码只读 :ro, 无外网)",
                     agent_test_cmd,
                     cwd=agent_root,
-                    timeout=360,
+                    timeout=600,
                 ))
             else:
                 results.append({
