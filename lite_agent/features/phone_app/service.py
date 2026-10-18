@@ -710,7 +710,11 @@ class PhoneAppService:
                         if "positive_rate" in filters_raw:
                             filters_obj.positive_rate = PositiveRateFilter(**filters_raw["positive_rate"])
                         if "shop_types" in filters_raw:
-                            filters_obj.shop_types = ShopTypesFilter(**filters_raw["shop_types"])
+                            st_val = filters_raw["shop_types"]
+                            if isinstance(st_val, list):
+                                filters_obj.shop_types = ShopTypesFilter(types=st_val)
+                            elif isinstance(st_val, dict):
+                                filters_obj.shop_types = ShopTypesFilter(**st_val)
                         if "logistics" in filters_raw:
                             filters_obj.logistics = LogisticsFilter(**filters_raw["logistics"])
 

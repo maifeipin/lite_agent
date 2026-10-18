@@ -36,11 +36,18 @@ class JdAdapter:
         if deadline is not None and time.monotonic() >= deadline:
             return {"status": "timeout", "items": [], "error": "搜索前超出总时限预算 (DEADLINE_EXCEEDED)"}
 
-        # 1. 点击首页搜索框
+        # 1. 确保进入搜索输入状态
         tapped = self.driver.tap("#b51")
         if not tapped:
-            self.driver.tap((540, 285))
-        time.sleep(0.6)
+            ui_check = self.driver.dump_ui("table", timeout=1.5)
+            if "EditText" not in ui_check:
+                tapped = self.driver.tap((540, 285))
+                time.sleep(0.4)
+                ui_check = self.driver.dump_ui("table", timeout=1.5)
+                if "EditText" not in ui_check:
+                    self.restore_ready(timeout_sec=5.0)
+                    self.driver.tap("#b51")
+        time.sleep(0.5)
 
         if cancel_event and cancel_event.is_set():
             return {"status": "cancelled", "items": [], "error": "搜索中收到取消信号"}
@@ -61,27 +68,35 @@ class JdAdapter:
             return {"status": "timeout", "items": [], "error": "搜索中超出总时限预算 (DEADLINE_EXCEEDED)"}
 
         # 3. 提交搜索
-        self.driver.tap("搜索")
+        tapped_search = self.driver.tap("搜索")
+        if not tapped_search:
+            self.driver.submit()
 
-        # 4. 轮询等待结果页呈现
+        # 4. 轮询等待结果页呈现并提取卡片
         loaded = False
         empty_result = False
         raw_xml = ""
+        items = []
 
-        for _ in range(6):
+        for _ in range(8):
             if cancel_event and cancel_event.is_set():
                 return {"status": "cancelled", "items": [], "error": "等待结果时收到取消信号"}
             if deadline is not None and time.monotonic() >= deadline:
                 return {"status": "timeout", "items": [], "error": "等待结果时超出总时限预算 (DEADLINE_EXCEEDED)"}
             time.sleep(0.7)
             raw_xml = self.driver.dump_ui("xml")
-            if "综合推荐" in raw_xml or "筛选商品" in raw_xml or "官方直降" in raw_xml or "到手价" in raw_xml or "已售" in raw_xml:
+            items = self._parse_items_from_xml(raw_xml)
+            empty_result = bool("没有找到" in raw_xml or "抱歉" in raw_xml or "暂无相关商品" in raw_xml or "换个关键词" in raw_xml)
+            has_markers = bool("综合推荐" in raw_xml or "筛选商品" in raw_xml or "官方直降" in raw_xml or "到手价" in raw_xml or "已售" in raw_xml or "显示模式" in raw_xml)
+            if items:
                 loaded = True
                 break
-            elif "没有找到" in raw_xml or "抱歉" in raw_xml or "暂无相关商品" in raw_xml or "换个关键词" in raw_xml:
+            elif empty_result:
                 loaded = True
-                empty_result = True
                 break
+            elif has_markers:
+                loaded = True
+                # 标记检测到容器，但卡片可能仍在渲染，继续轮询
 
         if not loaded:
             return {
@@ -97,11 +112,7 @@ class JdAdapter:
                 "coverage": {"is_recommended": False, "raw_total": 0}
             }
 
-        # 5. 基于 XML 容器树隔离提取卡片
-        items = self._parse_items_from_xml(raw_xml)
-        status = "succeeded"
-        if not items:
-            status = "empty_results" if (empty_result or "没有找到" in raw_xml or "暂无商品" in raw_xml) else "extraction_failed"
+        status = "succeeded" if items else "extraction_failed"
 
         return {
             "status": status,
@@ -112,10 +123,14 @@ class JdAdapter:
             }
         }
 
+
     def _parse_items_from_xml(self, raw_xml: str) -> List[Dict[str, Any]]:
         """从 XML UI 树中提取商品卡片，保证每个卡片所有字段均在同一容器节点内绑定 (B05)。"""
         if not raw_xml:
             return []
+
+        # 过滤 Android XML 转储中的控制字符 (如 \x00-\x08, \x0b-\x0c, \x0e-\x1f)
+        raw_xml = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", raw_xml)
 
         try:
             root = ET.fromstring(raw_xml)
@@ -128,14 +143,17 @@ class JdAdapter:
         for node in root.iter("node"):
             cls_name = node.attrib.get("class", "")
             if "RecyclerView" in cls_name:
-                for child in node:
-                    if child.attrib.get("bounds"):
-                        cards.append(child)
-                break
+                # 检查该 RecyclerView 是否包含商品价格，避免命中顶部的筛选栏/分类栏等辅助 RecyclerView
+                has_price = any(re.match(r"^¥\d+", n.attrib.get("text", "").replace("\u200b", "").strip()) for n in node.iter("node"))
+                if has_price:
+                    for child in node:
+                        if child.attrib.get("bounds"):
+                            cards.append(child)
+                    break
 
         if not cards:
             for node in root.iter("node"):
-                texts = [n.attrib.get("text", "") for n in node.iter("node")]
+                texts = [n.attrib.get("text", "").replace("\u200b", "").strip() for n in node.iter("node")]
                 prices = [t for t in texts if re.match(r"^¥\d+(\.\d+)?", t)]
                 if len(prices) == 1 and any(len(t) > 7 for t in texts):
                     cards.append(node)
@@ -157,8 +175,8 @@ class JdAdapter:
             card_elements = list(card.iter("node"))
 
             for elem in card_elements:
-                text = elem.attrib.get("text", "").strip()
-                desc = elem.attrib.get("content-desc", "").strip()
+                text = elem.attrib.get("text", "").replace("\u200b", "").strip()
+                desc = elem.attrib.get("content-desc", "").replace("\u200b", "").strip()
                 combined = f"{text} {desc}".strip()
                 res_id = elem.attrib.get("resource-id", "")
 
@@ -171,8 +189,8 @@ class JdAdapter:
                         pass
 
                 # 识别店铺
-                if not shop_name and ("旗舰店" in text or "专营店" in text or "自营" in text):
-                    if "榜" not in text and "加购物车" not in text and len(text) < 30:
+                if not shop_name and ("旗舰店" in text or "专营店" in text or "自营" in text or "小店" in text):
+                    if "榜" not in text and "加购物车" not in text and len(text) < 30 and "立减" not in text and "到手" not in text:
                         shop_name = text
 
                 # 识别销量口径及完整原文 (B05: 完整保留如 '10万+'、'5000+条' 及下界)
@@ -192,12 +210,14 @@ class JdAdapter:
                     "badge" in res_id.lower() or
                     "tag" in res_id.lower() or
                     (len(text) <= 6 and (text in ("自营", "官方旗舰店", "旗舰店"))) or
-                    (len(desc) <= 6 and (desc in ("自营", "官方旗舰店", "旗舰店")))
+                    (len(desc) <= 6 and (desc in ("自营", "官方旗舰店", "旗舰店"))) or
+                    (desc.startswith("自营,") or desc.startswith("广告自营,") or ",自营," in desc) or
+                    (desc.startswith("官方旗舰店,") or ",官方旗舰店," in desc)
                 )
                 if is_badge_element:
-                    if (text == "自营" or desc == "自营") and "self_operated" not in badges:
+                    if (text == "自营" or desc == "自营" or desc.startswith("自营,") or desc.startswith("广告自营,") or ",自营," in desc) and "self_operated" not in badges:
                         badges.append("self_operated")
-                    if (text == "官方旗舰店" or desc == "官方旗舰店") and "official_flagship" not in badges:
+                    if (text == "官方旗舰店" or desc == "官方旗舰店" or desc.startswith("官方旗舰店,") or ",官方旗舰店," in desc) and "official_flagship" not in badges:
                         badges.append("official_flagship")
 
                 # 识别物流事实 (B05: 优先判定明确否定，防止“不包邮”命中“包邮”，运费险不等于收取运费)
@@ -217,7 +237,7 @@ class JdAdapter:
                 elif has_positive_shipping:
                     free_shipping = True
 
-                if "京东物流" in combined or "京东发货" in combined:
+                if "京东物流" in combined or "京东发货" in combined or "明日达" in combined:
                     delivery_partner = "jd_delivery"
 
                 # 识别商品标题
@@ -385,7 +405,7 @@ class JdAdapter:
         }
 
     # --- 7. restore_ready ---
-    def restore_ready(self, timeout_sec: float = 5.0, deadline: Optional[float] = None) -> bool:
+    def restore_ready(self, timeout_sec: float = 10.0, deadline: Optional[float] = None) -> bool:
         """复位返回首页就绪状态 (E03 & F03: 严格受限于独立安全预算与截止时间，杜绝超时后判定为就绪)。"""
         eff_deadline = time.monotonic() + timeout_sec
         if deadline is not None:
@@ -399,7 +419,7 @@ class JdAdapter:
             # F03 核心防御：dump_ui 执行后立即复核 deadline！若已超时绝不可判定为 ready！
             if time.monotonic() >= eff_deadline:
                 return False
-            if "#b51" in ui or "搜索栏" in ui or "扫啊扫" in ui or "首页" in ui:
+            if "#b51" in ui or ("扫啊扫" in ui and "首页" in ui):
                 return True
 
             if time.monotonic() >= eff_deadline:
@@ -425,4 +445,4 @@ class JdAdapter:
         ui = self.driver.dump_ui("table", deadline=eff_deadline)
         if time.monotonic() >= eff_deadline:
             return False
-        return "#b51" in ui or "搜索栏" in ui or "首页" in ui
+        return "#b51" in ui or ("扫啊扫" in ui and "首页" in ui)

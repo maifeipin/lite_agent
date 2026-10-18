@@ -131,6 +131,9 @@ class DslExecutor:
         """从 XML UI 树提取商品，保证卡片字段在同一容器节点内绑定，杜绝跨卡片串字段 (E01: 容器级强绑定)。"""
         if not raw_xml:
             return [], "XML 内容为空"
+
+        # 过滤 Android XML 转储中的控制字符 (如 \x00-\x08, \x0b-\x0c, \x0e-\x1f)
+        raw_xml = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", raw_xml)
         try:
             root = ET.fromstring(raw_xml)
         except Exception as parse_err:
@@ -140,14 +143,16 @@ class DslExecutor:
         for node in root.iter("node"):
             cls_name = node.attrib.get("class", "")
             if "RecyclerView" in cls_name:
-                for child in node:
-                    if child.attrib.get("bounds"):
-                        cards.append(child)
-                break
+                has_price = any(re.match(r"^¥\d+", n.attrib.get("text", "").replace("\u200b", "").strip()) for n in node.iter("node"))
+                if has_price:
+                    for child in node:
+                        if child.attrib.get("bounds"):
+                            cards.append(child)
+                    break
 
         if not cards:
             for node in root.iter("node"):
-                texts = [n.attrib.get("text", "") for n in node.iter("node")]
+                texts = [n.attrib.get("text", "").replace("\u200b", "").strip() for n in node.iter("node")]
                 prices = [t for t in texts if re.match(r"^¥\d+(\.\d+)?", t)]
                 if len(prices) == 1 and any(len(t) > 7 for t in texts):
                     cards.append(node)
@@ -162,7 +167,7 @@ class DslExecutor:
             price_text = None
             amount = None
             for elem in card.iter("node"):
-                text = elem.attrib.get("text", "").strip()
+                text = elem.attrib.get("text", "").replace("\u200b", "").strip()
                 if not price_text and re.match(r"^¥\d+(\.\d+)?", text):
                     price_text = text
                     try:
@@ -173,7 +178,7 @@ class DslExecutor:
                     # 过滤广告与通用导航干扰词 (E01)
                     if (not text.startswith("¥") and "商品" not in text and "排行榜" not in text and
                         "进店" not in text and "广告" not in text and "赞助" not in text and
-                        "已选中" not in text and "未选中" not in text):
+                        "已选中" not in text and "未选中" not in text and "点击" not in text):
                         title = text
 
             if title and price_text and title not in seen_titles:

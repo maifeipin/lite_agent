@@ -199,9 +199,9 @@ class MacWorkerClient:
                 actual_status = "failed"
                 warnings.append(f"未知批次执行模式: '{mode}'")
 
-        # 4. 复位回到就绪状态 (门禁检查，R07 & E03: 独立 5 秒保护预算与安全截止时间)
+        # 4. 复位回到就绪状态 (门禁检查，R07 & E03: 独立保护预算与安全截止时间)
         t_rst_start = time.monotonic()
-        reset_ok = self.jd_adapter.restore_ready(timeout_sec=5.0, deadline=time.monotonic() + 5.0) if aid == "jd" else True
+        reset_ok = self.jd_adapter.restore_ready(timeout_sec=10.0, deadline=time.monotonic() + 10.0) if aid == "jd" else True
         t_rst_end = time.monotonic()
         reset_status = "ready" if reset_ok else "failed"
         t_restore_ms = int((t_rst_end - t_rst_start) * 1000)
