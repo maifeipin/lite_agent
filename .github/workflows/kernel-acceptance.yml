@@ -184,5 +184,7 @@ jobs:
           python -c "from scripts.verify import build_isolated_docker_image; assert build_isolated_docker_image('.')"
 
       - name: Run Sanitized Snapshot Double Regression
+        env:
+          MAIL_STATEMENT_PARSER_DIR: ${{ github.workspace }}/mail-statement-parser
         run: |
           python scripts/verify.py --agent-root . --parser-root mail-statement-parser

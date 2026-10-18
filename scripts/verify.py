@@ -514,6 +514,8 @@ def main(argv=None):
         print(f"❌ 关键错误: 找不到 parser 兄弟仓库: {parser_root}", file=sys.stderr)
         print("💡 若需独立验证无需 Parser 的基础内核门禁，请使用 --core-only 或 --skip-parser", file=sys.stderr)
         sys.exit(2)
+    if need_parser and os.path.isdir(parser_root):
+        os.environ["MAIL_STATEMENT_PARSER_DIR"] = parser_root
 
     print("==================================================")
     print("🚀 Lite Agent 全量门禁与隔离验证启动")

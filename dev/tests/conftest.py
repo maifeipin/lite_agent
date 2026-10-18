@@ -52,12 +52,18 @@ if os.path.isfile(_example_cfg):
     for _p in [_TEST_SESSION_DIR, tempfile.gettempdir(), "/parser", "/dummy_parser"]:
         if _p not in _sb_paths:
             _sb_paths.append(_p)
-    _local_parser = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "dev", "mail-statement-parser"))
-    if os.path.isdir(_local_parser):
-        if _local_parser not in _sb_paths:
-            _sb_paths.append(_local_parser)
-        if "MAIL_STATEMENT_PARSER_DIR" not in os.environ:
-            os.environ["MAIL_STATEMENT_PARSER_DIR"] = _local_parser
+    _parser_candidates = [
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "mail-statement-parser")),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "dev", "mail-statement-parser")),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "mail-statement-parser")),
+    ]
+    for _cand in _parser_candidates:
+        if os.path.isdir(_cand):
+            if _cand not in _sb_paths:
+                _sb_paths.append(_cand)
+            if "MAIL_STATEMENT_PARSER_DIR" not in os.environ:
+                os.environ["MAIL_STATEMENT_PARSER_DIR"] = _cand
+            break
     _env_parser = os.environ.get("MAIL_STATEMENT_PARSER_DIR")
     if _env_parser and _env_parser not in _sb_paths:
         _sb_paths.append(_env_parser)
