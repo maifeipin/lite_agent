@@ -121,9 +121,8 @@ window.PhoneAppUI = {
         bar.id = 'phone-app-topbar';
         bar.style.cssText = 'display:flex; justify-content:space-between; align-items:center; width:100%; margin-bottom:12px; padding:10px 14px; background:#f1f5f9; border-radius:6px; border:1px solid #e2e8f0; box-sizing:border-box;';
 
-        const isFake = window.PHONE_APP_TEST_MODE === true || (this._cachedDevices || []).some(d => d.test_mode === true);
-        const onlineDevCount = (this._cachedDevices || []).filter(d => d.status === 'online').length;
-        const devText = onlineDevCount > 0 ? `🟢 ${onlineDevCount} 台受控设备在线` : `🔴 暂无在线设备`;
+        const pausedDev = (this._cachedDevices || []).find(d => d.status === 'paused');
+        const resumeBtnHtml = pausedDev ? `<button class="modal-btn" style="font-size:12px; padding:5px 12px; background:#f59e0b; color:#fff; border:none; border-radius:4px; font-weight:bold; cursor:pointer;" onclick="window.PhoneAppUI.resumeDevice('${pausedDev.device_id}')">⚠️ 恢复设备 (${pausedDev.device_id})</button>` : '';
 
         bar.innerHTML = `
             <div style="display:flex; align-items:center; gap:12px;">
@@ -132,12 +131,34 @@ window.PhoneAppUI = {
                 <span style="font-size:12px; color:#64748b; background:#fff; padding:2px 8px; border-radius:12px; border:1px solid #cbd5e1;">${devText}</span>
             </div>
             <div style="display:flex; gap:8px;">
+                ${resumeBtnHtml}
                 <button class="modal-btn modal-btn-secondary" style="font-size:12px; padding:5px 12px;" onclick="window.PhoneAppUI.refreshBatches()">🔄 刷新列表</button>
                 <button class="modal-btn modal-btn-primary" style="font-size:13px; padding:6px 16px; font-weight:bold; background:#0284c7; border-color:#0284c7;" onclick="window.PhoneAppUI.openCreateModal()">${isFake ? "➕ 新建 Fake 测试任务" : "➕ 新建手机筛选任务"}</button>
             </div>
         `;
         header.parentNode.insertBefore(bar, header.nextSibling);
     },
+
+    async resumeDevice(deviceId) {
+        try {
+            const r = await fetch('/agent/api/v1/phone-app/device/resume', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ device_id: deviceId })
+            });
+            const d = await r.json();
+            if (d.success) {
+                alert(`设备 ${deviceId} 已成功恢复就绪！`);
+                await this.loadDevicesAndApps();
+                this.renderTopBar();
+            } else {
+                alert(`恢复设备失败: ${d.error || '未知错误'}`);
+            }
+        } catch (e) {
+            alert(`恢复请求失败: ${e.message}`);
+        }
+    },
+
 
     removeTopBar() {
         const bar = document.getElementById('phone-app-topbar');
