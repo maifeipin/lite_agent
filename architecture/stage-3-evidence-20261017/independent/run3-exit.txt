@@ -1,1 +1,0 @@
-docker_exit=0 host_exit=1

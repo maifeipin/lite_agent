@@ -1,106 +1,103 @@
 # Lite Agent
 
-🚀 **Lite Agent** 是一个轻量级、支持深度思考大模型的私有化 AI 智能助手引擎。通过 WebSocket / HTTP 回调 / 长轮询接入**飞书、钉钉、企业微信、Telegram、个人微信 iLink 与内置 Web 控制台**，并通过自然语言全自动调度本地服务器的运维、待办、账单、RSS 精选等 80+ 项技能。
+个人 AI 助手：以统一的模型调用、会话、权限和工具执行内核，连接飞书、Telegram、钉钉、企业微信、微信 iLink 与 HTTP API。业务由显式插件装配，支持待办、会议、邮件账单、内容检索及系统运维。
 
-![效果演示](assets/screenshot.png)
+## 目录与边界
 
-## 🌟 核心特性
-
-- **多通道无缝接入**: 一套代码同时支持飞书 (WebSocket)、Telegram (Long Polling/Webhook)、钉钉、企业微信、个人微信 iLink（扫码登录后长轮询）与 Web 控制台。
-- **现代化 Web 控制台**: 内置单页 Web Dashboard，集成**邮件中心、BERTopic 热点简报、待办看板、Socks5 代理监控与多通道会话追溯**，支持 SSE 真流式打字渲染与 Guest 访客权限隔离。
-- **OpenAI 兼容 API 通道**: 原生提供 `/v1/chat/completions` 等 OpenAI 标准接口，支持流式输出与 Function Calling，可无缝对接 NextChat、ChatBox 等客户端。
-- **动态工具分流 (RequestSelector)**: 智能识别意图按需注入领域工具，Token 开销减少 85%+，消除中小模型工具幻觉与误调风险。
-- **全自动多模态视觉 (OCR)**: 向机器人直接发送图片，自动调用外置大语言视觉模型（通过 `OCR_ENDPOINT` 代理），秒级解析并返回排版 Markdown。
-- **动态技能引擎 (Skills)**: 80+ 项内置运维技能，通过简单 Python 脚本即可快速扩展。
-- **复杂任务编排 (DAG)**: 遇到耗时复杂任务时，自动下发给 TaskOrchestrator 调度 Planner -> Worker -> Aggregator 多子任务流。
-- **AI 决策委员会**: 支持多大模型（如 GLM-5.3、Kimi-K3 等）协同审议与投票决策。
-- **定时推送与长短期记忆**: 支持 Crontab 式定时任务配置与基于向量库的长期记忆蒸馏。
-- **独立配置隔离**: 模型与任务路由从配置解耦至 `conf.d/` 独立维护，即改即生效。
-
-## 🛠️ 内置技能概览
-
-- 📰 **RSS 资讯与 BERTopic 热点聚类** (`ops_rss.py`, `scripts/rss_topic/`): 多源资讯聚合评分、BERTopic 主题聚类与宏观热点态势发现、预计算缓存秒级推送。
-- 📋 **待办与任务流** (`ops_todo.py`): 待办全生命周期管理（增删改查/延期/搁置）与 IM 每日简报推送。
-- 💰 **邮件与财务账单** (`ops_billing.py`, `ops_mail_*.py`): 邮箱账单批量拉取、自动识别入库、多维财务报表与对账。
-- 🖥️ **系统运维与安全** (`ops_sys.py`, `ops_sentinel.py`, `ops_security.py`): 主机状态、日志检索、安全哨兵基线与入侵审查、`/check` 一键体检。
-- 📝 **博客与网页剪藏** (`ops_blog.py`, `ops_web_clipper.py`): Halo 博客发布与导出、网页 Markdown 提取及 HedgeDoc 自动云端转存。
-- ☁️ **云盘灾备** (`ops_backup.py`): 官方 `bdpan` CLI 增量同步，自动打包 Halo、Meilisearch、HedgeDoc、Vaultwarden 等数据至百度网盘。
-- 🌐 **网络代理与边缘控制** (`ops_socks5.py`, `ops_edge_*.py`): Socks5 节点测速与动态出站探测、Edge 边缘节点管理。
-- 🧠 **AI 决策与学业分析** (`ops_decision.py`, `ops_gaokao.py`): 多模型决策投票、高考志愿位次与专业推荐。
-
-## 📦 部署
-
-### 1. 配置
-
-项目采用 **环境变量分离** 的安全配置方案。
-
-1. 复制 `.env.example` 为 `.env` 并填入密钥：
-```bash
-cp .env.example .env
-vim .env
+```text
+main.py                 唯一启动入口，支持 core / full
+agent.py                Agent 宿主与消息处理
+session.py              会话与消息状态
+security.py             权限与安全检查
+app/                    应用装配、插件清单与生命周期
+contracts/              纯数据契约
+core/                   模型调用、执行、路由与编排
+services/               通用注册表、调度和投递
+channels/               通信适配器
+features/               七个业务插件及规范服务
+skills/                 工具元数据与现有兼容入口
+integrations/           SMTP、通知、邮件解析等外部集成
+memory_engine/          长期记忆
+edge_node/              边缘节点组件
+web_dashboard/          Web 控制台
+config/                 架构规则、示例、测试与容器配置
+requirements/           core / test / full 依赖
+scripts/                当前运维与验证入口；rss_topic 为外部任务链
+rules/                  业务规则
+assets/                 图片与许可证
+conf.d/                 配置分片示例；私有 JSON 不入库
+tests/                  按职责归类的自动化测试
 ```
 
-2. 复制配置文件与模型示例配置：
-```bash
-cp config.example.json config.json
+内核不得反向依赖业务插件；业务由 `app` 显式加载。`skills/` 中的装饰器与薄入口仍有实际消费者，不按“未使用导入”机械删除。架构规则在 `config/architecture/rules.json`，核心导出清单在 `config/architecture/core-manifest.txt`。
 
+历史设计、复核报告、执行日志与旧手工验证脚本保存在本机 `.local/archive/`，不进入后续提交；`architecture/`、`docs/` 也已忽略。运行数据、密钥、`.env` 和私有配置不提交。历史材料从当前树退出不等于清除了 Git 历史。
+
+## 安装与配置
+
+在仓库根目录执行：
+
+```bash
+python3 -m pip install -r requirements/full.txt
+cp config/examples/env.example .env
+cp config/examples/agent.json config.json
 mkdir -p conf.d
 cp conf.d/llm.json.example conf.d/llm.json
 cp conf.d/task_routing.json.example conf.d/task_routing.json
 cp conf.d/committee.json.example conf.d/committee.json
 cp conf.d/output_delivery.json.example conf.d/output_delivery.json
 cp conf.d/adaptive_execution.json.example conf.d/adaptive_execution.json
+cp conf.d/task_specs.json.example conf.d/task_specs.json
 ```
 
-自适应执行的观察指标和暂缓事项见 [docs/adaptive-execution-followups.md](docs/adaptive-execution-followups.md)。
-
-### 个人微信 iLink（可选）
-
-在 `config.json` 的 `channels` 下开启配置（凭据由扫码生成，不要写进配置文件）：
+填写自己的模型、频道及业务配置，保护配置文件权限。现有部署的根目录 `config.json`、`.env` 与 `conf.d/*.json` 保持原位置；本轮目录整理没有移动生产配置或运行数据。
 
 ```bash
-# 执行扫码登录（若 systemd 以 liteagent 用户运行，必须以同一用户执行）
-sudo -u liteagent -H /usr/bin/python3 -m channels.wechat_ilink --login \
-  --session-file data/wechat_session.json
-sudo systemctl restart lite-agent
+python3 main.py --mode full --config config.json
+python3 main.py --mode core --config config.json
 ```
 
-### 百度网盘 bdpan 备份（可选）
+full 模式默认装配 billing、todo、review_meeting、mail_ops、sys_ops、network_ops、content_ops。可用 `--plugins todo,review_meeting` 显式选取；CLI 插件列表优先于 `LITE_AGENT_PLUGINS` 和 `plugins.enabled`，`plugins.disabled` 仍会过滤。core 模式不装配业务插件。启用插件前核对其定时任务、后台 Worker 和外发目标。
 
-云盘自动灾备依赖官方 `bdpan` CLI 工具：
+微信 iLink 登录必须使用运行服务的同一系统用户；账号状态写在自己的 `data/` 中：
 
 ```bash
-# 方式 A：从百度官方 CDN 下载安装器一键安装 (Linux x86_64 示例)
-curl -fsSL https://issuecdn.baidupcs.com/issue/netdisk/ai-bdpan/installer/3.8.4/bdpan-installer-linux-amd64 -o bdpan-installer
-chmod +x bdpan-installer
-./bdpan-installer --yes
-sudo ln -sf ~/.local/bin/bdpan /usr/local/bin/bdpan
-
-# 方式 B：执行 bdpan-storage 官方项目的安装脚本
-# bash /path/to/bdpan-storage/skills/baidu-drive/scripts/install.sh --yes
-
-# 授权登录（必须以运行服务的同一用户执行）
-sudo -u liteagent -H bdpan login
+python3 -m channels.wechat_ilink --login --session-file data/wechat_session.json
 ```
 
-### 2. 启动
+## 开发验证
 
 ```bash
-pip install -r requirements.txt
-python3 main.py
+python3 -m pip install -r dev/requirements/test.txt
+python3 -m pytest -c dev/config/pytest.ini --rootdir=. dev/tests/ -p dev.tests.support.no_skips
+python3 scripts/check_architecture.py
+python3 scripts/verify.py
 ```
 
-## 💬 常用指令
+`verify.py` 执行本机、Node 及 Docker Python 3.9 门禁；Parser 默认取相邻 `../dev/mail-statement-parser`，也可用 `--parser-root PATH`。测试使用隔离配置、临时数据库与脱敏快照，禁止跳过用例冒充通过。完整测试镜像由脚本在仅含 Dockerfile 和测试依赖的隔离构建上下文生成，不把私有配置交给 Docker builder。
 
-| 指令 | 说明 |
-|------|------|
-| `/check` | 全方位健康自检（进程/网络/备份/DB 等 9 项） |
-| `/rss_fetch` / `/rss_list` | 获取今日精选 / 查看分类资讯 |
-| `/cron` / `/cron log` | 查看定时任务列表 / 执行日志 |
-| `/remember <type> <内容>` | 强制写入长期记忆 |
-| `/balance` / `/status` | 查询 API 余额 / 会话 Token 统计 |
-| `/new` / `/help` | 重置当前会话 / 完整帮助 |
+```bash
+python3 scripts/verify.py --core-only
+python3 scripts/verify_core.py
+python3 scripts/export_core.py --verify-only --check-hashes
+```
 
-## 📄 开源协议
+测试分组：`kernel/` 内核，`architecture/` 分层与隔离，`channels/` 频道，`features/` 业务，`integration/` 跨模块与 Parser 合同，`regression/` 长期反例，`tooling/` 构建与验证工具，`frontend/` 前端契约；`support/` 为隔离守卫，`fixtures/` 为明确脱敏的机器输入。
 
-[MIT License](LICENSE)
+## 运维入口
+
+| 入口 | 用途 |
+| --- | --- |
+| `scripts/check_models.py` | 模型配置检查 |
+| `scripts/debug_api.py` | 明确目标后的 API 手工诊断 |
+| `scripts/review_meeting.py` | 会审 CLI 薄入口 |
+| `scripts/run_decision.py` | 现有决策 CLI |
+| `scripts/gen_edge_keys.py`、`scripts/gen_htpasswd.py` | 边缘密钥及认证文件生成 |
+| `scripts/switch_model.py` | 模型配置切换 |
+| `scripts/switch_naive_config.sh` | 已有受限代理配置切换脚本 |
+| `scripts/backup_to_bypy.sh`、`full_backup_once.py`、`rsslite_full_backup.py` | 既有备份入口，执行前确认目标和权限 |
+| `scripts/rss_topic/` | 既有 RSS Topic 外部流水线，保留路径以兼容 cron |
+
+运维入口可能发送通知、修改外部系统或备份数据，不作为普通单元测试直接运行。生产配置、数据库和微信状态不能被测试副本覆盖；回退代码时保留上线后新增的业务状态。
+
+许可证见 [assets/LICENSE](assets/LICENSE)。

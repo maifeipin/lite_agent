@@ -4,7 +4,7 @@ Lite Agent 核心基础源码导出与校验工具 (scripts/export_core.py)
 用于从全量仓库中提取纯净的 core 基础模式运行副本，并执行严格的安全与依赖防御检查。
 
 支持参数:
-  --manifest PATH     指定基础源码清单文件 (默认: architecture/kernel-core-manifest.txt)
+  --manifest PATH     指定基础源码清单文件 (默认: config/architecture/core-manifest.txt)
   --output-dir PATH   导出目标目录 (若指定则将文件复制至该目录)
   --agent-root PATH   Agent 仓库根目录 (默认根据脚本位置自动推导)
   --verify-only       仅验证清单合法性、安全性与文件存在性，不实际写出文件
@@ -49,20 +49,25 @@ REQUIRED_CORE_MODULES = {
     "agent.py",
     "session.py",
     "security.py",
-    "requirements-core.txt",
-    "contracts/message.py",
-    "core/agent_runtime.py",
-    "core/execution_ledger.py",
-    "core/skill_engine.py",
-    "services/commands.py",
-    "services/routes.py",
-    "services/cron.py",
-    "app/bootstrap.py",
-    "app/lifecycle.py",
-    "channels/api.py",
-    "channels/base.py",
-    "integrations/notifications.py",
-    "integrations/smtp/client.py",
+    "dev/requirements/core.txt",
+    "lite_agent/__init__.py",
+    "lite_agent/cli.py",
+    "lite_agent/agent.py",
+    "lite_agent/session.py",
+    "lite_agent/security.py",
+    "lite_agent/contracts/message.py",
+    "lite_agent/core/agent_runtime.py",
+    "lite_agent/core/execution_ledger.py",
+    "lite_agent/core/skill_engine.py",
+    "lite_agent/services/commands.py",
+    "lite_agent/services/routes.py",
+    "lite_agent/services/cron.py",
+    "lite_agent/app/bootstrap.py",
+    "lite_agent/app/lifecycle.py",
+    "lite_agent/channels/api.py",
+    "lite_agent/channels/base.py",
+    "lite_agent/integrations/notifications.py",
+    "lite_agent/integrations/smtp/client.py",
 }
 
 
@@ -75,7 +80,7 @@ def parse_args(argv: List[str] = None) -> argparse.Namespace:
         "--manifest",
         type=str,
         default=None,
-        help="基础源码清单文件路径 (默认: architecture/kernel-core-manifest.txt)",
+        help="基础源码清单文件路径 (默认: config/architecture/core-manifest.txt)",
     )
     parser.add_argument(
         "--output-dir",
@@ -235,9 +240,12 @@ def main(argv: List[str] = None):
         print(f"❌ 找不到 Agent 根目录: {agent_root}", file=sys.stderr)
         sys.exit(1)
 
-    manifest_path = os.path.abspath(args.manifest) if args.manifest else os.path.join(
-        agent_root, "architecture", "kernel-core-manifest.txt"
-    )
+    if args.manifest:
+        manifest_path = os.path.abspath(args.manifest)
+    else:
+        manifest_path = os.path.join(agent_root, "dev", "config", "architecture", "core-manifest.txt")
+        if not os.path.isfile(manifest_path):
+            manifest_path = os.path.join(agent_root, "config", "architecture", "core-manifest.txt")
     if not os.path.isfile(manifest_path):
         print(f"❌ 找不到 manifest 文件: {manifest_path}", file=sys.stderr)
         sys.exit(1)

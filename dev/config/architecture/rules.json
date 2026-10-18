@@ -1,0 +1,171 @@
+{
+  "schema_version": 1,
+  "description": "Lite Agent 架构门禁规则与过渡期例外清单 (E0 基线)",
+  "rules": {
+    "RULE_NO_DIRECT_PARSER_IMPORT": {
+      "name": "禁止生产代码直接导入 Parser 模块",
+      "description": "禁止 Agent 生产模块通过 import / from / importlib 直接导入 mail-statement-parser 内部模块 (mail_client, statement_parser, statement_db 等)，必须通过 MailCLI 或已声明的 integrations 适配器访问。"
+    },
+    "RULE_NO_CORE_REVERSE_DEPENDENCY": {
+      "name": "禁止 core 通用运行时产生反向依赖",
+      "description": "core/ 通用运行时不得新增对 skills/、scripts/ 或具体业务工作流 (如 BillingWorkflow) 的直接导入。"
+    },
+    "RULE_DYNAMIC_IMPORT_REGISTERED": {
+      "name": "动态导入必须严格登记",
+      "description": "禁止通过未登记的 importlib.import_module 或 __import__ 绕行跨仓或反向依赖门禁。"
+    },
+    "RULE_NO_CROSS_REPO_SYS_PATH": {
+      "name": "禁止生产代码注入跨仓 sys.path",
+      "description": "禁止生产代码动态修改 sys.path 引入外部未受管代码目录。"
+    },
+    "RULE_NO_DIRECT_SQLITE_IN_BILLING": {
+      "name": "禁止账单业务层直接直连 SQLite",
+      "description": "禁止 features/billing/ 业务代码直接 import sqlite3 直连解析库/账单库，所有只读或变更操作必须收敛至 Parser CLI (MailCLI)。"
+    },
+    "RULE_NO_FEATURE_SYS_MODULES_LOOKUP": {
+      "name": "禁止业务特性层通过 sys.modules 反查上层依赖",
+      "description": "禁止 features/ 内部通过 sys.modules 反向检索 skills/ 或兼容层实例，必须通过显式依赖注入或参数传递解耦。"
+    },
+    "RULE_NO_KERNEL_BUSINESS_DEPENDENCY": {
+      "name": "禁止基础内核代码依赖业务特性、技能与脚本",
+      "description": "基础内核代码 (core/, services/, contracts/, app/, 以及根文件 agent.py, session.py, security.py) 严禁产生对 features/ 业务层、skills/ 工具实现、scripts/ 业务脚本或具体业务工作流的反向导入。"
+    },
+    "RULE_NO_CONTRACTS_DEPENDENCY": {
+      "name": "禁止 contracts 契约层依赖运行时与业务",
+      "description": "contracts/ 纯契约层严禁依赖任何外部运行时实现 (agent, session, security, core, services, features, skills, scripts 等)，仅允许标准库。"
+    },
+    "RULE_NO_SERVICES_DEPENDENCY": {
+      "name": "禁止 services 服务层反向依赖完整 Agent 实现",
+      "description": "services/ 通用服务层严禁反向依赖完整 agent.py 运行时，必须通过参数注入或契约类型解耦。"
+    }
+  },
+  "exceptions": [
+    {
+      "file": "lite_agent/core/skill_engine.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "<dynamic_expression>",
+      "reason": "动态扫描加载 skills 目录下插件模块",
+      "owner": "agent_runtime",
+      "removal_stage": "permanent_plugin_loader",
+      "verification_requirement": "test_skill_engine.py 回归"
+    },
+    {
+      "file": "lite_agent/core/skill_engine.py",
+      "rule": "RULE_NO_CROSS_REPO_SYS_PATH",
+      "target": "parent_dir",
+      "reason": "技能引擎添加父级包路径",
+      "owner": "agent_runtime",
+      "removal_stage": "permanent_plugin_loader",
+      "verification_requirement": "test_skill_engine.py 回归"
+    },
+    {
+      "file": "lite_agent/core/skill_engine.py",
+      "rule": "RULE_NO_CROSS_REPO_SYS_PATH",
+      "target": "skills_dir",
+      "reason": "技能引擎添加插件目录",
+      "owner": "agent_runtime",
+      "removal_stage": "permanent_plugin_loader",
+      "verification_requirement": "test_skill_engine.py 回归"
+    },
+    {
+      "file": "dev/tests/integration/test_mail_quality.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "statement_db",
+      "scope": "parser_repo",
+      "reason": "受控测试动态加载 parser db 验证质量事件落地",
+      "owner": "test_infrastructure",
+      "removal_stage": "E0_closeout",
+      "verification_requirement": "绑定临时上下文与 tmp_path"
+    },
+    {
+      "file": "dev/tests/integration/test_mail_quality.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "statement_models",
+      "scope": "parser_repo",
+      "reason": "受控测试动态加载 parser models 验证质量事件契约",
+      "owner": "test_infrastructure",
+      "removal_stage": "E0_closeout",
+      "verification_requirement": "绑定临时上下文与 tmp_path"
+    },
+    {
+      "file": "dev/tests/integration/test_mail_quality.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "statement_parser",
+      "scope": "test_real_cmb_case_is_repeat_safe_through_parser_cli_and_todo",
+      "reason": "受控测试动态加载 parser 验证重解析契约",
+      "owner": "test_infrastructure",
+      "removal_stage": "E0_closeout",
+      "verification_requirement": "绑定临时上下文与 tmp_path"
+    },
+    {
+      "file": "dev/tests/integration/test_mail_evidence_regressions.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "statement_parser",
+      "scope": "mail_store",
+      "reason": "受控测试动态加载 parser 验证 R6 阶段契约",
+      "owner": "test_infrastructure",
+      "removal_stage": "E0_closeout",
+      "verification_requirement": "绑定临时上下文与 tmp_path"
+    },
+    {
+      "file": "dev/tests/integration/test_mail_evidence_regressions.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "billing_readmodel",
+      "scope": "mail_store",
+      "reason": "受控测试动态加载 readmodel 验证读模型契约",
+      "owner": "test_infrastructure",
+      "removal_stage": "E0_closeout",
+      "verification_requirement": "绑定临时上下文与 tmp_path"
+    },
+    {
+      "file": "dev/tests/integration/test_mail_evidence_regressions.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "mail_quality",
+      "scope": "test_zero_is_present_for_purpose_requirements",
+      "reason": "受控测试动态加载 quality 验证质量模块",
+      "owner": "test_infrastructure",
+      "removal_stage": "E0_closeout",
+      "verification_requirement": "绑定临时上下文与 tmp_path"
+    },
+    {
+      "file": "dev/tests/integration/test_mail_evidence_regressions.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "statement_evidence",
+      "scope": "test_purpose_isolation_keeps_confirmed_reminder_despite_detail_gap",
+      "reason": "受控测试动态加载 evidence 验证证据契约",
+      "owner": "test_infrastructure",
+      "removal_stage": "E0_closeout",
+      "verification_requirement": "绑定临时上下文与 tmp_path"
+    },
+    {
+      "file": "dev/tests/integration/test_mail_evidence_regressions.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "mail_client",
+      "scope": "test_reminder_cli_never_claims_no_due_when_all_records_are_unverified",
+      "reason": "受控测试动态加载 client 验证离线重解析契约",
+      "owner": "test_infrastructure",
+      "removal_stage": "E0_closeout",
+      "verification_requirement": "绑定临时上下文与 tmp_path"
+    },
+    {
+      "file": "dev/tests/integration/test_mail_quality.py",
+      "rule": "RULE_NO_CROSS_REPO_SYS_PATH",
+      "target": "root",
+      "scope": "parser_repo",
+      "reason": "受控测试挂载 parser_repo 兄弟仓库路径",
+      "owner": "test_infrastructure",
+      "removal_stage": "E0_closeout",
+      "verification_requirement": "绑定临时上下文与 tmp_path"
+    },
+    {
+      "file": "lite_agent/app/plugins.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "<dynamic_expression>",
+      "scope": "load_plugin_by_entry",
+      "reason": "受控插件加载器基于显式允许清单导入插件模块",
+      "owner": "app_plugins",
+      "removal_stage": "permanent_plugin_loader",
+      "verification_requirement": "必须校验 entry 在 allowed_entries 显式白名单内"
+    }
+  ]
+}

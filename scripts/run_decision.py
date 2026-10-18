@@ -5,7 +5,7 @@ import os
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
-from skills.ops_decision import ops_decision
+from lite_agent.skills.ops_decision import ops_decision
 
 def main():
     if len(sys.argv) < 2:

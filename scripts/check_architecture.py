@@ -81,7 +81,7 @@ def get_repo_python_files(repo_root: str, target_dir: Optional[str] = None) -> L
                 if f.endswith(".py"):
                     files_set.add(os.path.relpath(os.path.join(root, f), repo_root))
 
-    excluded_prefixes = (".git", ".venv", "venv", "scratch", "docs", ".gemini", "deploy")
+    excluded_prefixes = (".git", ".venv", "venv", "scratch", "docs", "architecture", ".local", ".gemini", "deploy")
     result = []
     for f in sorted(files_set):
         norm = os.path.normpath(f).replace("\\", "/")
@@ -118,17 +118,20 @@ class ArchitectureVisitor(ast.NodeVisitor):
         self.rel_path = norm
 
         # 分层判定
-        self.is_contracts = norm.startswith("contracts/") or norm == "contracts.py"
-        self.is_services = norm.startswith("services/") or norm == "services.py"
-        self.is_app = norm.startswith("app/") or norm == "app.py"
-        self.is_core = norm.startswith("core/") or norm == "core.py"
-        self.is_channels = norm.startswith("channels/") or norm == "channels.py"
-        self.is_kernel_root = norm in ("main.py", "agent.py", "session.py", "security.py")
+        self.is_contracts = norm.startswith("contracts/") or norm == "contracts.py" or norm.startswith("lite_agent/contracts/")
+        self.is_services = norm.startswith("services/") or norm == "services.py" or norm.startswith("lite_agent/services/")
+        self.is_app = norm.startswith("app/") or norm == "app.py" or norm.startswith("lite_agent/app/")
+        self.is_core = norm.startswith("core/") or norm == "core.py" or norm.startswith("lite_agent/core/")
+        self.is_channels = norm.startswith("channels/") or norm == "channels.py" or norm.startswith("lite_agent/channels/")
+        self.is_kernel_root = norm in (
+            "main.py", "agent.py", "session.py", "security.py",
+            "lite_agent/cli.py", "lite_agent/agent.py", "lite_agent/session.py", "lite_agent/security.py"
+        )
         self.is_kernel = self.is_contracts or self.is_services or self.is_app or self.is_core or self.is_kernel_root
 
-        self.is_test = norm.startswith("tests/")
-        self.is_billing_feature = norm.startswith("features/billing")
-        self.is_feature = norm.startswith("features/")
+        self.is_test = norm.startswith("tests/") or norm.startswith("dev/tests/")
+        self.is_billing_feature = norm.startswith("features/billing") or norm.startswith("lite_agent/features/billing")
+        self.is_feature = norm.startswith("features/") or norm.startswith("lite_agent/features/")
 
         self.findings: List[Dict[str, Any]] = []
         self.scope_stack: List[Union[ast.FunctionDef, ast.AsyncFunctionDef]] = []
@@ -197,7 +200,10 @@ class ArchitectureVisitor(ast.NodeVisitor):
                 )
 
             # 规则 2: 基础内核代码与公共 channels 严禁导入业务特性、技能与脚本
-            if (self.is_kernel or self.is_channels) and root_mod in ("features", "skills", "scripts"):
+            is_business_import = root_mod in ("features", "skills", "scripts") or (
+                root_mod == "lite_agent" and len(mod_name.split(".")) > 1 and mod_name.split(".")[1] in ("features", "skills", "scripts")
+            )
+            if (self.is_kernel or self.is_channels) and is_business_import:
                 rule_name = "RULE_NO_CORE_REVERSE_DEPENDENCY" if self.is_core else "RULE_NO_KERNEL_BUSINESS_DEPENDENCY"
                 self._record_finding(
                     rule_name,
@@ -208,7 +214,8 @@ class ArchitectureVisitor(ast.NodeVisitor):
                 )
 
             # 规则 3: contracts 严禁依赖任何外部运行时
-            if self.is_contracts and root_mod not in CONTRACT_STDLIB | {"contracts"}:
+            is_contracts_allowed = root_mod in CONTRACT_STDLIB | {"contracts"} or mod_name.startswith("lite_agent.contracts")
+            if self.is_contracts and not is_contracts_allowed:
                 self._record_finding(
                     "RULE_NO_CONTRACTS_DEPENDENCY",
                     mod_name,
@@ -218,7 +225,8 @@ class ArchitectureVisitor(ast.NodeVisitor):
                 )
 
             # 规则 4: services 严禁反向依赖完整 agent 运行时
-            if self.is_services and root_mod == "agent":
+            is_agent_import = root_mod == "agent" or mod_name == "lite_agent.agent" or mod_name.startswith("lite_agent.agent.")
+            if self.is_services and is_agent_import:
                 self._record_finding(
                     "RULE_NO_SERVICES_DEPENDENCY",
                     mod_name,
@@ -268,7 +276,10 @@ class ArchitectureVisitor(ast.NodeVisitor):
                 full_mod = f"{resolved_mod}.{alias.name}" if resolved_mod else alias.name
                 root_item = full_mod.split(".")[0]
 
-                if root_item in ("features", "skills", "scripts"):
+                is_business_item = root_item in ("features", "skills", "scripts") or (
+                    root_item == "lite_agent" and len(full_mod.split(".")) > 1 and full_mod.split(".")[1] in ("features", "skills", "scripts")
+                )
+                if is_business_item:
                     rule_name = "RULE_NO_CORE_REVERSE_DEPENDENCY" if self.is_core else "RULE_NO_KERNEL_BUSINESS_DEPENDENCY"
                     self._record_finding(
                         rule_name,
@@ -283,7 +294,8 @@ class ArchitectureVisitor(ast.NodeVisitor):
             for alias in node.names:
                 full_mod = f"{resolved_mod}.{alias.name}" if resolved_mod else alias.name
                 root_item = full_mod.split(".")[0]
-                if root_item not in CONTRACT_STDLIB | {"contracts"}:
+                is_contracts_item_allowed = root_item in CONTRACT_STDLIB | {"contracts"} or full_mod.startswith("lite_agent.contracts")
+                if not is_contracts_item_allowed:
                     self._record_finding(
                         "RULE_NO_CONTRACTS_DEPENDENCY",
                         full_mod,
@@ -297,7 +309,8 @@ class ArchitectureVisitor(ast.NodeVisitor):
             for alias in node.names:
                 full_mod = f"{resolved_mod}.{alias.name}" if resolved_mod else alias.name
                 root_item = full_mod.split(".")[0]
-                if root_item == "agent":
+                is_agent_item = root_item == "agent" or full_mod == "lite_agent.agent" or full_mod.startswith("lite_agent.agent.")
+                if is_agent_item:
                     self._record_finding(
                         "RULE_NO_SERVICES_DEPENDENCY",
                         full_mod,
@@ -325,7 +338,11 @@ class ArchitectureVisitor(ast.NodeVisitor):
                     target_str = ""
                     if isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str):
                         target_str = node.slice.value
-                    if target_str and (target_str.startswith("skills.") or target_str.startswith("integrations.") or target_str.startswith("core.")):
+                    forbidden_sys_modules = (
+                        "skills.", "integrations.", "core.",
+                        "lite_agent.skills.", "lite_agent.integrations.", "lite_agent.core."
+                    )
+                    if target_str and any(target_str.startswith(p) for p in forbidden_sys_modules):
                         self._record_finding(
                             "RULE_NO_FEATURE_SYS_MODULES_LOOKUP",
                             target_str,
@@ -343,7 +360,11 @@ class ArchitectureVisitor(ast.NodeVisitor):
                         if isinstance(comparator.value, ast.Name) and comparator.value.id == "sys":
                             if isinstance(node.left, ast.Constant) and isinstance(node.left.value, str):
                                 target_str = node.left.value
-                                if target_str.startswith("skills.") or target_str.startswith("integrations.") or target_str.startswith("core."):
+                                forbidden_sys_modules = (
+                                    "skills.", "integrations.", "core.",
+                                    "lite_agent.skills.", "lite_agent.integrations.", "lite_agent.core."
+                                )
+                                if target_str and any(target_str.startswith(p) for p in forbidden_sys_modules):
                                     self._record_finding(
                                         "RULE_NO_FEATURE_SYS_MODULES_LOOKUP",
                                         target_str,
@@ -483,7 +504,7 @@ def verify_exception_requirements(
     scope_args = finding.get("scope_args", [])
 
     # 1. 对 tests/ 目录中跨仓相关的例外，强制验证具体发生违规的作用域绑定了受控临时上下文/fixture
-    if rel_path.startswith("tests/") and rule in (
+    if (rel_path.startswith("tests/") or rel_path.startswith("dev/tests/")) and rule in (
         "RULE_NO_DIRECT_PARSER_IMPORT", "RULE_DYNAMIC_IMPORT_REGISTERED", "RULE_NO_CROSS_REPO_SYS_PATH"
     ):
         if scope == "<module>":
@@ -498,7 +519,7 @@ def verify_exception_requirements(
 
     # 2. 对 app/plugins.py 受控插件加载器例外，强制验证函数内部包含白名单校验
     norm_file = os.path.normpath(rel_path).replace("\\", "/")
-    if norm_file == "app/plugins.py" and rule == "RULE_DYNAMIC_IMPORT_REGISTERED":
+    if norm_file in ("app/plugins.py", "lite_agent/app/plugins.py") and rule == "RULE_DYNAMIC_IMPORT_REGISTERED":
         fn_nodes = [
             n for n in ast.walk(tree)
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == scope
@@ -613,7 +634,9 @@ def run_checks(
 
 def main():
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    config_path = os.path.join(repo_root, "architecture_rules.json")
+    config_path = os.path.join(repo_root, "dev/config/architecture/rules.json")
+    if not os.path.exists(config_path):
+        config_path = os.path.join(repo_root, "config/architecture/rules.json")
 
     target_dir = None
     if len(sys.argv) > 1:

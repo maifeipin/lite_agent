@@ -44,3 +44,11 @@ statements.db*
 /scripts/export_gaokao_with_majors.py
 /scripts/external_review.py
 docs/mail-billing*.md
+
+# Local design history, execution tools and caches
+/.local/
+/architecture/
+/docs/
+/.workbuddy/
+/.pytest_cache/
+/format-recheck.json

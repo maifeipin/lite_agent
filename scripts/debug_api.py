@@ -10,7 +10,7 @@ import sqlite3
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
-from core import config_loader
+from lite_agent.core import config_loader
 
 def send_chat_message(port, token, text):
     url = f"http://127.0.0.1:{port}/api/v1/chat"
