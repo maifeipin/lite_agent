@@ -64,6 +64,9 @@
                     <button class="filter-btn" data-source="socks5" title="Socks5 代理">
                         <span class="icon">🧦</span> <span class="filter-btn-text">Socks5 代理</span> <span class="badge" id="badge-socks5">0</span>
                     </button>
+                    <button class="filter-btn" data-source="phone-apps" title="Phone App 执行与真机筛选">
+                        <span class="icon">📱</span> <span class="filter-btn-text">Phone App</span> <span class="badge" id="badge-phone-apps">0</span>
+                    </button>
                 </div>
 
                 <div class="nav-section" id="section-categories" style="display:none;">
@@ -234,6 +237,7 @@
     <script src="modules/meetings.js?v=2"></script>
     <script src="modules/task_specs.js?v=9"></script>
     <script src="modules/socks5.js?v=1"></script>
+    <script src="modules/phone_apps.js?v=1"></script>
     <script>
     // 动态加载指令列表（从后端注册表）
     (async function loadCommands() {

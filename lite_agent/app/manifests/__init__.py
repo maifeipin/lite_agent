@@ -52,4 +52,10 @@ FULL_MODE_PLUGINS: List[Dict[str, Any]] = [
         "description": "RSS订阅早报、网页剪藏、搜索与知识归档",
         "dependencies": [],
     },
+    {
+        "name": "phone_app",
+        "entry": "lite_agent.features.phone_app",
+        "description": "Phone App 执行层、审核工作流与真机调度中枢",
+        "dependencies": [],
+    },
 ]

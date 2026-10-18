@@ -147,6 +147,7 @@ class PluginContext:
             "network_ops": ["network", "socks5", "edge"],
             "content_ops": ["rss", "content"],
             "billing": ["billing"],
+            "phone_app": ["phone_app", "database"],
         }
         for k in plugin_extra_keys.get(name, []):
             if k in self._raw_config:

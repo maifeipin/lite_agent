@@ -80,6 +80,10 @@ def skill(name: str, description: str, params: dict = None, tags: list = None,
                     prop["enum"] = param_info["enum"]
                 if "default" in param_info:
                     prop["default"] = param_info["default"]
+                if "items" in param_info:
+                    prop["items"] = param_info["items"]
+                if "properties" in param_info:
+                    prop["properties"] = param_info["properties"]
                 properties[param_name] = prop
                 # 没有 default 的参数视为必填
                 if "default" not in param_info:
