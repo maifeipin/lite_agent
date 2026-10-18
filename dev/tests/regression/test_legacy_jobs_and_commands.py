@@ -120,7 +120,7 @@ def test_v2_all_business_slash_commands_registered_in_instance_registry():
 
 def test_v3_full_manifest_loads_safely_without_crashing_on_pymongo():
     """V3: 全量默认 FULL_MODE_PLUGINS 清单可稳定加载，无真实 MongoDB 也能安全降级。"""
-    assert len(FULL_MODE_PLUGINS) == 7
+    assert len(FULL_MODE_PLUGINS) == 8
 
     app = create_app(mode="full", config=BASE_CONFIG)
     app.plugin_loader.load_all(FULL_MODE_PLUGINS)
