@@ -99,6 +99,8 @@ RECEIPT_STATUS_MAP: Dict[str, TaskStatus] = {
     "succeeded": TaskStatus.SUCCEEDED,
     "success": TaskStatus.SUCCEEDED,
     "failed": TaskStatus.FAILED,
+    "extraction_failed": TaskStatus.FAILED,
+    "empty_results": TaskStatus.SUCCEEDED,
     "timed_out": TaskStatus.TIMED_OUT,
     "timeout": TaskStatus.TIMED_OUT,
     "needs_human_action": TaskStatus.NEEDS_HUMAN_ACTION,

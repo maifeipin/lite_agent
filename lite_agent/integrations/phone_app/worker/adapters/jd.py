@@ -41,17 +41,17 @@ class JdAdapter:
         if not ("#b51" in ui_check or ("扫啊扫" in ui_check and "首页" in ui_check)):
             self.restore_ready(timeout_sec=10.0, deadline=deadline)
 
-        tapped = self.driver.tap("#b51", deadline=deadline)
+        tapped = self.driver.tap((540, 285), deadline=deadline)
         if not tapped:
-            tapped = self.driver.tap((540, 285), deadline=deadline)
-        time.sleep(0.5)
+            tapped = self.driver.tap("#b51", deadline=deadline)
+        time.sleep(0.6)
 
-        # 2. 中文原子注入
-        filled = self.driver.fill("id=com.jd.lib.search.feature:id/zt", query)
+        # 2. 中文原子注入 (优先使用标准 EditText 选择器，避免废弃 ID 产生冗余超时)
+        filled = self.driver.fill("class=android.widget.EditText", query)
         if not filled:
-            filled = self.driver.fill("id=com.jd.lib.search.feature:id/zs", query)
+            filled = self.driver.fill("EditText", query)
         if not filled:
-            filled = self.driver.fill("class=android.widget.EditText", query)
+            filled = self.driver.fill("id=com.jd.lib.search.feature:id/zt", query)
         time.sleep(0.4)
 
         # 3. 提交搜索 (优先直接触发输入框 IME ACTION_SEARCH，后备点击搜索按钮)
