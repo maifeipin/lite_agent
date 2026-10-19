@@ -28,7 +28,9 @@ def build_llm_pool_env(cfg: dict) -> dict:
             continue
         driver = m.get("driver", "")
         provider = "gemini" if is_gemini_driver(driver) else "openai"
-        burl = m.get("base_url") or ("https://generativelanguage.googleapis.com/v1beta/openai" if provider == "gemini" else "https://api.openai.com/v1")
+        # gemini_native 走 Gemini 原生 generateContent，不是 OpenAI 兼容格式；
+        # 这里不再伪造 .../v1beta/openai，避免下游把原生端点当成兼容层处理。
+        burl = m.get("base_url") or ("" if provider == "gemini" else "https://api.openai.com/v1")
         k_raw = m.get("api_key", "")
         if k_raw.startswith("${") and k_raw.endswith("}"):
             api_key = os.environ.get(k_raw[2:-1], "")
@@ -36,7 +38,10 @@ def build_llm_pool_env(cfg: dict) -> dict:
             api_key = k_raw
         if not api_key:
             continue
-        endpoints.append({'api_key': api_key, 'base_url': burl, 'provider': provider, 'model': m.get('model', '')})
+        # proxy 必须随端点下发：Gemini 等海外端点的出网要走代理，
+        # 丢掉 proxy 会让子进程直连不可达地址，池里的 gemini 端点形同虚设。
+        endpoints.append({'api_key': api_key, 'base_url': burl, 'provider': provider,
+                          'model': m.get('model', ''), 'proxy': m.get('proxy', '')})
     if not endpoints:
         return {}
     return {'LLM_POOL': json.dumps(endpoints, ensure_ascii=False)}

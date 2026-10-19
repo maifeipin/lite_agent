@@ -81,7 +81,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: 'maifeipin/mail-statement-parser'
-          ref: '918bce6b6d80dbf6d2af61cac35cbe24e44a7cdc'
+          ref: 'fa3600d813d9b0b07171baf7c8ab9aeebc77d17d'
           token: ${{ secrets.PARSER_REPO_READ_TOKEN || github.token }}
           path: 'mail-statement-parser'
 
@@ -102,7 +102,7 @@ jobs:
           python -m pytest -c dev/config/pytest.ini --rootdir=. dev/tests/ -q -p no:cacheprovider -p dev.tests.support.no_skips --tb=short
 
   # -------------------------------------------------------------
-  # Gate 4: Parser 跨仓兼容回归 (固定兼容 SHA: 918bce6b6d80dbf6d2af61cac35cbe24e44a7cdc)
+  # Gate 4: Parser 跨仓兼容回归 (固定兼容 SHA: fa3600d813d9b0b07171baf7c8ab9aeebc77d17d)
   # -------------------------------------------------------------
   parser-compat-regression:
     name: 4. Parser Cross-Repo Contract Regression (Fixed SHA)
@@ -115,7 +115,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: 'maifeipin/mail-statement-parser'
-          ref: '918bce6b6d80dbf6d2af61cac35cbe24e44a7cdc'
+          ref: 'fa3600d813d9b0b07171baf7c8ab9aeebc77d17d'
           token: ${{ secrets.PARSER_REPO_READ_TOKEN || github.token }}
           path: 'mail-statement-parser'
 
@@ -129,8 +129,8 @@ jobs:
           cd mail-statement-parser
           PARSER_ACTUAL_SHA=$(git rev-parse HEAD)
           echo "Actual Parser SHA: ${PARSER_ACTUAL_SHA}"
-          if [ "${PARSER_ACTUAL_SHA}" != "918bce6b6d80dbf6d2af61cac35cbe24e44a7cdc" ]; then
-            echo "❌ 关键错误: Parser 提交哈希未锁定在已核准基线 918bce6b6d80dbf6d2af61cac35cbe24e44a7cdc"
+          if [ "${PARSER_ACTUAL_SHA}" != "fa3600d813d9b0b07171baf7c8ab9aeebc77d17d" ]; then
+            echo "❌ 关键错误: Parser 提交哈希未锁定在已核准基线 fa3600d813d9b0b07171baf7c8ab9aeebc77d17d"
             exit 1
           fi
 
@@ -160,7 +160,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: 'maifeipin/mail-statement-parser'
-          ref: '918bce6b6d80dbf6d2af61cac35cbe24e44a7cdc'
+          ref: 'fa3600d813d9b0b07171baf7c8ab9aeebc77d17d'
           token: ${{ secrets.PARSER_REPO_READ_TOKEN || github.token }}
           path: 'mail-statement-parser'
 
