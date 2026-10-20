@@ -589,6 +589,21 @@ def main(argv=None):
                 "error_tail": "Node not installed",
             })
 
+    # 3b. 前端目录内其余回归脚本自动纳入门禁 (新增反例不得只靠手工执行)
+    frontend_dir = os.path.dirname(frontend_test)
+    extra_node_bin = shutil.which("node")
+    if extra_node_bin and os.path.isdir(frontend_dir):
+        primary_name = os.path.basename(frontend_test)
+        for extra_name in sorted(
+            name for name in os.listdir(frontend_dir)
+            if name.endswith(".js") and name != primary_name
+        ):
+            results.append(run_step(
+                f"3b. 前端回归 {extra_name} (Node.js)",
+                [extra_node_bin, os.path.join(frontend_dir, extra_name)],
+                cwd=agent_root,
+            ))
+
     # 4. Agent 回归测试套件 (严格使用当前解释器 sys.executable，缺依赖报错，禁止隐式回退)
     try:
         import pytest  # noqa: F401

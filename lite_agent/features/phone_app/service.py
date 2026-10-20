@@ -113,13 +113,17 @@ class PhoneAppService:
                     devices.append({
                         **dev,
                         "status": "online",
+                        "error_code": "",
+                        "offline_reason": "",
                         "status_text": "🟢 本机ADB在线已就绪"
                     })
                 else:
                     devices.append({
                         **dev,
                         "status": "offline",
-                        "status_text": "🔴 离线未连接"
+                        "error_code": "adb_no_device",
+                        "offline_reason": "本机 adb devices 未列出该设备",
+                        "status_text": "🔴 本机 ADB 未识别到设备"
                     })
             return devices
 
@@ -131,6 +135,8 @@ class PhoneAppService:
                 "android_version": 14,
                 "validated": True,
                 "status": "offline",
+                "error_code": "worker_offline",
+                "offline_reason": "VPS1 ↔ Mac 链路未建立 (无 Worker 心跳上报)",
                 "status_text": "🔴 Worker 离线未连接 (VPS1 ↔ Mac 链路未建立)"
             }
         ]

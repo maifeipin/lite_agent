@@ -16,6 +16,50 @@ from typing import Dict, Any, List, Optional, Tuple, Set
 logger = logging.getLogger("features.phone_app.worker_hub")
 
 
+# 设备离线错误码 → 面向运维的中文说明 (C03: 离线必须可定位到具体环节)。
+# 与 Worker 侧 drivers.handsets.DEVICE_ERROR_CODES 的键保持一致；
+# 中枢仅做展示措辞，不承担硬件诊断逻辑，故各自维护映射而不跨层导入。
+DEVICE_ERROR_LABELS: Dict[str, str] = {
+    "hs_missing": "Mac 未安装 handsets CLI",
+    "adb_missing": "Mac 未安装 adb",
+    "adb_no_device": "ADB 未识别到设备 (未插线/未连接)",
+    "adb_unauthorized": "手机未授权 USB 调试",
+    "adb_error": "ADB 检测异常",
+    "hs_daemon_unbound": "hs 守护进程未绑定设备 (需 hs use)",
+    "hs_driver_error": "handsets 驱动启动失败",
+    "worker_offline": "Worker 未连接 (VPS1 ↔ Mac 链路未建立)",
+    "timeout": "设备检测超时",
+    "unknown": "设备离线 (原因未知)",
+}
+
+MAX_REASON_LEN = 200
+
+
+def _normalize_device_report(dev: Dict[str, Any]) -> Dict[str, Any]:
+    """白名单化设备上报字段 (D04: 拒绝任意透传)，同时保留离线诊断信息。"""
+    return {
+        "device_id": dev.get("device_id"),
+        "model": dev.get("model", "Android Device"),
+        "status": dev.get("status", "unknown"),
+        "test_mode": dev.get("test_mode") is True,
+        "handsets_port": dev.get("handsets_port", 9008),
+        "error_code": str(dev.get("error_code") or "")[:32],
+        "offline_reason": str(dev.get("offline_reason") or "")[:MAX_REASON_LEN],
+    }
+
+
+def _device_status_text(worker_id: str, dev: Dict[str, Any]) -> str:
+    """按设备真实状态与错误码生成可读状态文案。"""
+    status = dev.get("status", "unknown")
+    if status == "online":
+        return f"🟢 物理设备就绪 (Worker: {worker_id})"
+
+    label = DEVICE_ERROR_LABELS.get(dev.get("error_code", ""), "物理设备未连接/离线")
+    reason = dev.get("offline_reason") or ""
+    detail = f" — {reason}" if reason else ""
+    return f"🔴 {label} ({status}, Worker: {worker_id}){detail}"
+
+
 class TaskLease:
     """任务执行租约。"""
 
@@ -133,13 +177,7 @@ class WorkerHub:
             d_status = dev.get("status", "unknown")
             if d_status not in ("online", "offline", "unauthorized", "paused", "unknown"):
                 return False, {"error": f"设备 '{did}' 状态 '{d_status}' 不合法"}
-            validated_devices.append({
-                "device_id": did,
-                "model": dev.get("model", "Android Device"),
-                "status": d_status,
-                "test_mode": dev.get("test_mode") is True,
-                "handsets_port": dev.get("handsets_port", 9008)
-            })
+            validated_devices.append(_normalize_device_report(dev))
 
         session_id = f"wsess-{uuid.uuid4().hex}"
         now = time.time()
@@ -195,13 +233,7 @@ class WorkerHub:
                 for dev in devices:
                     did = dev.get("device_id")
                     if did and isinstance(did, str) and did in authorized_ids:
-                        validated_devices.append({
-                            "device_id": did,
-                            "model": dev.get("model", "Android Device"),
-                            "status": dev.get("status", "unknown"),
-                            "test_mode": dev.get("test_mode") is True,
-                            "handsets_port": dev.get("handsets_port", 9008)
-                        })
+                        validated_devices.append(_normalize_device_report(dev))
                     elif did not in authorized_ids:
                         logger.warning(f"Worker '{worker_id}' 心跳上报了未在握手阶段授权的设备 '{did}'，已拦截并忽略 (D04)")
                 worker["devices"] = validated_devices
@@ -236,10 +268,7 @@ class WorkerHub:
                         "worker_id": wid,
                         "worker_online": True,
                         "status": dev_status,
-                        "status_text": (
-                            f"🟢 物理设备就绪 (Worker: {wid})" if dev_status == "online"
-                            else f"🔴 物理设备未连接/离线 ({dev_status}, Worker: {wid})"
-                        )
+                        "status_text": _device_status_text(wid, dev)
                     })
 
         return online_devices
