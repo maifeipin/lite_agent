@@ -24,6 +24,10 @@ from lite_agent.services.cron import (
     CronJob,
     default_cron_service,
 )
+from lite_agent.services.user_session import (
+    UserSessionService,
+    DEFAULT_USER_SCOPE,
+)
 
 __all__ = [
     "CommandRegistry",
@@ -37,4 +41,6 @@ __all__ = [
     "CronService",
     "CronJob",
     "default_cron_service",
+    "UserSessionService",
+    "DEFAULT_USER_SCOPE",
 ]

@@ -9,36 +9,46 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.liteagent.mobile.core.network.ApiClient
+import com.liteagent.mobile.core.network.ServerUrlNormalizer
 import com.liteagent.mobile.core.security.SecureTokenStorage
-import com.liteagent.mobile.ui.theme.*
+import com.liteagent.mobile.core.security.UserSession
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.*
 
 @Composable
-fun ServerConfigDialog(
+fun AccountSettingsDialog(
     tokenStorage: SecureTokenStorage,
     apiClient: ApiClient,
     onDismiss: () -> Unit,
-    onSaved: (newServerUrl: String) -> Unit
+    onServerSwitched: (newServerUrl: String) -> Unit,
+    onLoggedOut: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
-    var serverUrl by remember { mutableStateOf("") }
-    var generalToken by remember { mutableStateOf("") }
-    var showPassword by remember { mutableStateOf(false) }
-
-    var isTesting by remember { mutableStateOf(false) }
-    var testResult by remember { mutableStateOf<String?>(null) }
-    var isTestSuccess by remember { mutableStateOf(false) }
-    var saveError by remember { mutableStateOf<String?>(null) }
+    var activeServerUrl by remember { mutableStateOf("") }
+    var userSession by remember { mutableStateOf<UserSession?>(null) }
+    var isSwitchingServer by remember { mutableStateOf(false) }
+    var newServerUrlInput by remember { mutableStateOf("") }
+    var isLoggingOut by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        val activeUrl = tokenStorage.getActiveServerUrl()
-        serverUrl = activeUrl
-        generalToken = tokenStorage.getGeneralToken(activeUrl)
+        val url = tokenStorage.getActiveServerUrl()
+        activeServerUrl = url
+        newServerUrlInput = url
+        userSession = tokenStorage.getSession(url)
+    }
+
+    val expiresFormatted = remember(userSession) {
+        val exp = userSession?.expiresAt ?: 0L
+        if (exp > 0L) {
+            val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+            sdf.format(Date(exp * 1000))
+        } else {
+            "未设定"
+        }
     }
 
     Dialog(onDismissRequest = onDismiss) {
@@ -48,7 +58,7 @@ fun ServerConfigDialog(
                 .padding(8.dp),
             shape = RoundedCornerShape(20.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
         ) {
             Column(
                 modifier = Modifier
@@ -58,175 +68,173 @@ fun ServerConfigDialog(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Icon(
-                        imageVector = Icons.Default.Dns,
+                        imageVector = Icons.Default.AccountCircle,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(28.dp)
                     )
                     Text(
-                        text = "服务器与安全凭据",
+                        text = "账号与服务设置",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold
                     )
                 }
 
-                Text(
-                    text = "凭证按服务器物理隔离存储，由 Android Keystore 硬件级 AES-256-GCM 加密，严禁降级与云备份。",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = TextSecondary
-                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
-                OutlinedTextField(
-                    value = serverUrl,
-                    onValueChange = {
-                        serverUrl = it
-                        testResult = null
-                        saveError = null
-                    },
-                    label = { Text("服务地址 (Base URL)") },
-                    placeholder = { Text("http://192.168.2.xxx:8000") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    leadingIcon = {
-                        Icon(Icons.Default.Link, contentDescription = null, tint = TextMuted)
-                    }
-                )
+                // Current Account Info
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "当前登录账号",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = userSession?.username?.takeIf { it.isNotBlank() } ?: "未命名用户",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "会话有效期至：$expiresFormatted",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
 
-                OutlinedTextField(
-                    value = generalToken,
-                    onValueChange = {
-                        generalToken = it
-                        testResult = null
-                        saveError = null
-                    },
-                    label = { Text("通用 API 密钥 (Bearer Token)") },
-                    placeholder = { Text("输入静态 auth_token") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                    leadingIcon = {
-                        Icon(Icons.Default.Key, contentDescription = null, tint = TextMuted)
-                    },
-                    trailingIcon = {
-                        IconButton(onClick = { showPassword = !showPassword }) {
-                            Icon(
-                                imageVector = if (showPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                contentDescription = if (showPassword) "隐藏" else "显示",
-                                tint = TextMuted
-                            )
-                        }
-                    }
-                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
-                if (saveError != null) {
-                    Surface(
-                        color = AccentRose.copy(alpha = 0.15f),
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
+                // Server Address Info
+                if (!isSwitchingServer) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(
-                            text = saveError!!,
-                            color = AccentRose,
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.padding(12.dp)
+                            text = "已连接服务地址",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                    }
-                }
-
-                if (testResult != null) {
-                    Surface(
-                        color = if (isTestSuccess) AccentEmerald.copy(alpha = 0.15f) else AccentRose.copy(alpha = 0.15f),
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
                         Row(
-                            modifier = Modifier.padding(12.dp),
+                            modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Icon(
-                                imageVector = if (isTestSuccess) Icons.Default.CheckCircle else Icons.Default.Error,
-                                contentDescription = null,
-                                tint = if (isTestSuccess) AccentEmerald else AccentRose,
-                                modifier = Modifier.size(18.dp)
-                            )
                             Text(
-                                text = testResult!!,
+                                text = activeServerUrl,
                                 style = MaterialTheme.typography.bodyMedium,
-                                color = if (isTestSuccess) AccentEmerald else AccentRose
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.weight(1f)
                             )
+                            TextButton(onClick = { isSwitchingServer = true }) {
+                                Text("切换服务器")
+                            }
+                        }
+                    }
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "输入新服务器地址",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        OutlinedTextField(
+                            value = newServerUrlInput,
+                            onValueChange = { newServerUrlInput = it },
+                            placeholder = { Text("https://mail.maifeipin.com/") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            TextButton(onClick = { isSwitchingServer = false }) {
+                                Text("取消")
+                            }
+                            Button(
+                                onClick = {
+                                    val clean = ServerUrlNormalizer.normalize(newServerUrlInput)
+                                    scope.launch {
+                                        tokenStorage.setActiveServerUrl(clean)
+                                        isSwitchingServer = false
+                                        onServerSwitched(clean)
+                                        onDismiss()
+                                    }
+                                }
+                            ) {
+                                Text("确认切换")
+                            }
                         }
                     }
                 }
 
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Actions: Logout & Dismiss
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    OutlinedButton(
-                        onClick = {
-                            scope.launch {
-                                isTesting = true
-                                testResult = null
-                                saveError = null
-                                try {
-                                    // 临时测试连接，绝不篡改持久化存储
-                                    val normalized = com.liteagent.mobile.core.network.ServerUrlNormalizer.normalize(serverUrl)
-                                    val response = apiClient.testConnectionDirect(normalized, generalToken)
-                                    if (response.isSuccessful) {
-                                        isTestSuccess = true
-                                        val total = response.body()?.total ?: 0
-                                        testResult = "连接成功！在线 API 会话数: $total"
-                                    } else if (response.code() == 401) {
-                                        isTestSuccess = false
-                                        testResult = "鉴权失败 (401)：密钥错误或未授权"
-                                    } else {
-                                        isTestSuccess = false
-                                        testResult = "响应异常 (HTTP ${response.code()})"
-                                    }
-                                } catch (e: Exception) {
-                                    isTestSuccess = false
-                                    testResult = "连接失败: ${e.localizedMessage ?: e.message}"
-                                } finally {
-                                    isTesting = false
-                                }
-                            }
-                        },
-                        enabled = !isTesting && serverUrl.isNotBlank(),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        if (isTesting) {
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                        } else {
-                            Text("测试连接")
-                        }
+                    TextButton(onClick = onDismiss) {
+                        Text("关闭")
                     }
 
                     Button(
                         onClick = {
+                            isLoggingOut = true
                             scope.launch {
-                                try {
-                                    // 只有用户主动保存时，才正式持久化并加密保存
-                                    val cleanUrl = com.liteagent.mobile.core.network.ServerUrlNormalizer.normalize(serverUrl)
-                                    tokenStorage.setGeneralToken(cleanUrl, generalToken)
-                                    tokenStorage.setActiveServerUrl(cleanUrl)
-                                    onSaved(cleanUrl)
-                                    onDismiss()
-                                } catch (e: SecurityException) {
-                                    saveError = "加密安全终止: ${e.message}"
-                                } catch (e: Exception) {
-                                    saveError = "保存失败: ${e.message}"
-                                }
+                                apiClient.logout(activeServerUrl)
+                                isLoggingOut = false
+                                onDismiss()
+                                onLoggedOut()
                             }
                         },
-                        modifier = Modifier.weight(1f)
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer,
+                            contentColor = MaterialTheme.colorScheme.onErrorContainer
+                        ),
+                        enabled = !isLoggingOut
                     ) {
-                        Text("保存配置")
+                        if (isLoggingOut) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.Logout,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("退出登录")
+                        }
                     }
                 }
             }
         }
     }
+}
+
+/**
+ * 保持兼容别名
+ */
+@Composable
+fun ServerConfigDialog(
+    tokenStorage: SecureTokenStorage,
+    apiClient: ApiClient,
+    onDismiss: () -> Unit,
+    onSaved: (newServerUrl: String) -> Unit,
+    onLoggedOut: (() -> Unit)? = null
+) {
+    AccountSettingsDialog(
+        tokenStorage = tokenStorage,
+        apiClient = apiClient,
+        onDismiss = onDismiss,
+        onServerSwitched = onSaved,
+        onLoggedOut = onLoggedOut ?: {}
+    )
 }

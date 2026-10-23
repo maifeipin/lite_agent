@@ -491,7 +491,39 @@ def handle_auth(http_handler: Any) -> None:
                         access.ensure_tables(db)
                         with db:
                             session = access.issue_host_session(db, username)
-                    review_json(http_handler, {'success': True, **session})
+
+                    # 签发通用用户会话（Access Token + 轮换 Refresh Token），实现统一多端凭证
+                    device_id = str(body.get('device_id') or secrets.token_hex(8))
+                    device_name = str(body.get('device_name') or 'mobile')
+                    remember_me = bool(body.get('remember_me', False))
+                    session_svc = getattr(api_srv, "user_session_service", None)
+                    if session_svc is None:
+                        from lite_agent.services.user_session import UserSessionService
+                        session_svc = UserSessionService(config=cfg)
+                    user_session = session_svc.create_session(
+                        username,
+                        device_id=device_id,
+                        device_name=device_name,
+                        remember_me=remember_me
+                    )
+
+                    resp_data = {
+                        'success': True,
+                        'username': username,
+                        'session_id': user_session.get('session_id'),
+                        'session_token': user_session.get('session_token'),
+                        'access_token': user_session.get('access_token'),
+                        'expires_at': user_session.get('expires_at'),
+                        'access_token_expires_at': user_session.get('access_token_expires_at'),
+                        'scopes': user_session.get('scopes'),
+                        'remember_me': remember_me,
+                        **session
+                    }
+                    if 'refresh_token' in user_session:
+                        resp_data['refresh_token'] = user_session.get('refresh_token')
+                        resp_data['refresh_expires_at'] = user_session.get('refresh_expires_at')
+
+                    review_json(http_handler, resp_data)
                     return
                 else:
                     review_json(http_handler, {'success': False, 'error': '账号或密码错误'}, 401)
@@ -501,6 +533,102 @@ def handle_auth(http_handler: Any) -> None:
         return
 
     review_json(http_handler, {'success': False, 'error': '账号或密码错误'}, 401)
+
+
+def handle_auth_refresh(http_handler: Any) -> None:
+    """使用 Refresh Token 续期 Access Token 并执行轮换。"""
+    length = int(http_handler.headers.get('Content-Length') or 0)
+    raw = http_handler.rfile.read(length) if length > 0 else b'{}'
+    try:
+        body = json.loads(raw.decode('utf-8'))
+        if not isinstance(body, dict):
+            raise ValueError("请求体必须是 JSON 对象")
+    except Exception as exc:
+        review_json(http_handler, {'success': False, 'error': str(exc)}, 400)
+        return
+
+    refresh_token = body.get('refresh_token')
+    if not isinstance(refresh_token, str) or not refresh_token.strip():
+        review_json(http_handler, {'success': False, 'error': 'refresh_token 不能为空'}, 400)
+        return
+    refresh_token = refresh_token.strip()
+
+    srv = getattr(http_handler, "server", None)
+    api_srv = getattr(srv, "api_server", None)
+    cfg = getattr(api_srv, "config", {}) if api_srv else {}
+    session_svc = getattr(api_srv, "user_session_service", None)
+    if session_svc is None:
+        from lite_agent.services.user_session import UserSessionService
+        session_svc = UserSessionService(config=cfg)
+
+    refreshed, err = session_svc.refresh_session(refresh_token)
+    if not refreshed:
+        err_msg = "检测到凭证重用，会话已吊销，请重新登录" if err == "reuse_detected" else "凭据无效或已过期，请重新登录"
+        review_json(http_handler, {'success': False, 'error': err_msg}, 401)
+        return
+
+    username = refreshed["username"]
+    db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
+    review_session = {}
+    try:
+        with closing(room.connect(db_path)) as db:
+            access.ensure_tables(db)
+            with db:
+                review_session = access.issue_host_session(db, username)
+    except Exception:
+        pass
+
+    review_json(http_handler, {
+        'success': True,
+        'username': username,
+        'session_id': refreshed.get('session_id'),
+        'session_token': refreshed.get('session_token'),
+        'access_token': refreshed.get('access_token'),
+        'expires_at': refreshed.get('expires_at'),
+        'access_token_expires_at': refreshed.get('access_token_expires_at'),
+        'refresh_token': refreshed.get('refresh_token'),
+        'refresh_expires_at': refreshed.get('refresh_expires_at'),
+        **review_session
+    })
+
+
+def handle_auth_logout(http_handler: Any) -> None:
+    """退出登录并撤销统一会话族与相关会审会话。"""
+    length = int(http_handler.headers.get('Content-Length') or 0)
+    raw = http_handler.rfile.read(length) if length > 0 else b'{}'
+    try:
+        body = json.loads(raw.decode('utf-8')) if raw else {}
+        if not isinstance(body, dict):
+            body = {}
+    except Exception:
+        body = {}
+
+    auth_header = http_handler.headers.get('Authorization') or ""
+    bearer_token = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
+    refresh_token = body.get('refresh_token')
+    access_token = body.get('session_token') or body.get('access_token') or bearer_token
+
+    srv = getattr(http_handler, "server", None)
+    api_srv = getattr(srv, "api_server", None)
+    session_svc = getattr(api_srv, "user_session_service", None)
+    if session_svc is None:
+        from lite_agent.services.user_session import UserSessionService
+        session_svc = UserSessionService(config=getattr(api_srv, "config", {}) if api_srv else {})
+
+    # 1. 撤销统一用户会话族
+    session_svc.revoke_session(token=access_token, refresh_token=refresh_token)
+
+    # 2. 撤销旧会审 Host 会话
+    review_token = body.get('review_token') or bearer_token
+    if isinstance(review_token, str) and review_token.strip():
+        try:
+            db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
+            with closing(room.connect(db_path)) as db:
+                access.revoke_host_session(db, review_token.strip())
+        except Exception:
+            pass
+
+    review_json(http_handler, {'success': True, 'message': '已安全登出'})
 
 
 def _verify_htpasswd(password: str, stored_hash: str) -> bool:

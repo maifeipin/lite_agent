@@ -12,16 +12,23 @@ import com.liteagent.mobile.core.network.models.TaskStreamData
 import com.liteagent.mobile.core.security.AndroidKeyStoreCryptoEngine
 import com.liteagent.mobile.core.security.RecoveryTaskState
 import com.liteagent.mobile.core.security.SecureTokenStorage
+import com.liteagent.mobile.core.security.UserSession
 import com.liteagent.mobile.ui.chat.ChatViewModel
+import com.liteagent.mobile.core.network.ApiClient
+import com.liteagent.mobile.core.network.ApiService
+import com.liteagent.mobile.core.network.AuthenticationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -386,5 +393,578 @@ class SanityTest {
         val resp = gson.fromJson(json, ChatResponse::class.java)
         assertEquals("async", resp.type)
         assertEquals("t_888", resp.taskId)
+    }
+
+    @Test
+    fun unified_login_success_saves_session_and_validates_active_status() = runTest {
+        val fakeStorage = FakeTokenStorage("https://mail.maifeipin.com")
+        val fakeApi = FakeApiService()
+        val fakeClient = FakeApiClient(fakeApi, fakeStorage)
+
+        val result = fakeClient.login(
+            serverUrl = "https://mail.maifeipin.com",
+            username = "alice",
+            password = "secret_password",
+            rememberMe = true
+        )
+
+        assertTrue("登录请求必须返回成功", result.isSuccess)
+        val loginResp = result.getOrNull()
+        assertNotNull(loginResp)
+        assertEquals("alice", loginResp?.username)
+        assertEquals("fake_session_token", loginResp?.sessionToken)
+        assertEquals("fake_session_id", loginResp?.sessionId)
+        assertEquals(listOf("user:general"), loginResp?.scopes)
+        assertEquals("fake_refresh_token", loginResp?.refreshToken)
+
+        val savedSession = fakeStorage.getSession("https://mail.maifeipin.com")
+        assertNotNull("登录成功后必须持久化 UserSession", savedSession)
+        assertEquals("alice", savedSession?.username)
+        assertEquals("fake_session_token", savedSession?.sessionToken)
+        assertEquals("fake_refresh_token", savedSession?.refreshToken)
+        assertTrue(fakeStorage.hasValidSession("https://mail.maifeipin.com"))
+    }
+
+    @Test
+    fun remember_me_false_does_not_issue_refresh_token() = runTest {
+        val fakeStorage = FakeTokenStorage("https://mail.maifeipin.com")
+        val fakeApi = FakeApiService()
+        val fakeClient = FakeApiClient(fakeApi, fakeStorage)
+
+        val result = fakeClient.login(
+            serverUrl = "https://mail.maifeipin.com",
+            username = "bob",
+            password = "secret_password",
+            rememberMe = false
+        )
+
+        assertTrue(result.isSuccess)
+        val loginResp = result.getOrNull()
+        assertNull("未开启记住登录时严禁签发 refresh_token", loginResp?.refreshToken)
+        assertNull(loginResp?.refreshExpiresAt)
+
+        val savedSession = fakeStorage.getSession("https://mail.maifeipin.com")
+        assertNotNull(savedSession)
+        assertNull("未记住登录时不保存 refresh_token", savedSession?.refreshToken)
+    }
+
+    @Test
+    fun stale_401_does_not_clear_new_session_when_token_mismatched() = runTest {
+        val fakeStorage = FakeTokenStorage("https://mail.maifeipin.com")
+        val currentSession = UserSession(
+            serverUrl = "https://mail.maifeipin.com",
+            username = "owner",
+            sessionId = "new_session_id",
+            sessionToken = "new_valid_token_abc",
+            expiresAt = System.currentTimeMillis() / 1000 + 3600,
+            refreshToken = "refresh_xyz",
+            refreshExpiresAt = System.currentTimeMillis() / 1000 + 86400,
+            reviewToken = null,
+            reviewExpiresAt = 0L,
+            rememberMe = true
+        )
+        fakeStorage.saveSession(currentSession)
+
+        // 模拟一个迟到的旧请求返回了 401（携带的是旧 token：old_expired_token_123）
+        fakeStorage.clearSession("https://mail.maifeipin.com", matchingToken = "old_expired_token_123")
+
+        // 断言：新会话必须完好保留，旧 401 不得误伤新会话
+        val sessionAfterStale401 = fakeStorage.getSession("https://mail.maifeipin.com")
+        assertNotNull("迟到的旧 401 严禁清除匹配不上的新登录会话", sessionAfterStale401)
+        assertEquals("new_valid_token_abc", sessionAfterStale401?.sessionToken)
+
+        // 当 matchingToken 与当前 Token 一致时，才允许清除
+        fakeStorage.clearSession("https://mail.maifeipin.com", matchingToken = "new_valid_token_abc")
+        val sessionAfterMatching401 = fakeStorage.getSession("https://mail.maifeipin.com")
+        assertNull("与当前凭证一致的 401/撤销才执行本地清除", sessionAfterMatching401)
+    }
+
+    @Test
+    fun logout_clears_local_session_and_invokes_remote() = runTest {
+        val fakeStorage = FakeTokenStorage("https://mail.maifeipin.com")
+        val fakeApi = FakeApiService()
+        val fakeClient = FakeApiClient(fakeApi, fakeStorage)
+
+        fakeClient.login("https://mail.maifeipin.com", "alice", "pw", rememberMe = true)
+        assertTrue(fakeStorage.hasValidSession("https://mail.maifeipin.com"))
+
+        val logoutResult = fakeClient.logout("https://mail.maifeipin.com")
+        assertTrue(logoutResult.isSuccess)
+        assertFalse("退出登录后本地会话必须失效", fakeStorage.hasValidSession("https://mail.maifeipin.com"))
+        assertNull(fakeStorage.getSession("https://mail.maifeipin.com"))
+    }
+
+    @Test
+    fun chat_view_model_cleans_up_on_logout_and_different_session_reloads() = runTest {
+        val fakeStorage = FakeTokenStorage("https://mail.maifeipin.com")
+        val fakeApi = FakeApiService()
+        fakeApi.sessionsResponse = listOf(SessionItem(sessionKey = "api:session_alice", title = "Alice 对话"))
+        val fakeClient = FakeApiClient(fakeApi, fakeStorage)
+        val fakeSse = FakeSseStreamManager(fakeStorage)
+
+        val viewModel = ChatViewModel(fakeStorage, fakeClient, fakeSse)
+        testScheduler.advanceUntilIdle()
+
+        assertEquals("Alice 对话加载成功", 1, viewModel.sessions.value.size)
+        assertEquals("api:session_alice", viewModel.currentSession.value?.sessionKey)
+
+        // 执行退出登录
+        viewModel.onLoggedOut()
+        testScheduler.advanceUntilIdle()
+
+        assertTrue("退出后会话列表必须清空", viewModel.sessions.value.isEmpty())
+        assertNull("退出后当前会话必须清空", viewModel.currentSession.value)
+        assertTrue("退出后消息流必须清空", viewModel.messages.value.isEmpty())
+
+        // 重新登录同一服务器的不同用户 Bob
+        fakeApi.sessionsResponse = listOf(SessionItem(sessionKey = "api:session_bob", title = "Bob 对话"))
+        viewModel.onSessionChanged("https://mail.maifeipin.com", sessionId = "sess_bob_999")
+        testScheduler.advanceUntilIdle()
+
+        assertEquals("Bob 登录后同一服务器必须刷新为 Bob 的会话", 1, viewModel.sessions.value.size)
+        assertEquals("api:session_bob", viewModel.currentSession.value?.sessionKey)
+    }
+
+    @Test
+    fun handle_unauthorized_preserves_session_on_transient_network_error() = runTest {
+        val fakeStorage = FakeTokenStorage("https://mail.maifeipin.com")
+        val fakeApi = FakeApiService()
+        val fakeClient = FakeApiClient(fakeApi, fakeStorage)
+
+        // 保存有效会话（含 refresh token）
+        fakeStorage.saveSession(
+            serverUrl = "https://mail.maifeipin.com",
+            username = "alice",
+            sessionId = "sess_123",
+            sessionToken = "token_abc",
+            expiresAt = System.currentTimeMillis() / 1000 + 3600,
+            refreshToken = "refresh_xyz",
+            refreshExpiresAt = System.currentTimeMillis() / 1000 + 86400,
+            rememberMe = true
+        )
+
+        // 模拟刷新时发生 500 服务器错误（非 401 凭证拒绝）
+        fakeApi.shouldFailRefresh = true
+        fakeApi.refreshFailureCode = 500
+
+        val retryAllowed = fakeClient.handleUnauthorized("https://mail.maifeipin.com", "token_abc", "sess_123")
+        assertFalse(retryAllowed)
+        // 关键断言：服务端 500 或网络故障时，本地会话必须完好保留，严禁误登出！
+        assertNotNull("临时网络/服务器错误严禁清理用户会话", fakeStorage.getSession("https://mail.maifeipin.com"))
+
+        // 模拟明确凭据失效（401 Unauthorized）
+        fakeApi.refreshFailureCode = 401
+        val retryAllowedAuthFail = fakeClient.handleUnauthorized("https://mail.maifeipin.com", "token_abc", "sess_123")
+        assertFalse(retryAllowedAuthFail)
+        // 关键断言：明确 401 凭据拒绝时，本地会话被精准清除
+        assertNull("明确凭据失效时才清除本地会话", fakeStorage.getSession("https://mail.maifeipin.com"))
+    }
+
+    @Test
+    fun cross_session_401_does_not_retry_under_new_account() = runTest {
+        val serverUrl = "https://mail.maifeipin.com"
+        val fakeStorage = FakeTokenStorage(serverUrl)
+        val fakeApi = FakeApiService()
+        val fakeClient = FakeApiClient(fakeApi, fakeStorage)
+
+        // 1. 用户 A (Alice) 登录
+        fakeStorage.saveSession(
+            serverUrl = serverUrl,
+            username = "alice",
+            sessionId = "sess_alice_111",
+            sessionToken = "token_alice_aaa",
+            expiresAt = System.currentTimeMillis() / 1000 + 3600,
+            refreshToken = "refresh_alice_xxx",
+            refreshExpiresAt = System.currentTimeMillis() / 1000 + 86400,
+            rememberMe = true
+        )
+
+        // 2. 模拟发起 A 的请求（绑定 A 的会话 ID 与 Token）
+        val tokenUsedByAlice = "token_alice_aaa"
+        val sessionIdUsedByAlice = "sess_alice_111"
+
+        // 3. 在 A 请求挂起期间，用户切换登录到账号 B (Bob)
+        fakeStorage.saveSession(
+            serverUrl = serverUrl,
+            username = "bob",
+            sessionId = "sess_bob_222",
+            sessionToken = "token_bob_bbb",
+            expiresAt = System.currentTimeMillis() / 1000 + 3600,
+            refreshToken = "refresh_bob_yyy",
+            refreshExpiresAt = System.currentTimeMillis() / 1000 + 86400,
+            rememberMe = true
+        )
+
+        // 4. A 的请求迟到返回 401
+        val retryAllowed = fakeClient.handleUnauthorized(
+            serverUrl = serverUrl,
+            tokenUsed = tokenUsedByAlice,
+            sessionIdUsed = sessionIdUsedByAlice
+        )
+
+        // 断言 1：必须直接拒绝重试，绝不能用 Bob 的 Token 重发 Alice 的旧请求
+        assertFalse("A 请求挂起期间切换登录 B，A 返回 401 严禁重发", retryAllowed)
+
+        // 断言 2：Bob 的新会话必须完好保留，严禁被 A 的 401 误清除
+        val currentSession = fakeStorage.getSession(serverUrl)
+        assertNotNull("当前活跃账号 B 的会话必须完好保留", currentSession)
+        assertEquals("bob", currentSession?.username)
+        assertEquals("sess_bob_222", currentSession?.sessionId)
+        assertEquals("token_bob_bbb", currentSession?.sessionToken)
+    }
+
+    @Test
+    fun auth_interceptor_drops_cross_session_retry_when_session_changed() = runTest {
+        val serverUrl = "https://mail.maifeipin.com"
+        val fakeStorage = FakeTokenStorage(serverUrl)
+        var unauthorizedTriggered = false
+        val fakeApi = FakeApiService()
+        val fakeClient = object : ApiClient(fakeStorage, onUnauthorized = { unauthorizedTriggered = true }) {
+            override fun getAuthApiService(serverUrl: String): ApiService = fakeApi
+        }
+
+        // 1. 用户 A 登录
+        fakeStorage.saveSession(
+            serverUrl = serverUrl,
+            username = "alice",
+            sessionId = "sess_alice_111",
+            sessionToken = "token_alice_aaa",
+            expiresAt = System.currentTimeMillis() / 1000 + 3600,
+            refreshToken = "refresh_alice_xxx",
+            refreshExpiresAt = System.currentTimeMillis() / 1000 + 86400,
+            rememberMe = true
+        )
+
+        var requestCount = 0
+        val interceptor = AuthInterceptor(
+            tokenStorage = fakeStorage,
+            onUnauthorized = { unauthorizedTriggered = true },
+            boundBaseUrl = serverUrl,
+            onUnauthorizedWithContext = { url, tokenUsed, sessionIdUsed ->
+                runBlocking { fakeClient.handleUnauthorized(url, tokenUsed, sessionIdUsed) }
+            }
+        )
+
+        val client = OkHttpClient.Builder()
+            .addInterceptor(interceptor)
+            .addInterceptor { chain ->
+                requestCount++
+                val req = chain.request()
+                // 当 Alice 的请求到达服务端前/挂起时，模拟用户在外部切换登录为 Bob
+                if (requestCount == 1) {
+                    runBlocking {
+                        fakeStorage.saveSession(
+                            serverUrl = serverUrl,
+                            username = "bob",
+                            sessionId = "sess_bob_222",
+                            sessionToken = "token_bob_bbb",
+                            expiresAt = System.currentTimeMillis() / 1000 + 3600,
+                            refreshToken = "refresh_bob_yyy",
+                            refreshExpiresAt = System.currentTimeMillis() / 1000 + 86400,
+                            rememberMe = true
+                        )
+                    }
+                    // Alice 的请求返回 401
+                    okhttp3.Response.Builder()
+                        .request(req)
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(401)
+                        .message("Unauthorized")
+                        .body("{}".toResponseBody("application/json".toMediaTypeOrNull()))
+                        .build()
+                } else {
+                    okhttp3.Response.Builder()
+                        .request(req)
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body("{}".toResponseBody("application/json".toMediaTypeOrNull()))
+                        .build()
+                }
+            }
+            .build()
+
+        val req = Request.Builder().url("https://mail.maifeipin.com/api/v1/sessions").build()
+        val response = client.newCall(req).execute()
+
+        // 校验：没有重试（requestCount 仅为 1）
+        assertEquals("旧会话请求在会话改变后严禁重试", 1, requestCount)
+        assertEquals(401, response.code)
+        // Bob 的会话未受损坏
+        val bobSession = fakeStorage.getSession(serverUrl)
+        assertEquals("bob", bobSession?.username)
+        assertFalse("会话切换后旧请求 401 不得触发登出回调", unauthorizedTriggered)
+    }
+
+    @Test
+    fun late_refresh_result_rejected_after_logout() = runTest {
+        val serverUrl = "https://mail.maifeipin.com"
+        val fakeStorage = FakeTokenStorage(serverUrl)
+        val fakeApi = FakeApiService()
+        val fakeClient = FakeApiClient(fakeApi, fakeStorage)
+
+        // 1. 用户登录（保存含 refresh token 的会话）
+        fakeStorage.saveSession(
+            serverUrl = serverUrl,
+            username = "alice",
+            sessionId = "sess_refresh_test",
+            sessionToken = "token_initial",
+            expiresAt = System.currentTimeMillis() / 1000 + 3600,
+            refreshToken = "refresh_token_initial",
+            refreshExpiresAt = System.currentTimeMillis() / 1000 + 86400,
+            rememberMe = true
+        )
+        assertNotNull(fakeStorage.getSession(serverUrl))
+
+        // 2. 模拟“刷新挂起期间用户退出”：
+        // 在 fakeApi.refresh 执行时，触发用户退出（清空本地会话）
+        fakeApi.onRefreshInvoked = {
+            runBlocking {
+                fakeStorage.clearSession(serverUrl)
+            }
+        }
+
+        // 3. 执行刷新
+        val refreshResult = fakeClient.refresh(serverUrl, "refresh_token_initial")
+
+        // 4. 断言：刷新操作必须返回失败（因为会话在挂起时已被注销）
+        assertTrue("退出后迟到的刷新必须标记为失败", refreshResult.isFailure)
+        assertTrue(refreshResult.exceptionOrNull() is AuthenticationException)
+
+        // 5. 关键断言：存储层必须保持为空，严禁被迟到返回的刷新结果复活！
+        val sessionAfterLateRefresh = fakeStorage.getSession(serverUrl)
+        assertNull("用户退出后，迟到的刷新结果严禁重新落盘，存储必须保持为空", sessionAfterLateRefresh)
+        assertFalse("退出后 token 存储状态必须无效", fakeStorage.hasValidSession(serverUrl))
+    }
+
+    @Test
+    fun update_tokens_rejects_missing_or_mismatched_session_id() = runTest {
+        val serverUrl = "https://mail.maifeipin.com"
+        val fakeStorage = FakeTokenStorage(serverUrl)
+
+        // 1. 空存储时尝试 updateTokens -> 必须返回 false
+        val writeToEmpty = fakeStorage.updateTokens(
+            serverUrl = serverUrl,
+            newSessionToken = "new_token",
+            newExpiresAt = System.currentTimeMillis() / 1000 + 3600,
+            newRefreshToken = "new_refresh",
+            newRefreshExpiresAt = System.currentTimeMillis() / 1000 + 86400,
+            newReviewToken = null,
+            newReviewExpiresAt = 0L,
+            matchingSessionId = "sess_missing"
+        )
+        assertFalse("当前会话不存在时 updateTokens 必须拒绝", writeToEmpty)
+        assertNull(fakeStorage.getSession(serverUrl))
+
+        // 2. 存入 Alice 会话
+        fakeStorage.saveSession(
+            serverUrl = serverUrl,
+            username = "alice",
+            sessionId = "sess_alice",
+            sessionToken = "token_alice",
+            expiresAt = System.currentTimeMillis() / 1000 + 3600,
+            refreshToken = "refresh_alice",
+            refreshExpiresAt = System.currentTimeMillis() / 1000 + 86400,
+            rememberMe = true
+        )
+
+        // 3. matchingSessionId 缺失（null 或 blank）-> 必须返回 false
+        val writeNullSession = fakeStorage.updateTokens(
+            serverUrl = serverUrl,
+            newSessionToken = "new_token_2",
+            newExpiresAt = System.currentTimeMillis() / 1000 + 3600,
+            newRefreshToken = null,
+            newRefreshExpiresAt = 0L,
+            newReviewToken = null,
+            newReviewExpiresAt = 0L,
+            matchingSessionId = null
+        )
+        assertFalse("matchingSessionId 缺失时必须拒绝写回", writeNullSession)
+
+        // 4. matchingSessionId 不匹配（如为其他会话 ID）-> 必须返回 false
+        val writeMismatched = fakeStorage.updateTokens(
+            serverUrl = serverUrl,
+            newSessionToken = "new_token_3",
+            newExpiresAt = System.currentTimeMillis() / 1000 + 3600,
+            newRefreshToken = null,
+            newRefreshExpiresAt = 0L,
+            newReviewToken = null,
+            newReviewExpiresAt = 0L,
+            matchingSessionId = "sess_different"
+        )
+        assertFalse("matchingSessionId 不匹配时必须拒绝写回", writeMismatched)
+
+        // 5. 校验 Alice 会话未被篡改
+        val aliceSession = fakeStorage.getSession(serverUrl)
+        assertEquals("token_alice", aliceSession?.sessionToken)
+    }
+
+    @Test
+    fun refresh_snapshot_prevents_writing_to_switched_account() = runTest {
+        val serverUrl = "https://mail.maifeipin.com"
+        val fakeStorage = FakeTokenStorage(serverUrl)
+        val fakeApi = FakeApiService()
+        val fakeClient = FakeApiClient(fakeApi, fakeStorage)
+
+        // 1. 用户 A (Alice) 登录
+        fakeStorage.saveSession(
+            serverUrl = serverUrl,
+            username = "alice",
+            sessionId = "sess_alice_snap",
+            sessionToken = "token_alice_orig",
+            expiresAt = System.currentTimeMillis() / 1000 + 3600,
+            refreshToken = "refresh_alice_orig",
+            refreshExpiresAt = System.currentTimeMillis() / 1000 + 86400,
+            rememberMe = true
+        )
+
+        // 2. 模拟交错时序：
+        // 在 fakeApi.refresh 执行挂起期间，用户切换登录到账号 B (Bob)
+        fakeApi.onRefreshInvoked = {
+            runBlocking {
+                fakeStorage.saveSession(
+                    serverUrl = serverUrl,
+                    username = "bob",
+                    sessionId = "sess_bob_new",
+                    sessionToken = "token_bob_orig",
+                    expiresAt = System.currentTimeMillis() / 1000 + 3600,
+                    refreshToken = "refresh_bob_orig",
+                    refreshExpiresAt = System.currentTimeMillis() / 1000 + 86400,
+                    rememberMe = true
+                )
+            }
+        }
+
+        // 3. 执行 Alice 的刷新，传入 Alice 会话快照 ID
+        val refreshResult = fakeClient.refresh(
+            serverUrl = serverUrl,
+            refreshToken = "refresh_alice_orig",
+            expectedSessionId = "sess_alice_snap"
+        )
+
+        // 4. 断言：刷新操作因目标会话已被切换而标记为失败
+        assertTrue("会话切换后，旧账号刷新结果严禁标记为成功", refreshResult.isFailure)
+        assertTrue(refreshResult.exceptionOrNull() is AuthenticationException)
+
+        // 5. 关键断言：Bob 的新会话凭据未被篡改，绝不能将 Alice 的新 Token 写进 Bob
+        val bobSession = fakeStorage.getSession(serverUrl)
+        assertNotNull(bobSession)
+        assertEquals("bob", bobSession?.username)
+        assertEquals("sess_bob_new", bobSession?.sessionId)
+        assertEquals("token_bob_orig", bobSession?.sessionToken)
+        assertEquals("refresh_bob_orig", bobSession?.refreshToken)
+    }
+
+    @Test
+    fun auth_interceptor_does_not_close_response_when_retry_is_disqualified() = runTest {
+        val serverUrl = "https://mail.maifeipin.com"
+        val fakeStorage = FakeTokenStorage(serverUrl)
+
+        // 用户 A 登录
+        fakeStorage.saveSession(
+            serverUrl = serverUrl,
+            username = "alice",
+            sessionId = "sess_alice_close_test",
+            sessionToken = "token_alice_close",
+            expiresAt = System.currentTimeMillis() / 1000 + 3600,
+            refreshToken = "refresh_alice_close",
+            refreshExpiresAt = System.currentTimeMillis() / 1000 + 86400,
+            rememberMe = true
+        )
+
+        // 构造拦截器：在 onUnauthorizedWithContext 中返回 false（放弃重试）
+        val interceptor = AuthInterceptor(
+            tokenStorage = fakeStorage,
+            onUnauthorized = {},
+            boundBaseUrl = serverUrl,
+            onUnauthorizedWithContext = { _, _, _ ->
+                false
+            }
+        )
+
+        val client = OkHttpClient.Builder()
+            .addInterceptor(interceptor)
+            .addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(401)
+                    .message("Unauthorized")
+                    .body("""{"error":"unauthorized_error_payload"}""".toResponseBody("application/json".toMediaTypeOrNull()))
+                    .build()
+            }
+            .build()
+
+        val req = Request.Builder().url("https://mail.maifeipin.com/api/v1/sessions").build()
+        val response = client.newCall(req).execute()
+
+        // 关键断言：放弃重试时返回的 401 响应体绝不能被提前 close()，业务调用方必须能正常读取内容
+        assertEquals(401, response.code)
+        val bodyContent = response.body?.string()
+        assertNotNull("未重发的响应体必须保持未关闭状态以便业务层读取错误原因", bodyContent)
+        assertTrue(bodyContent!!.contains("unauthorized_error_payload"))
+    }
+
+    @Test
+    fun auth_interceptor_does_not_close_response_if_session_switched_after_refresh_success() = runTest {
+        val serverUrl = "https://mail.maifeipin.com"
+        val fakeStorage = FakeTokenStorage(serverUrl)
+
+        // 用户 A 登录
+        fakeStorage.saveSession(
+            serverUrl = serverUrl,
+            username = "alice",
+            sessionId = "sess_alice_switch",
+            sessionToken = "token_alice_switch",
+            expiresAt = System.currentTimeMillis() / 1000 + 3600,
+            refreshToken = "refresh_alice_switch",
+            refreshExpiresAt = System.currentTimeMillis() / 1000 + 86400,
+            rememberMe = true
+        )
+
+        // 构造拦截器：模拟 onUnauthorizedWithContext 返回 true，但在此瞬间会话已被切换为 Bob
+        val interceptor = AuthInterceptor(
+            tokenStorage = fakeStorage,
+            onUnauthorized = {},
+            boundBaseUrl = serverUrl,
+            onUnauthorizedWithContext = { _, _, _ ->
+                // 在返回重试结果前，存储层已被切换到 Bob
+                runBlocking {
+                    fakeStorage.saveSession(
+                        serverUrl = serverUrl,
+                        username = "bob",
+                        sessionId = "sess_bob_switch",
+                        sessionToken = "token_bob_switch",
+                        expiresAt = System.currentTimeMillis() / 1000 + 3600,
+                        refreshToken = "refresh_bob_switch",
+                        refreshExpiresAt = System.currentTimeMillis() / 1000 + 86400,
+                        rememberMe = true
+                    )
+                }
+                true
+            }
+        )
+
+        val client = OkHttpClient.Builder()
+            .addInterceptor(interceptor)
+            .addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(401)
+                    .message("Unauthorized")
+                    .body("""{"error":"stale_session_401"}""".toResponseBody("application/json".toMediaTypeOrNull()))
+                    .build()
+            }
+            .build()
+
+        val req = Request.Builder().url("https://mail.maifeipin.com/api/v1/sessions").build()
+        val response = client.newCall(req).execute()
+
+        // 关键断言：会话已切换到 Bob，严禁重发 Alice 请求；且原 401 响应绝不能被提前关闭
+        assertEquals(401, response.code)
+        val bodyContent = response.body?.string()
+        assertNotNull(bodyContent)
+        assertTrue(bodyContent!!.contains("stale_session_401"))
     }
 }

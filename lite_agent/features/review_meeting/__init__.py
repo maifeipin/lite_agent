@@ -116,6 +116,28 @@ def register(context: Any) -> None:
         cors_restricted=True,
     )
 
+    def _handle_meeting_refresh_route(http_handler: Any, parsed_url: Any):
+        http_adapter.handle_auth_refresh(http_handler)
+
+    context.register_route(
+        "POST",
+        "/api/v1/auth/refresh",
+        _handle_meeting_refresh_route,
+        auth_required=False,
+        cors_restricted=True,
+    )
+
+    def _handle_meeting_logout_route(http_handler: Any, parsed_url: Any):
+        http_adapter.handle_auth_logout(http_handler)
+
+    context.register_route(
+        "POST",
+        "/api/v1/auth/logout",
+        _handle_meeting_logout_route,
+        auth_required=False,
+        cors_restricted=True,
+    )
+
     # 4. 注册会审通知监听器 (如果配置启用)
     cfg = getattr(context, "config", {}) or {}
     notif_cfg = cfg.get("review_meeting_notifications", {})

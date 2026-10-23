@@ -83,14 +83,21 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def _auth(self) -> bool:
         import os
-        auth_token = self.server.api_server.auth_token
-        guest_token = self.server.api_server.config.get("guest_token", "")
+        api_srv = getattr(self.server, "api_server", None)
+        auth_token = getattr(api_srv, "auth_token", "") if api_srv else ""
+        guest_token = api_srv.config.get("guest_token", "") if api_srv and hasattr(api_srv, "config") else ""
         # The edge_token is at the root config, so we can check os.environ directly since it's mapped from .env
         edge_token = os.environ.get("EDGE_TOKEN", "")
+        session_service = getattr(api_srv, "user_session_service", None)
+
         self.is_guest = False
         self.is_edge = False
+        self.user_session = None
 
-        if not auth_token and not guest_token and not edge_token:
+        has_static = bool(auth_token or guest_token or edge_token)
+        has_session = bool(session_service and session_service.is_available())
+
+        if not has_static and not has_session:
             self.send_error(503, "API authentication is not configured")
             return False
 
@@ -114,6 +121,15 @@ class ApiHandler(BaseHTTPRequestHandler):
         elif edge_token and token == edge_token:
             self.is_edge = True
             return True
+        elif session_service:
+            verified, reason = session_service.verify_access_token(token, required_scope="user:general")
+            if verified:
+                self.is_guest = False
+                self.user_session = verified
+                return True
+            if reason in ("expired", "revoked"):
+                self.send_error(401, "Token expired or revoked")
+                return False
 
         self.send_error(403, "Forbidden")
         return False
@@ -1125,6 +1141,12 @@ class ApiServer:
         self.port = self.config.get("port", 8080)
         self.auth_token = self.config.get("auth_token", "")
         self.route_registry = getattr(agent, "route_registry", None)
+        from lite_agent.services.user_session import UserSessionService
+        self.user_session_service = getattr(agent, "user_session_service", None)
+        if self.user_session_service is None:
+            self.user_session_service = UserSessionService(
+                config=getattr(agent, "_config", None) or config
+            )
         self.server = None
         self._thread = None
         from lite_agent.core.task_spec_service import TaskSpecService

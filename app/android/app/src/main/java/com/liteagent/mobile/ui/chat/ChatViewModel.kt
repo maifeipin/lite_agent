@@ -54,6 +54,7 @@ class ChatViewModel(
     private var boundServerUrl: String = ""
     private var boundSessionKey: String = ""
     private var boundTaskId: String? = null
+    private var boundSessionId: String = ""
 
     private var activeLoadJob: Job? = null
     private var activeSendJob: Job? = null
@@ -73,17 +74,47 @@ class ChatViewModel(
         _pendingRecoveryTasks.value = list
     }
 
-    fun onServerSwitched(newServerUrl: String) {
-        val cleanUrl = ServerUrlNormalizer.normalize(newServerUrl)
-        if (cleanUrl == boundServerUrl) return
+    /**
+     * 退出登录清理：立即中止所有网络请求与 SSE 流，重置所有内存对话与任务状态。
+     */
+    fun onLoggedOut() {
+        activeLoadJob?.cancel()
+        activeSendJob?.cancel()
+        activeSseJob?.cancel()
+        sseStreamManager.cancel()
 
-        // 切换服务器必须取消所有旧连接、重置内存状态，杜绝向新服务器带入旧凭证或消息
+        boundServerUrl = ""
+        boundSessionKey = ""
+        boundTaskId = null
+        boundSessionId = ""
+
+        _sessions.value = emptyList()
+        _currentSession.value = null
+        _messages.value = emptyList()
+        _taskLogs.value = emptyList()
+        _taskStatus.value = null
+        _isStreaming.value = false
+        _errorMessage.value = null
+        _pendingRecoveryTasks.value = emptyList()
+    }
+
+    /**
+     * 账号或服务器切换：按规范化服务器 + 会话 ID 严格隔离上下文。
+     * 同服务器重新登录新账号时，立即清空旧状态并重新拉取。
+     */
+    fun onSessionChanged(newServerUrl: String, sessionId: String = "") {
+        val cleanUrl = ServerUrlNormalizer.normalize(newServerUrl)
+        if (cleanUrl == boundServerUrl && sessionId.isNotBlank() && sessionId == boundSessionId && _sessions.value.isNotEmpty()) {
+            return
+        }
+
         activeLoadJob?.cancel()
         activeSendJob?.cancel()
         activeSseJob?.cancel()
         sseStreamManager.cancel()
 
         boundServerUrl = cleanUrl
+        boundSessionId = sessionId
         boundSessionKey = ""
         boundTaskId = null
 
@@ -99,6 +130,10 @@ class ChatViewModel(
             refreshRecoveryTasks()
             loadSessions()
         }
+    }
+
+    fun onServerSwitched(newServerUrl: String) {
+        onSessionChanged(newServerUrl, "")
     }
 
     fun loadSessions(): Job {

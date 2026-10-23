@@ -21,6 +21,7 @@ import androidx.lifecycle.ViewModelProvider
 import com.liteagent.mobile.core.network.ApiClient
 import com.liteagent.mobile.core.network.SseStreamManager
 import com.liteagent.mobile.core.security.SecureTokenStorage
+import com.liteagent.mobile.ui.auth.LoginScreen
 import com.liteagent.mobile.ui.chat.ChatScreen
 import com.liteagent.mobile.ui.chat.ChatViewModel
 import com.liteagent.mobile.ui.chat.ChatViewModelFactory
@@ -47,11 +48,42 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             LiteAgentTheme {
-                MainAppScaffold(
-                    tokenStorage = tokenStorage,
-                    apiClient = apiClient,
-                    chatViewModel = chatViewModel
-                )
+                val activeServer by tokenStorage.activeServerUrlFlow.collectAsState(initial = SecureTokenStorage.DEFAULT_SERVER_URL)
+                val session by tokenStorage.sessionFlow.collectAsState(initial = null)
+                var isCheckingSession by remember { mutableStateOf(true) }
+                var isLoggedIn by remember { mutableStateOf(false) }
+
+                LaunchedEffect(activeServer, session) {
+                    val valid = tokenStorage.hasValidSession(activeServer)
+                    isLoggedIn = valid
+                    isCheckingSession = false
+                }
+
+                if (isCheckingSession) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                    }
+                } else if (!isLoggedIn) {
+                    LoginScreen(
+                        tokenStorage = tokenStorage,
+                        apiClient = apiClient,
+                        onLoginSuccess = { serverUrl ->
+                            isLoggedIn = true
+                            val newSession = kotlinx.coroutines.runBlocking { tokenStorage.getSession(serverUrl) }
+                            chatViewModel.onSessionChanged(serverUrl, newSession?.sessionId ?: "")
+                        }
+                    )
+                } else {
+                    MainAppScaffold(
+                        tokenStorage = tokenStorage,
+                        apiClient = apiClient,
+                        chatViewModel = chatViewModel,
+                        onLogout = {
+                            isLoggedIn = false
+                            chatViewModel.onLoggedOut()
+                        }
+                    )
+                }
             }
         }
     }
@@ -68,7 +100,8 @@ enum class NavigationTab(val label: String, val icon: ImageVector) {
 fun MainAppScaffold(
     tokenStorage: SecureTokenStorage,
     apiClient: ApiClient,
-    chatViewModel: ChatViewModel
+    chatViewModel: ChatViewModel,
+    onLogout: () -> Unit = {}
 ) {
     var selectedTab by remember { mutableStateOf(NavigationTab.CHAT) }
     var showServerConfig by remember { mutableStateOf(false) }
@@ -80,6 +113,11 @@ fun MainAppScaffold(
             onDismiss = { showServerConfig = false },
             onSaved = { newServerUrl ->
                 chatViewModel.onServerSwitched(newServerUrl)
+            },
+            onLoggedOut = {
+                showServerConfig = false
+                chatViewModel.onLoggedOut()
+                onLogout()
             }
         )
     }
