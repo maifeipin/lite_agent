@@ -576,4 +576,13 @@ open class SecureTokenStorage(
     open suspend fun clearIncompleteTask(serverUrl: String, taskId: String) {
         removeIncompleteTask(serverUrl, taskId)
     }
+
+    open suspend fun clearAll() {
+        sessionMutex.withLock {
+            inMemorySessions.clear()
+            requireDataStore.edit { prefs ->
+                prefs.clear()
+            }
+        }
+    }
 }

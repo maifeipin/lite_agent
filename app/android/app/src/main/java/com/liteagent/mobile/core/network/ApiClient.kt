@@ -12,6 +12,8 @@ import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import java.util.concurrent.TimeUnit
 
+open class AuthenticationException(message: String) : Exception(message)
+
 open class ApiClient(
     val tokenStorage: SecureTokenStorage,
     val onUnauthorized: (() -> Unit)? = null
@@ -47,8 +49,6 @@ open class ApiClient(
             )
             .build()
     }
-
-open class AuthenticationException(message: String) : Exception(message)
 
     private val authRetrofitLock = Any()
     private var cachedAuthRetrofit: Retrofit? = null
