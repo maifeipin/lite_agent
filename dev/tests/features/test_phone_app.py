@@ -820,7 +820,7 @@ def test_b06_directory_hygiene_and_no_root_phone_worker():
         "lite_agent", "web_dashboard", "dev", "scripts", "edge_node",
         "deploy", "conf.d", "data", "assets", "rules", "workspace",
         ".agents", ".local", ".git", ".pytest_cache", ".venv", "venv", "__pycache__",
-        "mail-statement-parser", "mail_statement_parser",
+        "mail-statement-parser", "mail_statement_parser", "app",
     }
     top_entries = [
         e for e in os.listdir(repo_root)

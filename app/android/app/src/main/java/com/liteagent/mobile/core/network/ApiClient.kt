@@ -154,7 +154,7 @@ open class ApiClient(
                 val expiresAt = body.effectiveExpiresAt
                 val sessionId = body.sessionId ?: ""
                 val refreshToken = body.refreshToken
-                val refreshExp = body.refreshExpiresAt
+                val refreshExp = body.refreshExpiresAt ?: 0L
                 val reviewToken = body.reviewToken
                 val reviewExp = body.reviewTokenExpiresAt
 
@@ -212,7 +212,7 @@ open class ApiClient(
                     newSessionToken = body.effectiveSessionToken,
                     newExpiresAt = body.effectiveExpiresAt,
                     newRefreshToken = body.refreshToken,
-                    newRefreshExpiresAt = body.refreshExpiresAt,
+                    newRefreshExpiresAt = body.refreshExpiresAt ?: 0L,
                     newReviewToken = body.reviewToken,
                     newReviewExpiresAt = body.reviewTokenExpiresAt,
                     matchingSessionId = targetSessionId

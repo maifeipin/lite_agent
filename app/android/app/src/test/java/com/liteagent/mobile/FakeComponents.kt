@@ -204,7 +204,7 @@ class FakeApiService : ApiService {
                 sessionId = "fake_session_id",
                 scopes = listOf("user:general"),
                 refreshToken = if (request.rememberMe) "fake_refresh_token" else null,
-                refreshExpiresAt = if (request.rememberMe) System.currentTimeMillis() / 1000 + 30 * 86400 else 0L
+                refreshExpiresAt = if (request.rememberMe) System.currentTimeMillis() / 1000 + 30 * 86400 else null
             )
         )
     }

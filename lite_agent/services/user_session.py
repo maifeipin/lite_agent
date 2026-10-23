@@ -40,14 +40,27 @@ class UserSessionService:
 
     def __init__(self, db_path: Optional[str] = None, config: Optional[dict] = None):
         cfg = config or {}
-        configured_path = cfg.get("user_session_db") or os.environ.get("USER_SESSION_DB")
+        configured_path = (
+            cfg.get("user_session_db")
+            or (cfg.get("session") or {}).get("user_session_db")
+            or (cfg.get("session") or {}).get("db_path")
+            or os.environ.get("USER_SESSION_DB")
+        )
         if db_path:
             self.db_path = db_path
         elif configured_path:
-            self.db_path = configured_path
+            if configured_path.endswith("sessions.db"):
+                self.db_path = os.path.join(os.path.dirname(configured_path), "user_sessions.db")
+            else:
+                self.db_path = configured_path
         elif os.environ.get("REVIEW_MEETING_DB"):
             self.db_path = os.path.join(
                 os.path.dirname(os.path.abspath(os.environ["REVIEW_MEETING_DB"])),
+                "user_sessions.db"
+            )
+        elif os.environ.get("LITE_AGENT_SESSION_DB_PATH"):
+            self.db_path = os.path.join(
+                os.path.dirname(os.path.abspath(os.environ["LITE_AGENT_SESSION_DB_PATH"])),
                 "user_sessions.db"
             )
         else:

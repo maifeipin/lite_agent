@@ -44,7 +44,8 @@ class AuthInterceptor(
         val requestBuilder = original.newBuilder().removeHeader(HEADER_CONFIGURED_BASE_URL)
 
         val session = runBlocking { tokenStorage.getSession(targetServerUrl) }
-        val token = session?.sessionToken ?: ""
+        val token = session?.sessionToken?.ifBlank { null }
+            ?: runBlocking { tokenStorage.getGeneralToken(targetServerUrl) }
         val currentSessionId = session?.sessionId ?: ""
 
         val boundSessionId = original.tag(SessionIdTag::class.java)?.sessionId ?: currentSessionId

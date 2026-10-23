@@ -20,7 +20,7 @@ data class LoginResponse(
     @SerializedName("expires_at") val expiresAt: Long = 0L,
     @SerializedName("access_token_expires_at") val accessTokenExpiresAt: Long = 0L,
     @SerializedName("refresh_token") val refreshToken: String? = null,
-    @SerializedName("refresh_expires_at") val refreshExpiresAt: Long = 0L,
+    @SerializedName("refresh_expires_at") val refreshExpiresAt: Long? = null,
     @SerializedName("scopes") val scopes: List<String>? = null,
     @SerializedName("remember_me") val rememberMe: Boolean = false,
     @SerializedName("review_token") val reviewToken: String? = null,
@@ -50,7 +50,7 @@ data class RefreshResponse(
     @SerializedName("expires_at") val expiresAt: Long = 0L,
     @SerializedName("access_token_expires_at") val accessTokenExpiresAt: Long = 0L,
     @SerializedName("refresh_token") val refreshToken: String? = null,
-    @SerializedName("refresh_expires_at") val refreshExpiresAt: Long = 0L,
+    @SerializedName("refresh_expires_at") val refreshExpiresAt: Long? = null,
     @SerializedName("review_token") val reviewToken: String? = null,
     @SerializedName("review_token_expires_at") val reviewTokenExpiresAt: Long = 0L,
     @SerializedName("error") val error: String? = null
