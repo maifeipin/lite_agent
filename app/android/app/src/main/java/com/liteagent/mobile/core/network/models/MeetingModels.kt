@@ -60,12 +60,16 @@ data class MeetingDetail(
     @SerializedName("state") val state: String,
     @SerializedName("round") val round: Int = 1,
     @SerializedName("brief") val brief: String? = null,
-    @SerializedName("last_seq") val lastSeq: Int = 0,
+    @SerializedName("last_seq") val lastSeqRaw: Int? = null,
+    @SerializedName("next_since") val nextSince: Int? = null,
     @SerializedName("participants") val participants: List<MeetingParticipant> = emptyList(),
     @SerializedName("events") val events: List<MeetingEvent> = emptyList(),
     @SerializedName("hint") val hint: String? = null,
     @SerializedName("error") val error: String? = null
 ) {
+    val lastSeq: Int
+        get() = lastSeqRaw ?: nextSince ?: events.maxOfOrNull { it.seq } ?: 0
+
     val isAwaitingApproval: Boolean
         get() = state.equals("awaiting_approval", ignoreCase = true) || state.equals("waiting", ignoreCase = true)
 }

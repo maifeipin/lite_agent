@@ -220,6 +220,8 @@ def review_enrich(result: dict, db, meeting_id: str, seat, is_admin: bool):
             p['metadata'] = json.loads(grant['metadata'])
             p['identity_source'] = 'self-reported'
     result['hint'] = review_hint(db, meeting_id, result, seat, is_admin)
+    row_seq = db.execute("SELECT COALESCE(MAX(seq), 0) FROM events WHERE meeting_id=?", (meeting_id,)).fetchone()
+    result['last_seq'] = row_seq[0] if row_seq else 0
 
 
 def handle_review_meeting_api(http_handler: Any, method: str, path: str, query: str) -> None:
