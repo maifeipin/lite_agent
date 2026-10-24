@@ -287,6 +287,8 @@ class FakeApiService : ApiService {
     var meetingDetailMap = mutableMapOf<String, MeetingDetail>()
     var shouldFailDecideConflict = false
     var shouldFailDecideTimeout = false
+    var simulateServerCommittedOnTimeout = false
+    var simulateServerOtherCommittedOnTimeout = false
     var decideTimeoutFailureCode = 504
     var lastDecideRequest: DecideMeetingRequest? = null
 
@@ -305,6 +307,38 @@ class FakeApiService : ApiService {
             return Response.error(409, """{"error":"版本冲突：议题已被更新"}""".toResponseBody("application/json".toMediaTypeOrNull()))
         }
         if (shouldFailDecideTimeout) {
+            val existing = meetingDetailMap[id] ?: MeetingDetail(id = id, title = "Mock Meeting", state = "open")
+            if (simulateServerCommittedOnTimeout) {
+                val newState = when (request.decision) {
+                    "approve" -> "approved"
+                    "revise" -> "changes_requested"
+                    "reject" -> "rejected"
+                    else -> existing.state
+                }
+                meetingDetailMap[id] = existing.copy(
+                    state = newState,
+                    lastSeqRaw = existing.lastSeq + 1,
+                    events = existing.events + MeetingEvent(
+                        seq = existing.lastSeq + 1,
+                        round = existing.round,
+                        actor = "human",
+                        kind = "decision",
+                        body = mapOf("decision" to request.decision, "request_id" to request.requestId)
+                    )
+                )
+            } else if (simulateServerOtherCommittedOnTimeout) {
+                meetingDetailMap[id] = existing.copy(
+                    state = "rejected",
+                    lastSeqRaw = existing.lastSeq + 1,
+                    events = existing.events + MeetingEvent(
+                        seq = existing.lastSeq + 1,
+                        round = existing.round,
+                        actor = "human",
+                        kind = "decision",
+                        body = mapOf("decision" to "reject", "request_id" to "bob-concurrent-uuid-999")
+                    )
+                )
+            }
             return Response.error(decideTimeoutFailureCode, """{"error":"Gateway Timeout"}""".toResponseBody("application/json".toMediaTypeOrNull()))
         }
         val existing = meetingDetailMap[id] ?: MeetingDetail(id = id, title = "Mock Meeting", state = "open")

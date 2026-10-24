@@ -1117,41 +1117,20 @@ class SanityTest {
 
         // 场景 A：网络超时，但服务端实际上执行成功，且审计事件中 request_id 与 decision 精确吻合
         fakeApi.shouldFailDecideTimeout = true
-        // 模拟服务端先入库事件后网络中断
-        var capturedReqId: String? = null
-        val originalDecide = fakeApi::decideReviewMeeting
+        fakeApi.simulateServerCommittedOnTimeout = true
+
         viewModel.decideMeeting(
             meetingId = meetId,
             decision = "approve",
             note = "网络超时重试测试",
             expectedVersion = 3
         )
-        // 在 decideReviewMeeting 被调用后，fakeApi.lastDecideRequest 已被赋值
-        capturedReqId = fakeApi.lastDecideRequest?.requestId
-        assertNotNull("客户端必须生成唯一的 request_id", capturedReqId)
-
-        // 模拟服务端其实已经记录了该 request_id 的 decision 事件
-        fakeApi.meetingDetailMap[meetId] = MeetingDetail(
-            id = meetId,
-            title = "超时核验议题",
-            state = "approved",
-            round = 1,
-            lastSeqRaw = 4,
-            events = listOf(
-                MeetingEvent(
-                    seq = 4,
-                    round = 1,
-                    actor = "human",
-                    kind = "decision",
-                    body = mapOf("decision" to "approve", "request_id" to capturedReqId)
-                )
-            )
-        )
         testScheduler.advanceUntilIdle()
 
         // 断言：由于 request_id 匹配且裁决一致，核验证实成功
         assertEquals("审批已成功同步至服务端", viewModel.uiState.value.actionSuccessMessage)
         assertNull(viewModel.uiState.value.errorMessage)
+        assertNotNull("客户端必须生成唯一的 request_id", fakeApi.lastDecideRequest?.requestId)
         viewModel.clearMessages()
 
         // 场景 B：提交超时，服务端议题状态虽然已不再是 awaiting_approval，但没有当前 request_id（被他人裁决）
@@ -1163,23 +1142,8 @@ class SanityTest {
             round = 1,
             lastSeqRaw = 10
         )
-        // 模拟提交失败时，另一个管理员 Bob 已经否决了议题，事件中的 request_id 是 Bob 的
-        fakeApi.meetingDetailMap[meetOther] = MeetingDetail(
-            id = meetOther,
-            title = "他人裁决并发议题",
-            state = "rejected",
-            round = 1,
-            lastSeqRaw = 11,
-            events = listOf(
-                MeetingEvent(
-                    seq = 11,
-                    round = 1,
-                    actor = "human",
-                    kind = "decision",
-                    body = mapOf("decision" to "reject", "request_id" to "bob-concurrent-uuid-999")
-                )
-            )
-        )
+        fakeApi.simulateServerCommittedOnTimeout = false
+        fakeApi.simulateServerOtherCommittedOnTimeout = true
 
         viewModel.decideMeeting(
             meetingId = meetOther,
