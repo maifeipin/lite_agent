@@ -1000,12 +1000,20 @@ class SanityTest {
 
     @Test
     fun todo_database_helper_db_key_computation() {
-        val key1 = TodoDatabaseHelper.computeDbKey("https://mail.maifeipin.com", "alice")
-        val key2 = TodoDatabaseHelper.computeDbKey("HTTPS://MAIL.MAIFEIPIN.COM/", "  ALICE  ")
-        assertEquals("不同大小写和空白的同一账号在同一服务器上必须生成完全相同的 SQLite Key", key1, key2)
+        val keyAliceLower = TodoDatabaseHelper.computeDbKey("https://mail.maifeipin.com", "alice")
+        val keyNormalized = TodoDatabaseHelper.computeDbKey("HTTPS://MAIL.MAIFEIPIN.COM/", "alice")
+        assertEquals("规范化主机与协议必须生成一致的主键", keyAliceLower, keyNormalized)
+        assertEquals(32, keyAliceLower.length)
+
+        val keyAliceUpper = TodoDatabaseHelper.computeDbKey("https://mail.maifeipin.com", "Alice")
+        assertNotEquals("用户名必须保留大小写身份语义，严禁将 Alice 与 alice 合并为同一缓存", keyAliceLower, keyAliceUpper)
+
+        val keyPathA = TodoDatabaseHelper.computeDbKey("https://mail.maifeipin.com/Proxy", "alice")
+        val keyPathB = TodoDatabaseHelper.computeDbKey("https://mail.maifeipin.com/proxy", "alice")
+        assertNotEquals("路径必须保留大小写身份语义，严禁混淆不同代理前缀", keyPathA, keyPathB)
 
         val keyBob = TodoDatabaseHelper.computeDbKey("https://mail.maifeipin.com", "bob")
-        assertNotEquals("同一服务器上的不同账号必须生成互相隔离的数据库沙箱 Key", key1, keyBob)
+        assertNotEquals("同一服务器上的不同账号必须生成互相隔离的数据库沙箱 Key", keyAliceLower, keyBob)
     }
 
     @Test
@@ -1086,6 +1094,127 @@ class SanityTest {
         assertNotNull(viewModel.uiState.value.actionSuccessMessage)
         assertTrue(viewModel.uiState.value.actionSuccessMessage!!.contains("已批准"))
         assertEquals("approved", fakeApi.meetingDetailMap["meet_001"]?.state)
+    }
+
+    @Test
+    fun meetings_view_model_timeout_verification_checks_request_id_and_audit_event() = runTest {
+        val serverUrl = "https://mail.maifeipin.com"
+        val fakeStorage = FakeTokenStorage(serverUrl)
+        val fakeApi = FakeApiService()
+        val fakeClient = FakeApiClient(fakeApi, fakeStorage)
+
+        val meetId = "meet_timeout_001"
+        fakeApi.meetingDetailMap[meetId] = MeetingDetail(
+            id = meetId,
+            title = "超时核验议题",
+            state = "awaiting_approval",
+            round = 1,
+            lastSeq = 3
+        )
+
+        val viewModel = MeetingsViewModel(fakeStorage, fakeClient)
+        testScheduler.advanceUntilIdle()
+
+        // 场景 A：网络超时，但服务端实际上执行成功，且审计事件中 request_id 与 decision 精确吻合
+        fakeApi.shouldFailDecideTimeout = true
+        // 模拟服务端先入库事件后网络中断
+        var capturedReqId: String? = null
+        val originalDecide = fakeApi::decideReviewMeeting
+        viewModel.decideMeeting(
+            meetingId = meetId,
+            decision = "approve",
+            note = "网络超时重试测试",
+            expectedVersion = 3
+        )
+        // 在 decideReviewMeeting 被调用后，fakeApi.lastDecideRequest 已被赋值
+        capturedReqId = fakeApi.lastDecideRequest?.requestId
+        assertNotNull("客户端必须生成唯一的 request_id", capturedReqId)
+
+        // 模拟服务端其实已经记录了该 request_id 的 decision 事件
+        fakeApi.meetingDetailMap[meetId] = MeetingDetail(
+            id = meetId,
+            title = "超时核验议题",
+            state = "approved",
+            round = 1,
+            lastSeq = 4,
+            events = listOf(
+                MeetingEvent(
+                    seq = 4,
+                    round = 1,
+                    actor = "human",
+                    kind = "decision",
+                    body = mapOf("decision" to "approve", "request_id" to capturedReqId)
+                )
+            )
+        )
+        testScheduler.advanceUntilIdle()
+
+        // 断言：由于 request_id 匹配且裁决一致，核验证实成功
+        assertEquals("审批已成功同步至服务端", viewModel.uiState.value.actionSuccessMessage)
+        assertNull(viewModel.uiState.value.errorMessage)
+        viewModel.clearMessages()
+
+        // 场景 B：提交超时，服务端议题状态虽然已不再是 awaiting_approval，但没有当前 request_id（被他人裁决）
+        val meetOther = "meet_other_002"
+        fakeApi.meetingDetailMap[meetOther] = MeetingDetail(
+            id = meetOther,
+            title = "他人裁决并发议题",
+            state = "awaiting_approval",
+            round = 1,
+            lastSeq = 10
+        )
+        // 模拟提交失败时，另一个管理员 Bob 已经否决了议题，事件中的 request_id 是 Bob 的
+        fakeApi.meetingDetailMap[meetOther] = MeetingDetail(
+            id = meetOther,
+            title = "他人裁决并发议题",
+            state = "rejected",
+            round = 1,
+            lastSeq = 11,
+            events = listOf(
+                MeetingEvent(
+                    seq = 11,
+                    round = 1,
+                    actor = "human",
+                    kind = "decision",
+                    body = mapOf("decision" to "reject", "request_id" to "bob-concurrent-uuid-999")
+                )
+            )
+        )
+
+        viewModel.decideMeeting(
+            meetingId = meetOther,
+            decision = "approve",
+            note = "我想批准",
+            expectedVersion = 10
+        )
+        testScheduler.advanceUntilIdle()
+
+        // 关键断言：严禁误报“审批已成功同步”！必须精准报告“状态已变化，本次提交结果未确认”
+        assertNull("他人裁决变更时严禁宣称本次审批成功同步", viewModel.uiState.value.actionSuccessMessage)
+        assertEquals("状态已变化，本次提交结果未确认", viewModel.uiState.value.errorMessage)
+        assertEquals("rejected", viewModel.uiState.value.selectedMeeting?.state)
+    }
+
+    @Test
+    fun meetings_view_model_account_switch_discards_stale_data() = runTest {
+        val serverUrl = "https://mail.maifeipin.com"
+        val fakeStorage = FakeTokenStorage(serverUrl)
+        val fakeApi = FakeApiService()
+        val fakeClient = FakeApiClient(fakeApi, fakeStorage)
+
+        val viewModel = MeetingsViewModel(fakeStorage, fakeClient)
+        testScheduler.advanceUntilIdle()
+
+        // 切换到 Bob 账号
+        viewModel.onSessionChanged(serverUrl, "bob")
+        testScheduler.advanceUntilIdle()
+
+        // 登出后状态清空
+        viewModel.onLoggedOut()
+        testScheduler.advanceUntilIdle()
+
+        assertTrue(viewModel.uiState.value.meetings.isEmpty())
+        assertNull(viewModel.uiState.value.selectedMeeting)
     }
 }
 

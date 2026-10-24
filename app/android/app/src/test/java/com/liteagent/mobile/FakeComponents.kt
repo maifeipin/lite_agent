@@ -286,6 +286,8 @@ class FakeApiService : ApiService {
     var meetingsResponse: List<MeetingItem> = emptyList()
     var meetingDetailMap = mutableMapOf<String, MeetingDetail>()
     var shouldFailDecideConflict = false
+    var shouldFailDecideTimeout = false
+    var decideTimeoutFailureCode = 504
     var lastDecideRequest: DecideMeetingRequest? = null
 
     override suspend fun getReviewMeetings(): Response<ReviewMeetingsResponse> {
@@ -301,6 +303,9 @@ class FakeApiService : ApiService {
         lastDecideRequest = request
         if (shouldFailDecideConflict) {
             return Response.error(409, """{"error":"版本冲突：议题已被更新"}""".toResponseBody("application/json".toMediaTypeOrNull()))
+        }
+        if (shouldFailDecideTimeout) {
+            return Response.error(decideTimeoutFailureCode, """{"error":"Gateway Timeout"}""".toResponseBody("application/json".toMediaTypeOrNull()))
         }
         val existing = meetingDetailMap[id] ?: MeetingDetail(id = id, title = "Mock Meeting", state = "open")
         val newState = when (request.decision) {

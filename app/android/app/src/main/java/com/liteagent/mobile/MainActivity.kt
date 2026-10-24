@@ -88,7 +88,7 @@ class MainActivity : ComponentActivity() {
                             val username = newSession?.username ?: "default"
                             chatViewModel.onSessionChanged(serverUrl, newSession?.sessionId ?: "")
                             todosViewModel.onSessionChanged(serverUrl, username)
-                            meetingsViewModel.onSessionChanged(serverUrl)
+                            meetingsViewModel.onSessionChanged(serverUrl, username)
                         }
                     )
                 } else {
@@ -145,7 +145,7 @@ fun MainAppScaffold(
                 val username = newSession?.username ?: "default"
                 chatViewModel.onServerSwitched(newServerUrl)
                 todosViewModel.onSessionChanged(newServerUrl, username)
-                meetingsViewModel.onSessionChanged(newServerUrl)
+                meetingsViewModel.onSessionChanged(newServerUrl, username)
             },
             onLoggedOut = {
                 showServerConfig = false

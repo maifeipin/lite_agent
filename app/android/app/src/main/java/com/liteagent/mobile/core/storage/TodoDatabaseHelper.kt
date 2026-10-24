@@ -38,10 +38,13 @@ class TodoDatabaseHelper(
             val cleanUrl = try {
                 com.liteagent.mobile.core.network.ServerUrlNormalizer.normalize(serverUrl)
             } catch (_: Exception) {
-                serverUrl.trim().trimEnd('/').lowercase()
+                serverUrl.trim().trimEnd('/')
             }
-            val raw = "${cleanUrl.lowercase()}_${username.trim().lowercase()}"
-            return raw.hashCode().toUInt().toString(16)
+            val trimmedUser = username.trim()
+            val canonical = "$cleanUrl|$trimmedUser"
+            val md = java.security.MessageDigest.getInstance("SHA-256")
+            val digest = md.digest(canonical.toByteArray(Charsets.UTF_8))
+            return digest.joinToString("") { "%02x".format(it) }.take(32)
         }
     }
 

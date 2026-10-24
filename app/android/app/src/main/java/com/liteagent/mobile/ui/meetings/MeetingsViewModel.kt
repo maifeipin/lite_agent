@@ -42,35 +42,57 @@ class MeetingsViewModel(
     val uiState: StateFlow<MeetingsUiState> = _uiState.asStateFlow()
 
     private var boundServerUrl: String = ""
+    private var boundUsername: String = ""
+    private var sessionEpoch: Long = 0L
+    private var activeLoadJob: kotlinx.coroutines.Job? = null
+    private var activeDetailJob: kotlinx.coroutines.Job? = null
+    private var activeDecisionJob: kotlinx.coroutines.Job? = null
 
     init {
-        viewModelScope.launch {
-            boundServerUrl = ServerUrlNormalizer.normalize(tokenStorage.getActiveServerUrl())
-            loadMeetings()
+        activeLoadJob = viewModelScope.launch {
+            val server = ServerUrlNormalizer.normalize(tokenStorage.getActiveServerUrl())
+            val session = tokenStorage.getSession(server)
+            val username = session?.username ?: "default"
+            initSessionAndLoad(server, username)
         }
     }
 
+    private suspend fun initSessionAndLoad(serverUrl: String, username: String) {
+        val currentEpoch = ++sessionEpoch
+        boundServerUrl = serverUrl
+        boundUsername = username
+        _uiState.value = MeetingsUiState(isLoading = true)
+        loadMeetingsInternal(currentEpoch)
+    }
+
     fun refresh() {
-        viewModelScope.launch {
+        val currentEpoch = sessionEpoch
+        activeLoadJob?.cancel()
+        activeLoadJob = viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isRefreshing = true, errorMessage = null)
-            loadMeetingsInternal()
+            loadMeetingsInternal(currentEpoch)
         }
     }
 
     fun loadMeetings() {
-        viewModelScope.launch {
+        val currentEpoch = sessionEpoch
+        activeLoadJob?.cancel()
+        activeLoadJob = viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
-            loadMeetingsInternal()
+            loadMeetingsInternal(currentEpoch)
         }
     }
 
-    private suspend fun loadMeetingsInternal() {
+    private suspend fun loadMeetingsInternal(epoch: Long = sessionEpoch) {
+        if (epoch != sessionEpoch) return
         val currentServer = boundServerUrl.ifEmpty {
             ServerUrlNormalizer.normalize(tokenStorage.getActiveServerUrl()).also { boundServerUrl = it }
         }
 
         try {
             val result = apiClient.getReviewMeetings(currentServer)
+            if (epoch != sessionEpoch) return
+
             if (result.isSuccess) {
                 val list = result.getOrNull() ?: emptyList()
                 val awaiting = list.filter { it.isAwaitingApproval }
@@ -94,19 +116,25 @@ class MeetingsViewModel(
             }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            _uiState.value = _uiState.value.copy(
-                isLoading = false,
-                isRefreshing = false,
-                errorMessage = e.localizedMessage ?: e.message
-            )
+            if (epoch == sessionEpoch) {
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    isRefreshing = false,
+                    errorMessage = e.localizedMessage ?: e.message
+                )
+            }
         }
     }
 
     fun selectMeeting(meetingId: String) {
-        viewModelScope.launch {
+        val currentEpoch = sessionEpoch
+        activeDetailJob?.cancel()
+        activeDetailJob = viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isDetailLoading = true, errorMessage = null)
             try {
                 val result = apiClient.getReviewMeetingDetail(meetingId, serverUrl = boundServerUrl)
+                if (currentEpoch != sessionEpoch) return@launch
+
                 if (result.isSuccess) {
                     _uiState.value = _uiState.value.copy(
                         selectedMeeting = result.getOrNull(),
@@ -120,15 +148,18 @@ class MeetingsViewModel(
                 }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
-                _uiState.value = _uiState.value.copy(
-                    isDetailLoading = false,
-                    errorMessage = e.localizedMessage ?: e.message
-                )
+                if (currentEpoch == sessionEpoch) {
+                    _uiState.value = _uiState.value.copy(
+                        isDetailLoading = false,
+                        errorMessage = e.localizedMessage ?: e.message
+                    )
+                }
             }
         }
     }
 
     fun closeMeetingDetail() {
+        activeDetailJob?.cancel()
         _uiState.value = _uiState.value.copy(selectedMeeting = null)
     }
 
@@ -142,7 +173,9 @@ class MeetingsViewModel(
         expectedVersion: Int,
         onSuccess: () -> Unit = {}
     ) {
-        viewModelScope.launch {
+        val currentEpoch = sessionEpoch
+        activeDecisionJob?.cancel()
+        activeDecisionJob = viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isSubmittingDecision = true, errorMessage = null, conflictErrorMessage = null)
             val requestId = UUID.randomUUID().toString()
 
@@ -155,6 +188,8 @@ class MeetingsViewModel(
 
             try {
                 val result = apiClient.decideReviewMeeting(meetingId, request, serverUrl = boundServerUrl)
+                if (currentEpoch != sessionEpoch) return@launch
+
                 if (result.isSuccess) {
                     val updated = result.getOrNull()
                     val decisionText = when (decision) {
@@ -169,7 +204,7 @@ class MeetingsViewModel(
                         actionSuccessMessage = "审批成功：$decisionText"
                     )
                     onSuccess()
-                    loadMeetingsInternal()
+                    loadMeetingsInternal(currentEpoch)
                 } else {
                     val ex = result.exceptionOrNull()
                     if (ex is ConflictException) {
@@ -180,20 +215,34 @@ class MeetingsViewModel(
                         )
                         // 自动重新拉取最新详情与列表
                         selectMeeting(meetingId)
-                        loadMeetingsInternal()
+                        loadMeetingsInternal(currentEpoch)
                     } else {
-                        // 瞬态或超时故障：进行状态核验
+                        // 瞬态或超时故障：进行状态与 request_id 审计事件核验
                         val verifyResult = apiClient.getReviewMeetingDetail(meetingId, serverUrl = boundServerUrl)
+                        if (currentEpoch != sessionEpoch) return@launch
+
                         val verifyDetail = verifyResult.getOrNull()
-                        if (verifyDetail != null && verifyDetail.state != "awaiting_approval" && verifyDetail.state != "waiting") {
-                            // 实际上已在服务端执行成功
+                        val matchingDecision = verifyDetail?.events?.find {
+                            it.kind.equals("decision", ignoreCase = true) && it.requestId == requestId
+                        }
+
+                        if (matchingDecision != null && matchingDecision.decisionValue.equals(decision, ignoreCase = true)) {
+                            // 审计事件完全匹配本次 request_id 与裁决类型，确认服务端已成功应用
                             _uiState.value = _uiState.value.copy(
                                 isSubmittingDecision = false,
                                 selectedMeeting = verifyDetail,
                                 actionSuccessMessage = "审批已成功同步至服务端"
                             )
                             onSuccess()
-                            loadMeetingsInternal()
+                            loadMeetingsInternal(currentEpoch)
+                        } else if (verifyDetail != null && !verifyDetail.isAwaitingApproval) {
+                            // 状态已变化，但未核实到本次 request_id（可能被其他人裁决或提交失败）
+                            _uiState.value = _uiState.value.copy(
+                                isSubmittingDecision = false,
+                                selectedMeeting = verifyDetail,
+                                errorMessage = "状态已变化，本次提交结果未确认"
+                            )
+                            loadMeetingsInternal(currentEpoch)
                         } else {
                             _uiState.value = _uiState.value.copy(
                                 isSubmittingDecision = false,
@@ -204,22 +253,32 @@ class MeetingsViewModel(
                 }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
-                _uiState.value = _uiState.value.copy(
-                    isSubmittingDecision = false,
-                    errorMessage = e.localizedMessage ?: e.message
-                )
+                if (currentEpoch == sessionEpoch) {
+                    _uiState.value = _uiState.value.copy(
+                        isSubmittingDecision = false,
+                        errorMessage = e.localizedMessage ?: e.message
+                    )
+                }
             }
         }
     }
 
-    fun onSessionChanged(serverUrl: String) {
-        boundServerUrl = ServerUrlNormalizer.normalize(serverUrl)
-        _uiState.value = MeetingsUiState()
-        loadMeetings()
+    fun onSessionChanged(serverUrl: String, username: String = "") {
+        activeLoadJob?.cancel()
+        activeDetailJob?.cancel()
+        activeDecisionJob?.cancel()
+        activeLoadJob = viewModelScope.launch {
+            initSessionAndLoad(serverUrl, username)
+        }
     }
 
     fun onLoggedOut() {
+        activeLoadJob?.cancel()
+        activeDetailJob?.cancel()
+        activeDecisionJob?.cancel()
+        sessionEpoch++
         boundServerUrl = ""
+        boundUsername = ""
         _uiState.value = MeetingsUiState()
     }
 

@@ -809,6 +809,18 @@ class ReviewMeetingAPITests(unittest.TestCase):
         self.assertEqual(status_200, 200)
         self.assertEqual(res_200["state"], "approved")
 
+        # Idempotent retry with same request_id succeeds without duplicate decision event
+        status_retry, res_retry = self.request("POST", f"/{mid}", {
+            "decision": "approve",
+            "note": "Approved via mobile client",
+            "expected_version": last_seq,
+            "request_id": "test-uuid-client-1"
+        }, token="admin-secret")
+        self.assertEqual(status_retry, 200)
+        self.assertEqual(res_retry["state"], "approved")
+        decision_events = [e for e in res_retry["events"] if e.get("kind") == "decision"]
+        self.assertEqual(len(decision_events), 1)
+
 
     def test_meeting_cors_preflight_allows_dashboard_not_other_origins(self):
         for origin, allowed in (("https://mail.maifeipin.com", True), ("https://evil.example", False)):

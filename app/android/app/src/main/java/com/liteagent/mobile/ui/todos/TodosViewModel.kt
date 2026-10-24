@@ -13,6 +13,7 @@ import com.liteagent.mobile.core.security.SecureTokenStorage
 import com.liteagent.mobile.core.storage.TodoDatabaseHelper
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -66,9 +67,12 @@ class TodosViewModel(
     private var dbHelper: TodoDatabaseHelper? = null
     private var boundServerUrl: String = ""
     private var boundUsername: String = ""
+    private var sessionEpoch: Long = 0L
+    private var activeInitJob: Job? = null
+    private var activeFetchJob: Job? = null
 
     init {
-        viewModelScope.launch {
+        activeInitJob = viewModelScope.launch {
             val server = ServerUrlNormalizer.normalize(tokenStorage.getActiveServerUrl())
             val session = tokenStorage.getSession(server)
             val username = session?.username ?: "default"
@@ -77,68 +81,99 @@ class TodosViewModel(
     }
 
     private suspend fun initDatabaseAndLoad(serverUrl: String, username: String) {
+        val currentEpoch = ++sessionEpoch
+        _uiState.value = TodosUiState(isLoading = true)
+
         withContext(Dispatchers.IO) {
-            dbHelper?.close()
             val dbKey = TodoDatabaseHelper.computeDbKey(serverUrl, username)
-            val helper = TodoDatabaseHelper(context, dbKey)
-            dbHelper = helper
+            val newHelper = TodoDatabaseHelper(context, dbKey)
+
+            if (currentEpoch != sessionEpoch) {
+                newHelper.close()
+                return@withContext
+            }
+
+            dbHelper?.close()
+            dbHelper = newHelper
             boundServerUrl = serverUrl
             boundUsername = username
 
             // 1. 0ms 闪电加载本地 SQLite 离线缓存
-            val cached = helper.getAll()
+            val cached = newHelper.getAll()
+            if (currentEpoch != sessionEpoch) return@withContext
+
             withContext(Dispatchers.Main) {
-                _uiState.value = _uiState.value.copy(
-                    todos = cached,
-                    isLoading = cached.isEmpty()
-                )
+                if (currentEpoch == sessionEpoch) {
+                    _uiState.value = _uiState.value.copy(
+                        todos = cached,
+                        isLoading = cached.isEmpty()
+                    )
+                }
             }
 
             // 2. 异步网络拉取最新服务端待办
-            fetchTodosFromServer(isRefresh = false)
+            fetchTodosFromServer(isRefresh = false, epoch = currentEpoch, helper = newHelper)
         }
     }
 
     fun refresh() {
-        viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isRefreshing = true, errorMessage = null)
-            fetchTodosFromServer(isRefresh = true)
+        val currentEpoch = sessionEpoch
+        val currentHelper = dbHelper
+        _uiState.value = _uiState.value.copy(isRefreshing = true, errorMessage = null)
+        activeFetchJob?.cancel()
+        activeFetchJob = viewModelScope.launch {
+            fetchTodosFromServer(isRefresh = true, epoch = currentEpoch, helper = currentHelper)
         }
     }
 
-    private suspend fun fetchTodosFromServer(isRefresh: Boolean) {
+    private suspend fun fetchTodosFromServer(
+        isRefresh: Boolean,
+        epoch: Long = sessionEpoch,
+        helper: TodoDatabaseHelper? = dbHelper
+    ) {
+        if (epoch != sessionEpoch || helper == null || helper != dbHelper) return
         val currentServer = boundServerUrl
         try {
             val result = apiClient.getTodos(currentServer)
+            if (epoch != sessionEpoch || helper != dbHelper) return
+
             if (result.isSuccess) {
                 val serverTodos = result.getOrNull() ?: emptyList()
                 withContext(Dispatchers.IO) {
-                    dbHelper?.saveAll(serverTodos)
+                    if (epoch == sessionEpoch && helper == dbHelper) {
+                        helper.saveAll(serverTodos)
+                    }
                 }
-                _uiState.value = _uiState.value.copy(
-                    todos = serverTodos,
-                    isLoading = false,
-                    isRefreshing = false,
-                    isOffline = false,
-                    errorMessage = null
-                )
+                if (epoch == sessionEpoch) {
+                    _uiState.value = _uiState.value.copy(
+                        todos = serverTodos,
+                        isLoading = false,
+                        isRefreshing = false,
+                        isOffline = false,
+                        errorMessage = null
+                    )
+                }
             } else {
-                val err = result.exceptionOrNull()?.message ?: "同步待办失败"
+                if (epoch == sessionEpoch) {
+                    val err = result.exceptionOrNull()?.message ?: "同步待办失败"
+                    _uiState.value = _uiState.value.copy(
+                        isLoading = false,
+                        isRefreshing = false,
+                        isOffline = true,
+                        errorMessage = if (isRefresh) err else null
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            if (epoch == sessionEpoch) {
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
                     isRefreshing = false,
                     isOffline = true,
-                    errorMessage = if (isRefresh) err else null
+                    errorMessage = if (isRefresh) (e.localizedMessage ?: e.message) else null
                 )
             }
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            _uiState.value = _uiState.value.copy(
-                isLoading = false,
-                isRefreshing = false,
-                isOffline = true,
-                errorMessage = if (isRefresh) (e.localizedMessage ?: e.message) else null
-            )
         }
     }
 
@@ -261,12 +296,17 @@ class TodosViewModel(
     }
 
     fun onSessionChanged(serverUrl: String, username: String) {
-        viewModelScope.launch {
+        activeInitJob?.cancel()
+        activeFetchJob?.cancel()
+        activeInitJob = viewModelScope.launch {
             initDatabaseAndLoad(serverUrl, username)
         }
     }
 
     fun onLoggedOut() {
+        activeInitJob?.cancel()
+        activeFetchJob?.cancel()
+        sessionEpoch++
         dbHelper?.close()
         dbHelper = null
         boundServerUrl = ""

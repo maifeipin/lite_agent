@@ -52,6 +52,9 @@ data class MeetingEvent(
 
     val decisionValue: String?
         get() = (body["decision"] as? String)
+
+    val requestId: String?
+        get() = (body["request_id"] as? String)
 }
 
 data class MeetingDetail(

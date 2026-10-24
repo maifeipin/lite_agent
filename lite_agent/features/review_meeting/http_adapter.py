@@ -317,23 +317,47 @@ def handle_review_meeting_api(http_handler: Any, method: str, path: str, query: 
                     if decision not in ('approve', 'reject', 'revise'):
                         raise access.ReviewAPIError("decision 必须是 'approve'、'reject' 或 'revise'", 400)
                     row = room.get(db, meeting_id)
-                    if row['state'] != room.WAITING or row['archived_at'] is not None:
-                        raise access.ReviewAPIError('只有待审批议题可由人工作出裁决', 400)
-                    expected_version = payload.get('expected_version')
-                    if expected_version is not None:
-                        last_seq = db.execute("SELECT COALESCE(MAX(seq), 0) FROM events WHERE meeting_id=?", (meeting_id,)).fetchone()[0]
-                        if isinstance(expected_version, bool) or not isinstance(expected_version, int) or expected_version != last_seq:
-                            raise access.ReviewAPIError(f'版本冲突：当前议题最新序号为 {last_seq}，期望序号为 {expected_version}', 409)
-                    note = access._text(payload.get('note', '') or '', 'note') if payload.get('note') else ''
-                    body = {'decision': decision, 'note': note}
+
                     req_id = payload.get('request_id')
+                    existing_decision = None
                     if req_id:
-                        body['request_id'] = str(req_id)[:64]
-                    room.append(db, row, 'human', 'decision', body)
-                    next_state = {'approve': 'approved', 'revise': 'changes_requested', 'reject': 'rejected'}[decision]
-                    db.execute('UPDATE meetings SET state=? WHERE id=?', (next_state, meeting_id))
-                    result = room.snapshot(db, meeting_id, full=True)
-                    status = 200
+                        req_id_str = str(req_id)[:64]
+                        cur = db.execute(
+                            "SELECT seq, body FROM events WHERE meeting_id=? AND kind='decision' ORDER BY seq DESC",
+                            (meeting_id,)
+                        )
+                        for ev_seq, ev_body_raw in cur.fetchall():
+                            try:
+                                ev_body = json.loads(ev_body_raw) if isinstance(ev_body_raw, str) else ev_body_raw
+                                if isinstance(ev_body, dict) and ev_body.get('request_id') == req_id_str:
+                                    existing_decision = (ev_seq, ev_body)
+                                    break
+                            except Exception:
+                                pass
+
+                    if existing_decision is not None:
+                        # 幂等返回已有裁决结果快照，不重复追加事件
+                        result = room.snapshot(db, meeting_id, full=True)
+                        review_enrich(result, db, meeting_id, None, True)
+                        status = 200
+                    else:
+                        if row['state'] != room.WAITING or row['archived_at'] is not None:
+                            raise access.ReviewAPIError('只有待审批议题可由人工作出裁决', 400)
+                        expected_version = payload.get('expected_version')
+                        if expected_version is not None:
+                            last_seq = db.execute("SELECT COALESCE(MAX(seq), 0) FROM events WHERE meeting_id=?", (meeting_id,)).fetchone()[0]
+                            if isinstance(expected_version, bool) or not isinstance(expected_version, int) or expected_version != last_seq:
+                                raise access.ReviewAPIError(f'版本冲突：当前议题最新序号为 {last_seq}，期望序号为 {expected_version}', 409)
+                        note = access._text(payload.get('note', '') or '', 'note') if payload.get('note') else ''
+                        body = {'decision': decision, 'note': note}
+                        if req_id:
+                            body['request_id'] = str(req_id)[:64]
+                        room.append(db, row, 'human', 'decision', body)
+                        next_state = {'approve': 'approved', 'revise': 'changes_requested', 'reject': 'rejected'}[decision]
+                        db.execute('UPDATE meetings SET state=? WHERE id=?', (next_state, meeting_id))
+                        result = room.snapshot(db, meeting_id, full=True)
+                        review_enrich(result, db, meeting_id, None, True)
+                        status = 200
                 elif method == 'POST' and action == 'invites':
                     result = access.issue_seat_invite(
                         db, meeting_id, payload.get('label', 'agent'), payload.get('invite_ttl_seconds', access.INVITE_TTL_DEFAULT))
