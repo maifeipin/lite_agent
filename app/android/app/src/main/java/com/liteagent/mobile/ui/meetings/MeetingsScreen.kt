@@ -801,7 +801,7 @@ private fun DecisionConfirmDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Text(text = "确认$actionName会审议题", fontWeight = FontWeight.Bold)
+            Text(text = "确认【${actionName}】会审议题", fontWeight = FontWeight.Bold)
         },
         text = {
             Column(
