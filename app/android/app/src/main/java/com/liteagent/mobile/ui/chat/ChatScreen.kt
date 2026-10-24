@@ -22,8 +22,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalFocusManager
 import com.liteagent.mobile.core.network.models.MessageItem
 import com.liteagent.mobile.core.network.models.SessionItem
+import com.liteagent.mobile.ui.common.autoDismissKeyboardOnTap
 import com.liteagent.mobile.ui.theme.*
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -32,6 +34,8 @@ fun ChatScreen(
     viewModel: ChatViewModel,
     onOpenSettings: () -> Unit
 ) {
+    val focusManager = LocalFocusManager.current
+    val isImeVisible = WindowInsets.isImeVisible
     val sessions by viewModel.sessions.collectAsState()
     val currentSession by viewModel.currentSession.collectAsState()
     val messages by viewModel.messages.collectAsState()
@@ -47,7 +51,7 @@ fun ChatScreen(
 
     val listState = rememberLazyListState()
 
-    LaunchedEffect(messages.size, taskLogs.size) {
+    LaunchedEffect(messages.size, taskLogs.size, isImeVisible) {
         if (messages.isNotEmpty() || taskLogs.isNotEmpty()) {
             listState.animateScrollToItem(index = (messages.size + (if (taskLogs.isNotEmpty()) 1 else 0)).coerceAtLeast(0))
         }
@@ -228,7 +232,8 @@ fun ChatScreen(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp),
+                .padding(horizontal = 16.dp)
+                .autoDismissKeyboardOnTap(focusManager),
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(vertical = 16.dp)
         ) {

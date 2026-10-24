@@ -23,6 +23,8 @@ import androidx.compose.ui.unit.sp
 import com.liteagent.mobile.core.network.ApiClient
 import com.liteagent.mobile.core.network.ServerUrlNormalizer
 import com.liteagent.mobile.core.security.SecureTokenStorage
+import com.liteagent.mobile.ui.common.autoDismissKeyboardOnTap
+import com.liteagent.mobile.ui.common.fullScreenInputPadding
 import com.liteagent.mobile.ui.theme.*
 import kotlinx.coroutines.launch
 
@@ -51,6 +53,13 @@ fun LoginScreen(
         val session = tokenStorage.getSession(serverUrl)
         if (session != null && session.username.isNotBlank()) {
             username = session.username
+        }
+    }
+
+    val isImeVisible = WindowInsets.isImeVisible
+    LaunchedEffect(isImeVisible) {
+        if (isImeVisible) {
+            scrollState.animateScrollTo(scrollState.maxValue)
         }
     }
 
@@ -89,12 +98,14 @@ fun LoginScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
+            .fullScreenInputPadding()
+            .autoDismissKeyboardOnTap(focusManager)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(scrollState)
-                .padding(horizontal = 24.dp, vertical = 48.dp),
+                .padding(horizontal = 24.dp, vertical = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {

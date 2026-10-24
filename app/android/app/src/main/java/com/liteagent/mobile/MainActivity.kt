@@ -96,6 +96,7 @@ enum class NavigationTab(val label: String, val icon: ImageVector) {
     DISCOVER("发现", Icons.Default.Explore)
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun MainAppScaffold(
     tokenStorage: SecureTokenStorage,
@@ -105,6 +106,7 @@ fun MainAppScaffold(
 ) {
     var selectedTab by remember { mutableStateOf(NavigationTab.CHAT) }
     var showServerConfig by remember { mutableStateOf(false) }
+    val isImeVisible = WindowInsets.isImeVisible
 
     if (showServerConfig) {
         ServerConfigDialog(
@@ -123,27 +125,31 @@ fun MainAppScaffold(
     }
 
     Scaffold(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .imePadding(),
         containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
-            NavigationBar(
-                containerColor = MaterialTheme.colorScheme.surface,
-                tonalElevation = 4.dp
-            ) {
-                NavigationTab.values().forEach { tab ->
-                    NavigationBarItem(
-                        selected = selectedTab == tab,
-                        onClick = { selectedTab = tab },
-                        icon = { Icon(tab.icon, contentDescription = tab.label) },
-                        label = { Text(tab.label, fontSize = 12.sp) },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = MaterialTheme.colorScheme.primary,
-                            selectedTextColor = MaterialTheme.colorScheme.primary,
-                            unselectedIconColor = TextMuted,
-                            unselectedTextColor = TextMuted,
-                            indicatorColor = MaterialTheme.colorScheme.surfaceVariant
+            if (!isImeVisible) {
+                NavigationBar(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 4.dp
+                ) {
+                    NavigationTab.values().forEach { tab ->
+                        NavigationBarItem(
+                            selected = selectedTab == tab,
+                            onClick = { selectedTab = tab },
+                            icon = { Icon(tab.icon, contentDescription = tab.label) },
+                            label = { Text(tab.label, fontSize = 12.sp) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = MaterialTheme.colorScheme.primary,
+                                selectedTextColor = MaterialTheme.colorScheme.primary,
+                                unselectedIconColor = TextMuted,
+                                unselectedTextColor = TextMuted,
+                                indicatorColor = MaterialTheme.colorScheme.surfaceVariant
+                            )
                         )
-                    )
+                    }
                 }
             }
         }
