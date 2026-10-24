@@ -348,4 +348,115 @@ open class ApiClient(
         val service = tempRetrofit.create(ApiService::class.java)
         return service.getSessions()
     }
+
+    // --- 待办事项 (Todos) API 封装 ---
+    open suspend fun getTodos(serverUrl: String? = null): Result<List<TodoItem>> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getTodos()
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                Result.success(response.body()!!.data ?: emptyList())
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "获取待办失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun createTodo(request: CreateTodoRequest, serverUrl: String? = null): Result<String> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.createTodo(request)
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                Result.success(response.body()!!.message ?: "创建成功")
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "创建待办失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun updateTodo(id: String, request: UpdateTodoRequest, serverUrl: String? = null): Result<String> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.updateTodo(id, request)
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                Result.success(response.body()!!.message ?: "更新成功")
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "更新待办失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun deleteTodo(id: String, serverUrl: String? = null): Result<Unit> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.deleteTodo(id)
+            if (response.isSuccessful) {
+                Result.success(Unit)
+            } else {
+                Result.failure(Exception("删除失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    // --- 会审决策中枢 (Review Meetings) API 封装 ---
+    open suspend fun getReviewMeetings(serverUrl: String? = null): Result<List<MeetingItem>> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getReviewMeetings()
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!.meetings)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "获取会审列表失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun getReviewMeetingDetail(id: String, since: Int = 0, serverUrl: String? = null): Result<MeetingDetail> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getReviewMeetingDetail(id, since)
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "获取会议详情失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun decideReviewMeeting(id: String, request: DecideMeetingRequest, serverUrl: String? = null): Result<MeetingDetail> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.decideReviewMeeting(id, request)
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!)
+            } else if (response.code() == 409) {
+                val errMsg = try {
+                    response.errorBody()?.string()?.let { gson.fromJson(it, Map::class.java) }?.get("error")?.toString()
+                } catch (_: Exception) { null } ?: "版本冲突：议题已被更新，请刷新后重试"
+                Result.failure(ConflictException(errMsg))
+            } else {
+                val errMsg = try {
+                    response.errorBody()?.string()?.let { gson.fromJson(it, Map::class.java) }?.get("error")?.toString()
+                } catch (_: Exception) { null } ?: "裁决失败 (${response.code()})"
+                Result.failure(Exception(errMsg))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
 }
+
+class ConflictException(message: String) : Exception(message)
+

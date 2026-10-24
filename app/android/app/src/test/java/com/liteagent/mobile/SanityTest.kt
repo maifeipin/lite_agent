@@ -17,6 +17,11 @@ import com.liteagent.mobile.ui.chat.ChatViewModel
 import com.liteagent.mobile.core.network.ApiClient
 import com.liteagent.mobile.core.network.ApiService
 import com.liteagent.mobile.core.network.AuthenticationException
+import com.liteagent.mobile.core.network.models.*
+import com.liteagent.mobile.core.storage.TodoDatabaseHelper
+import com.liteagent.mobile.ui.meetings.MeetingsViewModel
+import com.liteagent.mobile.ui.todos.TodoFilter
+import com.liteagent.mobile.ui.todos.TodosUiState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.runBlocking
@@ -967,4 +972,120 @@ class SanityTest {
         assertNotNull(bodyContent)
         assertTrue(bodyContent!!.contains("stale_session_401"))
     }
+
+    @Test
+    fun todo_models_and_filter_state_logic() {
+        val pendingTodo = TodoItem(id = "1", title = "Task 1", status = "pending")
+        val activeTodo = TodoItem(id = "2", title = "Task 2", status = "active")
+        val doneTodo = TodoItem(id = "3", title = "Task 3", status = "done")
+
+        assertFalse(pendingTodo.isCompleted)
+        assertFalse(activeTodo.isCompleted)
+        assertTrue(doneTodo.isCompleted)
+
+        val uiStateAll = TodosUiState(todos = listOf(pendingTodo, activeTodo, doneTodo), filter = TodoFilter.ALL)
+        assertEquals(3, uiStateAll.filteredTodos.size)
+        assertEquals(1, uiStateAll.pendingCount)
+        assertEquals(1, uiStateAll.activeCount)
+        assertEquals(1, uiStateAll.doneCount)
+
+        val uiStatePending = uiStateAll.copy(filter = TodoFilter.PENDING)
+        assertEquals(1, uiStatePending.filteredTodos.size)
+        assertEquals("Task 1", uiStatePending.filteredTodos.first().title)
+
+        val uiStateDone = uiStateAll.copy(filter = TodoFilter.DONE)
+        assertEquals(1, uiStateDone.filteredTodos.size)
+        assertEquals("Task 3", uiStateDone.filteredTodos.first().title)
+    }
+
+    @Test
+    fun todo_database_helper_db_key_computation() {
+        val key1 = TodoDatabaseHelper.computeDbKey("https://mail.maifeipin.com", "alice")
+        val key2 = TodoDatabaseHelper.computeDbKey("HTTPS://MAIL.MAIFEIPIN.COM/", "  ALICE  ")
+        assertEquals("不同大小写和空白的同一账号在同一服务器上必须生成完全相同的 SQLite Key", key1, key2)
+
+        val keyBob = TodoDatabaseHelper.computeDbKey("https://mail.maifeipin.com", "bob")
+        assertNotEquals("同一服务器上的不同账号必须生成互相隔离的数据库沙箱 Key", key1, keyBob)
+    }
+
+    @Test
+    fun meeting_models_state_and_event_predicates() {
+        val awaitingMeeting = MeetingItem(id = "m1", title = "Release Meeting", state = "awaiting_approval", round = 2)
+        val openMeeting = MeetingItem(id = "m2", title = "Draft Meeting", state = "open")
+        val approvedMeeting = MeetingItem(id = "m3", title = "Approved Meeting", state = "approved")
+        val rejectedMeeting = MeetingItem(id = "m4", title = "Rejected Meeting", state = "rejected")
+        val changesMeeting = MeetingItem(id = "m5", title = "Revise Meeting", state = "changes_requested")
+
+        assertTrue(awaitingMeeting.isAwaitingApproval)
+        assertFalse(openMeeting.isAwaitingApproval)
+        assertTrue(approvedMeeting.isApproved)
+        assertTrue(rejectedMeeting.isRejected)
+        assertTrue(changesMeeting.isChangesRequested)
+
+        val reviewEvent = MeetingEvent(
+            seq = 1,
+            round = 1,
+            actor = "security_lead",
+            kind = "review",
+            body = mapOf("position" to "support", "text" to "安全审计无异常，予以通过")
+        )
+        assertEquals("support", reviewEvent.reviewPosition)
+        assertEquals("安全审计无异常，予以通过", reviewEvent.reviewText)
+    }
+
+    @Test
+    fun meetings_view_model_decision_concurrency_and_conflict_handling() = runTest {
+        val serverUrl = "https://mail.maifeipin.com"
+        val fakeStorage = FakeTokenStorage(serverUrl)
+        val fakeApi = FakeApiService()
+        val fakeClient = FakeApiClient(fakeApi, fakeStorage)
+
+        val testMeeting = MeetingItem(id = "meet_001", title = "Sprint 2 发布审批", state = "awaiting_approval", round = 1)
+        fakeApi.meetingsResponse = listOf(testMeeting)
+        fakeApi.meetingDetailMap["meet_001"] = MeetingDetail(
+            id = "meet_001",
+            title = "Sprint 2 发布审批",
+            state = "awaiting_approval",
+            round = 1,
+            lastSeq = 5
+        )
+
+        val viewModel = MeetingsViewModel(fakeStorage, fakeClient)
+        testScheduler.advanceUntilIdle()
+
+        assertEquals(1, viewModel.uiState.value.meetings.size)
+        assertEquals(1, viewModel.uiState.value.waitingCount)
+
+        // 1. 模拟 409 Conflict 版本冲突
+        fakeApi.shouldFailDecideConflict = true
+        viewModel.decideMeeting(
+            meetingId = "meet_001",
+            decision = "approve",
+            note = "准予发布",
+            expectedVersion = 5
+        )
+        testScheduler.advanceUntilIdle()
+
+        assertNotNull("409 Conflict 必须记录冲突提示信息", viewModel.uiState.value.conflictErrorMessage)
+        assertTrue(viewModel.uiState.value.conflictErrorMessage!!.contains("版本冲突"))
+        assertNotNull("必须传递包含 request_id 的决策请求", fakeApi.lastDecideRequest)
+        assertNotNull(fakeApi.lastDecideRequest?.requestId)
+        assertEquals(5, fakeApi.lastDecideRequest?.expectedVersion)
+
+        // 2. 模拟正常审批决策通过
+        fakeApi.shouldFailDecideConflict = false
+        viewModel.decideMeeting(
+            meetingId = "meet_001",
+            decision = "approve",
+            note = "准予发布",
+            expectedVersion = 5
+        )
+        testScheduler.advanceUntilIdle()
+
+        assertNull(viewModel.uiState.value.conflictErrorMessage)
+        assertNotNull(viewModel.uiState.value.actionSuccessMessage)
+        assertTrue(viewModel.uiState.value.actionSuccessMessage!!.contains("已批准"))
+        assertEquals("approved", fakeApi.meetingDetailMap["meet_001"]?.state)
+    }
 }
+

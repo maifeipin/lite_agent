@@ -759,6 +759,57 @@ class ReviewMeetingAPITests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertEqual(results[0][0], 401)
 
+    def test_decide_approval_endpoint_and_conflict_check(self):
+        _, created = self.create()
+        mid = created["id"]
+        codex = self.join(mid, created["invite_url"].split("#invite=")[1], "codex")
+        _, invited_qwen = self.request("POST", f"/{mid}/invites", {"label": "qwen"}, token="admin-secret")
+        qwen = self.join(mid, invited_qwen["invite_url"].split("#invite=")[1], "qwen")
+        self.request("POST", f"/{mid}/reviews", {"position": "support", "text": "Good start"}, token=codex)
+        self.request("POST", f"/{mid}/reviews", {"position": "revise", "text": "Needs review"}, token=qwen)
+        with closing(room.connect(self.db_path)) as db:
+            with db:
+                for p in room.missing(db, room.get(db, mid)):
+                    room.execute(db, SimpleNamespace(action="waive", id=mid, participants=p, reason="waived"))
+                room.execute(db, SimpleNamespace(action="advance", id=mid))
+        codex_rev = [e["seq"] for e in self.request("GET", f"/{mid}", token="admin-secret")[1]["events"] if e["kind"] == "review" and e["actor"] == "codex"][0]
+        self.request("POST", f"/{mid}/reviews", {
+            "position": "revise", "text": "Second round reply",
+            "responds_to_seq": codex_rev}, token=qwen)
+        with closing(room.connect(self.db_path)) as db:
+            with db:
+                for p in room.missing(db, room.get(db, mid)):
+                    room.execute(db, SimpleNamespace(action="waive", id=mid, participants=p, reason="absent"))
+                summary = Path(self.temp.name) / "summary.md"
+                summary.write_text("Review summary", encoding="utf-8")
+                room.execute(db, SimpleNamespace(action="request-approval", id=mid, summary_file=str(summary)))
+
+        # Non-admin cannot decide
+        self.assertEqual(self.request("POST", f"/{mid}", {"decision": "approve"}, token=qwen)[0], 403)
+
+        # Invalid decision returns 400
+        self.assertEqual(self.request("POST", f"/{mid}", {"decision": "invalid"}, token="admin-secret")[0], 400)
+
+        # Version conflict (mismatched expected_version) returns 409
+        status_409, body_409 = self.request("POST", f"/{mid}", {
+            "decision": "approve", "expected_version": 999999
+        }, token="admin-secret")
+        self.assertEqual(status_409, 409)
+        self.assertIn("版本冲突", body_409.get("error", ""))
+
+        # Correct version and request_id succeeds
+        _, snap = self.request("GET", f"/{mid}", token="admin-secret")
+        last_seq = max(e["seq"] for e in snap["events"])
+        status_200, res_200 = self.request("POST", f"/{mid}", {
+            "decision": "approve",
+            "note": "Approved via mobile client",
+            "expected_version": last_seq,
+            "request_id": "test-uuid-client-1"
+        }, token="admin-secret")
+        self.assertEqual(status_200, 200)
+        self.assertEqual(res_200["state"], "approved")
+
+
     def test_meeting_cors_preflight_allows_dashboard_not_other_origins(self):
         for origin, allowed in (("https://mail.maifeipin.com", True), ("https://evil.example", False)):
             conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port)

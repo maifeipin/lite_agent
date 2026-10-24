@@ -82,6 +82,11 @@ def review_admin(http_handler: Any) -> bool:
         return True
     if not 32 <= len(bearer) <= 128:
         return False
+    session_service = getattr(api, "session_service", None)
+    if session_service:
+        session, _ = session_service.verify_access_token(bearer, required_scope="user:general")
+        if session:
+            return True
     db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
     try:
         with closing(sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)) as db:
@@ -273,26 +278,26 @@ def handle_review_meeting_api(http_handler: Any, method: str, path: str, query: 
         return
 
     try:
-        if ((method == 'POST' and action in (None, 'cohosts', 'revoke-cohost'))
+        if ((method in ('POST', 'PATCH') and action in (None, 'cohosts', 'revoke-cohost'))
                 and not review_admin(http_handler)):
-            raise access.ReviewAPIError('仅主持人可创建会议或授权共管', 403)
+            raise access.ReviewAPIError('仅主持人可创建会议、授权共管或执行裁决', 403)
         if ((method == 'POST' and action in ('invites', 'advance', 'waive', 'revoke-seat', 'request-approval'))
                 and not review_operator(http_handler, meeting_id, action)):
             raise access.ReviewAPIError('仅主持人可创建会议、更新邀请或推进轮次', 403)
-        payload = (review_body(http_handler) if method == 'POST' and action != 'leave'
+        payload = (review_body(http_handler) if method in ('POST', 'PATCH') and action != 'leave'
                    else {})
         db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
         with closing(room.connect(db_path)) as db:
             access.ensure_tables(db)
             with db:
-                if method == 'POST':
+                if method in ('POST', 'PATCH'):
                     db.execute('BEGIN IMMEDIATE')
                     if action in ('invites', 'advance', 'waive', 'revoke-seat', 'request-approval'):
                         actor = review_operator(http_handler, meeting_id, action)
                         if not actor:
                             raise access.ReviewAPIError('共管授权无效或已撤销', 403)
                         room.append(db, room.get(db, meeting_id), actor, 'management_action', {'action': action})
-                if method == 'POST' and meeting_id is None:
+                if method in ('POST', 'PATCH') and meeting_id is None:
                     owner_key_hash = payload.get('owner_key_hash')
                     if owner_key_hash is None:
                         owner_key_hash = review_default_owner_hash(db_path)
@@ -303,6 +308,30 @@ def handle_review_meeting_api(http_handler: Any, method: str, path: str, query: 
                         legacy=cfg.get('review_allow_legacy_invites') is True)
                     result['invite_url'] = review_invite_url(http_handler, result['id'], result.pop('invite_token'))
                     status = 201
+                elif method in ('POST', 'PATCH') and meeting_id is not None and action is None:
+                    decision = payload.get('decision')
+                    if not decision and payload.get('action') == 'decide':
+                        decision = payload.get('decision')
+                    if decision not in ('approve', 'reject', 'revise'):
+                        raise access.ReviewAPIError("decision 必须是 'approve'、'reject' 或 'revise'", 400)
+                    row = room.get(db, meeting_id)
+                    if row['state'] != room.WAITING or row['archived_at'] is not None:
+                        raise access.ReviewAPIError('只有待审批议题可由人工作出裁决', 400)
+                    expected_version = payload.get('expected_version')
+                    if expected_version is not None:
+                        last_seq = db.execute("SELECT COALESCE(MAX(seq), 0) FROM events WHERE meeting_id=?", (meeting_id,)).fetchone()[0]
+                        if isinstance(expected_version, bool) or not isinstance(expected_version, int) or expected_version != last_seq:
+                            raise access.ReviewAPIError(f'版本冲突：当前议题最新序号为 {last_seq}，期望序号为 {expected_version}', 409)
+                    note = access._text(payload.get('note', '') or '', 'note') if payload.get('note') else ''
+                    body = {'decision': decision, 'note': note}
+                    req_id = payload.get('request_id')
+                    if req_id:
+                        body['request_id'] = str(req_id)[:64]
+                    room.append(db, row, 'human', 'decision', body)
+                    next_state = {'approve': 'approved', 'revise': 'changes_requested', 'reject': 'rejected'}[decision]
+                    db.execute('UPDATE meetings SET state=? WHERE id=?', (next_state, meeting_id))
+                    result = room.snapshot(db, meeting_id, full=True)
+                    status = 200
                 elif method == 'POST' and action == 'invites':
                     result = access.issue_seat_invite(
                         db, meeting_id, payload.get('label', 'agent'), payload.get('invite_ttl_seconds', access.INVITE_TTL_DEFAULT))

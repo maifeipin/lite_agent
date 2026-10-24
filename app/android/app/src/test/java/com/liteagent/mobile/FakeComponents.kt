@@ -257,6 +257,62 @@ class FakeApiService : ApiService {
     override suspend fun testConnection(): Response<Map<String, Any>> {
         return Response.success(mapOf("status" to "ok"))
     }
+
+    // --- 待办事项 (Todos) Mock ---
+    var todosResponse: List<TodoItem> = emptyList()
+    var shouldFailTodos = false
+    var todosFailureCode = 500
+
+    override suspend fun getTodos(status: String): Response<TodosResponse> {
+        if (shouldFailTodos) {
+            return Response.error(todosFailureCode, """{"error":"failed"}""".toResponseBody("application/json".toMediaTypeOrNull()))
+        }
+        return Response.success(TodosResponse(success = true, data = todosResponse))
+    }
+
+    override suspend fun createTodo(request: CreateTodoRequest): Response<CreateTodoResponse> {
+        return Response.success(CreateTodoResponse(success = true, message = "created"))
+    }
+
+    override suspend fun updateTodo(id: String, request: UpdateTodoRequest): Response<UpdateTodoResponse> {
+        return Response.success(UpdateTodoResponse(success = true, message = "updated"))
+    }
+
+    override suspend fun deleteTodo(id: String): Response<Map<String, Any>> {
+        return Response.success(mapOf("success" to true))
+    }
+
+    // --- 会审决策中枢 (Review Meetings) Mock ---
+    var meetingsResponse: List<MeetingItem> = emptyList()
+    var meetingDetailMap = mutableMapOf<String, MeetingDetail>()
+    var shouldFailDecideConflict = false
+    var lastDecideRequest: DecideMeetingRequest? = null
+
+    override suspend fun getReviewMeetings(): Response<ReviewMeetingsResponse> {
+        return Response.success(ReviewMeetingsResponse(meetings = meetingsResponse))
+    }
+
+    override suspend fun getReviewMeetingDetail(id: String, since: Int): Response<MeetingDetail> {
+        val detail = meetingDetailMap[id] ?: MeetingDetail(id = id, title = "Mock Meeting", state = "open")
+        return Response.success(detail)
+    }
+
+    override suspend fun decideReviewMeeting(id: String, request: DecideMeetingRequest): Response<MeetingDetail> {
+        lastDecideRequest = request
+        if (shouldFailDecideConflict) {
+            return Response.error(409, """{"error":"版本冲突：议题已被更新"}""".toResponseBody("application/json".toMediaTypeOrNull()))
+        }
+        val existing = meetingDetailMap[id] ?: MeetingDetail(id = id, title = "Mock Meeting", state = "open")
+        val newState = when (request.decision) {
+            "approve" -> "approved"
+            "revise" -> "changes_requested"
+            "reject" -> "rejected"
+            else -> existing.state
+        }
+        val updated = existing.copy(state = newState, lastSeq = existing.lastSeq + 1)
+        meetingDetailMap[id] = updated
+        return Response.success(updated)
+    }
 }
 
 class FakeApiClient(

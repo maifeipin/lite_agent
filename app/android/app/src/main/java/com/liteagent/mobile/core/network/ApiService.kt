@@ -36,4 +36,42 @@ interface ApiService {
 
     @GET("agent/api/v1/dashboard")
     suspend fun testConnection(): Response<Map<String, Any>>
+
+    // --- 待办事项 (Todos GTD) ---
+    @GET("agent/api/v1/todos")
+    suspend fun getTodos(
+        @Query("status") status: String = "pending,active,done"
+    ): Response<TodosResponse>
+
+    @POST("agent/api/v1/todos")
+    suspend fun createTodo(
+        @Body request: CreateTodoRequest
+    ): Response<CreateTodoResponse>
+
+    @PATCH("agent/api/v1/todos/{id}")
+    suspend fun updateTodo(
+        @Path("id") id: String,
+        @Body request: UpdateTodoRequest
+    ): Response<UpdateTodoResponse>
+
+    @DELETE("agent/api/v1/todos/{id}")
+    suspend fun deleteTodo(
+        @Path("id") id: String
+    ): Response<Map<String, Any>>
+
+    // --- 会审决策中枢 (Review Meetings) ---
+    @GET("agent/api/v1/review-meetings")
+    suspend fun getReviewMeetings(): Response<ReviewMeetingsResponse>
+
+    @GET("agent/api/v1/review-meetings/{id}")
+    suspend fun getReviewMeetingDetail(
+        @Path("id") id: String,
+        @Query("since") since: Int = 0
+    ): Response<MeetingDetail>
+
+    @POST("agent/api/v1/review-meetings/{id}")
+    suspend fun decideReviewMeeting(
+        @Path("id") id: String,
+        @Body request: DecideMeetingRequest
+    ): Response<MeetingDetail>
 }
