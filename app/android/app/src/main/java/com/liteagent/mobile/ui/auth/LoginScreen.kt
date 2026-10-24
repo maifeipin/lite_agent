@@ -23,11 +23,13 @@ import androidx.compose.ui.unit.sp
 import com.liteagent.mobile.core.network.ApiClient
 import com.liteagent.mobile.core.network.ServerUrlNormalizer
 import com.liteagent.mobile.core.security.SecureTokenStorage
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import com.liteagent.mobile.ui.common.autoDismissKeyboardOnTap
 import com.liteagent.mobile.ui.common.fullScreenInputPadding
 import com.liteagent.mobile.ui.theme.*
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun LoginScreen(
     tokenStorage: SecureTokenStorage,

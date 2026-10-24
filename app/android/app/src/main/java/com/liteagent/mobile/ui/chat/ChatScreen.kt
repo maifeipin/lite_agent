@@ -28,7 +28,7 @@ import com.liteagent.mobile.core.network.models.SessionItem
 import com.liteagent.mobile.ui.common.autoDismissKeyboardOnTap
 import com.liteagent.mobile.ui.theme.*
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun ChatScreen(
     viewModel: ChatViewModel,
