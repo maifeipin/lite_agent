@@ -105,7 +105,7 @@ class MeetingsViewModel(
                     awaitingMeetings = awaiting,
                     isLoading = false,
                     isRefreshing = false,
-                    errorMessage = null
+                    errorMessage = if (_uiState.value.errorMessage == "获取会审列表失败") null else _uiState.value.errorMessage
                 )
             } else {
                 _uiState.value = _uiState.value.copy(
