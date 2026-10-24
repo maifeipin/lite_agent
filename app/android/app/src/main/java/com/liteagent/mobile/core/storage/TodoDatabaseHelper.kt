@@ -35,7 +35,12 @@ class TodoDatabaseHelper(
         private const val COL_UPDATED_AT = "updated_at"
 
         fun computeDbKey(serverUrl: String, username: String): String {
-            val raw = "${serverUrl.trim().lowercase()}_${username.trim().lowercase()}"
+            val cleanUrl = try {
+                com.liteagent.mobile.core.network.ServerUrlNormalizer.normalize(serverUrl)
+            } catch (_: Exception) {
+                serverUrl.trim().trimEnd('/').lowercase()
+            }
+            val raw = "${cleanUrl.lowercase()}_${username.trim().lowercase()}"
             return raw.hashCode().toUInt().toString(16)
         }
     }
