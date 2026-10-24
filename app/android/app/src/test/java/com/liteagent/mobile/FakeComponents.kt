@@ -7,6 +7,7 @@ import com.liteagent.mobile.core.network.models.*
 import com.liteagent.mobile.core.security.RecoveryTaskState
 import com.liteagent.mobile.core.security.SecureTokenStorage
 import com.liteagent.mobile.core.security.UserSession
+import com.liteagent.mobile.core.storage.ITodoDatabaseHelper
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.sync.withLock
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -260,25 +261,63 @@ class FakeApiService : ApiService {
 
     // --- 待办事项 (Todos) Mock ---
     var todosResponse: List<TodoItem> = emptyList()
+    var todosByUser: MutableMap<String, List<TodoItem>> = mutableMapOf()
+    var todosResponseProvider: (() -> List<TodoItem>)? = null
+    var currentUser: String = "alice"
+    var storage: SecureTokenStorage? = null
     var shouldFailTodos = false
     var todosFailureCode = 500
+
+    var shouldFailCreateTodo = false
+    var createTodoFailureCode = 500
+    var createTodoPauseDeferred: CompletableDeferred<Unit>? = null
+    var onCreateTodoInvoked: (() -> Unit)? = null
+
+    var shouldFailUpdateTodo = false
+    var updateTodoFailureCode = 500
+    var updateTodoPauseDeferred: CompletableDeferred<Unit>? = null
+    var onUpdateTodoInvoked: (() -> Unit)? = null
+
+    var shouldFailDeleteTodo = false
+    var deleteTodoFailureCode = 500
+    var deleteTodoPauseDeferred: CompletableDeferred<Unit>? = null
+    var onDeleteTodoInvoked: (() -> Unit)? = null
 
     override suspend fun getTodos(status: String): Response<TodosResponse> {
         if (shouldFailTodos) {
             return Response.error(todosFailureCode, """{"error":"failed"}""".toResponseBody("application/json".toMediaTypeOrNull()))
         }
-        return Response.success(TodosResponse(success = true, data = todosResponse))
+        val currentUsername = storage?.getSession()?.username ?: currentUser
+        val data = todosResponseProvider?.invoke()
+            ?: todosByUser[currentUsername]
+            ?: todosResponse
+        return Response.success(TodosResponse(success = true, data = data))
     }
 
     override suspend fun createTodo(request: CreateTodoRequest): Response<CreateTodoResponse> {
+        onCreateTodoInvoked?.invoke()
+        createTodoPauseDeferred?.await()
+        if (shouldFailCreateTodo) {
+            return Response.error(createTodoFailureCode, """{"error":"create failed"}""".toResponseBody("application/json".toMediaTypeOrNull()))
+        }
         return Response.success(CreateTodoResponse(success = true, message = "created"))
     }
 
     override suspend fun updateTodo(id: String, request: UpdateTodoRequest): Response<UpdateTodoResponse> {
+        onUpdateTodoInvoked?.invoke()
+        updateTodoPauseDeferred?.await()
+        if (shouldFailUpdateTodo) {
+            return Response.error(updateTodoFailureCode, """{"error":"update failed"}""".toResponseBody("application/json".toMediaTypeOrNull()))
+        }
         return Response.success(UpdateTodoResponse(success = true, message = "updated"))
     }
 
     override suspend fun deleteTodo(id: String): Response<Map<String, Any>> {
+        onDeleteTodoInvoked?.invoke()
+        deleteTodoPauseDeferred?.await()
+        if (shouldFailDeleteTodo) {
+            return Response.error(deleteTodoFailureCode, """{"error":"delete failed"}""".toResponseBody("application/json".toMediaTypeOrNull()))
+        }
         return Response.success(mapOf("success" to true))
     }
 
@@ -358,6 +397,9 @@ class FakeApiClient(
     val fakeService: FakeApiService,
     storage: SecureTokenStorage
 ) : ApiClient(storage) {
+    init {
+        fakeService.storage = storage
+    }
     override suspend fun getApiService(serverUrl: String?): ApiService = fakeService
     override fun getAuthApiService(serverUrl: String): ApiService = fakeService
 }
@@ -385,5 +427,45 @@ class FakeSseStreamManager(
     override fun cancel() {
         isCancelled = true
         isStreamStarted = false
+    }
+}
+
+class FakeTodoDatabaseHelper(override val dbKey: String) : ITodoDatabaseHelper {
+    val items = mutableMapOf<String, TodoItem>()
+    var isClosed = false
+    var updateStatusCallCount = 0
+    var deleteTodoCallCount = 0
+    var insertOrUpdateCallCount = 0
+
+    override fun getAll(): List<TodoItem> = items.values.toList()
+
+    override fun saveAll(newItems: List<TodoItem>) {
+        items.clear()
+        newItems.forEach { items[it.id] = it }
+    }
+
+    override fun insertOrUpdate(item: TodoItem) {
+        insertOrUpdateCallCount++
+        items[item.id] = item
+    }
+
+    override fun updateStatus(id: String, newStatus: String) {
+        updateStatusCallCount++
+        items[id]?.let {
+            items[id] = it.copy(status = newStatus)
+        }
+    }
+
+    override fun deleteTodo(id: String) {
+        deleteTodoCallCount++
+        items.remove(id)
+    }
+
+    override fun clearAll() {
+        items.clear()
+    }
+
+    override fun close() {
+        isClosed = true
     }
 }

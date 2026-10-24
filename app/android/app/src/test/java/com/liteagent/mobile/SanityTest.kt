@@ -22,6 +22,7 @@ import com.liteagent.mobile.core.storage.TodoDatabaseHelper
 import com.liteagent.mobile.ui.meetings.MeetingsViewModel
 import com.liteagent.mobile.ui.todos.TodoFilter
 import com.liteagent.mobile.ui.todos.TodosUiState
+import com.liteagent.mobile.ui.todos.TodosViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.runBlocking
@@ -1179,6 +1180,183 @@ class SanityTest {
 
         assertTrue(viewModel.uiState.value.meetings.isEmpty())
         assertNull(viewModel.uiState.value.selectedMeeting)
+    }
+
+    @Test
+    fun todos_view_model_write_operations_isolated_across_account_switch() = runTest {
+        val serverUrl = "https://mail.maifeipin.com"
+        val fakeStorage = FakeTokenStorage(serverUrl)
+        val fakeApi = FakeApiService()
+        val fakeClient = FakeApiClient(fakeApi, fakeStorage)
+
+        val aliceHelper = FakeTodoDatabaseHelper("alice_key")
+        val bobHelper = FakeTodoDatabaseHelper("bob_key")
+
+        val aliceItem = TodoItem(id = "todo_alice_1", title = "Alice Task", status = "pending")
+        aliceHelper.saveAll(listOf(aliceItem))
+        val bobItem = TodoItem(id = "todo_bob_1", title = "Bob Task", status = "pending")
+        bobHelper.saveAll(listOf(bobItem))
+
+        // 分别配置 Alice 与 Bob 的接口响应，避免初始化网络同步覆盖预置缓存
+        fakeApi.todosByUser["alice"] = listOf(aliceItem)
+        fakeApi.todosByUser["bob"] = listOf(bobItem)
+        fakeApi.currentUser = "alice"
+
+        var currentHelpers = mutableMapOf("alice" to aliceHelper, "bob" to bobHelper)
+
+        // 模拟 Alice 登录会话
+        fakeStorage.saveSession(
+            serverUrl = serverUrl,
+            username = "alice",
+            sessionId = "session_alice",
+            sessionToken = "tok_alice",
+            expiresAt = System.currentTimeMillis() + 3600_000,
+            refreshToken = null,
+            refreshExpiresAt = 0,
+            reviewToken = null,
+            reviewExpiresAt = 0,
+            rememberMe = false
+        )
+
+        // 注入 testDispatcher 作为 ioDispatcher，保证所有 IO 协程受 testScheduler 统一调度，消除竞态
+        val viewModel = TodosViewModel(
+            context = null,
+            tokenStorage = fakeStorage,
+            apiClient = fakeClient,
+            dbHelperFactory = { _, user -> currentHelpers[user] ?: FakeTodoDatabaseHelper(user) },
+            ioDispatcher = testDispatcher
+        )
+        testScheduler.advanceUntilIdle()
+
+        assertEquals(1, viewModel.uiState.value.todos.size)
+        assertEquals("todo_alice_1", viewModel.uiState.value.todos.first().id)
+
+        // 1. 测试 toggleTodoStatus 写操作：在途期间发生账号切换，旧请求失败不得回滚或污染新账号
+        val updateStarted = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val updatePause = kotlinx.coroutines.CompletableDeferred<Unit>()
+        fakeApi.onUpdateTodoInvoked = { updateStarted.complete(Unit) }
+        fakeApi.updateTodoPauseDeferred = updatePause
+        fakeApi.shouldFailUpdateTodo = true
+
+        // Alice 触发待办状态翻转（乐观更新为 done）
+        viewModel.toggleTodoStatus(aliceItem)
+
+        // 确认写请求已进入挂起点
+        assertTrue("状态翻转写操作必须已进入并到达挂起点", updateStarted.isCompleted)
+        assertEquals("done", viewModel.uiState.value.todos.first().status)
+        assertEquals("done", aliceHelper.items["todo_alice_1"]?.status)
+
+        // 此时用户切换账号至 Bob
+        fakeStorage.saveSession(
+            serverUrl = serverUrl,
+            username = "bob",
+            sessionId = "session_bob",
+            sessionToken = "tok_bob",
+            expiresAt = System.currentTimeMillis() + 3600_000,
+            refreshToken = null,
+            refreshExpiresAt = 0,
+            reviewToken = null,
+            reviewExpiresAt = 0,
+            rememberMe = false
+        )
+        fakeApi.currentUser = "bob"
+        viewModel.onSessionChanged(serverUrl, "bob")
+        testScheduler.advanceUntilIdle()
+
+        // 断言：UI 已切换为 Bob 的待办
+        assertEquals(1, viewModel.uiState.value.todos.size)
+        assertEquals("todo_bob_1", viewModel.uiState.value.todos.first().id)
+        assertEquals("pending", viewModel.uiState.value.todos.first().status)
+        assertTrue(aliceHelper.isClosed)
+
+        // 释放 Alice 的旧请求，使服务端返回失败
+        updatePause.complete(Unit)
+        testScheduler.advanceUntilIdle()
+
+        // 核心安全断言：
+        // a) Bob 的数据库沙箱绝对不得受到 Alice 待办的写操作或状态污染
+        assertNull("Bob 数据库绝不能混入 Alice 的待办", bobHelper.items["todo_alice_1"])
+        assertEquals("Bob 的自身待办状态不得被改动", "pending", bobHelper.items["todo_bob_1"]?.status)
+        assertEquals("Bob 数据库写操作调用次数必须为 0", 0, bobHelper.updateStatusCallCount)
+
+        // b) Bob 当前界面绝对不得被 Alice 的回滚逻辑覆盖或混入错误提示
+        assertEquals(1, viewModel.uiState.value.todos.size)
+        assertEquals("todo_bob_1", viewModel.uiState.value.todos.first().id)
+        assertNull("旧账号请求失败绝不能向新账号界面弹出错误提示", viewModel.uiState.value.errorMessage)
+
+        // 2. 测试 deleteTodo 写操作跨账号隔离
+        val deleteStarted = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val deletePause = kotlinx.coroutines.CompletableDeferred<Unit>()
+        fakeApi.onDeleteTodoInvoked = { deleteStarted.complete(Unit) }
+        fakeApi.deleteTodoPauseDeferred = deletePause
+        fakeApi.shouldFailDeleteTodo = true
+
+        // Bob 触发删除待办
+        viewModel.deleteTodo("todo_bob_1")
+
+        // 确认删除写操作已进入挂起点
+        assertTrue("删除写操作必须已进入并到达挂起点", deleteStarted.isCompleted)
+        assertEquals(0, viewModel.uiState.value.todos.size)
+        assertNull(bobHelper.items["todo_bob_1"])
+
+        // 此时退出登录
+        viewModel.onLoggedOut()
+        testScheduler.advanceUntilIdle()
+        assertTrue(bobHelper.isClosed)
+
+        // 释放 Bob 的在途删除请求（失败）
+        deletePause.complete(Unit)
+        testScheduler.advanceUntilIdle()
+
+        // 断言：已登出状态下，失败回滚不得将待办重新恢复到未登录界面
+        assertEquals(0, viewModel.uiState.value.todos.size)
+        assertNull(viewModel.uiState.value.errorMessage)
+
+        // 3. 测试 createTodo 写操作在途退出登录时的代次隔离
+        val bobHelper2 = FakeTodoDatabaseHelper("bob_key_2")
+        bobHelper2.saveAll(listOf(bobItem))
+        currentHelpers["bob"] = bobHelper2
+
+        fakeStorage.saveSession(
+            serverUrl = serverUrl,
+            username = "bob",
+            sessionId = "session_bob_2",
+            sessionToken = "tok_bob_2",
+            expiresAt = System.currentTimeMillis() + 3600_000,
+            refreshToken = null,
+            refreshExpiresAt = 0,
+            reviewToken = null,
+            reviewExpiresAt = 0,
+            rememberMe = false
+        )
+        fakeApi.currentUser = "bob"
+        viewModel.onSessionChanged(serverUrl, "bob")
+        testScheduler.advanceUntilIdle()
+        assertEquals(1, viewModel.uiState.value.todos.size)
+
+        val createStarted = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val createPause = kotlinx.coroutines.CompletableDeferred<Unit>()
+        fakeApi.onCreateTodoInvoked = { createStarted.complete(Unit) }
+        fakeApi.createTodoPauseDeferred = createPause
+        fakeApi.shouldFailCreateTodo = true
+
+        viewModel.createTodo("Bob in-flight item")
+        assertTrue("创建写操作必须已进入并到达挂起点", createStarted.isCompleted)
+        assertTrue(viewModel.uiState.value.isCreating)
+
+        // 在途期间退出登录
+        viewModel.onLoggedOut()
+        testScheduler.advanceUntilIdle()
+
+        // 释放在途创建请求（失败）
+        createPause.complete(Unit)
+        testScheduler.advanceUntilIdle()
+
+        // 断言：已登出状态下，错误提示和创建中标志不会泄漏在界面上
+        assertFalse(viewModel.uiState.value.isCreating)
+        assertNull(viewModel.uiState.value.errorMessage)
+        assertNull(viewModel.uiState.value.actionSuccessMessage)
+        assertTrue(viewModel.uiState.value.todos.isEmpty())
     }
 }
 

@@ -335,7 +335,17 @@ def handle_review_meeting_api(http_handler: Any, method: str, path: str, query: 
                             except Exception:
                                 pass
 
+                    incoming_note = access._text(payload.get('note', '') or '', 'note') if payload.get('note') else ''
                     if existing_decision is not None:
+                        # 校验幂等请求参数一致性：同键同参返回原结果，同键异参返回 409 冲突
+                        orig_seq, orig_body = existing_decision
+                        orig_decision = orig_body.get('decision')
+                        orig_note = orig_body.get('note', '') or ''
+                        if orig_decision != decision or orig_note != incoming_note:
+                            raise access.ReviewAPIError(
+                                f"幂等参数冲突：已存在相同 request_id 的裁决记录，但参数不一致 (已存 decision='{orig_decision}', 请求 decision='{decision}')",
+                                409
+                            )
                         # 幂等返回已有裁决结果快照，不重复追加事件
                         result = room.snapshot(db, meeting_id, full=True)
                         review_enrich(result, db, meeting_id, None, True)
@@ -348,8 +358,7 @@ def handle_review_meeting_api(http_handler: Any, method: str, path: str, query: 
                             last_seq = db.execute("SELECT COALESCE(MAX(seq), 0) FROM events WHERE meeting_id=?", (meeting_id,)).fetchone()[0]
                             if isinstance(expected_version, bool) or not isinstance(expected_version, int) or expected_version != last_seq:
                                 raise access.ReviewAPIError(f'版本冲突：当前议题最新序号为 {last_seq}，期望序号为 {expected_version}', 409)
-                        note = access._text(payload.get('note', '') or '', 'note') if payload.get('note') else ''
-                        body = {'decision': decision, 'note': note}
+                        body = {'decision': decision, 'note': incoming_note}
                         if req_id:
                             body['request_id'] = str(req_id)[:64]
                         room.append(db, row, 'human', 'decision', body)

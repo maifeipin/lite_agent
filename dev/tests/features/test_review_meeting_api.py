@@ -821,6 +821,24 @@ class ReviewMeetingAPITests(unittest.TestCase):
         decision_events = [e for e in res_retry["events"] if e.get("kind") == "decision"]
         self.assertEqual(len(decision_events), 1)
 
+        # Idempotent conflict: same request_id but different decision (reject instead of approve) returns 409
+        status_conflict_dec, res_conflict_dec = self.request("POST", f"/{mid}", {
+            "decision": "reject",
+            "note": "Approved via mobile client",
+            "request_id": "test-uuid-client-1"
+        }, token="admin-secret")
+        self.assertEqual(status_conflict_dec, 409)
+        self.assertIn("幂等参数冲突", res_conflict_dec.get("error", ""))
+
+        # Idempotent conflict: same request_id but different note returns 409
+        status_conflict_note, res_conflict_note = self.request("POST", f"/{mid}", {
+            "decision": "approve",
+            "note": "A conflicting note text",
+            "request_id": "test-uuid-client-1"
+        }, token="admin-secret")
+        self.assertEqual(status_conflict_note, 409)
+        self.assertIn("幂等参数冲突", res_conflict_note.get("error", ""))
+
 
     def test_meeting_cors_preflight_allows_dashboard_not_other_origins(self):
         for origin, allowed in (("https://mail.maifeipin.com", True), ("https://evil.example", False)):

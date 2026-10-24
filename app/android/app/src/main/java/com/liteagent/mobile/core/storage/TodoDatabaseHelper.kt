@@ -7,18 +7,32 @@ import android.database.sqlite.SQLiteOpenHelper
 import com.liteagent.mobile.core.network.models.TodoItem
 
 /**
+ * 待办沙箱存储抽象接口，支持生产 SQLite 实现与单元测试内存/Mock 实现
+ */
+interface ITodoDatabaseHelper : java.io.Closeable {
+    val dbKey: String
+    fun getAll(): List<TodoItem>
+    fun saveAll(items: List<TodoItem>)
+    fun insertOrUpdate(item: TodoItem)
+    fun updateStatus(id: String, newStatus: String)
+    fun deleteTodo(id: String)
+    fun clearAll()
+    override fun close()
+}
+
+/**
  * 本地 SQLite 沙箱存储：按规范化 (serverUrl + "_" + username) 的哈希独立建库，
  * 实现零网络依赖的待办离线秒开与即时乐观更新。
  */
 class TodoDatabaseHelper(
     context: Context,
-    dbKey: String
+    override val dbKey: String
 ) : SQLiteOpenHelper(
     context.applicationContext,
     "todos_${dbKey.filter { it.isLetterOrDigit() }}.db",
     null,
     DATABASE_VERSION
-) {
+), ITodoDatabaseHelper {
     companion object {
         private const val DATABASE_VERSION = 1
         private const val TABLE_TODOS = "todos"
@@ -72,7 +86,7 @@ class TodoDatabaseHelper(
     }
 
     @Synchronized
-    fun getAll(): List<TodoItem> {
+    override fun getAll(): List<TodoItem> {
         val list = mutableListOf<TodoItem>()
         val db = readableDatabase
         val cursor = db.query(
@@ -116,7 +130,7 @@ class TodoDatabaseHelper(
     }
 
     @Synchronized
-    fun saveAll(items: List<TodoItem>) {
+    override fun saveAll(items: List<TodoItem>) {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -143,7 +157,7 @@ class TodoDatabaseHelper(
     }
 
     @Synchronized
-    fun insertOrUpdate(item: TodoItem) {
+    override fun insertOrUpdate(item: TodoItem) {
         val db = writableDatabase
         val values = ContentValues().apply {
             put(COL_ID, item.id)
@@ -161,7 +175,7 @@ class TodoDatabaseHelper(
     }
 
     @Synchronized
-    fun updateStatus(id: String, newStatus: String) {
+    override fun updateStatus(id: String, newStatus: String) {
         val db = writableDatabase
         val values = ContentValues().apply {
             put(COL_STATUS, newStatus)
@@ -171,13 +185,13 @@ class TodoDatabaseHelper(
     }
 
     @Synchronized
-    fun deleteTodo(id: String) {
+    override fun deleteTodo(id: String) {
         val db = writableDatabase
         db.delete(TABLE_TODOS, "$COL_ID = ?", arrayOf(id))
     }
 
     @Synchronized
-    fun clearAll() {
+    override fun clearAll() {
         val db = writableDatabase
         db.delete(TABLE_TODOS, null, null)
     }

@@ -10,8 +10,10 @@ import com.liteagent.mobile.core.network.models.CreateTodoRequest
 import com.liteagent.mobile.core.network.models.TodoItem
 import com.liteagent.mobile.core.network.models.UpdateTodoRequest
 import com.liteagent.mobile.core.security.SecureTokenStorage
+import com.liteagent.mobile.core.storage.ITodoDatabaseHelper
 import com.liteagent.mobile.core.storage.TodoDatabaseHelper
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -56,20 +58,23 @@ data class TodosUiState(
 }
 
 class TodosViewModel(
-    private val context: Context,
+    private val context: Context? = null,
     private val tokenStorage: SecureTokenStorage,
-    private val apiClient: ApiClient
+    private val apiClient: ApiClient,
+    private val dbHelperFactory: ((serverUrl: String, username: String) -> ITodoDatabaseHelper)? = null,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(TodosUiState())
     val uiState: StateFlow<TodosUiState> = _uiState.asStateFlow()
 
-    private var dbHelper: TodoDatabaseHelper? = null
+    private var dbHelper: ITodoDatabaseHelper? = null
     private var boundServerUrl: String = ""
     private var boundUsername: String = ""
     private var sessionEpoch: Long = 0L
     private var activeInitJob: Job? = null
     private var activeFetchJob: Job? = null
+    private val activeWriteJobs = java.util.Collections.synchronizedSet(mutableSetOf<Job>())
 
     init {
         activeInitJob = viewModelScope.launch {
@@ -80,13 +85,30 @@ class TodosViewModel(
         }
     }
 
+    private fun launchWriteJob(block: suspend kotlinx.coroutines.CoroutineScope.() -> Unit): Job {
+        var job: Job? = null
+        job = viewModelScope.launch {
+            try {
+                block()
+            } finally {
+                job?.let { activeWriteJobs.remove(it) }
+            }
+        }
+        activeWriteJobs.add(job)
+        return job
+    }
+
     private suspend fun initDatabaseAndLoad(serverUrl: String, username: String) {
         val currentEpoch = ++sessionEpoch
         _uiState.value = TodosUiState(isLoading = true)
 
-        withContext(Dispatchers.IO) {
+        withContext(ioDispatcher) {
             val dbKey = TodoDatabaseHelper.computeDbKey(serverUrl, username)
-            val newHelper = TodoDatabaseHelper(context, dbKey)
+            val newHelper: ITodoDatabaseHelper = dbHelperFactory?.invoke(serverUrl, username)
+                ?: TodoDatabaseHelper(
+                    context ?: throw IllegalStateException("Context required when no helper factory is provided"),
+                    dbKey
+                )
 
             if (currentEpoch != sessionEpoch) {
                 newHelper.close()
@@ -129,7 +151,7 @@ class TodosViewModel(
     private suspend fun fetchTodosFromServer(
         isRefresh: Boolean,
         epoch: Long = sessionEpoch,
-        helper: TodoDatabaseHelper? = dbHelper
+        helper: ITodoDatabaseHelper? = dbHelper
     ) {
         if (epoch != sessionEpoch || helper == null || helper != dbHelper) return
         val currentServer = boundServerUrl
@@ -139,7 +161,7 @@ class TodosViewModel(
 
             if (result.isSuccess) {
                 val serverTodos = result.getOrNull() ?: emptyList()
-                withContext(Dispatchers.IO) {
+                withContext(ioDispatcher) {
                     if (epoch == sessionEpoch && helper == dbHelper) {
                         helper.saveAll(serverTodos)
                     }
@@ -183,8 +205,13 @@ class TodosViewModel(
 
     /**
      * 乐观更新待办状态：即时翻转本地与 SQLite，后台同步服务端，失败时自动回滚
+     * 捕获会话代次与数据库沙箱引用，严格杜绝跨账号回滚与界面污染
      */
     fun toggleTodoStatus(item: TodoItem) {
+        val currentEpoch = sessionEpoch
+        val currentHelper = dbHelper ?: return
+        val currentServer = boundServerUrl
+
         val oldStatus = item.status
         val newStatus = if (item.isCompleted) "pending" else "done"
         val updatedItem = item.copy(
@@ -197,32 +224,59 @@ class TodosViewModel(
         val updatedList = currentList.map { if (it.id == item.id) updatedItem else it }
         _uiState.value = _uiState.value.copy(todos = updatedList)
 
-        viewModelScope.launch(Dispatchers.IO) {
-            dbHelper?.updateStatus(item.id, newStatus)
+        launchWriteJob {
+            try {
+                withContext(ioDispatcher) {
+                    if (currentEpoch != sessionEpoch || currentHelper != dbHelper) return@withContext
+                    currentHelper.updateStatus(item.id, newStatus)
 
-            // 后台同步服务端
-            val result = apiClient.updateTodo(
-                id = item.id,
-                request = UpdateTodoRequest(status = newStatus),
-                serverUrl = boundServerUrl
-            )
-
-            if (result.isFailure) {
-                // 失败回滚
-                dbHelper?.updateStatus(item.id, oldStatus)
-                withContext(Dispatchers.Main) {
-                    val reverted = _uiState.value.todos.map { if (it.id == item.id) item else it }
-                    _uiState.value = _uiState.value.copy(
-                        todos = reverted,
-                        errorMessage = "状态同步失败: ${result.exceptionOrNull()?.message}"
+                    // 后台同步服务端
+                    val result = apiClient.updateTodo(
+                        id = item.id,
+                        request = UpdateTodoRequest(status = newStatus),
+                        serverUrl = currentServer
                     )
+
+                    if (currentEpoch != sessionEpoch || currentHelper != dbHelper) return@withContext
+
+                    if (result.isFailure) {
+                        // 失败仅回滚当前所属代次的数据库沙箱
+                        currentHelper.updateStatus(item.id, oldStatus)
+                        withContext(Dispatchers.Main) {
+                            if (currentEpoch == sessionEpoch && currentHelper == dbHelper) {
+                                val reverted = _uiState.value.todos.map { if (it.id == item.id) item else it }
+                                _uiState.value = _uiState.value.copy(
+                                    todos = reverted,
+                                    errorMessage = "状态同步失败: ${result.exceptionOrNull()?.message}"
+                                )
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                if (currentEpoch == sessionEpoch && currentHelper == dbHelper) {
+                    withContext(ioDispatcher) {
+                        if (currentEpoch == sessionEpoch && currentHelper == dbHelper) {
+                            currentHelper.updateStatus(item.id, oldStatus)
+                        }
+                    }
+                    withContext(Dispatchers.Main) {
+                        if (currentEpoch == sessionEpoch && currentHelper == dbHelper) {
+                            val reverted = _uiState.value.todos.map { if (it.id == item.id) item else it }
+                            _uiState.value = _uiState.value.copy(
+                                todos = reverted,
+                                errorMessage = "状态同步失败: ${e.localizedMessage ?: e.message}"
+                            )
+                        }
+                    }
                 }
             }
         }
     }
 
     /**
-     * 创建新待办事项
+     * 创建新待办事项：绑定会话代次与数据库实例
      */
     fun createTodo(
         title: String,
@@ -237,7 +291,11 @@ class TodosViewModel(
             return
         }
 
-        viewModelScope.launch {
+        val currentEpoch = sessionEpoch
+        val currentHelper = dbHelper ?: return
+        val currentServer = boundServerUrl
+
+        launchWriteJob {
             _uiState.value = _uiState.value.copy(isCreating = true, errorMessage = null)
             try {
                 val request = CreateTodoRequest(
@@ -246,14 +304,16 @@ class TodosViewModel(
                     description = description?.trim()?.ifEmpty { null },
                     dueAt = dueAt?.trim()?.ifEmpty { null }
                 )
-                val result = apiClient.createTodo(request, serverUrl = boundServerUrl)
+                val result = apiClient.createTodo(request, serverUrl = currentServer)
+                if (currentEpoch != sessionEpoch || currentHelper != dbHelper) return@launchWriteJob
+
                 if (result.isSuccess) {
                     _uiState.value = _uiState.value.copy(
                         isCreating = false,
                         actionSuccessMessage = "待办创建成功"
                     )
                     onSuccess()
-                    fetchTodosFromServer(isRefresh = true)
+                    fetchTodosFromServer(isRefresh = true, epoch = currentEpoch, helper = currentHelper)
                 } else {
                     _uiState.value = _uiState.value.copy(
                         isCreating = false,
@@ -262,34 +322,66 @@ class TodosViewModel(
                 }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
-                _uiState.value = _uiState.value.copy(
-                    isCreating = false,
-                    errorMessage = e.localizedMessage ?: e.message
-                )
+                if (currentEpoch == sessionEpoch && currentHelper == dbHelper) {
+                    _uiState.value = _uiState.value.copy(
+                        isCreating = false,
+                        errorMessage = e.localizedMessage ?: e.message
+                    )
+                }
             }
         }
     }
 
     /**
-     * 删除待办事项
+     * 删除待办事项：绑定会话代次与数据库沙箱，防止跨会话回滚
      */
     fun deleteTodo(id: String) {
+        val currentEpoch = sessionEpoch
+        val currentHelper = dbHelper ?: return
+        val currentServer = boundServerUrl
+
         val currentList = _uiState.value.todos
         val deletedItem = currentList.find { it.id == id } ?: return
         val filteredList = currentList.filter { it.id != id }
         _uiState.value = _uiState.value.copy(todos = filteredList)
 
-        viewModelScope.launch(Dispatchers.IO) {
-            dbHelper?.deleteTodo(id)
-            val result = apiClient.deleteTodo(id, serverUrl = boundServerUrl)
-            if (result.isFailure) {
-                // 恢复
-                dbHelper?.insertOrUpdate(deletedItem)
-                withContext(Dispatchers.Main) {
-                    _uiState.value = _uiState.value.copy(
-                        todos = currentList,
-                        errorMessage = "删除失败: ${result.exceptionOrNull()?.message}"
-                    )
+        launchWriteJob {
+            try {
+                withContext(ioDispatcher) {
+                    if (currentEpoch != sessionEpoch || currentHelper != dbHelper) return@withContext
+                    currentHelper.deleteTodo(id)
+                    val result = apiClient.deleteTodo(id, serverUrl = currentServer)
+                    if (currentEpoch != sessionEpoch || currentHelper != dbHelper) return@withContext
+
+                    if (result.isFailure) {
+                        // 恢复
+                        currentHelper.insertOrUpdate(deletedItem)
+                        withContext(Dispatchers.Main) {
+                            if (currentEpoch == sessionEpoch && currentHelper == dbHelper) {
+                                _uiState.value = _uiState.value.copy(
+                                    todos = currentList,
+                                    errorMessage = "删除失败: ${result.exceptionOrNull()?.message}"
+                                )
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                if (currentEpoch == sessionEpoch && currentHelper == dbHelper) {
+                    withContext(ioDispatcher) {
+                        if (currentEpoch == sessionEpoch && currentHelper == dbHelper) {
+                            currentHelper.insertOrUpdate(deletedItem)
+                        }
+                    }
+                    withContext(Dispatchers.Main) {
+                        if (currentEpoch == sessionEpoch && currentHelper == dbHelper) {
+                            _uiState.value = _uiState.value.copy(
+                                todos = currentList,
+                                errorMessage = "删除失败: ${e.localizedMessage ?: e.message}"
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -298,6 +390,16 @@ class TodosViewModel(
     fun onSessionChanged(serverUrl: String, username: String) {
         activeInitJob?.cancel()
         activeFetchJob?.cancel()
+        synchronized(activeWriteJobs) {
+            activeWriteJobs.forEach { it.cancel() }
+            activeWriteJobs.clear()
+        }
+        sessionEpoch++
+        dbHelper?.close()
+        dbHelper = null
+        boundServerUrl = ""
+        boundUsername = ""
+        _uiState.value = TodosUiState(isLoading = true)
         activeInitJob = viewModelScope.launch {
             initDatabaseAndLoad(serverUrl, username)
         }
@@ -306,6 +408,10 @@ class TodosViewModel(
     fun onLoggedOut() {
         activeInitJob?.cancel()
         activeFetchJob?.cancel()
+        synchronized(activeWriteJobs) {
+            activeWriteJobs.forEach { it.cancel() }
+            activeWriteJobs.clear()
+        }
         sessionEpoch++
         dbHelper?.close()
         dbHelper = null
@@ -320,7 +426,14 @@ class TodosViewModel(
 
     override fun onCleared() {
         super.onCleared()
+        activeInitJob?.cancel()
+        activeFetchJob?.cancel()
+        synchronized(activeWriteJobs) {
+            activeWriteJobs.forEach { it.cancel() }
+            activeWriteJobs.clear()
+        }
         dbHelper?.close()
+        dbHelper = null
     }
 }
 
