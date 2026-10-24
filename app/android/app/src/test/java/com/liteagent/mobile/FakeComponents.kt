@@ -314,7 +314,7 @@ class FakeApiService : ApiService {
             "reject" -> "rejected"
             else -> existing.state
         }
-        val updated = existing.copy(state = newState, lastSeq = existing.lastSeq + 1)
+        val updated = existing.copy(state = newState, lastSeqRaw = existing.lastSeq + 1)
         meetingDetailMap[id] = updated
         return Response.success(updated)
     }

@@ -1055,7 +1055,7 @@ class SanityTest {
             title = "Sprint 2 发布审批",
             state = "awaiting_approval",
             round = 1,
-            lastSeq = 5
+            lastSeqRaw = 5
         )
 
         val viewModel = MeetingsViewModel(fakeStorage, fakeClient)
@@ -1109,7 +1109,7 @@ class SanityTest {
             title = "超时核验议题",
             state = "awaiting_approval",
             round = 1,
-            lastSeq = 3
+            lastSeqRaw = 3
         )
 
         val viewModel = MeetingsViewModel(fakeStorage, fakeClient)
@@ -1136,7 +1136,7 @@ class SanityTest {
             title = "超时核验议题",
             state = "approved",
             round = 1,
-            lastSeq = 4,
+            lastSeqRaw = 4,
             events = listOf(
                 MeetingEvent(
                     seq = 4,
@@ -1161,7 +1161,7 @@ class SanityTest {
             title = "他人裁决并发议题",
             state = "awaiting_approval",
             round = 1,
-            lastSeq = 10
+            lastSeqRaw = 10
         )
         // 模拟提交失败时，另一个管理员 Bob 已经否决了议题，事件中的 request_id 是 Bob 的
         fakeApi.meetingDetailMap[meetOther] = MeetingDetail(
@@ -1169,7 +1169,7 @@ class SanityTest {
             title = "他人裁决并发议题",
             state = "rejected",
             round = 1,
-            lastSeq = 11,
+            lastSeqRaw = 11,
             events = listOf(
                 MeetingEvent(
                     seq = 11,
