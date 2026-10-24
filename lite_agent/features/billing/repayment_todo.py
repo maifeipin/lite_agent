@@ -59,7 +59,7 @@ def reconcile_repayment_todos(client, db_path=None, remind_days=3):
                 f"新账单：{bill['bank_code']} {bill['statement_month']}（账单 #{bill['id']}）",
                 f"本期应还金额：{bill['total_due']}。请核验账单币种与明细；金额不表示已经还款。",
                 created_via='billing_notice',kind='notice',project='billing',
-                due_at=datetime.now(timezone.utc).isoformat(),
+                due_at=stamp or datetime.now(timezone.utc).isoformat(),
                 source_metadata={'revision':revision,'cycle_id':1,'statement_id':bill['id']})
             stats['notices']+=int(notice.get('created') is True)
         due_at=None
