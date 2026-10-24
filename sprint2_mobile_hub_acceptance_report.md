@@ -1,10 +1,12 @@
 # Sprint 2 掌上中枢与会审决策验收审计报告
 
-> **报告版本**: v2.0 (包含 4 项代码复核缺口闭环)  
-> **审计基线 Commit**: `484c48e` -> 本次修复提交  
+> **报告版本**: v2.1 (4 项代码复核缺口闭环 + GitHub Actions CI 双绿线全通)  
+> **审计基线 Commit**: `484c48e` -> `9c23094`  
 > **审计时间**: 2026-10-24  
 > **验证环境**: OnePlus 13 (Android 15) @ `192.168.2.137:32981` / 生产后端 VPS1 (`https://mail.maifeipin.com`)  
-> **CI 状态**: GitHub Actions CI 自动化构建与测试通过  
+> **CI 状态**: 
+>   - **Android CI Build**: [Run #40100786384](https://github.com/maifeipin/lite_agent/actions/runs/40100786384) `✓ 全部通过` (35 项移动端单测全数通过，成功打包产物 `liteagent-debug-apk`)
+>   - **Kernel Acceptance Gates**: [Run #40100786275](https://github.com/maifeipin/lite_agent/actions/runs/40100786275) `✓ 全部通过` (5 道质量闸门全绿：Core Isolated、Frontend JS、Agent Full Pytest 1234/1234 用例、Parser Contract、Docker Python 3.9 双向回归)  
 
 ---
 
