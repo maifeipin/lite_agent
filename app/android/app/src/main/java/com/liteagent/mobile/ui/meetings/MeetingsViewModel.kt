@@ -176,7 +176,12 @@ class MeetingsViewModel(
         val currentEpoch = sessionEpoch
         activeDecisionJob?.cancel()
         activeDecisionJob = viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isSubmittingDecision = true, errorMessage = null, conflictErrorMessage = null)
+            _uiState.value = _uiState.value.copy(
+                isSubmittingDecision = true,
+                errorMessage = null,
+                conflictErrorMessage = null,
+                actionSuccessMessage = null
+            )
             val requestId = UUID.randomUUID().toString()
 
             val request = DecideMeetingRequest(
@@ -211,6 +216,7 @@ class MeetingsViewModel(
                         // 409 Conflict 拦截：版本冲突，自动刷新最新状态
                         _uiState.value = _uiState.value.copy(
                             isSubmittingDecision = false,
+                            actionSuccessMessage = null,
                             conflictErrorMessage = ex.message ?: "版本冲突：议题已被更新，已自动刷新至最新状态！"
                         )
                         // 自动重新拉取最新详情与列表
@@ -240,12 +246,14 @@ class MeetingsViewModel(
                             _uiState.value = _uiState.value.copy(
                                 isSubmittingDecision = false,
                                 selectedMeeting = verifyDetail,
+                                actionSuccessMessage = null,
                                 errorMessage = "状态已变化，本次提交结果未确认"
                             )
                             loadMeetingsInternal(currentEpoch)
                         } else {
                             _uiState.value = _uiState.value.copy(
                                 isSubmittingDecision = false,
+                                actionSuccessMessage = null,
                                 errorMessage = ex?.message ?: "审批提交失败"
                             )
                         }
@@ -256,6 +264,7 @@ class MeetingsViewModel(
                 if (currentEpoch == sessionEpoch) {
                     _uiState.value = _uiState.value.copy(
                         isSubmittingDecision = false,
+                        actionSuccessMessage = null,
                         errorMessage = e.localizedMessage ?: e.message
                     )
                 }
