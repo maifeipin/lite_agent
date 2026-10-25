@@ -170,7 +170,7 @@ class MeetingsViewModel(
         if (!isActive) return
 
         livePollJob = viewModelScope.launch {
-            while (kotlinx.coroutines.isActive) {
+            while (isActive) {
                 kotlinx.coroutines.delay(3000L) // 3秒长轮询直播
                 val currentEpoch = sessionEpoch
                 try {

@@ -155,6 +155,8 @@ open class SecureTokenStorage(
         return activeServerUrlFlow.first()
     }
 
+    open suspend fun getActiveSession(): UserSession? = getSession()
+
     open suspend fun getSession(serverUrl: String? = null): UserSession? {
         val targetUrl = serverUrl ?: getActiveServerUrl()
         val mem = inMemorySessions[targetUrl]

@@ -103,7 +103,7 @@ class DiscoverViewModel(
                 }
 
                 val session = tokenStorage.getSession(server)
-                val token = session?.effectiveToken ?: session?.sessionId ?: ""
+                val token = session?.sessionToken ?: session?.sessionId ?: ""
 
                 val client = okhttp3.OkHttpClient()
                 val req = okhttp3.Request.Builder()

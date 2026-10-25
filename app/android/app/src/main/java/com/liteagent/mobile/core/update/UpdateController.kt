@@ -68,7 +68,7 @@ class UpdateController(
         job = scope.launch {
             try {
                 val serverUrl = tokenStorage.getActiveServerUrl()
-                val session = tokenStorage.getActiveSession()
+                val session = tokenStorage.getSession()
                 val token = session?.sessionToken
 
                 val info = AppUpdateManager.checkForUpdate(
@@ -106,7 +106,7 @@ class UpdateController(
         job = scope.launch {
             try {
                 val serverUrl = tokenStorage.getActiveServerUrl()
-                val session = tokenStorage.getActiveSession()
+                val session = tokenStorage.getSession()
                 val token = session?.sessionToken
 
                 val apk = AppUpdateManager.downloadApk(
