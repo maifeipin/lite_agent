@@ -1361,14 +1361,20 @@ class SanityTest {
 
     @Test
     fun testCreateTodoWithAdvanceRemindersAndRecurrence() = runTest {
-        val testDispatcher = StandardTestDispatcher(testScheduler)
-        val storage = FakeTokenStorage()
-        val fakeApi = FakeApiService(storage)
+        val testDispatcher = UnconfinedTestDispatcher(testScheduler)
+        val serverUrl = "https://mail.maifeipin.com"
+        val storage = FakeTokenStorage(serverUrl)
+        val fakeApi = FakeApiService()
         val apiClient = FakeApiClient(fakeApi, storage)
 
         storage.saveSession(
-            "https://mail.maifeipin.com",
-            UserSession(sessionToken = "tok", username = "alice", serverUrl = "https://mail.maifeipin.com")
+            UserSession(
+                serverUrl = serverUrl,
+                username = "alice",
+                sessionId = "sess_1",
+                sessionToken = "tok",
+                expiresAt = System.currentTimeMillis() + 3600_000
+            )
         )
         fakeApi.todosByUser["alice"] = emptyList()
 
@@ -1403,13 +1409,19 @@ class SanityTest {
 
     @Test
     fun testCreateMeetingAndLiveStreamDetail() = runTest {
-        val storage = FakeTokenStorage()
-        val fakeApi = FakeApiService(storage)
+        val serverUrl = "https://mail.maifeipin.com"
+        val storage = FakeTokenStorage(serverUrl)
+        val fakeApi = FakeApiService()
         val apiClient = FakeApiClient(fakeApi, storage)
 
         storage.saveSession(
-            "https://mail.maifeipin.com",
-            UserSession(sessionToken = "tok", username = "alice", serverUrl = "https://mail.maifeipin.com")
+            UserSession(
+                serverUrl = serverUrl,
+                username = "alice",
+                sessionId = "sess_1",
+                sessionToken = "tok",
+                expiresAt = System.currentTimeMillis() + 3600_000
+            )
         )
 
         val meetingsVm = MeetingsViewModel(storage, apiClient)
