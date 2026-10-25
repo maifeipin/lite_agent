@@ -5,7 +5,7 @@ Zero database connections, file writes, or cron registrations occur upon module 
 import logging
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 from lite_agent.integrations.notifications import send_im_alert
 from lite_agent.features.todo.rendering import render_markdown
@@ -33,47 +33,161 @@ def _parse_until(until: str) -> str:
 
 
 
-def _parse_target_hm_and_dow(recur_cron: str) -> Tuple[str, Optional[int]]:
-    if not recur_cron:
-        return "09:00", None
+_CRON_DOW_TO_PY = {
+    0: 6, 7: 6,  # Sunday
+    1: 0,        # Monday
+    2: 1,        # Tuesday
+    3: 2,        # Wednesday
+    4: 3,        # Thursday
+    5: 4,        # Friday
+    6: 5,        # Saturday
+}
+_DOW_NAME_MAP = {
+    "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6, "sun": 0
+}
 
+
+def _parse_cron_field(field_str: str, min_val: int, max_val: int, name_map: Optional[Dict[str, int]] = None) -> Optional[Set[int]]:
+    """解析单个 cron 字段（支持 *、数字、连字符区间如 1-5 或 mon-fri、步长如 */15 或 10-30/10、逗号列表）。"""
+    s = field_str.strip().lower()
+    if not s:
+        return None
+    if s == "*":
+        return set(range(min_val, max_val + 1))
+
+    allowed: Set[int] = set()
+    for item in s.split(','):
+        item = item.strip()
+        if not item:
+            continue
+        step = 1
+        range_part = item
+        if '/' in item:
+            parts = item.split('/', 1)
+            range_part = parts[0].strip()
+            step_str = parts[1].strip()
+            if not step_str.isdigit() or int(step_str) <= 0:
+                return None
+            step = int(step_str)
+
+        if range_part == "" or range_part == "*":
+            start_val, end_val = min_val, max_val
+        elif '-' in range_part:
+            r_parts = range_part.split('-', 1)
+            s_str, e_str = r_parts[0].strip(), r_parts[1].strip()
+            start_val = name_map[s_str] if (name_map and s_str in name_map) else (int(s_str) if s_str.isdigit() else None)
+            end_val = name_map[e_str] if (name_map and e_str in name_map) else (int(e_str) if e_str.isdigit() else None)
+            if start_val is None or end_val is None:
+                return None
+        else:
+            v = name_map[range_part] if (name_map and range_part in name_map) else (int(range_part) if range_part.isdigit() else None)
+            if v is None:
+                return None
+            start_val = v
+            end_val = max_val if step > 1 else v
+
+        if start_val < min_val or start_val > max_val or end_val < min_val or end_val > max_val:
+            return None
+
+        if start_val <= end_val:
+            for val in range(start_val, end_val + 1, step):
+                allowed.add(val)
+        else:
+            full_span = list(range(start_val, max_val + 1)) + list(range(min_val, end_val + 1))
+            for val in full_span[::step]:
+                allowed.add(val)
+
+    return allowed if allowed else None
+
+
+def _matches_cron_schedule(local_dt: datetime, recur_cron: Optional[str]) -> bool:
+    """校验指定日期时间是否满足 cron 或周期别名排程。"""
+    if not recur_cron:
+        return True
     s = recur_cron.strip().lower()
     if s in ("daily", "every_day", "everyday"):
-        return "09:00", None
-    elif s in ("weekly", "every_monday"):
-        return "09:00", 0
+        return True
+    if s in ("workday", "workdays", "weekday", "weekdays"):
+        return local_dt.weekday() in range(0, 5)
+    if s in ("weekly", "every_monday"):
+        return local_dt.weekday() == 0
+    if s in ("monthly",):
+        return local_dt.day == 1
 
-    m_hm = re.match(r'^(\d{1,2}):(\d{2})$', s)
-    if m_hm:
-        h_val, m_val = int(m_hm.group(1)), int(m_hm.group(2))
-        return f"{h_val:02d}:{m_val:02d}", None
+    if re.match(r'^\d{1,2}:\d{2}$', s):
+        return True
 
     parts = s.split()
     if len(parts) == 5:
         m_str, h_str, dom_str, mon_str, dow_str = parts
-        try:
-            m_val = int(m_str) if m_str != '*' else 0
-            h_val = int(h_str) if h_str != '*' else 9
-            dow_map = {
-                "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
-                "1": 0, "2": 1, "3": 2, "4": 3, "5": 4, "6": 5, "7": 6, "0": 6
-            }
-            if dow_str in dow_map:
-                dow_val = dow_map[dow_str]
-            elif dow_str != '*':
-                try:
-                    val = int(dow_str)
-                    dow_val = (val - 1) % 7 if val >= 1 else 6
-                except ValueError:
-                    dow_val = None
-            else:
-                dow_val = None
-            return f"{h_val:02d}:{m_val:02d}", dow_val
-        except ValueError:
-            pass
+        # 0. Minute (m)
+        if m_str != '*':
+            allowed_mins = _parse_cron_field(m_str, 0, 59)
+            if allowed_mins is not None and local_dt.minute not in allowed_mins:
+                return False
+        # 1. Hour (h)
+        if h_str != '*':
+            allowed_hrs = _parse_cron_field(h_str, 0, 23)
+            if allowed_hrs is not None and local_dt.hour not in allowed_hrs:
+                return False
+        # 2. Day of month (dom)
+        if dom_str != '*':
+            allowed_doms = _parse_cron_field(dom_str, 1, 31)
+            if allowed_doms is not None and local_dt.day not in allowed_doms:
+                return False
+        # 3. Month (mon)
+        if mon_str != '*':
+            allowed_mons = _parse_cron_field(mon_str, 1, 12)
+            if allowed_mons is not None and local_dt.month not in allowed_mons:
+                return False
+        # 4. Day of week (dow)
+        if dow_str != '*':
+            raw_dows = _parse_cron_field(dow_str, 0, 7, _DOW_NAME_MAP)
+            if raw_dows is not None:
+                allowed_py_dows = {_CRON_DOW_TO_PY[d] for d in raw_dows if d in _CRON_DOW_TO_PY}
+                if local_dt.weekday() not in allowed_py_dows:
+                    return False
+        return True
+    return True
 
-    logger.warning(f"[_parse_target_hm_and_dow] 无法完全解析 Cron '{recur_cron}', 降级使用默认 (09:00)")
-    return "09:00", None
+
+def _parse_target_hm(recur_cron: Optional[str]) -> str:
+    """提取执行时分 HH:MM，默认 09:00。"""
+    if not recur_cron:
+        return "09:00"
+    s = recur_cron.strip().lower()
+    if s in ("daily", "every_day", "everyday", "workday", "workdays", "weekday", "weekdays", "weekly", "every_monday", "monthly"):
+        return "09:00"
+    m_hm = re.match(r'^(\d{1,2}):(\d{2})$', s)
+    if m_hm:
+        return f"{int(m_hm.group(1)):02d}:{int(m_hm.group(2)):02d}"
+    parts = s.split()
+    if len(parts) == 5:
+        m_str, h_str = parts[0], parts[1]
+        m_val = int(m_str) if m_str.isdigit() else 0
+        h_val = int(h_str) if h_str.isdigit() else 9
+        return f"{h_val:02d}:{m_val:02d}"
+    return "09:00"
+
+
+def _parse_target_hm_and_dow(recur_cron: str) -> Tuple[str, Optional[int]]:
+    """向后兼容辅助函数。"""
+    if not recur_cron:
+        return "09:00", None
+    hm = _parse_target_hm(recur_cron)
+    s = recur_cron.strip().lower()
+    if s in ("weekly", "every_monday"):
+        return hm, 0
+    parts = s.split()
+    if len(parts) == 5:
+        dow_str = parts[4]
+        if dow_str != '*':
+            raw_dows = _parse_cron_field(dow_str, 0, 7, _DOW_NAME_MAP)
+            if raw_dows:
+                py_dows = [_CRON_DOW_TO_PY[d] for d in raw_dows if d in _CRON_DOW_TO_PY]
+                if len(py_dows) == 1:
+                    return hm, py_dows[0]
+    return hm, None
 
 
 def _should_spawn_recurring(recur_cron: str, last_spawned_at: Optional[str], now_iso_str: str) -> bool:
@@ -92,10 +206,10 @@ def _should_spawn_recurring(recur_cron: str, last_spawned_at: Optional[str], now
         if today_prefix == last_date_str:
             return False
 
-    target_hm, target_dow = _parse_target_hm_and_dow(recur_cron)
-    if target_dow is not None and local_now.weekday() != target_dow:
+    if not _matches_cron_schedule(local_now, recur_cron):
         return False
 
+    target_hm = _parse_target_hm(recur_cron)
     current_hm = local_now.strftime("%H:%M")
     return current_hm >= target_hm
 
@@ -103,8 +217,11 @@ def _should_spawn_recurring(recur_cron: str, last_spawned_at: Optional[str], now
 class TodoService:
     """Core domain service for Todo lifecycle management."""
 
-    def __init__(self, db_path: Optional[str] = None):
-        self.repo = TodoRepository(db_path)
+    def __init__(self, db_path: Any = None):
+        if isinstance(db_path, TodoRepository):
+            self.repo = db_path
+        else:
+            self.repo = TodoRepository(db_path)
 
     @property
     def db_path(self) -> str:
@@ -120,7 +237,9 @@ class TodoService:
         recur_cron: Optional[str] = None,
         remind_interval_mins: int = 0,
         remind_before_mins: int = 30,
-        notify_enabled: bool = True
+        notify_enabled: bool = True,
+        priority: int = 1,
+        dispatch_target: Optional[str] = None
     ) -> str:
         self._validate_reminders(notify_enabled, remind_before_mins, remind_interval_mins)
         if not isinstance(notify_enabled, bool):
@@ -139,7 +258,9 @@ class TodoService:
             recur_cron=recur_cron,
             remind_interval_mins=remind_interval_mins,
             remind_before_mins=remind_before_mins,
-            notify_enabled=notify_enabled
+            notify_enabled=notify_enabled,
+            priority=priority,
+            dispatch_target=dispatch_target
         )
         render_markdown(self.db_path)
         if kind == "recurring":
@@ -258,7 +379,9 @@ class TodoService:
         kind: Optional[str] = None,
         remind_interval_mins: Optional[int] = None,
         remind_before_mins: Optional[int] = None,
-        notify_enabled: Optional[bool] = None
+        notify_enabled: Optional[bool] = None,
+        priority: Optional[int] = None,
+        dispatch_target: Optional[str] = None
     ) -> str:
         self._validate_reminders(notify_enabled, remind_before_mins, remind_interval_mins)
         fields: Dict[str, Any] = {}
@@ -273,6 +396,8 @@ class TodoService:
         if remind_interval_mins is not None: fields["remind_interval_mins"] = remind_interval_mins
         if remind_before_mins is not None: fields["remind_before_mins"] = remind_before_mins
         if notify_enabled is not None: fields['notify_enabled'] = notify_enabled
+        if priority is not None: fields['priority'] = priority
+        if dispatch_target is not None: fields['dispatch_target'] = dispatch_target
 
         if not fields:
             return f"❌ 未提供任何修改项"
@@ -382,6 +507,41 @@ class TodoService:
     def get_by_id(self, tid: str) -> Optional[Dict[str, Any]]:
         return self.repo.get_todo(tid)
 
+    def _dispatch_alert(
+        self,
+        title: str,
+        text: str,
+        color: str = "yellow",
+        dedup_key: Optional[str] = None,
+        dispatch_target: Optional[str] = None
+    ) -> bool:
+        """根据分发目标路由通知到内置渠道、邮件或全通道。"""
+        target = (dispatch_target or "").lower()
+        want_mail = "mail" in target or "email" in target or "邮件" in target
+        want_all = "all" in target or "全通道" in target
+
+        if want_all:
+            sent_mail = False
+            try:
+                from lite_agent.integrations.smtp import send_email_delivery
+                sent_mail = bool(send_email_delivery(title, text))
+            except Exception as e:
+                logger.debug(f"[TodoService] 邮件分发异常: {e}")
+            sent_im = send_im_alert(title=title, text=text, color=color, dedup_key=dedup_key)
+            return bool(sent_im or sent_mail)
+        elif want_mail:
+            sent_mail = False
+            try:
+                from lite_agent.integrations.smtp import send_email_delivery
+                sent_mail = bool(send_email_delivery(title, text))
+            except Exception as e:
+                logger.debug(f"[TodoService] 邮件分发异常: {e}")
+            if not sent_mail:
+                return send_im_alert(title=title, text=text, color=color, dedup_key=dedup_key)
+            return True
+        else:
+            return send_im_alert(title=title, text=text, color=color, dedup_key=dedup_key)
+
     def tick(self, now_str: Optional[str] = None) -> Dict[str, int]:
         """Periodic tick: wakes snoozed, inspects due tasks for alerts, spawns recurring templates."""
         now = now_str or _now_iso()
@@ -403,6 +563,9 @@ class TodoService:
             interval_mins = row.get('remind_interval_mins')
             before_mins = row.get('remind_before_mins')
             last_notified = row.get('notified_due_at')
+            priority_val = row.get('priority', 1)
+            dispatch_target = row.get('dispatch_target')
+            p_tag = {0: "🚨 [P0 紧急]", 1: "⚡ [P1 重要]", 2: "📌 [P2 次要]", 3: "☕ [P3 稍后]"}.get(priority_val, "⚡ [P1 重要]")
 
             try:
                 due_dt = datetime.fromisoformat(due_at)
@@ -418,12 +581,17 @@ class TodoService:
                         last_day = datetime.fromisoformat(last_notified).astimezone(schedule_zone).date()
                     except ValueError:
                         continue
-                if now_dt < due_dt or local_now.strftime('%H:%M') < (row.get('recur_cron') or due_dt.strftime('%H:%M')) or last_day == local_now.date():
+                if now_dt < due_dt or not _matches_cron_schedule(local_now, row.get('recur_cron')) or local_now.strftime('%H:%M') < _parse_target_hm(row.get('recur_cron') or due_dt.strftime('%H:%M')) or last_day == local_now.date():
                     continue
                 if not self.repo.mark_notified_due(tid, now, last_notified, due_at):
                     continue
-                sent = send_im_alert(title=f'🔔 周期提醒: {title}', text=f'{title}\n{description or ""}',
-                                     color='yellow', dedup_key=f'todo_periodic:{tid}:{local_now.date()}')
+                sent = self._dispatch_alert(
+                    title=f'{p_tag} 🔔 周期提醒: {title}',
+                    text=f'{title}\n{description or ""}',
+                    color='red' if priority_val == 0 else 'yellow',
+                    dedup_key=f'todo_periodic:{tid}:{local_now.date()}',
+                    dispatch_target=dispatch_target
+                )
                 if sent is False:
                     self.repo.release_notification_claim(tid, now, last_notified)
                 else:
@@ -458,11 +626,15 @@ class TodoService:
                 if description:
                     msg += f"\n- 说明: {description[:100]}"
 
-                sent = send_im_alert(
-                    title=(f"📬 {title}" if kind == "notice" else f"⏰ 待办提醒: {title}"),
+                alert_color = "yellow" if kind == "notice" else ("red" if (is_overdue or priority_val == 0) else ("blue" if priority_val == 3 else "yellow"))
+                alert_title = f"📬 {title}" if kind == "notice" else f"{p_tag} 待办提醒: {title}"
+
+                sent = self._dispatch_alert(
+                    title=alert_title,
                     text=msg,
-                    color="yellow" if kind == "notice" else ("red" if is_overdue else "yellow"),
-                    dedup_key=f"todo_due:{tid}:{now[:16]}" if (interval_mins and interval_mins > 0) else f"todo_due:{tid}"
+                    color=alert_color,
+                    dedup_key=f"todo_due:{tid}:{now[:16]}" if (interval_mins and interval_mins > 0) else f"todo_due:{tid}",
+                    dispatch_target=dispatch_target
                 )
                 if sent is False:
                     self.repo.release_notification_claim(tid, now, last_notified)
@@ -483,7 +655,8 @@ class TodoService:
             rlast = r.get('recur_last_spawned_at')
             if _should_spawn_recurring(rcron, rlast, now):
                 child_id = generate_todo_id(f"{ptitle}_{local_now.strftime('%Y-%m-%d')}", self.db_path)
-                due_time = local_now.strftime("%Y-%m-%dT18:00:00%z")
+                target_hm = _parse_target_hm(rcron)
+                due_time = local_now.strftime(f"%Y-%m-%dT{target_hm}:00%z")
                 if not self.repo.spawn_recurring_child(child_id, ptitle, pdesc, pproj, now, pid, due_time, rlast):
                     continue
                 spawned_count += 1
