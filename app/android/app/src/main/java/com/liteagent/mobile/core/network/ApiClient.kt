@@ -456,6 +456,55 @@ open class ApiClient(
             Result.failure(e)
         }
     }
+
+    open suspend fun createReviewMeeting(
+        request: CreateMeetingRequest,
+        serverUrl: String? = null
+    ): Result<CreateMeetingResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.createReviewMeeting(request)
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!)
+            } else {
+                val errMsg = try {
+                    response.errorBody()?.string()?.let { gson.fromJson(it, Map::class.java) }?.get("error")?.toString()
+                } catch (_: Exception) { null } ?: "创建会审失败 (${response.code()})"
+                Result.failure(Exception(errMsg))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    // --- 发现中枢：邮件与账单 ---
+    open suspend fun getRecentEmails(limit: Int = 20, serverUrl: String? = null): Result<List<EmailSummaryItem>> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getRecentEmails(limit)
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                Result.success(response.body()!!.emails)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "获取邮件失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun getBillingSummary(serverUrl: String? = null): Result<BillingSummaryResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getBillingSummary()
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                Result.success(response.body()!!)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "获取账单概览失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
 }
 
 class ConflictException(message: String) : Exception(message)

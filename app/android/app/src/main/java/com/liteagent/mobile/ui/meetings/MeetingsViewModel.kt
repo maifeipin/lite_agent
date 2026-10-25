@@ -126,9 +126,12 @@ class MeetingsViewModel(
         }
     }
 
+    private var livePollJob: kotlinx.coroutines.Job? = null
+
     fun selectMeeting(meetingId: String) {
         val currentEpoch = sessionEpoch
         activeDetailJob?.cancel()
+        livePollJob?.cancel()
         activeDetailJob = viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isDetailLoading = true, errorMessage = null)
             try {
@@ -136,10 +139,12 @@ class MeetingsViewModel(
                 if (currentEpoch != sessionEpoch) return@launch
 
                 if (result.isSuccess) {
+                    val detail = result.getOrNull()
                     _uiState.value = _uiState.value.copy(
-                        selectedMeeting = result.getOrNull(),
+                        selectedMeeting = detail,
                         isDetailLoading = false
                     )
+                    startLivePollingIfActive(meetingId, detail)
                 } else {
                     _uiState.value = _uiState.value.copy(
                         isDetailLoading = false,
@@ -158,9 +163,87 @@ class MeetingsViewModel(
         }
     }
 
+    private fun startLivePollingIfActive(meetingId: String, initialDetail: MeetingDetail?) {
+        livePollJob?.cancel()
+        val state = initialDetail?.state?.lowercase() ?: ""
+        val isActive = state in listOf("open", "in_progress", "reviewing", "discussing", "waiting", "awaiting_approval", "voting")
+        if (!isActive) return
+
+        livePollJob = viewModelScope.launch {
+            while (kotlinx.coroutines.isActive) {
+                kotlinx.coroutines.delay(3000L) // 3秒长轮询直播
+                val currentEpoch = sessionEpoch
+                try {
+                    val result = apiClient.getReviewMeetingDetail(meetingId, serverUrl = boundServerUrl)
+                    if (currentEpoch != sessionEpoch || _uiState.value.selectedMeeting?.id != meetingId) break
+                    if (result.isSuccess) {
+                        val updated = result.getOrNull()
+                        if (updated != null) {
+                            _uiState.value = _uiState.value.copy(selectedMeeting = updated)
+                            val updatedState = updated.state.lowercase()
+                            if (updatedState !in listOf("open", "in_progress", "reviewing", "discussing", "waiting", "awaiting_approval", "voting")) {
+                                break
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                    // ignore network blips during background stream polling
+                }
+            }
+        }
+    }
+
     fun closeMeetingDetail() {
         activeDetailJob?.cancel()
+        livePollJob?.cancel()
         _uiState.value = _uiState.value.copy(selectedMeeting = null)
+    }
+
+    fun createMeeting(
+        title: String,
+        brief: String?,
+        inviteTtlSeconds: Int = 86400,
+        onSuccess: (String) -> Unit = {}
+    ) {
+        val currentEpoch = sessionEpoch
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
+            try {
+                val req = com.liteagent.mobile.core.network.models.CreateMeetingRequest(
+                    title = title.trim(),
+                    brief = brief?.trim()?.ifEmpty { null },
+                    inviteTtlSeconds = inviteTtlSeconds
+                )
+                val result = apiClient.createReviewMeeting(req, serverUrl = boundServerUrl)
+                if (currentEpoch != sessionEpoch) return@launch
+                if (result.isSuccess) {
+                    val resp = result.getOrNull()
+                    val meetingId = resp?.id ?: ""
+                    _uiState.value = _uiState.value.copy(
+                        isLoading = false,
+                        actionSuccessMessage = "会审会议发起成功 (ID: $meetingId)"
+                    )
+                    loadMeetingsInternal(currentEpoch)
+                    if (meetingId.isNotEmpty()) {
+                        onSuccess(meetingId)
+                        selectMeeting(meetingId)
+                    }
+                } else {
+                    _uiState.value = _uiState.value.copy(
+                        isLoading = false,
+                        errorMessage = result.exceptionOrNull()?.message ?: "发起会审失败"
+                    )
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                if (currentEpoch == sessionEpoch) {
+                    _uiState.value = _uiState.value.copy(
+                        isLoading = false,
+                        errorMessage = e.localizedMessage ?: e.message
+                    )
+                }
+            }
+        }
     }
 
     /**

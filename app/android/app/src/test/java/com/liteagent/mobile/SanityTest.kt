@@ -1358,5 +1358,77 @@ class SanityTest {
         assertNull(viewModel.uiState.value.actionSuccessMessage)
         assertTrue(viewModel.uiState.value.todos.isEmpty())
     }
-}
 
+    @Test
+    fun testCreateTodoWithAdvanceRemindersAndRecurrence() = runTest {
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val storage = FakeTokenStorage()
+        val fakeApi = FakeApiService(storage)
+        val apiClient = FakeApiClient(fakeApi, storage)
+
+        storage.saveSession(
+            "https://mail.maifeipin.com",
+            UserSession(sessionToken = "tok", username = "alice", serverUrl = "https://mail.maifeipin.com")
+        )
+        fakeApi.todosByUser["alice"] = emptyList()
+
+        val fakeHelper = FakeTodoDatabaseHelper("alice_key")
+        val viewModel = TodosViewModel(
+            tokenStorage = storage,
+            apiClient = apiClient,
+            dbHelperFactory = { _, _ -> fakeHelper },
+            ioDispatcher = testDispatcher
+        )
+        testScheduler.advanceUntilIdle()
+
+        var onSuccessCalled = false
+        viewModel.createTodo(
+            title = "明天10点钟的会议",
+            project = "会议",
+            description = "提前40分钟每5分钟提醒我",
+            dueAt = "2026-10-26 10:00:00",
+            remindBeforeMins = 40,
+            remindIntervalMins = 5,
+            notifyEnabled = true,
+            recurCron = "daily",
+            priority = 1,
+            dispatchTarget = "内置通道推送",
+            onSuccess = { onSuccessCalled = true }
+        )
+        testScheduler.advanceUntilIdle()
+
+        assertTrue("创建待办应当成功回调", onSuccessCalled)
+        assertEquals("待办创建成功", viewModel.uiState.value.actionSuccessMessage)
+    }
+
+    @Test
+    fun testCreateMeetingAndLiveStreamDetail() = runTest {
+        val storage = FakeTokenStorage()
+        val fakeApi = FakeApiService(storage)
+        val apiClient = FakeApiClient(fakeApi, storage)
+
+        storage.saveSession(
+            "https://mail.maifeipin.com",
+            UserSession(sessionToken = "tok", username = "alice", serverUrl = "https://mail.maifeipin.com")
+        )
+
+        val meetingsVm = MeetingsViewModel(storage, apiClient)
+        testScheduler.advanceUntilIdle()
+
+        var createdMeetingId = ""
+        meetingsVm.createMeeting(
+            title = "Sprint 3 架构与真机验收会审",
+            brief = "讨论待办GTD交互与自动更新全量发布",
+            inviteTtlSeconds = 86400,
+            onSuccess = { id -> createdMeetingId = id }
+        )
+        testScheduler.advanceUntilIdle()
+
+        assertTrue("会议应当发起成功并生成ID", createdMeetingId.isNotEmpty())
+        assertEquals(createdMeetingId, meetingsVm.uiState.value.selectedMeeting?.id)
+        assertEquals("Sprint 3 架构与真机验收会审", meetingsVm.uiState.value.selectedMeeting?.title)
+
+        meetingsVm.closeMeetingDetail()
+        assertNull(meetingsVm.uiState.value.selectedMeeting)
+    }
+}

@@ -11,6 +11,10 @@ data class TodoItem(
     @SerializedName("project") val project: String? = null,
     @SerializedName("due_at") val dueAt: String? = null,
     @SerializedName("notify_enabled") val notifyEnabled: Any? = null,
+    @SerializedName("remind_before_mins") val remindBeforeMins: Int? = null,
+    @SerializedName("remind_interval_mins") val remindIntervalMins: Int? = null,
+    @SerializedName("recur_cron") val recurCron: String? = null,
+    @SerializedName("priority") val priority: Int? = null,
     @SerializedName("created_at") val createdAt: String? = null,
     @SerializedName("updated_at") val updatedAt: String? = null
 ) {
@@ -30,7 +34,12 @@ data class CreateTodoRequest(
     @SerializedName("project") val project: String? = null,
     @SerializedName("description") val description: String? = null,
     @SerializedName("due_at") val dueAt: String? = null,
-    @SerializedName("notify_enabled") val notifyEnabled: Boolean = true
+    @SerializedName("notify_enabled") val notifyEnabled: Boolean = true,
+    @SerializedName("remind_before_mins") val remindBeforeMins: Int = 30,
+    @SerializedName("remind_interval_mins") val remindIntervalMins: Int = 0,
+    @SerializedName("recur_cron") val recurCron: String? = null,
+    @SerializedName("priority") val priority: Int = 3,
+    @SerializedName("dispatch_target") val dispatchTarget: String? = null
 )
 
 data class CreateTodoResponse(

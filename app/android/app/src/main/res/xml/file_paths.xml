@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FileProvider 授权范围：仅暴露应用专属更新目录（updates/），
+  用于把下载好的 APK 交给系统安装器读取，不暴露任何其它文件。
+-->
+<paths>
+    <!-- getExternalFilesDir(null)/updates -->
+    <external-files-path
+        name="updates_external"
+        path="updates/" />
+    <!-- filesDir/updates（外部存储不可用时的兜底目录） -->
+    <files-path
+        name="updates_internal"
+        path="updates/" />
+</paths>

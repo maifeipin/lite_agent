@@ -27,6 +27,12 @@ import com.liteagent.mobile.ui.chat.ChatScreen
 import com.liteagent.mobile.ui.chat.ChatViewModel
 import com.liteagent.mobile.ui.chat.ChatViewModelFactory
 import com.liteagent.mobile.ui.chat.ServerConfigDialog
+import androidx.lifecycle.lifecycleScope
+import com.liteagent.mobile.core.update.UpdateController
+import com.liteagent.mobile.ui.components.UpdateDialogHost
+import com.liteagent.mobile.ui.discover.DiscoverScreen
+import com.liteagent.mobile.ui.discover.DiscoverViewModel
+import com.liteagent.mobile.ui.discover.DiscoverViewModelFactory
 import com.liteagent.mobile.ui.meetings.MeetingsScreen
 import com.liteagent.mobile.ui.meetings.MeetingsViewModel
 import com.liteagent.mobile.ui.meetings.MeetingsViewModelFactory
@@ -43,6 +49,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var chatViewModel: ChatViewModel
     private lateinit var todosViewModel: TodosViewModel
     private lateinit var meetingsViewModel: MeetingsViewModel
+    private lateinit var discoverViewModel: DiscoverViewModel
+    private lateinit var updateController: UpdateController
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -61,8 +69,20 @@ class MainActivity : ComponentActivity() {
         val meetingsFactory = MeetingsViewModelFactory(tokenStorage, apiClient)
         meetingsViewModel = ViewModelProvider(this, meetingsFactory)[MeetingsViewModel::class.java]
 
+        val discoverFactory = DiscoverViewModelFactory(tokenStorage, apiClient)
+        discoverViewModel = ViewModelProvider(this, discoverFactory)[DiscoverViewModel::class.java]
+
+        updateController = UpdateController(
+            context = applicationContext,
+            tokenStorage = tokenStorage,
+            scope = lifecycleScope
+        )
+        updateController.autoCheckOnce()
+
         setContent {
             LiteAgentTheme {
+                UpdateDialogHost(controller = updateController)
+
                 val activeServer by tokenStorage.activeServerUrlFlow.collectAsState(initial = SecureTokenStorage.DEFAULT_SERVER_URL)
                 val session by tokenStorage.sessionFlow.collectAsState(initial = null)
                 var isCheckingSession by remember { mutableStateOf(true) }
@@ -98,6 +118,8 @@ class MainActivity : ComponentActivity() {
                         chatViewModel = chatViewModel,
                         todosViewModel = todosViewModel,
                         meetingsViewModel = meetingsViewModel,
+                        discoverViewModel = discoverViewModel,
+                        updateController = updateController,
                         onLogout = {
                             isLoggedIn = false
                             chatViewModel.onLoggedOut()
@@ -107,6 +129,13 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::updateController.isInitialized) {
+            updateController.onResume()
         }
     }
 }
@@ -126,6 +155,8 @@ fun MainAppScaffold(
     chatViewModel: ChatViewModel,
     todosViewModel: TodosViewModel,
     meetingsViewModel: MeetingsViewModel,
+    discoverViewModel: DiscoverViewModel,
+    updateController: UpdateController,
     onLogout: () -> Unit = {}
 ) {
     var selectedTab by remember { mutableStateOf(NavigationTab.CHAT) }
@@ -244,10 +275,9 @@ fun MainAppScaffold(
                 NavigationTab.MEETINGS -> MeetingsScreen(
                     viewModel = meetingsViewModel
                 )
-                NavigationTab.DISCOVER -> TabPlaceholder(
-                    title = "发现与概览",
-                    subtitle = "RSS 晨间简报、账单速览与真机自动化监控 (Sprint 3)",
-                    icon = Icons.Default.AutoAwesome
+                NavigationTab.DISCOVER -> DiscoverScreen(
+                    viewModel = discoverViewModel,
+                    onCheckUpdate = { updateController.checkManually() }
                 )
             }
         }

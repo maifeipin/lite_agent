@@ -152,6 +152,14 @@ class ApiHandler(BaseHTTPRequestHandler):
                 matched["handler"](self, parsed_url)
                 return
 
+        # 1.5. 应用内一键更新 API（版本检查与 APK 下载，公开免认证）
+        if req_path == '/api/v1/app/version':
+            self._handle_app_version(parsed_url.query)
+            return
+        elif req_path == '/api/v1/app/download/latest.apk':
+            self._handle_app_download()
+            return
+
         # 2. 仪表盘 API 无需认证（仅返回注册表指令列表，无敏感数据）
         if req_path == '/api/v1/dashboard':
             self._handle_dashboard()
@@ -203,6 +211,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._handle_dashboard()
         elif req_path == '/v1/models':
             self._handle_openai_models()
+        elif req_path == '/api/v1/mail/recent':
+            self._handle_mail_recent(parsed_url.query)
+        elif req_path == '/api/v1/billing/summary':
+            self._handle_billing_summary()
         else:
             self.send_error(404, "Not Found")
 
@@ -559,6 +571,156 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         self.wfile.write(json.dumps(items, ensure_ascii=False).encode('utf-8'))
+
+    def _handle_app_version(self, query: str):
+        """检查移动端 App 最新版本信息 (未登录匿名可用)。"""
+        from urllib.parse import parse_qs
+        from lite_agent.core.constants import PROJECT_ROOT
+        qs = parse_qs(query)
+        current_code = int(qs.get('currentCode', [0])[0] or 0)
+        channel = qs.get('channel', ['debug'])[0]
+        pkg = qs.get('packageName', ['com.liteagent.mobile'])[0]
+
+        manifest_path = os.path.join(PROJECT_ROOT, 'data', 'app_version.json')
+        version_data = {}
+        if os.path.exists(manifest_path):
+            try:
+                with open(manifest_path, 'r', encoding='utf-8') as f:
+                    version_data = json.load(f)
+            except Exception:
+                pass
+
+        latest_code = int(version_data.get('versionCode', 100003))
+        latest_name = version_data.get('versionName', '1.0.3')
+        has_update = latest_code > current_code
+        force_update = bool(version_data.get('forceUpdate', False))
+
+        apk_path = os.path.join(PROJECT_ROOT, 'app', 'android', 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk')
+        size_bytes = 0
+        if os.path.exists(apk_path):
+            try:
+                size_bytes = os.path.getsize(apk_path)
+            except Exception:
+                pass
+
+        payload = {
+            "hasUpdate": has_update,
+            "forceUpdate": force_update,
+            "channel": channel,
+            "versionCode": latest_code,
+            "versionName": latest_name,
+            "packageName": pkg,
+            "minSupportedVersionCode": version_data.get('minSupportedVersionCode', 1),
+            "sizeBytes": size_bytes,
+            "sha256": version_data.get('sha256'),
+            "changelog": version_data.get('changelog', "Sprint 3: 待办高级提醒、会审轮询与直播滚动、发现中心账单邮件"),
+            "publishedAt": version_data.get('publishedAt', "2026-10-25T08:30:00Z"),
+            "downloadUrl": version_data.get('downloadUrl', "/agent/api/v1/app/download/latest.apk")
+        }
+        self._send_json(payload)
+
+    def _handle_app_download(self):
+        """流式分发最新 debug/release APK (未登录匿名可用)。"""
+        from lite_agent.core.constants import PROJECT_ROOT
+        apk_candidates = [
+            os.path.join(PROJECT_ROOT, 'app', 'android', 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk'),
+            os.path.join(PROJECT_ROOT, 'dist', 'app-debug.apk'),
+        ]
+        apk_path = None
+        for p in apk_candidates:
+            if os.path.exists(p):
+                apk_path = p
+                break
+
+        if not apk_path:
+            self.send_error(404, "最新 APK 尚未生成或已归档")
+            return
+
+        try:
+            size = os.path.getsize(apk_path)
+            self.send_response(200)
+            self._send_cors_headers()
+            self.send_header('Content-Type', 'application/vnd.android.package-archive')
+            self.send_header('Content-Length', str(size))
+            self.send_header('Content-Disposition', 'attachment; filename="liteagent-debug.apk"')
+            self.send_header('Accept-Ranges', 'bytes')
+            self.end_headers()
+            with open(apk_path, 'rb') as f:
+                while chunk := f.read(65536):
+                    self.wfile.write(chunk)
+        except Exception as e:
+            self.send_error(500, f"分发 APK 失败: {e}")
+
+    def _handle_mail_recent(self, query: str):
+        """获取最近邮件摘要列表 (支持移动端快速检索)。"""
+        from urllib.parse import parse_qs
+        qs = parse_qs(query)
+        limit = min(int(qs.get('limit', [20])[0] or 20), 100)
+        from lite_agent.integrations.mail.paths import get_statement_db_path
+        db_path = get_statement_db_path()
+        emails = []
+        if os.path.exists(db_path):
+            try:
+                conn = sqlite3.connect(db_path)
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT es.id, es.account_name, es.uid, es.sender, es.subject,
+                           es.email_date, es.importance, es.category, es.summary, es.processed
+                    FROM email_summaries es
+                    ORDER BY es.email_date DESC, es.id DESC
+                    LIMIT ?
+                """, (limit,))
+                for row in cur.fetchall():
+                    emails.append(dict(row))
+                conn.close()
+            except Exception:
+                pass
+
+        self._send_json({"success": True, "emails": emails})
+
+    def _handle_billing_summary(self):
+        """获取账单汇总统计与最近账单。"""
+        from lite_agent.integrations.mail.paths import get_statement_db_path
+        db_path = get_statement_db_path()
+        summary = {
+            "success": True,
+            "total_statements": 0,
+            "unpaid_count": 0,
+            "total_unpaid_cny": 0.0,
+            "recent_statements": [],
+            "health_status": "healthy"
+        }
+        if os.path.exists(db_path):
+            try:
+                conn = sqlite3.connect(db_path)
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                tables = {r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+                if 'statements' in tables:
+                    row_total = cur.execute("SELECT count(*) FROM statements").fetchone()
+                    summary["total_statements"] = row_total[0] if row_total else 0
+
+                    row_unpaid = cur.execute(
+                        "SELECT count(*), coalesce(sum(amount), 0) FROM statements WHERE paid = 0"
+                    ).fetchone()
+                    if row_unpaid:
+                        summary["unpaid_count"] = row_unpaid[0]
+                        summary["total_unpaid_cny"] = float(row_unpaid[1])
+
+                    cur.execute("""
+                        SELECT id, bank, card_number, due_date, amount, currency, paid, statement_date
+                        FROM statements
+                        ORDER BY statement_date DESC, id DESC
+                        LIMIT 10
+                    """)
+                    for r in cur.fetchall():
+                        summary["recent_statements"].append(dict(r))
+                conn.close()
+            except Exception as e:
+                summary["health_status"] = f"degraded: {e}"
+
+        self._send_json(summary)
 
     def _read_json_body(self) -> dict:
         length = int(self.headers.get('Content-Length', 0))

@@ -283,6 +283,12 @@ class TodosViewModel(
         project: String? = null,
         description: String? = null,
         dueAt: String? = null,
+        remindBeforeMins: Int = 30,
+        remindIntervalMins: Int = 0,
+        notifyEnabled: Boolean = true,
+        recurCron: String? = null,
+        priority: Int = 3,
+        dispatchTarget: String? = null,
         onSuccess: () -> Unit = {}
     ) {
         val trimmedTitle = title.trim()
@@ -302,7 +308,13 @@ class TodosViewModel(
                     title = trimmedTitle,
                     project = project?.trim()?.ifEmpty { null },
                     description = description?.trim()?.ifEmpty { null },
-                    dueAt = dueAt?.trim()?.ifEmpty { null }
+                    dueAt = dueAt?.trim()?.ifEmpty { null },
+                    notifyEnabled = notifyEnabled,
+                    remindBeforeMins = remindBeforeMins,
+                    remindIntervalMins = remindIntervalMins,
+                    recurCron = recurCron?.trim()?.ifEmpty { null },
+                    priority = priority,
+                    dispatchTarget = dispatchTarget?.trim()?.ifEmpty { null }
                 )
                 val result = apiClient.createTodo(request, serverUrl = currentServer)
                 if (currentEpoch != sessionEpoch || currentHelper != dbHelper) return@launchWriteJob

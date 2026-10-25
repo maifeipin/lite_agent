@@ -83,3 +83,16 @@ data class DecideMeetingRequest(
     @SerializedName("expected_version") val expectedVersion: Int? = null,
     @SerializedName("request_id") val requestId: String? = null
 )
+
+data class CreateMeetingRequest(
+    @SerializedName("title") val title: String,
+    @SerializedName("brief") val brief: String? = null,
+    @SerializedName("invite_ttl_seconds") val inviteTtlSeconds: Int = 86400
+)
+
+data class CreateMeetingResponse(
+    @SerializedName("id") val id: String? = null,
+    @SerializedName("owner_token") val ownerToken: String? = null,
+    @SerializedName("invite_url") val inviteUrl: String? = null,
+    @SerializedName("error") val error: String? = null
+)

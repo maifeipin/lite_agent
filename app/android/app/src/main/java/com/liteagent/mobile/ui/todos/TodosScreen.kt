@@ -19,6 +19,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
@@ -171,8 +178,19 @@ fun TodosScreen(
         CreateTodoBottomSheet(
             isCreating = uiState.isCreating,
             onDismiss = { showCreateSheet = false },
-            onSubmit = { title, project, desc, dueAt ->
-                viewModel.createTodo(title, project, desc, dueAt) {
+            onSubmit = { title, project, desc, dueAt, remindBeforeMins, remindIntervalMins, notifyEnabled, recurCron, priority, dispatchTarget ->
+                viewModel.createTodo(
+                    title = title,
+                    project = project,
+                    description = desc,
+                    dueAt = dueAt,
+                    remindBeforeMins = remindBeforeMins,
+                    remindIntervalMins = remindIntervalMins,
+                    notifyEnabled = notifyEnabled,
+                    recurCron = recurCron,
+                    priority = priority,
+                    dispatchTarget = dispatchTarget
+                ) {
                     showCreateSheet = false
                 }
             }
@@ -513,13 +531,95 @@ private fun EmptyTodosView(
 private fun CreateTodoBottomSheet(
     isCreating: Boolean,
     onDismiss: () -> Unit,
-    onSubmit: (title: String, project: String?, desc: String?, dueAt: String?) -> Unit
+    onSubmit: (
+        title: String,
+        project: String?,
+        desc: String?,
+        dueAt: String?,
+        remindBeforeMins: Int,
+        remindIntervalMins: Int,
+        notifyEnabled: Boolean,
+        recurCron: String?,
+        priority: Int,
+        dispatchTarget: String?
+    ) -> Unit
 ) {
     var title by remember { mutableStateOf("") }
-    var project by remember { mutableStateOf("") }
-    var dueAt by remember { mutableStateOf("") }
     var description by remember { mutableStateOf("") }
+    var showDescription by remember { mutableStateOf(false) }
+
+    // 快捷日期与时间
+    var dateType by remember { mutableStateOf("tomorrow") } // none, today, tomorrow, weekend, custom
+    var customDate by remember { mutableStateOf("") }
+    var timeType by remember { mutableStateOf("10:00") } // allday, 09:00, 10:00, 14:00, 18:00, custom
+    var customTime by remember { mutableStateOf("") }
+
+    // 高级提醒
+    var remindBeforeMins by remember { mutableStateOf(40) } // 提前40分钟
+    var remindIntervalMins by remember { mutableStateOf(5) } // 每5分钟
+    var notifyEnabled by remember { mutableStateOf(true) }
+    var dispatchTarget by remember { mutableStateOf("内置通道推送") }
+
+    // 周期规则
+    var recurType by remember { mutableStateOf("none") } // none, daily, workday, weekly, monthly
+
+    // 优先级与项目
+    var priority by remember { mutableStateOf(2) } // 0: P0, 1: P1, 2: P2, 3: P3
+    var project by remember { mutableStateOf("会议") }
+    var customProject by remember { mutableStateOf("") }
+
     val focusManager = LocalFocusManager.current
+    val scrollState = rememberScrollState()
+
+    val computedDueAt = remember(dateType, customDate, timeType, customTime) {
+        if (dateType == "none") null
+        else {
+            val dateStr = when (dateType) {
+                "today" -> SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+                "tomorrow" -> {
+                    val cal = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, 1) }
+                    SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(cal.time)
+                }
+                "weekend" -> {
+                    val cal = Calendar.getInstance()
+                    while (cal.get(Calendar.DAY_OF_WEEK) != Calendar.SATURDAY) {
+                        cal.add(Calendar.DAY_OF_YEAR, 1)
+                    }
+                    SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(cal.time)
+                }
+                "custom" -> customDate.trim().ifEmpty { null }
+                else -> null
+            }
+            if (dateStr == null) null
+            else {
+                val timeStr = when (timeType) {
+                    "allday" -> "09:00:00"
+                    "09:00" -> "09:00:00"
+                    "10:00" -> "10:00:00"
+                    "14:00" -> "14:00:00"
+                    "18:00" -> "18:00:00"
+                    "custom" -> {
+                        val trimmed = customTime.trim()
+                        if (trimmed.isEmpty()) "09:00:00"
+                        else if (trimmed.count { it == ':' } == 1) "$trimmed:00"
+                        else trimmed
+                    }
+                    else -> "09:00:00"
+                }
+                "$dateStr $timeStr"
+            }
+        }
+    }
+
+    val computedRecurCron = when (recurType) {
+        "daily" -> "daily"
+        "workday" -> "0 9 * * 1-5"
+        "weekly" -> "weekly"
+        "monthly" -> "0 9 1 * *"
+        else -> null
+    }
+
+    val finalProject = if (project == "自定义") customProject.trim().ifEmpty { null } else project.trim().ifEmpty { null }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -530,109 +630,478 @@ private fun CreateTodoBottomSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .fillMaxHeight(0.9f)
                 .padding(horizontal = 20.dp, vertical = 8.dp)
                 .imePadding()
-                .autoDismissKeyboardOnTap(focusManager),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+                .autoDismissKeyboardOnTap(focusManager)
         ) {
+            // 头部标题栏
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "新建待办事项",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "新建待办事项",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Surface(
+                        color = PrimaryIndigo.copy(alpha = 0.15f),
+                        shape = RoundedCornerShape(6.dp)
+                    ) {
+                        Text(
+                            text = "GTD 沉浸交互",
+                            color = PrimaryIndigo,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                }
                 IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
                     Icon(Icons.Default.Close, contentDescription = "关闭", tint = TextMuted)
                 }
             }
 
-            // 待办标题输入
-            OutlinedTextField(
-                value = title,
-                onValueChange = { title = it },
-                label = { Text("待办名称 (必填)") },
-                placeholder = { Text("例如：完成 Sprint 2 会审审批真机验收") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = false,
-                maxLines = 3,
-                shape = RoundedCornerShape(12.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = PrimaryIndigo,
-                    unfocusedBorderColor = SurfaceBorder
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // 主滚动表单
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .verticalScroll(scrollState),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // 待办标题输入
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    label = { Text("待办名称") },
+                    placeholder = { Text("例如：明天10点钟的会议") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = false,
+                    maxLines = 3,
+                    shape = RoundedCornerShape(12.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = PrimaryIndigo,
+                        unfocusedBorderColor = SurfaceBorder
+                    )
                 )
-            )
 
-            // 所属项目
-            OutlinedTextField(
-                value = project,
-                onValueChange = { project = it },
-                label = { Text("所属项目 (可选)") },
-                placeholder = { Text("例如：LiteAgent-Mobile") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                leadingIcon = {
-                    Icon(Icons.Outlined.Folder, contentDescription = null, tint = TextMuted)
-                },
-                shape = RoundedCornerShape(12.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = PrimaryIndigo,
-                    unfocusedBorderColor = SurfaceBorder
-                )
-            )
+                // 截止日期与时间节点
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = SurfaceCard),
+                    shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBorder)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "📅 截止日期",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = TextSecondary
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            listOf(
+                                "tomorrow" to "明天 (推荐)",
+                                "today" to "今天",
+                                "weekend" to "本周末",
+                                "custom" to "自定义日期",
+                                "none" to "无截止"
+                            ).forEach { (key, label) ->
+                                FilterChip(
+                                    selected = dateType == key,
+                                    onClick = { dateType = key },
+                                    label = { Text(label, fontSize = 12.sp) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = PrimaryIndigo.copy(alpha = 0.2f),
+                                        selectedLabelColor = PrimaryIndigo
+                                    )
+                                )
+                            }
+                        }
 
-            // 截止日期
-            OutlinedTextField(
-                value = dueAt,
-                onValueChange = { dueAt = it },
-                label = { Text("截止日期 (可选)") },
-                placeholder = { Text("例如：2026-10-25 18:00") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                leadingIcon = {
-                    Icon(Icons.Outlined.CalendarToday, contentDescription = null, tint = TextMuted)
-                },
-                shape = RoundedCornerShape(12.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = PrimaryIndigo,
-                    unfocusedBorderColor = SurfaceBorder
-                )
-            )
+                        if (dateType == "custom") {
+                            OutlinedTextField(
+                                value = customDate,
+                                onValueChange = { customDate = it },
+                                placeholder = { Text("格式：YYYY-MM-DD，如 2026-10-26") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                        }
 
-            // 详细说明
-            OutlinedTextField(
-                value = description,
-                onValueChange = { description = it },
-                label = { Text("详细说明 (可选)") },
-                placeholder = { Text("添加更多任务细节或核验要点...") },
-                modifier = Modifier.fillMaxWidth(),
-                minLines = 2,
-                maxLines = 4,
-                shape = RoundedCornerShape(12.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = PrimaryIndigo,
-                    unfocusedBorderColor = SurfaceBorder
-                )
-            )
+                        if (dateType != "none") {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "⏰ 具体时间点",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = TextSecondary
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                listOf(
+                                    "10:00" to "10:00 (推荐)",
+                                    "09:00" to "09:00",
+                                    "14:00" to "14:00",
+                                    "18:00" to "18:00",
+                                    "allday" to "全天",
+                                    "custom" to "自定义时间"
+                                ).forEach { (key, label) ->
+                                    FilterChip(
+                                        selected = timeType == key,
+                                        onClick = { timeType = key },
+                                        label = { Text(label, fontSize = 12.sp) },
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = PrimaryIndigo.copy(alpha = 0.2f),
+                                            selectedLabelColor = PrimaryIndigo
+                                        )
+                                    )
+                                }
+                            }
 
-            Spacer(modifier = Modifier.height(4.dp))
+                            if (timeType == "custom") {
+                                OutlinedTextField(
+                                    value = customTime,
+                                    onValueChange = { customTime = it },
+                                    placeholder = { Text("格式：HH:mm，如 10:30") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(8.dp)
+                                )
+                            }
+                        }
 
-            // 提交按钮
+                        computedDueAt?.let { due ->
+                            Text(
+                                text = "预计截止时间：$due",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = PrimaryIndigo,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+
+                // 高级提醒控制 (提前提醒 + 循环间隔 + 推送通道)
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = SurfaceCard),
+                    shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBorder)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "🔔 智能提醒开关与推送通道",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = TextSecondary
+                            )
+                            Switch(
+                                checked = notifyEnabled,
+                                onCheckedChange = { notifyEnabled = it }
+                            )
+                        }
+
+                        if (notifyEnabled) {
+                            Text(
+                                text = "提前提醒时间：",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextMuted
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                listOf(
+                                    40 to "提前40分钟 (推荐)",
+                                    0 to "准时提醒",
+                                    15 to "提前15分钟",
+                                    30 to "提前30分钟",
+                                    60 to "提前1小时"
+                                ).forEach { (mins, label) ->
+                                    FilterChip(
+                                        selected = remindBeforeMins == mins,
+                                        onClick = { remindBeforeMins = mins },
+                                        label = { Text(label, fontSize = 12.sp) },
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = AccentAmber.copy(alpha = 0.2f),
+                                            selectedLabelColor = AccentAmber
+                                        )
+                                    )
+                                }
+                            }
+
+                            Text(
+                                text = "重复提醒间隔：",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextMuted
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                listOf(
+                                    5 to "每5分钟 (推荐)",
+                                    0 to "单次提醒",
+                                    10 to "每10分钟",
+                                    15 to "每15分钟",
+                                    30 to "每30分钟"
+                                ).forEach { (interval, label) ->
+                                    FilterChip(
+                                        selected = remindIntervalMins == interval,
+                                        onClick = { remindIntervalMins = interval },
+                                        label = { Text(label, fontSize = 12.sp) },
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = AccentAmber.copy(alpha = 0.2f),
+                                            selectedLabelColor = AccentAmber
+                                        )
+                                    )
+                                }
+                            }
+
+                            Text(
+                                text = "推送通知渠道：",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextMuted
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                listOf(
+                                    "内置通道推送" to "内置系统推送",
+                                    "Telegram" to "Telegram Bot",
+                                    "邮件" to "邮件提醒"
+                                ).forEach { (channel, label) ->
+                                    FilterChip(
+                                        selected = dispatchTarget == channel,
+                                        onClick = { dispatchTarget = channel },
+                                        label = { Text(label, fontSize = 12.sp) },
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = PrimaryIndigo.copy(alpha = 0.2f),
+                                            selectedLabelColor = PrimaryIndigo
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 周期与重复规则
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = SurfaceCard),
+                    shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBorder)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "🔄 周期与重复规则",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = TextSecondary
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            listOf(
+                                "none" to "不重复",
+                                "daily" to "每天",
+                                "workday" to "工作日 (周一至周五)",
+                                "weekly" to "每周",
+                                "monthly" to "每月"
+                            ).forEach { (key, label) ->
+                                FilterChip(
+                                    selected = recurType == key,
+                                    onClick = { recurType = key },
+                                    label = { Text(label, fontSize = 12.sp) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = AccentGreen.copy(alpha = 0.2f),
+                                        selectedLabelColor = AccentGreen
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // 优先级与所属项目
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = SurfaceCard),
+                    shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBorder)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "🚩 优先级",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = TextSecondary
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            listOf(
+                                0 to ("P0 紧急" to AccentRed),
+                                1 to ("P1 高" to AccentAmber),
+                                2 to ("P2 中" to Color(0xFFFBBF24)),
+                                3 to ("P3 低" to TextSecondary)
+                            ).forEach { (p, pair) ->
+                                val (pLabel, pColor) = pair
+                                FilterChip(
+                                    selected = priority == p,
+                                    onClick = { priority = p },
+                                    label = { Text(pLabel, fontSize = 12.sp) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = pColor.copy(alpha = 0.2f),
+                                        selectedLabelColor = pColor
+                                    )
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "📁 所属项目",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = TextSecondary
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            listOf("会议", "工作", "生活", "个人", "自定义").forEach { p ->
+                                FilterChip(
+                                    selected = project == p,
+                                    onClick = { project = p },
+                                    label = { Text(p, fontSize = 12.sp) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = PrimaryIndigo.copy(alpha = 0.2f),
+                                        selectedLabelColor = PrimaryIndigo
+                                    )
+                                )
+                            }
+                        }
+                        if (project == "自定义") {
+                            OutlinedTextField(
+                                value = customProject,
+                                onValueChange = { customProject = it },
+                                placeholder = { Text("输入自定义项目名称") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                        }
+                    }
+                }
+
+                // 详细说明 (可折叠)
+                if (showDescription) {
+                    OutlinedTextField(
+                        value = description,
+                        onValueChange = { description = it },
+                        label = { Text("详细说明与核验备忘") },
+                        placeholder = { Text("添加任务细节或参会人员...") },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 2,
+                        maxLines = 4,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = PrimaryIndigo,
+                            unfocusedBorderColor = SurfaceBorder
+                        )
+                    )
+                } else {
+                    TextButton(
+                        onClick = { showDescription = true },
+                        modifier = Modifier.align(Alignment.Start)
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("添加详细说明 / 备忘", fontSize = 13.sp)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // 立即创建按钮
             Button(
                 onClick = {
                     if (title.isNotBlank()) {
-                        onSubmit(title, project, description, dueAt)
+                        onSubmit(
+                            title.trim(),
+                            finalProject,
+                            description.trim().ifEmpty { null },
+                            computedDueAt,
+                            remindBeforeMins,
+                            remindIntervalMins,
+                            notifyEnabled,
+                            computedRecurCron,
+                            priority,
+                            dispatchTarget
+                        )
                     }
                 },
                 enabled = title.isNotBlank() && !isCreating,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(48.dp),
+                    .height(50.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = PrimaryIndigo),
-                shape = RoundedCornerShape(12.dp)
+                shape = RoundedCornerShape(14.dp)
             ) {
                 if (isCreating) {
                     CircularProgressIndicator(
@@ -641,11 +1110,11 @@ private fun CreateTodoBottomSheet(
                         strokeWidth = 2.dp
                     )
                 } else {
-                    Text("立即创建", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                    Text("立即创建待办", fontWeight = FontWeight.Bold, fontSize = 15.sp)
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
         }
     }
 }

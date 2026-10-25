@@ -74,4 +74,18 @@ interface ApiService {
         @Path("id") id: String,
         @Body request: DecideMeetingRequest
     ): Response<MeetingDetail>
+
+    @POST("agent/api/v1/review-meetings")
+    suspend fun createReviewMeeting(
+        @Body request: CreateMeetingRequest
+    ): Response<CreateMeetingResponse>
+
+    // --- 发现中枢：邮件与账单 ---
+    @GET("agent/api/v1/mail/recent")
+    suspend fun getRecentEmails(
+        @Query("limit") limit: Int = 20
+    ): Response<EmailListResponse>
+
+    @GET("agent/api/v1/billing/summary")
+    suspend fun getBillingSummary(): Response<BillingSummaryResponse>
 }

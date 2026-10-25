@@ -391,6 +391,20 @@ class FakeApiService : ApiService {
         meetingDetailMap[id] = updated
         return Response.success(updated)
     }
+
+    override suspend fun createReviewMeeting(request: CreateMeetingRequest): Response<CreateMeetingResponse> {
+        val newId = "meeting-${System.currentTimeMillis()}"
+        meetingDetailMap[newId] = MeetingDetail(id = newId, title = request.title, brief = request.brief, state = "open")
+        return Response.success(CreateMeetingResponse(id = newId, ownerToken = "mock-owner-token", inviteUrl = "http://mock/join"))
+    }
+
+    override suspend fun getRecentEmails(limit: Int): Response<EmailListResponse> {
+        return Response.success(EmailListResponse(success = true, emails = emptyList()))
+    }
+
+    override suspend fun getBillingSummary(): Response<BillingSummaryResponse> {
+        return Response.success(BillingSummaryResponse(success = true, totalStatements = 0, unpaidCount = 0, totalUnpaidCny = 0.0))
+    }
 }
 
 class FakeApiClient(

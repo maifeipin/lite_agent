@@ -44,6 +44,7 @@ fun MeetingsScreen(
     val snackbarHostState = remember { SnackbarHostState() }
 
     var decisionActionTarget by remember { mutableStateOf<String?>(null) } // "approve", "revise", "reject"
+    var showCreateMeetingDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(uiState.errorMessage) {
         uiState.errorMessage?.let { msg ->
@@ -80,6 +81,9 @@ fun MeetingsScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = { showCreateMeetingDialog = true }) {
+                        Icon(Icons.Default.Add, contentDescription = "发起新会审", tint = PrimaryIndigo)
+                    }
                     IconButton(onClick = { viewModel.refresh() }, enabled = !uiState.isRefreshing) {
                         if (uiState.isRefreshing) {
                             CircularProgressIndicator(
@@ -154,6 +158,17 @@ fun MeetingsScreen(
                 }
             }
         }
+    }
+
+    if (showCreateMeetingDialog) {
+        CreateMeetingDialog(
+            onDismiss = { showCreateMeetingDialog = false },
+            onSubmit = { title, brief ->
+                viewModel.createMeeting(title, brief) {
+                    showCreateMeetingDialog = false
+                }
+            }
+        )
     }
 
     // 会审详情 Sheet / Full-Screen Modal
@@ -450,6 +465,14 @@ private fun MeetingDetailSheet(
 ) {
     val scrollState = rememberScrollState()
 
+    // 打开详情或新发言追加时，平滑自动滚动直达最底部最新发言与裁决区
+    LaunchedEffect(detail.id, detail.events.size) {
+        kotlinx.coroutines.delay(120L)
+        scrollState.animateScrollTo(scrollState.maxValue)
+    }
+
+    val isActiveMeeting = detail.state.lowercase() in listOf("open", "in_progress", "reviewing", "discussing", "waiting", "awaiting_approval")
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -482,6 +505,20 @@ private fun MeetingDetailSheet(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+                    if (isActiveMeeting) {
+                        Surface(
+                            color = AccentGreen.copy(alpha = 0.15f),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = "● 实时直播",
+                                color = AccentGreen,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
                 }
 
                 IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
@@ -911,4 +948,70 @@ private fun formatTime(epochSecondsOrMillis: Long): String {
     val millis = if (epochSecondsOrMillis < 10000000000L) epochSecondsOrMillis * 1000 else epochSecondsOrMillis
     val sdf = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
     return sdf.format(Date(millis))
+}
+
+@Composable
+private fun CreateMeetingDialog(
+    onDismiss: () -> Unit,
+    onSubmit: (title: String, brief: String?) -> Unit
+) {
+    var title by remember { mutableStateOf("") }
+    var brief by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(Icons.Default.Groups, contentDescription = null, tint = PrimaryIndigo)
+                Text("发起全新会审决策", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    text = "创建由 Claude、Gemini 及人类多方模型共同参与的架构或业务决策研讨会审室。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
+                )
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    label = { Text("议题标题 (必填)") },
+                    placeholder = { Text("例如：LiteAgent 掌上中枢架构裁决") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    shape = RoundedCornerShape(10.dp)
+                )
+                OutlinedTextField(
+                    value = brief,
+                    onValueChange = { brief = it },
+                    label = { Text("提案背景与技术要点 (可选)") },
+                    placeholder = { Text("详细阐述议题目标、关键指标与备选架构选项...") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 3,
+                    maxLines = 5,
+                    shape = RoundedCornerShape(10.dp)
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (title.isNotBlank()) {
+                        onSubmit(title.trim(), brief.trim().ifEmpty { null })
+                    }
+                },
+                enabled = title.isNotBlank(),
+                colors = ButtonDefaults.buttonColors(containerColor = PrimaryIndigo),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text("确认发起")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
 }

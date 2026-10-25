@@ -82,10 +82,13 @@ def handle_todos_post(http_handler: Any, parsed_url: Any) -> None:
         remind_interval_mins = data.get("remind_interval_mins", 0)
         remind_before_mins = data.get("remind_before_mins", 30)
         notify_enabled = data.get('notify_enabled', True)
+        recur_cron = data.get("recur_cron")
+        if recur_cron and kind == "misc":
+            kind = "recurring"
 
         msg = get_todo_service(http_handler).add(
             title=title, kind=kind, project=project, description=description,
-            due_at=due_at, remind_interval_mins=remind_interval_mins,
+            due_at=due_at, recur_cron=recur_cron, remind_interval_mins=remind_interval_mins,
             remind_before_mins=remind_before_mins, notify_enabled=notify_enabled
         )
 
