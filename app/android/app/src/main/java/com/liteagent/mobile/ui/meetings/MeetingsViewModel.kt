@@ -35,7 +35,8 @@ data class MeetingsUiState(
 
 class MeetingsViewModel(
     private val tokenStorage: SecureTokenStorage,
-    private val apiClient: ApiClient
+    private val apiClient: ApiClient,
+    private val enableLivePolling: Boolean = true
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(MeetingsUiState())
@@ -165,6 +166,7 @@ class MeetingsViewModel(
 
     private fun startLivePollingIfActive(meetingId: String, initialDetail: MeetingDetail?) {
         livePollJob?.cancel()
+        if (!enableLivePolling) return
         val state = initialDetail?.state?.lowercase() ?: ""
         val isActive = state in listOf("open", "in_progress", "reviewing", "discussing", "waiting", "awaiting_approval", "voting")
         if (!isActive) return

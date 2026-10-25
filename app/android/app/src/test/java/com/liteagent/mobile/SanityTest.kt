@@ -1361,7 +1361,6 @@ class SanityTest {
 
     @Test
     fun testCreateTodoWithAdvanceRemindersAndRecurrence() = runTest {
-        val testDispatcher = UnconfinedTestDispatcher(testScheduler)
         val serverUrl = "https://mail.maifeipin.com"
         val storage = FakeTokenStorage(serverUrl)
         val fakeApi = FakeApiService()
@@ -1424,7 +1423,7 @@ class SanityTest {
             )
         )
 
-        val meetingsVm = MeetingsViewModel(storage, apiClient)
+        val meetingsVm = MeetingsViewModel(storage, apiClient, enableLivePolling = false)
         testScheduler.advanceUntilIdle()
 
         var createdMeetingId = ""
@@ -1434,14 +1433,14 @@ class SanityTest {
             inviteTtlSeconds = 86400,
             onSuccess = { id -> createdMeetingId = id }
         )
-        testScheduler.runCurrent()
+        testScheduler.advanceUntilIdle()
 
         assertTrue("会议应当发起成功并生成ID", createdMeetingId.isNotEmpty())
         assertEquals(createdMeetingId, meetingsVm.uiState.value.selectedMeeting?.id)
         assertEquals("Sprint 3 架构与真机验收会审", meetingsVm.uiState.value.selectedMeeting?.title)
 
         meetingsVm.closeMeetingDetail()
-        testScheduler.runCurrent()
+        testScheduler.advanceUntilIdle()
         assertNull(meetingsVm.uiState.value.selectedMeeting)
     }
 }
