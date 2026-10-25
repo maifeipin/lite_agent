@@ -129,7 +129,7 @@ class MeetingsViewModel(
 
     private var livePollJob: kotlinx.coroutines.Job? = null
 
-    fun selectMeeting(meetingId: String) {
+    fun selectMeeting(meetingId: String, startLivePolling: Boolean = false) {
         val currentEpoch = sessionEpoch
         activeDetailJob?.cancel()
         livePollJob?.cancel()
@@ -145,7 +145,9 @@ class MeetingsViewModel(
                         selectedMeeting = detail,
                         isDetailLoading = false
                     )
-                    startLivePollingIfActive(meetingId, detail)
+                    if (startLivePolling) {
+                        startLivePollingIfActive(meetingId, detail)
+                    }
                 } else {
                     _uiState.value = _uiState.value.copy(
                         isDetailLoading = false,

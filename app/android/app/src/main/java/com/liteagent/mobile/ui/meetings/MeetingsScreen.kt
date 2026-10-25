@@ -131,7 +131,7 @@ fun MeetingsScreen(
                     item {
                         PinnedAwaitingSection(
                             awaitingMeetings = uiState.awaitingMeetings,
-                            onSelect = { viewModel.selectMeeting(it.id) }
+                            onSelect = { viewModel.selectMeeting(it.id, startLivePolling = true) }
                         )
                     }
                 }
@@ -153,7 +153,7 @@ fun MeetingsScreen(
                 ) { meeting ->
                     MeetingItemCard(
                         meeting = meeting,
-                        onClick = { viewModel.selectMeeting(meeting.id) }
+                        onClick = { viewModel.selectMeeting(meeting.id, startLivePolling = true) }
                     )
                 }
             }
