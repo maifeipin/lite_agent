@@ -1434,13 +1434,14 @@ class SanityTest {
             inviteTtlSeconds = 86400,
             onSuccess = { id -> createdMeetingId = id }
         )
-        testScheduler.advanceUntilIdle()
+        testScheduler.runCurrent()
 
         assertTrue("会议应当发起成功并生成ID", createdMeetingId.isNotEmpty())
         assertEquals(createdMeetingId, meetingsVm.uiState.value.selectedMeeting?.id)
         assertEquals("Sprint 3 架构与真机验收会审", meetingsVm.uiState.value.selectedMeeting?.title)
 
         meetingsVm.closeMeetingDetail()
+        testScheduler.runCurrent()
         assertNull(meetingsVm.uiState.value.selectedMeeting)
     }
 }
