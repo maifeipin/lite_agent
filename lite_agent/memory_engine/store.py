@@ -125,15 +125,18 @@ class MemoryStore:
 
             try:
                 import chromadb
-                for _submod in (
-                    'chromadb.db.impl.sqlite',
-                    'chromadb.db.impl.sqlite_pool',
-                    'chromadb.segment.impl.metadata.sqlite',
-                ):
-                    try:
-                        __import__(_submod)
-                    except Exception:
-                        pass
+                try:
+                    import chromadb.db.impl.sqlite
+                except Exception:
+                    pass
+                try:
+                    import chromadb.db.impl.sqlite_pool
+                except Exception:
+                    pass
+                try:
+                    import chromadb.segment.impl.metadata.sqlite
+                except Exception:
+                    pass
             finally:
                 if _orig_sqlite3 is not None:
                     sys.modules['sqlite3'] = _orig_sqlite3
