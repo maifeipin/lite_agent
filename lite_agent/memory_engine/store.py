@@ -128,13 +128,13 @@ class MemoryStore:
             return False
 
     def _init_schema(self):
-        for stmt in SCHEMA.split(';'):
-            s = stmt.strip()
-            if s:
-                self.conn.execute(s)
-        # 迁移：为已有数据库添加新列
-        self._migrate()
-        self.conn.commit()
+        with self.conn:
+            for stmt in SCHEMA.split(';'):
+                s = stmt.strip()
+                if s:
+                    self.conn.execute(s)
+            # 迁移：为已有数据库添加新列
+            self._migrate()
 
     def _migrate(self):
         """兼容旧 schema — 添加缺失列"""
@@ -178,16 +178,16 @@ class MemoryStore:
             topic_tags = []
 
         created_at = time.time()
-        cur = self.conn.execute(
-            """INSERT INTO conversations
-               (speaker_id, speaker_nick, session_id, role, content,
-                msg_type, memory_type, created_at, importance, topic_tags)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (speaker_id, speaker_nick, session_id, role, content,
-             msg_type, memory_type, created_at, importance, json.dumps(topic_tags))
-        )
-        row_id = cur.lastrowid
-        self.conn.commit()
+        with self.conn:
+            cur = self.conn.execute(
+                """INSERT INTO conversations
+                   (speaker_id, speaker_nick, session_id, role, content,
+                    msg_type, memory_type, created_at, importance, topic_tags)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (speaker_id, speaker_nick, session_id, role, content,
+                 msg_type, memory_type, created_at, importance, json.dumps(topic_tags))
+            )
+            row_id = cur.lastrowid
 
         # 写入向量库（已在 SQLite 事务提交后执行，避免长耗时 embedding 占用写锁）
         if self._chroma_ready and role in ('user', 'bot'):
@@ -215,50 +215,50 @@ class MemoryStore:
                        role: str = 'system') -> int:
         """保存蒸馏产物"""
         created_at = time.time()
-        cur = self.conn.execute(
-            """INSERT INTO conversations
-               (speaker_id, speaker_nick, role, content, created_at,
-                importance, topic_tags, distilled_from, is_distillate)
-               VALUES ('system','system',?,?,?,?,?,?,1)""",
-            (role, content, created_at, importance,
-             json.dumps(topic_tags or []),
-             json.dumps(source_ids))
-        )
-        row_id = cur.lastrowid
-        self.conn.commit()
+        with self.conn:
+            cur = self.conn.execute(
+                """INSERT INTO conversations
+                   (speaker_id, speaker_nick, role, content, created_at,
+                    importance, topic_tags, distilled_from, is_distillate)
+                   VALUES ('system','system',?,?,?,?,?,?,1)""",
+                (role, content, created_at, importance,
+                 json.dumps(topic_tags or []),
+                 json.dumps(source_ids))
+            )
+            row_id = cur.lastrowid
         return row_id
 
     def update_importance(self, msg_id: int, delta: float):
         """调整质量分（±0.1 为单位）"""
-        self.conn.execute(
-            "UPDATE conversations SET importance = MAX(0, MIN(1, importance + ?)) WHERE id = ?",
-            (delta, msg_id)
-        )
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute(
+                "UPDATE conversations SET importance = MAX(0, MIN(1, importance + ?)) WHERE id = ?",
+                (delta, msg_id)
+            )
 
     def update_feedback(self, msg_id: int, score: float):
         """记录显式反馈"""
-        self.conn.execute(
-            "UPDATE conversations SET feedback_score = ? WHERE id = ?",
-            (score, msg_id)
-        )
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute(
+                "UPDATE conversations SET feedback_score = ? WHERE id = ?",
+                (score, msg_id)
+            )
 
     # ========== 用户画像 ==========
 
     def touch_user(self, speaker_id: str, nick: str = ''):
         """更新用户最后活跃时间"""
         now = time.time()
-        self.conn.execute(
-            """INSERT INTO user_profiles (speaker_id, nick, first_seen, last_seen, interaction_count)
-               VALUES (?,?,?,?,1)
-               ON CONFLICT(speaker_id) DO UPDATE SET
-               nick = COALESCE(NULLIF(?, ''), nick),
-               last_seen = ?,
-               interaction_count = interaction_count + 1""",
-            (speaker_id, nick, now, now, nick, now)
-        )
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO user_profiles (speaker_id, nick, first_seen, last_seen, interaction_count)
+                   VALUES (?,?,?,?,1)
+                   ON CONFLICT(speaker_id) DO UPDATE SET
+                   nick = COALESCE(NULLIF(?, ''), nick),
+                   last_seen = ?,
+                   interaction_count = interaction_count + 1""",
+                (speaker_id, nick, now, now, nick, now)
+            )
 
     def get_user_profile(self, speaker_id: str) -> Optional[Dict]:
         row = self.conn.execute(
@@ -427,14 +427,14 @@ class MemoryStore:
     def save_distill_cache(self, cache_key: str, raw_json: str,
                            source_count: int) -> int:
         """写入蒸馏缓存（防丢失）"""
-        cur = self.conn.execute(
-            """INSERT OR REPLACE INTO distilled_cache
-               (cache_key, raw_json, status, source_count, created_at)
-               VALUES (?,?, 'pending', ?, ?)""",
-            (cache_key, raw_json, source_count, time.time())
-        )
-        self.conn.commit()
-        return cur.lastrowid
+        with self.conn:
+            cur = self.conn.execute(
+                """INSERT OR REPLACE INTO distilled_cache
+                   (cache_key, raw_json, status, source_count, created_at)
+                   VALUES (?,?, 'pending', ?, ?)""",
+                (cache_key, raw_json, source_count, time.time())
+            )
+            return cur.lastrowid
 
     def get_pending_cache(self) -> List[Dict]:
         """获取未向量化的缓存"""
@@ -449,45 +449,47 @@ class MemoryStore:
         } for r in rows]
 
     def mark_cache_vectorized(self, cache_id: int):
-        self.conn.execute(
-            "UPDATE distilled_cache SET status='vectorized', vectorized_at=? WHERE id=?",
-            (time.time(), cache_id)
-        )
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute(
+                "UPDATE distilled_cache SET status='vectorized', vectorized_at=? WHERE id=?",
+                (time.time(), cache_id)
+            )
 
     def mark_cache_failed(self, cache_id: int):
-        self.conn.execute(
-            "UPDATE distilled_cache SET status='failed' WHERE id=?",
-            (cache_id,)
-        )
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute(
+                "UPDATE distilled_cache SET status='failed' WHERE id=?",
+                (cache_id,)
+            )
 
     def mark_distilled(self, msg_ids: List[int]):
         """标记已被蒸馏（distilled_from 记录来源）"""
+        if not msg_ids:
+            return
         # 这些消息已合并到蒸馏产物中
-        self.conn.execute(
-            f"UPDATE conversations SET distilled_from = '[]' WHERE id IN ({','.join('?'*len(msg_ids))})",
-            msg_ids
-        )
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute(
+                f"UPDATE conversations SET distilled_from = '[]' WHERE id IN ({','.join('?'*len(msg_ids))})",
+                msg_ids
+            )
 
     # ========== 检索日志（用于反馈闭环）==========
 
     def log_retrieval(self, query: str, result_ids: List[str],
                       used: bool = False) -> int:
-        cur = self.conn.execute(
-            "INSERT INTO retrieval_log (query_text, result_ids, used_in_reply, created_at) VALUES (?,?,?,?)",
-            (query, json.dumps(result_ids), 1 if used else 0, time.time())
-        )
-        self.conn.commit()
-        return cur.lastrowid
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO retrieval_log (query_text, result_ids, used_in_reply, created_at) VALUES (?,?,?,?)",
+                (query, json.dumps(result_ids), 1 if used else 0, time.time())
+            )
+            return cur.lastrowid
 
     def log_retrieval_feedback(self, retrieval_id: int, feedback: float):
-        self.conn.execute(
-            "UPDATE retrieval_log SET feedback_after = ? WHERE id = ?",
-            (feedback, retrieval_id)
-        )
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute(
+                "UPDATE retrieval_log SET feedback_after = ? WHERE id = ?",
+                (feedback, retrieval_id)
+            )
 
     def close(self):
         self.conn.close()
