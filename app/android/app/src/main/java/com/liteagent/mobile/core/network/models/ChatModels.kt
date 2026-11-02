@@ -56,3 +56,31 @@ data class TaskStreamData(
     @SerializedName("logs") val logs: List<Any>? = null,
     @SerializedName("total_logs") val totalLogs: Int = 0
 )
+
+data class DashboardCommandItem(
+    @SerializedName("name") val name: String,
+    @SerializedName("description") val description: String = "",
+    @SerializedName("category") val category: String = "通用"
+)
+
+data class RenameSessionRequest(
+    @SerializedName("session_key") val sessionKey: String,
+    @SerializedName("title") val title: String
+)
+
+data class RenameSessionResponse(
+    @SerializedName("status") val status: String? = null,
+    @SerializedName("session_key") val sessionKey: String? = null,
+    @SerializedName("title") val title: String? = null,
+    @SerializedName("error") val error: String? = null
+)
+
+data class OcrResponse(
+    @SerializedName("markdown") val markdown: String? = null,
+    @SerializedName("text") val text: String? = null,
+    @SerializedName("detail") val detail: String? = null,
+    @SerializedName("error") val error: String? = null
+) {
+    val extractedText: String?
+        get() = markdown?.takeIf { it.isNotBlank() } ?: text?.takeIf { it.isNotBlank() }
+}

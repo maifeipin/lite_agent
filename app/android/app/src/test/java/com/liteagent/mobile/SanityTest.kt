@@ -19,7 +19,10 @@ import com.liteagent.mobile.core.network.ApiService
 import com.liteagent.mobile.core.network.AuthenticationException
 import com.liteagent.mobile.core.network.models.*
 import com.liteagent.mobile.core.storage.TodoDatabaseHelper
+import com.liteagent.mobile.ui.discover.DiscoverViewModel
 import com.liteagent.mobile.ui.meetings.MeetingsViewModel
+import com.liteagent.mobile.ui.phoneapp.PhoneAppViewModel
+import com.liteagent.mobile.ui.phoneapp.PhoneItemFilterState
 import com.liteagent.mobile.ui.todos.TodoFilter
 import com.liteagent.mobile.ui.todos.TodosUiState
 import com.liteagent.mobile.ui.todos.TodosViewModel
@@ -1442,5 +1445,121 @@ class SanityTest {
         meetingsVm.closeMeetingDetail()
         testScheduler.advanceUntilIdle()
         assertNull(meetingsVm.uiState.value.selectedMeeting)
+    }
+
+    @Test
+    fun testChatOcrUploadSessionRenameAndCommandPalette() = runTest {
+        val serverUrl = "https://mail.maifeipin.com"
+        val storage = FakeTokenStorage(serverUrl)
+        val fakeApi = FakeApiService()
+        fakeApi.sessionsResponse = listOf(SessionItem(sessionKey = "api:sess_ocr_1", title = "默认对话"))
+        fakeApi.ocrRecognizedText = "发票金额：¥1,280.00"
+        val apiClient = FakeApiClient(fakeApi, storage)
+        val sse = FakeSseStreamManager(storage)
+
+        val chatVm = ChatViewModel(storage, apiClient, sse)
+        testScheduler.advanceUntilIdle()
+
+        assertTrue("快捷指令列表必须加载内置兜底或远端指令", chatVm.commands.value.isNotEmpty())
+
+        var recognizedOut = ""
+        chatVm.uploadOcrImage("test.jpg".toByteArray(), "test.jpg", "image/jpeg") { text ->
+            recognizedOut = text
+        }
+        testScheduler.advanceUntilIdle()
+        assertEquals("发票金额：¥1,280.00", recognizedOut)
+
+        var renameSuccess = false
+        chatVm.renameCurrentSession("财务报销识别专场") { renameSuccess = true }
+        testScheduler.advanceUntilIdle()
+        assertTrue(renameSuccess)
+        assertEquals("财务报销识别专场", chatVm.currentSession.value?.title)
+
+        chatVm.prefillPrompt("帮我核对这张发票")
+        assertEquals("帮我核对这张发票", chatVm.consumePrefillPrompt())
+        assertNull(chatVm.prefillPromptText.value)
+    }
+
+    @Test
+    fun testPhoneAppBatchLifecycleAndThreeStateFilter() = runTest {
+        val serverUrl = "https://mail.maifeipin.com"
+        val storage = FakeTokenStorage(serverUrl)
+        val fakeApi = FakeApiService()
+        fakeApi.phoneDevicesResponse = listOf(
+            PhoneDeviceItem(id = "c68a3cf2", name = "OnePlus 9", status = "online")
+        )
+        val apiClient = FakeApiClient(fakeApi, storage)
+
+        val phoneVm = PhoneAppViewModel(storage, apiClient, enablePolling = false)
+        testScheduler.advanceUntilIdle()
+
+        assertEquals(1, phoneVm.uiState.value.devices.size)
+        assertTrue(phoneVm.uiState.value.devices.first().isOnline)
+
+        var createdBatch = false
+        phoneVm.createBatch(
+            deviceId = "c68a3cf2",
+            appId = "xianyu",
+            appName = "闲鱼",
+            query = "MacBook M3 Max",
+            maxItems = 10,
+            autoApprove = false,
+            onSuccess = { createdBatch = true }
+        )
+        testScheduler.advanceUntilIdle()
+        assertTrue(createdBatch)
+
+        val batchId = phoneVm.uiState.value.selectedBatch?.id ?: ""
+        assertTrue(batchId.isNotEmpty())
+        assertTrue(phoneVm.uiState.value.selectedBatch?.isWaitingApproval == true)
+
+        phoneVm.approveBatch(batchId)
+        testScheduler.advanceUntilIdle()
+        assertEquals("approved", phoneVm.uiState.value.selectedBatch?.status)
+
+        phoneVm.executeBatch(batchId)
+        testScheduler.advanceUntilIdle()
+        assertEquals("completed", phoneVm.uiState.value.selectedBatch?.status)
+        assertEquals(2, phoneVm.uiState.value.filteredSelectedItems.size)
+
+        phoneVm.setItemFilter(PhoneItemFilterState.QUALIFIED)
+        assertEquals(1, phoneVm.uiState.value.filteredSelectedItems.size)
+        assertEquals("MacBook M3 Max 64G", phoneVm.uiState.value.filteredSelectedItems.first().title)
+
+        phoneVm.setItemFilter(PhoneItemFilterState.PENDING_REVIEW)
+        assertEquals(1, phoneVm.uiState.value.filteredSelectedItems.size)
+        assertEquals("MacBook M3 32G", phoneVm.uiState.value.filteredSelectedItems.first().title)
+    }
+
+    @Test
+    fun testDiscoverRssBriefTaskSpecsAndSocks5Management() = runTest {
+        val serverUrl = "https://mail.maifeipin.com"
+        val storage = FakeTokenStorage(serverUrl)
+        val fakeApi = FakeApiService()
+        val apiClient = FakeApiClient(fakeApi, storage)
+
+        val discoverVm = DiscoverViewModel(storage, apiClient)
+        testScheduler.advanceUntilIdle()
+
+        assertNotNull(discoverVm.uiState.value.rssBrief)
+        assertEquals(1, discoverVm.uiState.value.filteredTopics.size)
+        assertEquals(1, discoverVm.uiState.value.filteredTaskSpecs.size)
+
+        discoverVm.updateSearchQuery("不存在的关键词_xyz")
+        assertEquals(0, discoverVm.uiState.value.filteredTopics.size)
+
+        discoverVm.updateSearchQuery("Agent")
+        assertEquals(1, discoverVm.uiState.value.filteredTopics.size)
+
+        discoverVm.runTaskSpec("spec_daily_digest", "每日情报汇总")
+        testScheduler.advanceUntilIdle()
+        assertEquals("任务已启动", discoverVm.uiState.value.actionMessage)
+
+        val nodes = apiClient.getSocks5Nodes(serverUrl).getOrNull()
+        assertNotNull(nodes)
+        assertEquals(1, nodes?.size)
+
+        val testRes = apiClient.testSocks5Node(1, serverUrl).getOrNull()
+        assertEquals("ok", testRes?.status)
     }
 }

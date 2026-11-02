@@ -50,6 +50,31 @@ class ChatViewModel(
     private val _pendingRecoveryTasks = MutableStateFlow<List<RecoveryTaskState>>(emptyList())
     val pendingRecoveryTasks: StateFlow<List<RecoveryTaskState>> = _pendingRecoveryTasks.asStateFlow()
 
+    private val _commands = MutableStateFlow<List<DashboardCommandItem>>(DEFAULT_COMMANDS)
+    val commands: StateFlow<List<DashboardCommandItem>> = _commands.asStateFlow()
+
+    private val _isUploadingOcr = MutableStateFlow(false)
+    val isUploadingOcr: StateFlow<Boolean> = _isUploadingOcr.asStateFlow()
+
+    private val _actionMessage = MutableStateFlow<String?>(null)
+    val actionMessage: StateFlow<String?> = _actionMessage.asStateFlow()
+
+    private val _prefilledDraft = MutableStateFlow<String?>(null)
+    val prefilledDraft: StateFlow<String?> = _prefilledDraft.asStateFlow()
+
+    companion object {
+        val DEFAULT_COMMANDS = listOf(
+            DashboardCommandItem("/new", "开启全新对话上下文", "会话"),
+            DashboardCommandItem("/rss_fetch", "获取今日 RSS 精选摘要 (Top 5)", "RSS"),
+            DashboardCommandItem("/rss_list", "查看 RSS 分组文章列表与概览", "RSS"),
+            DashboardCommandItem("/rss_topic", "按分类/主题检索 RSS 热点", "RSS"),
+            DashboardCommandItem("/sync_meili", "增量同步邮件和 RSS 到搜索引擎", "系统"),
+            DashboardCommandItem("/persona", "查看或确认个人主档案画像", "记忆"),
+            DashboardCommandItem("帮我总结今天的待办事项和未读邮件", "AI 综合汇总今日日程与重点邮件", "快捷指令"),
+            DashboardCommandItem("查询未还账单并生成还款提醒", "财务账单巡检与待办联动", "快捷指令")
+        )
+    }
+
     // 竞态保护与服务器/会话严格绑定标识
     private var boundServerUrl: String = ""
     private var boundSessionKey: String = ""
@@ -64,8 +89,78 @@ class ChatViewModel(
         viewModelScope.launch {
             boundServerUrl = ServerUrlNormalizer.normalize(tokenStorage.getActiveServerUrl())
             refreshRecoveryTasks()
+            loadCommands()
             loadSessions()
         }
+    }
+
+    fun loadCommands() {
+        viewModelScope.launch {
+            val server = boundServerUrl.ifEmpty { ServerUrlNormalizer.normalize(tokenStorage.getActiveServerUrl()) }
+            val result = apiClient.getDashboardCommands(server)
+            val remoteList = result.getOrNull()
+            if (!remoteList.isNullOrEmpty()) {
+                val merged = (remoteList + DEFAULT_COMMANDS).distinctBy { it.name }
+                _commands.value = merged
+            }
+        }
+    }
+
+    fun uploadOcrImage(
+        imageBytes: ByteArray,
+        fileName: String = "ocr_capture.jpg",
+        mimeType: String = "image/jpeg",
+        onTextExtracted: (String) -> Unit = {}
+    ): Job {
+        return viewModelScope.launch {
+            _isUploadingOcr.value = true
+            _errorMessage.value = null
+            try {
+                val server = boundServerUrl.ifEmpty { ServerUrlNormalizer.normalize(tokenStorage.getActiveServerUrl()) }
+                val res = apiClient.uploadOcrImage(imageBytes, fileName, mimeType, server)
+                if (res.isSuccess) {
+                    val extracted = res.getOrNull().orEmpty()
+                    onTextExtracted(extracted)
+                    _actionMessage.value = "📷 OCR 识别完成，文字已填入输入框"
+                } else {
+                    _errorMessage.value = "OCR 解析失败: ${res.exceptionOrNull()?.message ?: "未知错误"}"
+                }
+            } finally {
+                _isUploadingOcr.value = false
+            }
+        }
+    }
+
+    fun renameCurrentSession(newTitle: String): Job? {
+        val current = _currentSession.value ?: return null
+        val trimmed = newTitle.trim()
+        if (trimmed.isEmpty()) return null
+        return viewModelScope.launch {
+            val server = boundServerUrl.ifEmpty { ServerUrlNormalizer.normalize(tokenStorage.getActiveServerUrl()) }
+            val res = apiClient.renameSession(current.sessionKey, trimmed, server)
+            if (res.isSuccess) {
+                val updated = current.copy(title = trimmed)
+                _currentSession.value = updated
+                _sessions.value = _sessions.value.map {
+                    if (it.sessionKey == current.sessionKey) updated else it
+                }
+                _actionMessage.value = "会话已重命名为「$trimmed」"
+            } else {
+                _errorMessage.value = res.exceptionOrNull()?.message ?: "重命名失败"
+            }
+        }
+    }
+
+    fun prefillPrompt(prompt: String) {
+        _prefilledDraft.value = prompt
+    }
+
+    fun consumePrefilledDraft() {
+        _prefilledDraft.value = null
+    }
+
+    fun clearActionMessage() {
+        _actionMessage.value = null
     }
 
     suspend fun refreshRecoveryTasks() {
@@ -128,6 +223,7 @@ class ChatViewModel(
 
         viewModelScope.launch {
             refreshRecoveryTasks()
+            loadCommands()
             loadSessions()
         }
     }

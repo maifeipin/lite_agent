@@ -1,5 +1,11 @@
 package com.liteagent.mobile.ui.chat
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -18,15 +24,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.platform.LocalFocusManager
+import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import com.liteagent.mobile.core.network.models.DashboardCommandItem
 import com.liteagent.mobile.core.network.models.MessageItem
-import com.liteagent.mobile.core.network.models.SessionItem
 import com.liteagent.mobile.ui.common.autoDismissKeyboardOnTap
 import com.liteagent.mobile.ui.theme.*
+import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -34,6 +44,7 @@ fun ChatScreen(
     viewModel: ChatViewModel,
     onOpenSettings: () -> Unit
 ) {
+    val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     val isImeVisible = WindowInsets.isImeVisible
     val sessions by viewModel.sessions.collectAsState()
@@ -43,13 +54,37 @@ fun ChatScreen(
     val taskStatus by viewModel.taskStatus.collectAsState()
     val taskLogs by viewModel.taskLogs.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
+    val actionMessage by viewModel.actionMessage.collectAsState()
     val pendingRecoveryTasks by viewModel.pendingRecoveryTasks.collectAsState()
+    val commands by viewModel.commands.collectAsState()
+    val isUploadingOcr by viewModel.isUploadingOcr.collectAsState()
+    val prefilledDraft by viewModel.prefilledDraft.collectAsState()
 
     var inputText by remember { mutableStateOf("") }
     var showSessionMenu by remember { mutableStateOf(false) }
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var showCommandSheet by remember { mutableStateOf(false) }
+    var showOcrSourceMenu by remember { mutableStateOf(false) }
     var isThinkingExpanded by remember { mutableStateOf(true) }
+    var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
 
+    val snackbarHostState = remember { SnackbarHostState() }
     val listState = rememberLazyListState()
+
+    // 接收跨 Tab 预填的话题提示词
+    LaunchedEffect(prefilledDraft) {
+        prefilledDraft?.let { draft ->
+            inputText = draft
+            viewModel.consumePrefilledDraft()
+        }
+    }
+
+    LaunchedEffect(actionMessage) {
+        actionMessage?.let { msg ->
+            snackbarHostState.showSnackbar(msg)
+            viewModel.clearActionMessage()
+        }
+    }
 
     LaunchedEffect(messages.size, taskLogs.size, isImeVisible) {
         if (messages.isNotEmpty() || taskLogs.isNotEmpty()) {
@@ -57,283 +92,681 @@ fun ChatScreen(
         }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-    ) {
-        // 会话切换栏与状态
-        Surface(
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 2.dp,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Box {
-                    Surface(
-                        shape = RoundedCornerShape(20.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                        modifier = Modifier.clickable { showSessionMenu = true }
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Forum,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Text(
-                                text = currentSession?.displayTitle ?: "选择 API 会话",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontSize = 13.sp,
-                                maxLines = 1
-                            )
-                            Icon(
-                                imageVector = Icons.Default.ArrowDropDown,
-                                contentDescription = null,
-                                tint = TextMuted,
-                                modifier = Modifier.size(18.dp)
-                            )
+    // 处理 Uri 图片读取并上传 OCR
+    val handleImageUri: (Uri, String) -> Unit = { uri, defaultName ->
+        try {
+            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            val mimeType = context.contentResolver.getType(uri) ?: "image/jpeg"
+            if (bytes != null && bytes.isNotEmpty()) {
+                viewModel.uploadOcrImage(
+                    imageBytes = bytes,
+                    fileName = defaultName,
+                    mimeType = mimeType,
+                    onTextExtracted = { extracted ->
+                        inputText = if (inputText.isBlank()) {
+                            extracted
+                        } else {
+                            "$inputText\n$extracted"
                         }
                     }
-
-                    DropdownMenu(
-                        expanded = showSessionMenu,
-                        onDismissRequest = { showSessionMenu = false },
-                        modifier = Modifier.background(MaterialTheme.colorScheme.surface)
-                    ) {
-                        DropdownMenuItem(
-                            text = { Text("➕ 新建会话", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary) },
-                            onClick = {
-                                viewModel.createNewSession()
-                                showSessionMenu = false
-                            }
-                        )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
-                        sessions.forEach { s ->
-                            DropdownMenuItem(
-                                text = {
-                                    Column {
-                                        Text(s.displayTitle, maxLines = 1, style = MaterialTheme.typography.bodyMedium)
-                                        if (s.status.isNotBlank()) {
-                                            Text("状态: ${s.status}", style = MaterialTheme.typography.labelSmall, color = TextMuted)
-                                        }
-                                    }
-                                },
-                                onClick = {
-                                    viewModel.selectSession(s)
-                                    showSessionMenu = false
-                                }
-                            )
-                        }
-                    }
-                }
-
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    IconButton(onClick = { viewModel.createNewSession() }) {
-                        Icon(
-                            imageVector = Icons.Default.AddComment,
-                            contentDescription = "新建会话",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                    IconButton(onClick = onOpenSettings) {
-                        Icon(
-                            imageVector = Icons.Default.Settings,
-                            contentDescription = "服务器与凭据设置",
-                            tint = TextSecondary
-                        )
-                    }
-                }
+                )
             }
+        } catch (_: Exception) {
         }
+    }
 
-        // 未完成任务恢复横幅 (断网/超时/进程重启后主动提示)
-        AnimatedVisibility(visible = pendingRecoveryTasks.isNotEmpty() && !isStreaming) {
+    // 1. 系统相册选择器 (Android 13+ Photo Picker，免存储权限)
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            handleImageUri(uri, "gallery_ocr.jpg")
+        }
+    }
+
+    // 2. 系统相机拍照 Launcher
+    val takePictureLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success: Boolean ->
+        val uri = pendingCameraUri
+        if (success && uri != null) {
+            handleImageUri(uri, "camera_ocr.jpg")
+        }
+    }
+
+    val launchCameraCapture = {
+        try {
+            val dir = File(context.cacheDir, "ocr_camera").apply { mkdirs() }
+            val photoFile = File(dir, "capture_${System.currentTimeMillis()}.jpg")
+            val uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                photoFile
+            )
+            pendingCameraUri = uri
+            takePictureLauncher.launch(uri)
+        } catch (_: Exception) {
+        }
+    }
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted: Boolean ->
+        if (isGranted) {
+            launchCameraCapture()
+        }
+    }
+
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        containerColor = MaterialTheme.colorScheme.background,
+        snackbarHost = { SnackbarHost(snackbarHostState) }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .background(MaterialTheme.colorScheme.background)
+        ) {
+            // 会话切换栏与状态
             Surface(
-                color = AccentAmber.copy(alpha = 0.15f),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 2.dp,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
                         modifier = Modifier.weight(1f)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.SyncProblem,
-                            contentDescription = null,
-                            tint = AccentAmber,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Text(
-                            text = "检测到未完成的长任务，可继续同步最新进度",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = AccentAmber
-                        )
+                        Box {
+                            Surface(
+                                shape = RoundedCornerShape(20.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                                modifier = Modifier.clickable { showSessionMenu = true }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Forum,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Text(
+                                        text = currentSession?.displayTitle ?: "选择 API 会话",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontSize = 13.sp,
+                                        maxLines = 1
+                                    )
+                                    Icon(
+                                        imageVector = Icons.Default.ArrowDropDown,
+                                        contentDescription = null,
+                                        tint = TextMuted,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+
+                            DropdownMenu(
+                                expanded = showSessionMenu,
+                                onDismissRequest = { showSessionMenu = false },
+                                modifier = Modifier.background(MaterialTheme.colorScheme.surface)
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("➕ 新建会话", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary) },
+                                    onClick = {
+                                        viewModel.createNewSession()
+                                        showSessionMenu = false
+                                    }
+                                )
+                                if (currentSession != null) {
+                                    DropdownMenuItem(
+                                        text = { Text("✏️ 重命名当前会话", color = TextPrimary) },
+                                        onClick = {
+                                            showSessionMenu = false
+                                            showRenameDialog = true
+                                        }
+                                    )
+                                }
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+                                sessions.forEach { s ->
+                                    DropdownMenuItem(
+                                        text = {
+                                            Column {
+                                                Text(s.displayTitle, maxLines = 1, style = MaterialTheme.typography.bodyMedium)
+                                                if (s.status.isNotBlank()) {
+                                                    Text("状态: ${s.status}", style = MaterialTheme.typography.labelSmall, color = TextMuted)
+                                                }
+                                            }
+                                        },
+                                        onClick = {
+                                            viewModel.selectSession(s)
+                                            showSessionMenu = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+
+                        if (currentSession != null) {
+                            IconButton(
+                                onClick = { showRenameDialog = true },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Edit,
+                                    contentDescription = "重命名会话",
+                                    tint = TextMuted,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
                     }
-                    Button(
-                        onClick = { viewModel.resumeRecoveryTask() },
-                        colors = ButtonDefaults.buttonColors(containerColor = AccentAmber),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                        modifier = Modifier.height(32.dp)
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        Text("恢复任务", fontSize = 12.sp, color = Color.Black, fontWeight = FontWeight.Bold)
+                        IconButton(onClick = { viewModel.createNewSession() }) {
+                            Icon(
+                                imageVector = Icons.Default.AddComment,
+                                contentDescription = "新建会话",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        IconButton(onClick = onOpenSettings) {
+                            Icon(
+                                imageVector = Icons.Default.Settings,
+                                contentDescription = "服务器与凭据设置",
+                                tint = TextSecondary
+                            )
+                        }
                     }
                 }
             }
-        }
 
-        // 错误与 401 提示条
-        AnimatedVisibility(visible = errorMessage != null) {
+            // 未完成任务恢复横幅 (断网/超时/进程重启后主动提示)
+            AnimatedVisibility(visible = pendingRecoveryTasks.isNotEmpty() && !isStreaming) {
+                Surface(
+                    color = AccentAmber.copy(alpha = 0.15f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.SyncProblem,
+                                contentDescription = null,
+                                tint = AccentAmber,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = "检测到未完成的长任务，可继续同步最新进度",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = AccentAmber
+                            )
+                        }
+                        Button(
+                            onClick = { viewModel.resumeRecoveryTask() },
+                            colors = ButtonDefaults.buttonColors(containerColor = AccentAmber),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                            modifier = Modifier.height(32.dp)
+                        ) {
+                            Text("恢复任务", fontSize = 12.sp, color = Color.Black, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+
+            // 错误与 401 提示条
+            AnimatedVisibility(visible = errorMessage != null) {
+                Surface(
+                    color = AccentRose.copy(alpha = 0.2f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = errorMessage ?: "",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = AccentRose,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Row {
+                            TextButton(onClick = { viewModel.clearError() }) {
+                                Text("忽略", color = TextSecondary)
+                            }
+                            TextButton(onClick = onOpenSettings) {
+                                Text("去配置", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 消息列表与流式进度卡片
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .autoDismissKeyboardOnTap(focusManager),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                contentPadding = PaddingValues(vertical = 16.dp)
+            ) {
+                if (messages.isEmpty() && taskLogs.isEmpty()) {
+                    item {
+                        EmptyChatGreeting(
+                            onSuggestClick = { prompt -> inputText = prompt },
+                            onOpenCommandSheet = { showCommandSheet = true }
+                        )
+                    }
+                }
+
+                items(messages) { msg ->
+                    MessageBubble(message = msg)
+                }
+
+                // 任务执行进度与思考日志折叠卡片 (SSE 增量流)
+                if (isStreaming || taskLogs.isNotEmpty() || taskStatus == "pending_recovery") {
+                    item {
+                        TaskProgressCard(
+                            status = taskStatus ?: "running",
+                            isStreaming = isStreaming,
+                            logs = taskLogs,
+                            isExpanded = isThinkingExpanded,
+                            onToggle = { isThinkingExpanded = !isThinkingExpanded },
+                            onRetry = { viewModel.resumeRecoveryTask() }
+                        )
+                    }
+                }
+            }
+
+            // 底部多模态发送工具条 (含 [📷 OCR] + [/ 指令] + 输入框 + 发送)
             Surface(
-                color = AccentRose.copy(alpha = 0.2f),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 6.dp,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = errorMessage ?: "",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = AccentRose,
-                        modifier = Modifier.weight(1f)
-                    )
-                    TextButton(onClick = onOpenSettings) {
-                        Text("去配置", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                    }
-                }
-            }
-        }
-
-        // 消息列表与流式进度卡片
-        LazyColumn(
-            state = listState,
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp)
-                .autoDismissKeyboardOnTap(focusManager),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            contentPadding = PaddingValues(vertical = 16.dp)
-        ) {
-            if (messages.isEmpty() && taskLogs.isEmpty()) {
-                item {
-                    EmptyChatGreeting(onSuggestClick = { prompt ->
-                        inputText = prompt
-                    })
-                }
-            }
-
-            items(messages) { msg ->
-                MessageBubble(message = msg)
-            }
-
-            // 任务执行进度与思考日志折叠卡片 (SSE 增量流)
-            if (isStreaming || taskLogs.isNotEmpty() || taskStatus == "pending_recovery") {
-                item {
-                    TaskProgressCard(
-                        status = taskStatus ?: "running",
-                        isStreaming = isStreaming,
-                        logs = taskLogs,
-                        isExpanded = isThinkingExpanded,
-                        onToggle = { isThinkingExpanded = !isThinkingExpanded },
-                        onRetry = { viewModel.resumeRecoveryTask() }
-                    )
-                }
-            }
-        }
-
-        // 底部发送工具条
-        Surface(
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 6.dp,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedTextField(
-                    value = inputText,
-                    onValueChange = { inputText = it },
-                    placeholder = {
-                        Text(
-                            text = if (isStreaming) "长任务执行中，可折叠查看日志..." else "输入给 Lite Agent 的问题或指令...",
-                            fontSize = 14.sp
-                        )
-                    },
-                    modifier = Modifier.weight(1f),
-                    maxLines = 4,
-                    shape = RoundedCornerShape(24.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedContainerColor = MaterialTheme.colorScheme.background,
-                        unfocusedContainerColor = MaterialTheme.colorScheme.background,
-                        focusedBorderColor = MaterialTheme.colorScheme.primary,
-                        unfocusedBorderColor = MaterialTheme.colorScheme.outline
-                    )
-                )
-
-                IconButton(
-                    onClick = {
-                        if (inputText.isNotBlank() && !isStreaming) {
-                            val textToSend = inputText
-                            inputText = ""
-                            viewModel.sendMessage(textToSend)
-                        }
-                    },
-                    enabled = inputText.isNotBlank() && !isStreaming,
                     modifier = Modifier
-                        .size(48.dp)
-                        .clip(CircleShape)
-                        .background(
-                            if (inputText.isNotBlank() && !isStreaming)
-                                MaterialTheme.colorScheme.primary
-                            else
-                                MaterialTheme.colorScheme.surfaceVariant
-                        )
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    if (isStreaming) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            color = MaterialTheme.colorScheme.primary,
-                            strokeWidth = 2.dp
+                    // 1. [ 📷 ] 相机/相册 OCR 按钮
+                    Box {
+                        IconButton(
+                            onClick = { showOcrSourceMenu = true },
+                            enabled = !isUploadingOcr && !isStreaming,
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                        ) {
+                            if (isUploadingOcr) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    color = MaterialTheme.colorScheme.primary,
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.CameraAlt,
+                                    contentDescription = "拍照或选图 OCR 识别",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+
+                        DropdownMenu(
+                            expanded = showOcrSourceMenu,
+                            onDismissRequest = { showOcrSourceMenu = false },
+                            modifier = Modifier.background(MaterialTheme.colorScheme.surface)
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("📷 拍照识别票据/文档") },
+                                onClick = {
+                                    showOcrSourceMenu = false
+                                    val granted = ContextCompat.checkSelfPermission(
+                                        context,
+                                        Manifest.permission.CAMERA
+                                    ) == PackageManager.PERMISSION_GRANTED
+                                    if (granted) {
+                                        launchCameraCapture()
+                                    } else {
+                                        cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                                    }
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("🖼️ 从相册选择图片 OCR") },
+                                onClick = {
+                                    showOcrSourceMenu = false
+                                    photoPickerLauncher.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                    )
+                                }
+                            )
+                        }
+                    }
+
+                    // 2. [ / ] 快速指令面板按钮
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clickable(enabled = !isStreaming) { showCommandSheet = true }
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(
+                                text = "/",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 16.sp,
+                                color = SecondarySky
+                            )
+                        }
+                    }
+
+                    // 3. 多行自适应输入框
+                    OutlinedTextField(
+                        value = inputText,
+                        onValueChange = { inputText = it },
+                        placeholder = {
+                            Text(
+                                text = when {
+                                    isUploadingOcr -> "📷 OCR 正在解析图片文字..."
+                                    isStreaming -> "长任务执行中，可折叠查看日志..."
+                                    else -> "输入问题、/指令 或 📷拍票据..."
+                                },
+                                fontSize = 13.sp
+                            )
+                        },
+                        enabled = !isUploadingOcr,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 4,
+                        shape = RoundedCornerShape(24.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = MaterialTheme.colorScheme.background,
+                            unfocusedContainerColor = MaterialTheme.colorScheme.background,
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
                         )
-                    } else {
-                        Icon(
-                            imageVector = Icons.Default.Send,
-                            contentDescription = "发送",
-                            tint = if (inputText.isNotBlank()) Color.White else TextMuted,
-                            modifier = Modifier.size(20.dp)
-                        )
+                    )
+
+                    // 4. 发送按钮
+                    IconButton(
+                        onClick = {
+                            if (inputText.isNotBlank() && !isStreaming && !isUploadingOcr) {
+                                val textToSend = inputText
+                                inputText = ""
+                                viewModel.sendMessage(textToSend)
+                            }
+                        },
+                        enabled = inputText.isNotBlank() && !isStreaming && !isUploadingOcr,
+                        modifier = Modifier
+                            .size(44.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (inputText.isNotBlank() && !isStreaming && !isUploadingOcr)
+                                    MaterialTheme.colorScheme.primary
+                                else
+                                    MaterialTheme.colorScheme.surfaceVariant
+                            )
+                    ) {
+                        if (isStreaming) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                color = MaterialTheme.colorScheme.primary,
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.Send,
+                                contentDescription = "发送",
+                                tint = if (inputText.isNotBlank()) Color.White else TextMuted,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
                     }
                 }
             }
         }
     }
+
+    // 快速指令面板 BottomSheet (Command Palette)
+    if (showCommandSheet) {
+        CommandPaletteSheet(
+            commands = commands,
+            onDismiss = { showCommandSheet = false },
+            onSelectCommand = { cmd, sendImmediately ->
+                showCommandSheet = false
+                if (cmd.name == "/new") {
+                    viewModel.createNewSession()
+                } else if (sendImmediately) {
+                    viewModel.sendMessage(cmd.name)
+                } else {
+                    inputText = if (cmd.name.startsWith("/")) "${cmd.name} " else cmd.name
+                }
+            }
+        )
+    }
+
+    // 会话重命名弹窗
+    if (showRenameDialog && currentSession != null) {
+        RenameSessionDialog(
+            currentTitle = currentSession?.displayTitle ?: "",
+            onDismiss = { showRenameDialog = false },
+            onConfirm = { newTitle ->
+                showRenameDialog = false
+                viewModel.renameCurrentSession(newTitle)
+            }
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CommandPaletteSheet(
+    commands: List<DashboardCommandItem>,
+    onDismiss: () -> Unit,
+    onSelectCommand: (DashboardCommandItem, Boolean) -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var filterQuery by remember { mutableStateOf("") }
+
+    val filtered = remember(commands, filterQuery) {
+        if (filterQuery.isBlank()) commands
+        else {
+            val q = filterQuery.lowercase()
+            commands.filter {
+                it.name.lowercase().contains(q) || it.description.lowercase().contains(q)
+            }
+        }
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Terminal,
+                        contentDescription = null,
+                        tint = SecondarySky
+                    )
+                    Text(
+                        text = "快捷指令控制台 (Command Palette)",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Text(
+                    text = "${filtered.size} 项可用",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextMuted
+                )
+            }
+
+            OutlinedTextField(
+                value = filterQuery,
+                onValueChange = { filterQuery = it },
+                placeholder = { Text("搜索指令名称或功能描述...", fontSize = 13.sp) },
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 360.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(filtered) { cmd ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onSelectCommand(cmd, false) },
+                        colors = CardDefaults.cardColors(containerColor = SurfaceCard),
+                        shape = RoundedCornerShape(10.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBorder)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Surface(
+                                        color = PrimaryIndigo.copy(alpha = 0.15f),
+                                        shape = RoundedCornerShape(6.dp)
+                                    ) {
+                                        Text(
+                                            text = cmd.name,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp,
+                                            color = PrimaryIndigo,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                    if (cmd.category.isNotBlank()) {
+                                        Text(
+                                            text = cmd.category,
+                                            fontSize = 10.sp,
+                                            color = TextMuted
+                                        )
+                                    }
+                                }
+                                if (cmd.description.isNotBlank()) {
+                                    Text(
+                                        text = cmd.description,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = TextSecondary
+                                    )
+                                }
+                            }
+
+                            TextButton(
+                                onClick = { onSelectCommand(cmd, true) }
+                            ) {
+                                Text("直发 ▶", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AccentEmerald)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun RenameSessionDialog(
+    currentTitle: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit
+) {
+    var titleInput by remember { mutableStateOf(currentTitle) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("重命名当前会话", fontWeight = FontWeight.Bold) },
+        text = {
+            OutlinedTextField(
+                value = titleInput,
+                onValueChange = { titleInput = it },
+                label = { Text("会话标题") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick = { onConfirm(titleInput) },
+                enabled = titleInput.isNotBlank()
+            ) {
+                Text("保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
 }
 
 @Composable
@@ -522,7 +955,8 @@ fun TaskProgressCard(
 
 @Composable
 fun EmptyChatGreeting(
-    onSuggestClick: (String) -> Unit
+    onSuggestClick: (String) -> Unit,
+    onOpenCommandSheet: () -> Unit = {}
 ) {
     Column(
         modifier = Modifier
@@ -553,7 +987,7 @@ fun EmptyChatGreeting(
         )
 
         Text(
-            text = "随时下发指令、提问、拉取任务进度或触发多机协同调度。",
+            text = "随时下发指令、拍照票据 OCR、拉取任务进度或触发多机协同调度。",
             style = MaterialTheme.typography.bodyMedium,
             color = TextSecondary,
             textAlign = androidx.compose.ui.text.style.TextAlign.Center,
@@ -564,11 +998,15 @@ fun EmptyChatGreeting(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(top = 8.dp),
-            horizontalArrangement = Arrangement.Center
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
         ) {
             SuggestionChip(
                 onClick = { onSuggestClick("帮我总结今天的待办事项和未读邮件") },
                 label = { Text("总结今日待办与邮件", fontSize = 12.sp) }
+            )
+            SuggestionChip(
+                onClick = onOpenCommandSheet,
+                label = { Text("⚡ 快捷指令面板 (/)", fontSize = 12.sp) }
             )
         }
     }

@@ -12,4 +12,8 @@
     <files-path
         name="updates_internal"
         path="updates/" />
+    <!-- cacheDir/ocr_camera（相机拍照 OCR 临时图片目录） -->
+    <cache-path
+        name="ocr_camera_cache"
+        path="ocr_camera/" />
 </paths>

@@ -19,16 +19,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
 import com.liteagent.mobile.core.network.ApiClient
 import com.liteagent.mobile.core.network.SseStreamManager
 import com.liteagent.mobile.core.security.SecureTokenStorage
+import com.liteagent.mobile.core.update.UpdateController
 import com.liteagent.mobile.ui.auth.LoginScreen
 import com.liteagent.mobile.ui.chat.ChatScreen
 import com.liteagent.mobile.ui.chat.ChatViewModel
 import com.liteagent.mobile.ui.chat.ChatViewModelFactory
 import com.liteagent.mobile.ui.chat.ServerConfigDialog
-import androidx.lifecycle.lifecycleScope
-import com.liteagent.mobile.core.update.UpdateController
 import com.liteagent.mobile.ui.components.UpdateDialogHost
 import com.liteagent.mobile.ui.discover.DiscoverScreen
 import com.liteagent.mobile.ui.discover.DiscoverViewModel
@@ -36,6 +36,9 @@ import com.liteagent.mobile.ui.discover.DiscoverViewModelFactory
 import com.liteagent.mobile.ui.meetings.MeetingsScreen
 import com.liteagent.mobile.ui.meetings.MeetingsViewModel
 import com.liteagent.mobile.ui.meetings.MeetingsViewModelFactory
+import com.liteagent.mobile.ui.phoneapp.PhoneAppScreen
+import com.liteagent.mobile.ui.phoneapp.PhoneAppViewModel
+import com.liteagent.mobile.ui.phoneapp.PhoneAppViewModelFactory
 import com.liteagent.mobile.ui.theme.*
 import com.liteagent.mobile.ui.todos.TodosScreen
 import com.liteagent.mobile.ui.todos.TodosViewModel
@@ -49,6 +52,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var chatViewModel: ChatViewModel
     private lateinit var todosViewModel: TodosViewModel
     private lateinit var meetingsViewModel: MeetingsViewModel
+    private lateinit var phoneAppViewModel: PhoneAppViewModel
     private lateinit var discoverViewModel: DiscoverViewModel
     private lateinit var updateController: UpdateController
 
@@ -68,6 +72,9 @@ class MainActivity : ComponentActivity() {
 
         val meetingsFactory = MeetingsViewModelFactory(tokenStorage, apiClient)
         meetingsViewModel = ViewModelProvider(this, meetingsFactory)[MeetingsViewModel::class.java]
+
+        val phoneAppFactory = PhoneAppViewModelFactory(tokenStorage, apiClient)
+        phoneAppViewModel = ViewModelProvider(this, phoneAppFactory)[PhoneAppViewModel::class.java]
 
         val discoverFactory = DiscoverViewModelFactory(tokenStorage, apiClient)
         discoverViewModel = ViewModelProvider(this, discoverFactory)[DiscoverViewModel::class.java]
@@ -109,6 +116,8 @@ class MainActivity : ComponentActivity() {
                             chatViewModel.onSessionChanged(serverUrl, newSession?.sessionId ?: "")
                             todosViewModel.onSessionChanged(serverUrl, username)
                             meetingsViewModel.onSessionChanged(serverUrl, username)
+                            phoneAppViewModel.onSessionChanged(serverUrl, username)
+                            discoverViewModel.onServerChanged(serverUrl)
                         }
                     )
                 } else {
@@ -118,6 +127,7 @@ class MainActivity : ComponentActivity() {
                         chatViewModel = chatViewModel,
                         todosViewModel = todosViewModel,
                         meetingsViewModel = meetingsViewModel,
+                        phoneAppViewModel = phoneAppViewModel,
                         discoverViewModel = discoverViewModel,
                         updateController = updateController,
                         onLogout = {
@@ -125,6 +135,7 @@ class MainActivity : ComponentActivity() {
                             chatViewModel.onLoggedOut()
                             todosViewModel.onLoggedOut()
                             meetingsViewModel.onLoggedOut()
+                            phoneAppViewModel.onLoggedOut()
                         }
                     )
                 }
@@ -143,8 +154,13 @@ class MainActivity : ComponentActivity() {
 enum class NavigationTab(val label: String, val icon: ImageVector) {
     CHAT("助理", Icons.Default.Chat),
     TODOS("待办", Icons.Default.CheckCircle),
-    MEETINGS("会审", Icons.Default.Groups),
+    MEETINGS("会审&执行", Icons.Default.Groups),
     DISCOVER("发现", Icons.Default.Explore)
+}
+
+enum class MeetingsExecSubTab(val label: String) {
+    MEETINGS("📣 会审决策"),
+    PHONE_APPS("📱 自动化执行")
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -155,16 +171,19 @@ fun MainAppScaffold(
     chatViewModel: ChatViewModel,
     todosViewModel: TodosViewModel,
     meetingsViewModel: MeetingsViewModel,
+    phoneAppViewModel: PhoneAppViewModel,
     discoverViewModel: DiscoverViewModel,
     updateController: UpdateController,
     onLogout: () -> Unit = {}
 ) {
     var selectedTab by remember { mutableStateOf(NavigationTab.CHAT) }
+    var selectedSubTab by remember { mutableStateOf(MeetingsExecSubTab.MEETINGS) }
     var showServerConfig by remember { mutableStateOf(false) }
     val isImeVisible = WindowInsets.isImeVisible
 
     val todosState by todosViewModel.uiState.collectAsState()
     val meetingsState by meetingsViewModel.uiState.collectAsState()
+    val phoneAppState by phoneAppViewModel.uiState.collectAsState()
 
     if (showServerConfig) {
         ServerConfigDialog(
@@ -177,16 +196,21 @@ fun MainAppScaffold(
                 chatViewModel.onServerSwitched(newServerUrl)
                 todosViewModel.onSessionChanged(newServerUrl, username)
                 meetingsViewModel.onSessionChanged(newServerUrl, username)
+                phoneAppViewModel.onSessionChanged(newServerUrl, username)
+                discoverViewModel.onServerChanged(newServerUrl)
             },
             onLoggedOut = {
                 showServerConfig = false
                 chatViewModel.onLoggedOut()
                 todosViewModel.onLoggedOut()
                 meetingsViewModel.onLoggedOut()
+                phoneAppViewModel.onLoggedOut()
                 onLogout()
             }
         )
     }
+
+    val totalActionRequiredCount = meetingsState.waitingCount + phoneAppState.waitingApprovalCount
 
     Scaffold(
         modifier = Modifier
@@ -208,13 +232,13 @@ fun MainAppScaffold(
                                     NavigationTab.MEETINGS -> {
                                         BadgedBox(
                                             badge = {
-                                                if (meetingsState.waitingCount > 0) {
+                                                if (totalActionRequiredCount > 0) {
                                                     Badge(
                                                         containerColor = AccentAmber,
                                                         contentColor = Color.Black
                                                     ) {
                                                         Text(
-                                                            text = "${meetingsState.waitingCount}",
+                                                            text = "$totalActionRequiredCount",
                                                             fontWeight = FontWeight.Bold
                                                         )
                                                     }
@@ -272,12 +296,83 @@ fun MainAppScaffold(
                 NavigationTab.TODOS -> TodosScreen(
                     viewModel = todosViewModel
                 )
-                NavigationTab.MEETINGS -> MeetingsScreen(
-                    viewModel = meetingsViewModel
-                )
+                NavigationTab.MEETINGS -> {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.surface,
+                            tonalElevation = 2.dp,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                MeetingsExecSubTab.values().forEach { subTab ->
+                                    val isSelected = selectedSubTab == subTab
+                                    val subBadgeCount = when (subTab) {
+                                        MeetingsExecSubTab.MEETINGS -> meetingsState.waitingCount
+                                        MeetingsExecSubTab.PHONE_APPS -> phoneAppState.waitingApprovalCount
+                                    }
+                                    FilterChip(
+                                        selected = isSelected,
+                                        onClick = { selectedSubTab = subTab },
+                                        label = {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                Text(
+                                                    text = subTab.label,
+                                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                                    fontSize = 13.sp
+                                                )
+                                                if (subBadgeCount > 0) {
+                                                    Surface(
+                                                        color = AccentAmber,
+                                                        shape = RoundedCornerShape(10.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = "$subBadgeCount",
+                                                            color = Color.Black,
+                                                            fontSize = 10.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        modifier = Modifier.weight(1f),
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = PrimaryIndigo.copy(alpha = 0.2f),
+                                            selectedLabelColor = PrimaryIndigo
+                                        )
+                                    )
+                                }
+                            }
+                        }
+
+                        Box(modifier = Modifier.weight(1f)) {
+                            when (selectedSubTab) {
+                                MeetingsExecSubTab.MEETINGS -> MeetingsScreen(
+                                    viewModel = meetingsViewModel
+                                )
+                                MeetingsExecSubTab.PHONE_APPS -> PhoneAppScreen(
+                                    viewModel = phoneAppViewModel
+                                )
+                            }
+                        }
+                    }
+                }
                 NavigationTab.DISCOVER -> DiscoverScreen(
                     viewModel = discoverViewModel,
-                    onCheckUpdate = { updateController.checkManually() }
+                    onCheckUpdate = { updateController.checkManually() },
+                    onAskAiWithTopic = { prompt ->
+                        chatViewModel.prefillPrompt(prompt)
+                        selectedTab = NavigationTab.CHAT
+                    }
                 )
             }
         }

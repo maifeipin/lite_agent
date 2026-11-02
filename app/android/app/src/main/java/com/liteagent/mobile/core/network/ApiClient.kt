@@ -505,6 +505,300 @@ open class ApiClient(
             Result.failure(e)
         }
     }
+
+    // --- 助理增强：OCR 上传、快捷指令与会话重命名 ---
+    open suspend fun uploadOcrImage(
+        imageBytes: ByteArray,
+        fileName: String = "capture.jpg",
+        mimeType: String = "image/jpeg",
+        serverUrl: String? = null
+    ): Result<String> {
+        return try {
+            val service = getApiService(serverUrl)
+            val mediaType = okhttp3.MediaType.parse(mimeType) ?: okhttp3.MediaType.parse("image/jpeg")
+            val requestBody = okhttp3.RequestBody.create(mediaType, imageBytes)
+            val part = okhttp3.MultipartBody.Part.createFormData("file", fileName, requestBody)
+            val response = service.uploadOcrImage(part)
+            val body = response.body()
+            val text = body?.extractedText
+            if (response.isSuccessful && !text.isNullOrBlank()) {
+                Result.success(text)
+            } else {
+                val errMsg = body?.detail ?: body?.error ?: "OCR 解析未返回文本 (${response.code()})"
+                Result.failure(Exception(errMsg))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun getDashboardCommands(serverUrl: String? = null): Result<List<DashboardCommandItem>> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getDashboardCommands()
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!)
+            } else {
+                Result.failure(Exception("获取快捷指令失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun renameSession(
+        sessionKey: String,
+        newTitle: String,
+        serverUrl: String? = null
+    ): Result<RenameSessionResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.renameSession(RenameSessionRequest(sessionKey = sessionKey, title = newTitle))
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!)
+            } else {
+                Result.failure(Exception("重命名会话失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    // --- Phone App 真机自动化执行中枢 ---
+    open suspend fun getPhoneDevices(serverUrl: String? = null): Result<List<PhoneDeviceItem>> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getPhoneDevices()
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!.devices)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "获取设备列表失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun getPhoneApps(serverUrl: String? = null): Result<List<PhoneCatalogAppItem>> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getPhoneApps()
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!.apps)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "获取应用目录失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun getPhoneBatches(serverUrl: String? = null): Result<List<PhoneBatchItem>> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getPhoneBatches()
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!.batches)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "获取筛选批次失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun getPhoneBatchDetail(batchId: String, serverUrl: String? = null): Result<PhoneBatchDetailResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getPhoneBatchDetail(batchId)
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "获取批次详情失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun createPhoneBatch(
+        request: CreatePhoneBatchRequest,
+        serverUrl: String? = null
+    ): Result<CreatePhoneBatchResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.createPhoneBatch(request)
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                Result.success(response.body()!!)
+            } else {
+                val errMsg = try {
+                    response.errorBody()?.string()?.let { gson.fromJson(it, Map::class.java) }?.get("error")?.toString()
+                } catch (_: Exception) { null } ?: response.body()?.error ?: "创建筛选批次失败 (${response.code()})"
+                Result.failure(Exception(errMsg))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun approvePhoneBatch(batchId: String, serverUrl: String? = null): Result<PhoneActionResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.approvePhoneBatch(batchId)
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                Result.success(response.body()!!)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "审核批准失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun executePhoneBatch(batchId: String, serverUrl: String? = null): Result<PhoneActionResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.executePhoneBatch(batchId)
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                Result.success(response.body()!!)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "派发执行失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun rejectPhoneBatch(batchId: String, reason: String, serverUrl: String? = null): Result<PhoneActionResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.rejectPhoneBatch(batchId, PhoneActionRequest(reason = reason))
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                Result.success(response.body()!!)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "驳回批次失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun cancelPhoneBatch(batchId: String, reason: String = "用户在移动端主动取消", serverUrl: String? = null): Result<PhoneActionResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.cancelPhoneBatch(batchId, PhoneActionRequest(reason = reason))
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                Result.success(response.body()!!)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "取消批次失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun resumePhoneDevice(deviceId: String, serverUrl: String? = null): Result<PhoneActionResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.resumePhoneDevice(PhoneActionRequest(deviceId = deviceId))
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                Result.success(response.body()!!)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "恢复设备失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    // --- 发现中枢扩展：RSS 简报、复杂任务触发器、Socks5 节点 ---
+    open suspend fun getRssBrief(serverUrl: String? = null): Result<RssBriefResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getRssBrief()
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!)
+            } else {
+                Result.failure(Exception(response.body()?.detail ?: "获取今日简报失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun getTaskSpecs(serverUrl: String? = null): Result<List<TaskSpecItem>> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getTaskSpecs()
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!.data)
+            } else {
+                Result.failure(Exception("获取复杂任务失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun runTaskSpec(id: String, serverUrl: String? = null): Result<TaskSpecRunResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.runTaskSpec(id)
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!)
+            } else {
+                val errMsg = try {
+                    response.errorBody()?.string()?.let { gson.fromJson(it, Map::class.java) }?.get("error")?.toString()
+                } catch (_: Exception) { null } ?: response.body()?.error ?: "触发任务失败 (${response.code()})"
+                Result.failure(Exception(errMsg))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun getSocks5Nodes(serverUrl: String? = null): Result<List<Socks5NodeItem>> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getSocks5Nodes()
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!.data)
+            } else {
+                Result.failure(Exception("获取代理节点失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun testSocks5Node(id: Int, host: String? = null, serverUrl: String? = null): Result<Socks5TestResultDetail> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.testSocks5Node(id, host)
+            val result = response.body()?.result
+            if (response.isSuccessful && result != null) {
+                Result.success(result)
+            } else {
+                Result.failure(Exception("节点测速失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun setActiveSocks5Node(id: Int, serverUrl: String? = null): Result<String> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.setActiveSocks5Node(Socks5SetActiveRequest(id))
+            if (response.isSuccessful && response.body()?.success == true) {
+                Result.success(response.body()?.message ?: "已切换为主节点")
+            } else {
+                Result.failure(Exception(response.body()?.message ?: "切换主节点失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
 }
 
 class ConflictException(message: String) : Exception(message)
