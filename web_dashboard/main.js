@@ -90,12 +90,24 @@ function getDocTimestamp(doc) {
         const t = Date.parse(doc.email_date);
         if (!isNaN(t)) return t / 1000;
     }
-    if (doc.updated_at) {
-        if (typeof doc.updated_at === 'number') return doc.updated_at;
-        const t = Date.parse(doc.updated_at);
-        if (!isNaN(t)) return t / 1000;
+    let bestTs = 0;
+    if (doc.due_at) {
+        const s = String(doc.due_at).trim();
+        const t = Date.parse(s.includes('T') ? s : s.replace(' ', 'T'));
+        if (!isNaN(t)) bestTs = Math.max(bestTs, t / 1000);
     }
-    return 0;
+    if (doc.updated_at) {
+        if (typeof doc.updated_at === 'number') bestTs = Math.max(bestTs, doc.updated_at);
+        else {
+            const t = Date.parse(doc.updated_at);
+            if (!isNaN(t)) bestTs = Math.max(bestTs, t / 1000);
+        }
+    }
+    if (doc.created_at) {
+        const t = Date.parse(doc.created_at);
+        if (!isNaN(t)) bestTs = Math.max(bestTs, t / 1000);
+    }
+    return bestTs;
 }
 
 function jsonParseSafe(s) {
