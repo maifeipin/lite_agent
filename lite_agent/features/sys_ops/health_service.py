@@ -217,7 +217,9 @@ def _svc_name() -> str:
 
 def get_health_report() -> str:
     """生成系统全方位健康自检报告"""
-    report = ["🏥 **Lite Agent 系统全方位健康自检报告**\n"]
+    from lite_agent.core.version import get_system_version_info
+    ver_info = get_system_version_info()
+    report = [f"🏥 **Lite Agent 系统全方位健康自检报告** (Core: v{ver_info['core_version']} | Commit: `{ver_info['git_commit']}`)\n"]
     from lite_agent.core.constants import PROJECT_ROOT
     from lite_agent.core.sqlite_utils import connect_sqlite, safe_chromadb_sqlite_env
     base_dir = PROJECT_ROOT
