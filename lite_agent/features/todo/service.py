@@ -18,6 +18,21 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _local_tz():
+    return datetime.now().astimezone().tzinfo or timezone(timedelta(hours=8))
+
+
+def _parse_iso_aware(dt_str: str, fallback_tz: Any = None) -> datetime:
+    """Parse an ISO8601 or 'YYYY-MM-DD HH:MM:SS' datetime string and ensure it is timezone-aware.
+    Offset-naive strings are assumed to be in the local system timezone (e.g. Asia/Shanghai +08:00).
+    """
+    cleaned = dt_str.strip().replace('Z', '+00:00')
+    dt = datetime.fromisoformat(cleaned)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=fallback_tz or _local_tz())
+    return dt
+
+
 def _parse_until(until: str) -> str:
     if until.startswith('+'):
         m = re.match(r'^\+(\d+)([mhd])$', until)
@@ -551,7 +566,8 @@ class TodoService:
 
         # 2. Due soon tasks check
         due_tasks = self.repo.get_due_reminder_candidates()
-        now_dt = datetime.fromisoformat(now)
+        now_dt = _parse_iso_aware(now)
+        local_tz = _local_tz()
 
         for row in due_tasks:
             tid = row['id']
@@ -568,17 +584,17 @@ class TodoService:
             p_tag = {0: "🚨 [P0 紧急]", 1: "⚡ [P1 重要]", 2: "📌 [P2 次要]", 3: "☕ [P3 稍后]"}.get(priority_val, "⚡ [P1 重要]")
 
             try:
-                due_dt = datetime.fromisoformat(due_at)
+                due_dt = _parse_iso_aware(due_at, fallback_tz=local_tz)
             except Exception:
                 continue
 
             if kind == 'reminder':
-                schedule_zone = due_dt.tzinfo or timezone.utc
+                schedule_zone = due_dt.tzinfo or local_tz
                 local_now = now_dt.astimezone(schedule_zone)
                 last_day = None
                 if last_notified:
                     try:
-                        last_day = datetime.fromisoformat(last_notified).astimezone(schedule_zone).date()
+                        last_day = _parse_iso_aware(last_notified, fallback_tz=schedule_zone).astimezone(schedule_zone).date()
                     except ValueError:
                         continue
                 if now_dt < due_dt or not _matches_cron_schedule(local_now, row.get('recur_cron')) or local_now.strftime('%H:%M') < _parse_target_hm(row.get('recur_cron') or due_dt.strftime('%H:%M')) or last_day == local_now.date():
@@ -607,7 +623,7 @@ class TodoService:
                 should_notify = True
             elif interval_mins and interval_mins > 0:
                 try:
-                    last_dt = datetime.fromisoformat(last_notified)
+                    last_dt = _parse_iso_aware(last_notified, fallback_tz=local_tz)
                     if (now_dt - last_dt).total_seconds() >= (interval_mins * 60 - 5):
                         should_notify = True
                 except Exception:

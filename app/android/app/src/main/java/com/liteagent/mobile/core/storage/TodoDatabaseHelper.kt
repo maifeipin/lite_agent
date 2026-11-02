@@ -96,7 +96,7 @@ class TodoDatabaseHelper(
             null,
             null,
             null,
-            "$COL_CREATED_AT DESC"
+            "$COL_UPDATED_AT DESC, $COL_CREATED_AT DESC"
         )
         cursor.use {
             val idIdx = cursor.getColumnIndexOrThrow(COL_ID)

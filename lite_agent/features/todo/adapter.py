@@ -83,13 +83,16 @@ def handle_todos_post(http_handler: Any, parsed_url: Any) -> None:
         remind_before_mins = data.get("remind_before_mins", 30)
         notify_enabled = data.get('notify_enabled', True)
         recur_cron = data.get("recur_cron")
+        priority = data.get("priority", 1)
+        dispatch_target = data.get("dispatch_target")
         if recur_cron and kind == "misc":
             kind = "recurring"
 
         msg = get_todo_service(http_handler).add(
             title=title, kind=kind, project=project, description=description,
             due_at=due_at, recur_cron=recur_cron, remind_interval_mins=remind_interval_mins,
-            remind_before_mins=remind_before_mins, notify_enabled=notify_enabled
+            remind_before_mins=remind_before_mins, notify_enabled=notify_enabled,
+            priority=priority, dispatch_target=dispatch_target
         )
 
         http_handler.send_response(200)
@@ -162,9 +165,11 @@ def handle_todos_patch(http_handler: Any, parsed_url: Any) -> None:
         remind_interval_mins = data.get("remind_interval_mins")
         remind_before_mins = data.get("remind_before_mins")
         notify_enabled = data.get('notify_enabled')
+        priority = data.get("priority")
+        dispatch_target = data.get("dispatch_target")
 
-        if any(x is not None for x in [title, description, due_at, project, recur_cron, kind, remind_interval_mins, remind_before_mins, notify_enabled]):
-            msg.append(svc.update(tid, title=title, description=description, due_at=due_at, project=project, recur_cron=recur_cron, kind=kind, remind_interval_mins=remind_interval_mins, remind_before_mins=remind_before_mins, notify_enabled=notify_enabled))
+        if any(x is not None for x in [title, description, due_at, project, recur_cron, kind, remind_interval_mins, remind_before_mins, notify_enabled, priority, dispatch_target]):
+            msg.append(svc.update(tid, title=title, description=description, due_at=due_at, project=project, recur_cron=recur_cron, kind=kind, remind_interval_mins=remind_interval_mins, remind_before_mins=remind_before_mins, notify_enabled=notify_enabled, priority=priority, dispatch_target=dispatch_target))
 
         if not msg:
             http_handler.send_error(400, "Bad Request: No fields to update")

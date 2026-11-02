@@ -999,6 +999,19 @@ class SanityTest {
         val uiStateDone = uiStateAll.copy(filter = TodoFilter.DONE)
         assertEquals(1, uiStateDone.filteredTodos.size)
         assertEquals("Task 3", uiStateDone.filteredTodos.first().title)
+
+        // 验证 GTD 排序策略：已完成自动沉底 + 最近/临近截止优先 + 优先级优先
+        val oldTodo = TodoItem(id = "old", title = "Old Task", status = "pending", dueAt = "2026-08-28T10:00:00+08:00", priority = 2)
+        val recentTodo = TodoItem(id = "recent", title = "Recent Task", status = "pending", dueAt = "2026-11-02T21:10:00+08:00", priority = 0)
+        val completedRecent = TodoItem(id = "done_new", title = "Done Task", status = "done", dueAt = "2026-11-03T10:00:00+08:00", priority = 0)
+
+        val sortedRecent = TodosUiState(
+            todos = listOf(completedRecent, oldTodo, recentTodo),
+            sortMode = com.liteagent.mobile.ui.todos.TodoSortMode.SMART_RECENT
+        ).filteredTodos
+        assertEquals("recent", sortedRecent[0].id)
+        assertEquals("old", sortedRecent[1].id)
+        assertEquals("done_new", sortedRecent[2].id)
     }
 
     @Test

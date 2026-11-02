@@ -139,14 +139,16 @@ fun TodosScreen(
                 }
             }
 
-            // 分类状态过滤 Chips
+            // 分类状态过滤与 GTD 排序 Chips
             TodoFilterChipsRow(
                 currentFilter = uiState.filter,
+                currentSortMode = uiState.sortMode,
                 pendingCount = uiState.pendingCount,
                 activeCount = uiState.activeCount,
                 doneCount = uiState.doneCount,
                 allCount = uiState.todos.size,
-                onFilterSelected = { viewModel.setFilter(it) }
+                onFilterSelected = { viewModel.setFilter(it) },
+                onSortModeSelected = { viewModel.setSortMode(it) }
             )
 
             // 待办列表内容区
@@ -290,51 +292,97 @@ private fun TodosTopBar(
 @Composable
 private fun TodoFilterChipsRow(
     currentFilter: TodoFilter,
+    currentSortMode: TodoSortMode,
     pendingCount: Int,
     activeCount: Int,
     doneCount: Int,
     allCount: Int,
-    onFilterSelected: (TodoFilter) -> Unit
+    onFilterSelected: (TodoFilter) -> Unit,
+    onSortModeSelected: (TodoSortMode) -> Unit
 ) {
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        TodoFilter.values().forEach { filter ->
-            val count = when (filter) {
-                TodoFilter.ALL -> allCount
-                TodoFilter.PENDING -> pendingCount
-                TodoFilter.ACTIVE -> activeCount
-                TodoFilter.DONE -> doneCount
-            }
-            val isSelected = currentFilter == filter
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TodoFilter.values().forEach { filter ->
+                val count = when (filter) {
+                    TodoFilter.ALL -> allCount
+                    TodoFilter.PENDING -> pendingCount
+                    TodoFilter.ACTIVE -> activeCount
+                    TodoFilter.DONE -> doneCount
+                }
+                val isSelected = currentFilter == filter
 
-            FilterChip(
-                selected = isSelected,
-                onClick = { onFilterSelected(filter) },
-                label = {
-                    Text(
-                        text = "${filter.label} $count",
-                        fontSize = 12.sp,
-                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                    )
-                },
-                colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = PrimaryIndigo.copy(alpha = 0.2f),
-                    selectedLabelColor = PrimaryIndigo,
-                    containerColor = SurfaceCard,
-                    labelColor = TextSecondary
-                ),
-                border = FilterChipDefaults.filterChipBorder(
-                    enabled = true,
+                FilterChip(
                     selected = isSelected,
-                    borderColor = if (isSelected) PrimaryIndigo else SurfaceBorder,
-                    selectedBorderColor = PrimaryIndigo
-                ),
-                shape = RoundedCornerShape(20.dp)
+                    onClick = { onFilterSelected(filter) },
+                    label = {
+                        Text(
+                            text = "${filter.label} $count",
+                            fontSize = 12.sp,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                        )
+                    },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = PrimaryIndigo.copy(alpha = 0.2f),
+                        selectedLabelColor = PrimaryIndigo,
+                        containerColor = SurfaceCard,
+                        labelColor = TextSecondary
+                    ),
+                    border = FilterChipDefaults.filterChipBorder(
+                        enabled = true,
+                        selected = isSelected,
+                        borderColor = if (isSelected) PrimaryIndigo else SurfaceBorder,
+                        selectedBorderColor = PrimaryIndigo
+                    ),
+                    shape = RoundedCornerShape(20.dp)
+                )
+            }
+        }
+
+        // GTD 排序策略切换栏
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "排序:",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextMuted,
+                modifier = Modifier.padding(end = 2.dp)
             )
+            TodoSortMode.values().forEach { mode ->
+                val selected = currentSortMode == mode
+                Surface(
+                    color = if (selected) AccentAmber.copy(alpha = 0.18f) else SurfaceCard,
+                    shape = RoundedCornerShape(14.dp),
+                    border = androidx.compose.foundation.BorderStroke(
+                        1.dp,
+                        if (selected) AccentAmber.copy(alpha = 0.6f) else SurfaceBorder
+                    ),
+                    modifier = Modifier.clickable { onSortModeSelected(mode) }
+                ) {
+                    Text(
+                        text = mode.label,
+                        fontSize = 11.sp,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        color = if (selected) AccentAmber else TextSecondary,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                }
+            }
         }
     }
 }
@@ -570,11 +618,20 @@ private fun CreateTodoBottomSheet(
     var description by remember { mutableStateOf("") }
     var showDescription by remember { mutableStateOf(false) }
 
-    // 快捷日期与时间
+    // 快捷日期与时间 + 原生选择器弹窗状态
     var dateType by remember { mutableStateOf("tomorrow") } // none, today, tomorrow, weekend, custom
-    var customDate by remember { mutableStateOf("") }
+    var customDate by remember {
+        mutableStateOf(SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date()))
+    }
+    var showDatePickerDialog by remember { mutableStateOf(false) }
+
     var timeType by remember { mutableStateOf("10:00") } // allday, 09:00, 10:00, 14:00, 18:00, custom
-    var customTime by remember { mutableStateOf("") }
+    var customTime by remember {
+        val cal = Calendar.getInstance().apply { add(Calendar.MINUTE, 10) }
+        mutableStateOf(SimpleDateFormat("HH:mm", Locale.getDefault()).format(cal.time))
+    }
+    var showTimePickerDialog by remember { mutableStateOf(false) }
+    var useTimeKeyboardInput by remember { mutableStateOf(false) }
 
     // 高级提醒
     var remindBeforeMins by remember { mutableStateOf(40) } // 提前40分钟
@@ -593,8 +650,32 @@ private fun CreateTodoBottomSheet(
     val focusManager = LocalFocusManager.current
     val scrollState = rememberScrollState()
 
-    val computedDueAt = remember(dateType, customDate, timeType, customTime) {
-        if (dateType == "none") null
+    val isCustomDateValid = remember(dateType, customDate) {
+        if (dateType != "custom") true
+        else {
+            val s = customDate.trim()
+            if (!Regex("^\\d{4}-\\d{2}-\\d{2}$").matches(s)) false
+            else {
+                try {
+                    val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply { isLenient = false }
+                    sdf.parse(s) != null
+                } catch (_: Exception) {
+                    false
+                }
+            }
+        }
+    }
+
+    val isCustomTimeValid = remember(dateType, timeType, customTime) {
+        if (dateType == "none" || timeType != "custom") true
+        else {
+            val normalized = customTime.trim().replace('：', ':')
+            Regex("^([01]\\d|2[0-3]):[0-5]\\d(:[0-5]\\d)?$").matches(normalized)
+        }
+    }
+
+    val computedDueAt = remember(dateType, customDate, timeType, customTime, isCustomDateValid, isCustomTimeValid) {
+        if (dateType == "none" || !isCustomDateValid || !isCustomTimeValid) null
         else {
             val dateStr = when (dateType) {
                 "today" -> SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
@@ -621,14 +702,19 @@ private fun CreateTodoBottomSheet(
                     "14:00" -> "14:00:00"
                     "18:00" -> "18:00:00"
                     "custom" -> {
-                        val trimmed = customTime.trim()
+                        val trimmed = customTime.trim().replace('：', ':')
                         if (trimmed.isEmpty()) "09:00:00"
                         else if (trimmed.count { it == ':' } == 1) "$trimmed:00"
                         else trimmed
                     }
                     else -> "09:00:00"
                 }
-                "$dateStr $timeStr"
+                val tzOffset = try {
+                    SimpleDateFormat("XXX", Locale.US).format(Date())
+                } catch (_: Exception) {
+                    "+08:00"
+                }
+                "${dateStr}T${timeStr}${tzOffset}"
             }
         }
     }
@@ -740,12 +826,17 @@ private fun CreateTodoBottomSheet(
                                 "tomorrow" to "明天 (推荐)",
                                 "today" to "今天",
                                 "weekend" to "本周末",
-                                "custom" to "自定义日期",
+                                "custom" to "📅 选择日期",
                                 "none" to "无截止"
                             ).forEach { (key, label) ->
                                 FilterChip(
                                     selected = dateType == key,
-                                    onClick = { dateType = key },
+                                    onClick = {
+                                        dateType = key
+                                        if (key == "custom") {
+                                            showDatePickerDialog = true
+                                        }
+                                    },
                                     label = { Text(label, fontSize = 12.sp) },
                                     colors = FilterChipDefaults.filterChipColors(
                                         selectedContainerColor = PrimaryIndigo.copy(alpha = 0.2f),
@@ -756,14 +847,41 @@ private fun CreateTodoBottomSheet(
                         }
 
                         if (dateType == "custom") {
-                            OutlinedTextField(
-                                value = customDate,
-                                onValueChange = { customDate = it },
-                                placeholder = { Text("格式：YYYY-MM-DD，如 2026-10-26") },
-                                singleLine = true,
+                            Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(8.dp)
-                            )
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                OutlinedTextField(
+                                    value = customDate,
+                                    onValueChange = { customDate = it },
+                                    placeholder = { Text("YYYY-MM-DD") },
+                                    isError = !isCustomDateValid,
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(8.dp),
+                                    trailingIcon = {
+                                        IconButton(onClick = { showDatePickerDialog = true }) {
+                                            Icon(Icons.Default.DateRange, contentDescription = "打开日历选择器", tint = PrimaryIndigo)
+                                        }
+                                    }
+                                )
+                                FilledTonalButton(
+                                    onClick = { showDatePickerDialog = true },
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Icon(Icons.Default.CalendarMonth, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("日历", fontSize = 12.sp)
+                                }
+                            }
+                            if (!isCustomDateValid) {
+                                Text(
+                                    text = "⚠️ 日期格式无效，请点击右侧「日历」选择或输入有效 YYYY-MM-DD",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = AccentRose
+                                )
+                            }
                         }
 
                         if (dateType != "none") {
@@ -786,11 +904,16 @@ private fun CreateTodoBottomSheet(
                                     "14:00" to "14:00",
                                     "18:00" to "18:00",
                                     "allday" to "全天",
-                                    "custom" to "自定义时间"
+                                    "custom" to "🕒 选择时间"
                                 ).forEach { (key, label) ->
                                     FilterChip(
                                         selected = timeType == key,
-                                        onClick = { timeType = key },
+                                        onClick = {
+                                            timeType = key
+                                            if (key == "custom") {
+                                                showTimePickerDialog = true
+                                            }
+                                        },
                                         label = { Text(label, fontSize = 12.sp) },
                                         colors = FilterChipDefaults.filterChipColors(
                                             selectedContainerColor = PrimaryIndigo.copy(alpha = 0.2f),
@@ -801,20 +924,47 @@ private fun CreateTodoBottomSheet(
                             }
 
                             if (timeType == "custom") {
-                                OutlinedTextField(
-                                    value = customTime,
-                                    onValueChange = { customTime = it },
-                                    placeholder = { Text("格式：HH:mm，如 10:30") },
-                                    singleLine = true,
+                                Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    shape = RoundedCornerShape(8.dp)
-                                )
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    OutlinedTextField(
+                                        value = customTime,
+                                        onValueChange = { customTime = it.replace('：', ':') },
+                                        placeholder = { Text("HH:mm，如 21:10") },
+                                        isError = !isCustomTimeValid,
+                                        singleLine = true,
+                                        modifier = Modifier.weight(1f),
+                                        shape = RoundedCornerShape(8.dp),
+                                        trailingIcon = {
+                                            IconButton(onClick = { showTimePickerDialog = true }) {
+                                                Icon(Icons.Default.Schedule, contentDescription = "打开时钟选择器", tint = PrimaryIndigo)
+                                            }
+                                        }
+                                    )
+                                    FilledTonalButton(
+                                        onClick = { showTimePickerDialog = true },
+                                        shape = RoundedCornerShape(8.dp)
+                                    ) {
+                                        Icon(Icons.Default.AccessTime, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("拨盘", fontSize = 12.sp)
+                                    }
+                                }
+                                if (!isCustomTimeValid) {
+                                    Text(
+                                        text = "⚠️ 时间格式无效，请点击右侧「拨盘」选择或输入 00:00 ~ 23:59",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = AccentRose
+                                    )
+                                }
                             }
                         }
 
                         computedDueAt?.let { due ->
                             Text(
-                                text = "预计截止时间：$due",
+                                text = "预计截止时间：${due.take(16).replace('T', ' ')}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = PrimaryIndigo,
                                 fontWeight = FontWeight.SemiBold
@@ -1118,7 +1268,7 @@ private fun CreateTodoBottomSheet(
                         )
                     }
                 },
-                enabled = title.isNotBlank() && !isCreating,
+                enabled = title.isNotBlank() && isCustomDateValid && isCustomTimeValid && !isCreating,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(50.dp),
@@ -1138,5 +1288,106 @@ private fun CreateTodoBottomSheet(
 
             Spacer(modifier = Modifier.height(12.dp))
         }
+    }
+
+    // 原生 Material 3 日历选择器弹窗 (DatePickerDialog)
+    if (showDatePickerDialog) {
+        val initialMillis = remember(customDate) {
+            try {
+                SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
+                    timeZone = java.util.TimeZone.getTimeZone("UTC")
+                }.parse(customDate.trim())?.time ?: System.currentTimeMillis()
+            } catch (_: Exception) {
+                System.currentTimeMillis()
+            }
+        }
+        val datePickerState = rememberDatePickerState(initialSelectedDateMillis = initialMillis)
+        DatePickerDialog(
+            onDismissRequest = { showDatePickerDialog = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        datePickerState.selectedDateMillis?.let { millis ->
+                            val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
+                                timeZone = java.util.TimeZone.getTimeZone("UTC")
+                            }
+                            customDate = sdf.format(Date(millis))
+                        }
+                        showDatePickerDialog = false
+                    }
+                ) {
+                    Text("确定", fontWeight = FontWeight.Bold, color = PrimaryIndigo)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDatePickerDialog = false }) {
+                    Text("取消")
+                }
+            }
+        ) {
+            DatePicker(state = datePickerState)
+        }
+    }
+
+    // 原生 Material 3 时钟/数字双模时间选择器弹窗 (TimePicker / TimeInput)
+    if (showTimePickerDialog) {
+        val (initHour, initMin) = remember(customTime) {
+            val parts = customTime.trim().replace('：', ':').split(":")
+            val h = parts.getOrNull(0)?.toIntOrNull()?.coerceIn(0, 23) ?: Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+            val m = parts.getOrNull(1)?.toIntOrNull()?.coerceIn(0, 59) ?: Calendar.getInstance().get(Calendar.MINUTE)
+            h to m
+        }
+        val timePickerState = rememberTimePickerState(
+            initialHour = initHour,
+            initialMinute = initMin,
+            is24Hour = true
+        )
+        AlertDialog(
+            onDismissRequest = { showTimePickerDialog = false },
+            title = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("选择提醒时间", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    IconButton(onClick = { useTimeKeyboardInput = !useTimeKeyboardInput }) {
+                        Icon(
+                            imageVector = if (useTimeKeyboardInput) Icons.Default.Schedule else Icons.Default.Keyboard,
+                            contentDescription = "切换拨盘/键盘输入",
+                            tint = PrimaryIndigo
+                        )
+                    }
+                }
+            },
+            text = {
+                Box(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (useTimeKeyboardInput) {
+                        TimeInput(state = timePickerState)
+                    } else {
+                        TimePicker(state = timePickerState)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        customTime = String.format(Locale.US, "%02d:%02d", timePickerState.hour, timePickerState.minute)
+                        showTimePickerDialog = false
+                    }
+                ) {
+                    Text("确定", fontWeight = FontWeight.Bold, color = PrimaryIndigo)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showTimePickerDialog = false }) {
+                    Text("取消")
+                }
+            },
+            containerColor = SurfaceElevated
+        )
     }
 }

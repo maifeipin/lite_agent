@@ -469,7 +469,7 @@ fun MainAppScaffold(
                     }
 
                     chatSessions.take(8).forEach { sess ->
-                        val isCurrentSess = currentChatSession?.id == sess.id && selectedTab == NavigationTab.CHAT
+                        val isCurrentSess = currentChatSession?.sessionKey == sess.sessionKey && selectedTab == NavigationTab.CHAT
                         Surface(
                             color = if (isCurrentSess) PrimaryIndigo.copy(alpha = 0.14f) else Color.Transparent,
                             shape = RoundedCornerShape(10.dp),

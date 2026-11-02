@@ -29,9 +29,107 @@ enum class TodoFilter(val label: String) {
     DONE("已完成")
 }
 
+enum class TodoSortMode(val label: String) {
+    SMART_RECENT("🕐 最近待办"),
+    DUE_PROXIMITY("📅 临近截止"),
+    PRIORITY("🔥 优先级")
+}
+
+object TodoSortHelper {
+    private val isoFormats = listOf(
+        "yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXX",
+        "yyyy-MM-dd'T'HH:mm:ssXXX",
+        "yyyy-MM-dd'T'HH:mm:ssZ",
+        "yyyy-MM-dd HH:mm:ss",
+        "yyyy-MM-dd HH:mm",
+        "yyyy-MM-dd"
+    )
+
+    fun parseEpochMillis(raw: String?): Long? {
+        val s = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        s.toLongOrNull()?.let { return it }
+        // 统一将微秒截断或标准化以兼容 SimpleDateFormat
+        val normalized = s.replace(Regex("\\.(\\d{3})\\d+"), ".$1")
+        for (pattern in listOf(
+            "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+            "yyyy-MM-dd'T'HH:mm:ssXXX",
+            "yyyy-MM-dd'T'HH:mm:ssZ",
+            "yyyy-MM-dd'T'HH:mm:ss",
+            "yyyy-MM-dd HH:mm:ss",
+            "yyyy-MM-dd HH:mm",
+            "yyyy-MM-dd"
+        )) {
+            try {
+                val sdf = java.text.SimpleDateFormat(pattern, java.util.Locale.US)
+                sdf.isLenient = true
+                val d = sdf.parse(normalized)
+                if (d != null) return d.time
+            } catch (_: Exception) {
+            }
+        }
+        return null
+    }
+
+    fun sortTodos(items: List<TodoItem>, mode: TodoSortMode, nowMillis: Long = System.currentTimeMillis()): List<TodoItem> {
+        return items.sortedWith(Comparator { a, b ->
+            // 1. 已完成自动沉底 (GTD 黄金准则)
+            if (a.isCompleted != b.isCompleted) {
+                return@Comparator if (a.isCompleted) 1 else -1
+            }
+
+            val aDue = parseEpochMillis(a.dueAt)
+            val bDue = parseEpochMillis(b.dueAt)
+            val aUpd = parseEpochMillis(a.updatedAt) ?: parseEpochMillis(a.createdAt) ?: 0L
+            val bUpd = parseEpochMillis(b.updatedAt) ?: parseEpochMillis(b.createdAt) ?: 0L
+
+            when (mode) {
+                TodoSortMode.SMART_RECENT -> {
+                    // 最近优先：综合取 max(截止时间/最近更新时间)，同时有截止日期的近期任务优先
+                    val aHasDue = aDue != null
+                    val bHasDue = bDue != null
+                    val aEffective = maxOf(aUpd, aDue ?: 0L)
+                    val bEffective = maxOf(bUpd, bDue ?: 0L)
+                    if (aEffective != bEffective) {
+                        bEffective.compareTo(aEffective) // 越新/越近的排越前
+                    } else if (aHasDue != bHasDue) {
+                        if (aHasDue) -1 else 1
+                    } else {
+                        (a.priority ?: 2).compareTo(b.priority ?: 2)
+                    }
+                }
+                TodoSortMode.DUE_PROXIMITY -> {
+                    // 临近截止优先：有截止时间的排前面，且按距离当前时间 |due - now| 从近到远排序
+                    if ((aDue != null) != (bDue != null)) {
+                        if (aDue != null) -1 else 1
+                    } else if (aDue != null && bDue != null && aDue != bDue) {
+                        val aDist = kotlin.math.abs(aDue - nowMillis)
+                        val bDist = kotlin.math.abs(bDue - nowMillis)
+                        aDist.compareTo(bDist)
+                    } else {
+                        bUpd.compareTo(aUpd)
+                    }
+                }
+                TodoSortMode.PRIORITY -> {
+                    // 优先级优先：P0 -> P1 -> P2 -> P3，同优先级按最近时间降序
+                    val aPrio = a.priority ?: 2
+                    val bPrio = b.priority ?: 2
+                    if (aPrio != bPrio) {
+                        aPrio.compareTo(bPrio)
+                    } else {
+                        val aEff = maxOf(aUpd, aDue ?: 0L)
+                        val bEff = maxOf(bUpd, bDue ?: 0L)
+                        bEff.compareTo(aEff)
+                    }
+                }
+            }
+        })
+    }
+}
+
 data class TodosUiState(
     val todos: List<TodoItem> = emptyList(),
     val filter: TodoFilter = TodoFilter.ALL,
+    val sortMode: TodoSortMode = TodoSortMode.SMART_RECENT,
     val isLoading: Boolean = false,
     val isRefreshing: Boolean = false,
     val isOffline: Boolean = false,
@@ -40,11 +138,14 @@ data class TodosUiState(
     val isCreating: Boolean = false
 ) {
     val filteredTodos: List<TodoItem>
-        get() = when (filter) {
-            TodoFilter.ALL -> todos
-            TodoFilter.PENDING -> todos.filter { it.status.equals("pending", ignoreCase = true) }
-            TodoFilter.ACTIVE -> todos.filter { it.status.equals("active", ignoreCase = true) }
-            TodoFilter.DONE -> todos.filter { it.isCompleted }
+        get() {
+            val base = when (filter) {
+                TodoFilter.ALL -> todos
+                TodoFilter.PENDING -> todos.filter { it.status.equals("pending", ignoreCase = true) }
+                TodoFilter.ACTIVE -> todos.filter { it.status.equals("active", ignoreCase = true) }
+                TodoFilter.DONE -> todos.filter { it.isCompleted }
+            }
+            return TodoSortHelper.sortTodos(base, sortMode)
         }
 
     val pendingCount: Int
@@ -201,6 +302,10 @@ class TodosViewModel(
 
     fun setFilter(filter: TodoFilter) {
         _uiState.value = _uiState.value.copy(filter = filter)
+    }
+
+    fun setSortMode(sortMode: TodoSortMode) {
+        _uiState.value = _uiState.value.copy(sortMode = sortMode)
     }
 
     /**
