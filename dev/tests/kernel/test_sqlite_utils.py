@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from lite_agent.core.sqlite_utils import (
     SafeSqliteConnection,
+    SafeSqliteCursor,
     _PYSQLITE_GLOBAL_LOCK,
     connect_sqlite,
     safe_chromadb_sqlite_env,
@@ -245,6 +246,109 @@ class TestSqliteUtils(unittest.TestCase):
             self.assertEqual(cnt_rolled_back, 0)
         finally:
             store.close()
+
+    def test_09_sql_exception_paths_sync_tx_lock(self):
+        """回归 [P1]: executemany 异常开启事务必须持锁；executescript 异常结束事务必须释放锁。"""
+        db_file = self.tmp_path / "sql_exc_sync.db"
+        conn = connect_sqlite(db_file, check_same_thread=False)
+        try:
+            conn.execute("CREATE TABLE uniq_items (val TEXT UNIQUE)")
+            conn.commit()
+
+            # 1) executemany 第 1 条成功、第 2 条触发 UNIQUE 异常：in_transaction=True，必须持有事务锁
+            exc_caught = threading.Event()
+            b_done = threading.Event()
+
+            def thread_a_partial():
+                try:
+                    conn.executemany(
+                        "INSERT INTO uniq_items (val) VALUES (?)",
+                        [("first_ok",), ("first_ok",)],
+                    )
+                except sqlite3.IntegrityError:
+                    self.assertTrue(conn.in_transaction)
+                    self.assertTrue(conn._tx_lock_held)
+                    exc_caught.set()
+                    time.sleep(0.08)
+                    conn.commit()
+
+            def thread_b_try_rollback():
+                exc_caught.wait(timeout=2.0)
+                conn.rollback()
+                b_done.set()
+
+            ta = threading.Thread(target=thread_a_partial)
+            tb = threading.Thread(target=thread_b_try_rollback)
+            ta.start()
+            tb.start()
+            ta.join(timeout=5.0)
+            tb.join(timeout=5.0)
+            self.assertTrue(b_done.is_set())
+
+            rows = [r[0] for r in conn.execute("SELECT val FROM uniq_items").fetchall()]
+            self.assertEqual(rows, ["first_ok"], "executemany 部分插入的数据在提交前不得被其他线程回滚")
+
+            # 2) executescript 隐式提交已有事务后遇到语法错误：in_transaction=False，必须释放事务锁
+            conn.execute("INSERT INTO uniq_items (val) VALUES ('second_ok')")
+            self.assertTrue(conn.in_transaction)
+            self.assertTrue(conn._tx_lock_held)
+
+            with self.assertRaises(sqlite3.OperationalError):
+                conn.executescript("INSERT INTO uniq_items (val) VALUES ('third_ok'); INVALID SQL SYNTAX;")
+
+            self.assertFalse(conn.in_transaction)
+            self.assertFalse(conn._tx_lock_held)
+
+            # 验证其他线程不会被死锁阻塞
+            other_thread_ok = threading.Event()
+
+            def thread_c_verify_not_blocked():
+                conn.execute("INSERT INTO uniq_items (val) VALUES ('from_c')")
+                conn.commit()
+                other_thread_ok.set()
+
+            tc = threading.Thread(target=thread_c_verify_not_blocked)
+            tc.start()
+            tc.join(timeout=2.0)
+            self.assertTrue(other_thread_ok.is_set(), "executescript 异常结束事务后不得阻塞其他线程")
+        finally:
+            conn.close()
+
+    def test_10_shortcut_methods_return_safe_cursor(self):
+        """回归 [P1]: conn.execute/executemany/executescript 必须返回 SafeSqliteCursor，复用游标不得绕过事务锁。"""
+        db_file = self.tmp_path / "shortcut_cursor.db"
+        conn = connect_sqlite(db_file, check_same_thread=False)
+        try:
+            cur = conn.execute("CREATE TABLE t_cur (val TEXT)")
+            self.assertIsInstance(cur, SafeSqliteCursor)
+            conn.commit()
+
+            reused_inserted = threading.Event()
+
+            def thread_a():
+                # 复用 conn.execute() 返回的游标发起写入
+                cur.execute("INSERT INTO t_cur (val) VALUES ('via_reused_cursor')")
+                self.assertTrue(conn.in_transaction)
+                self.assertTrue(conn._tx_lock_held)
+                reused_inserted.set()
+                time.sleep(0.08)
+                conn.commit()
+
+            def thread_b():
+                reused_inserted.wait(timeout=2.0)
+                conn.rollback()
+
+            ta = threading.Thread(target=thread_a)
+            tb = threading.Thread(target=thread_b)
+            ta.start()
+            tb.start()
+            ta.join(timeout=5.0)
+            tb.join(timeout=5.0)
+
+            rows = [r[0] for r in cur.execute("SELECT val FROM t_cur").fetchall()]
+            self.assertEqual(rows, ["via_reused_cursor"])
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":

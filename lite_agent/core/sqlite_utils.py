@@ -31,34 +31,64 @@ _CHROMADB_ENV_LOCK = threading.RLock()
 
 
 class SafeSqliteCursor(_stdlib_sqlite3.Cursor):
-    """线程安全的 Cursor 子类，确保通过 cursor.execute 发起的事务同样纳入连接级事务锁保护。"""
+    """线程安全的 Cursor 子类，确保通过游标发起的所有操作及异常路径均同步连接级事务锁。"""
 
     def execute(self, sql: str, parameters: Any = (), /) -> "SafeSqliteCursor":
         conn = self.connection
         if isinstance(conn, SafeSqliteConnection):
             with conn._op_lock:
-                res = super().execute(sql, parameters)
-                conn._sync_tx_lock()
-                return res
-        return super().execute(sql, parameters)
+                try:
+                    super().execute(sql, parameters)
+                    return self
+                finally:
+                    conn._sync_tx_lock()
+        super().execute(sql, parameters)
+        return self
 
     def executemany(self, sql: str, parameters: Any, /) -> "SafeSqliteCursor":
         conn = self.connection
         if isinstance(conn, SafeSqliteConnection):
             with conn._op_lock:
-                res = super().executemany(sql, parameters)
-                conn._sync_tx_lock()
-                return res
-        return super().executemany(sql, parameters)
+                try:
+                    super().executemany(sql, parameters)
+                    return self
+                finally:
+                    conn._sync_tx_lock()
+        super().executemany(sql, parameters)
+        return self
 
     def executescript(self, sql_script: str, /) -> "SafeSqliteCursor":
         conn = self.connection
         if isinstance(conn, SafeSqliteConnection):
             with conn._op_lock:
-                res = super().executescript(sql_script)
-                conn._sync_tx_lock()
-                return res
-        return super().executescript(sql_script)
+                try:
+                    super().executescript(sql_script)
+                    return self
+                finally:
+                    conn._sync_tx_lock()
+        super().executescript(sql_script)
+        return self
+
+    def fetchone(self) -> Any:
+        conn = self.connection
+        if isinstance(conn, SafeSqliteConnection):
+            with conn._op_lock:
+                return super().fetchone()
+        return super().fetchone()
+
+    def fetchmany(self, size: Optional[int] = None) -> list:
+        conn = self.connection
+        if isinstance(conn, SafeSqliteConnection):
+            with conn._op_lock:
+                return super().fetchmany() if size is None else super().fetchmany(size)
+        return super().fetchmany() if size is None else super().fetchmany(size)
+
+    def fetchall(self) -> list:
+        conn = self.connection
+        if isinstance(conn, SafeSqliteConnection):
+            with conn._op_lock:
+                return super().fetchall()
+        return super().fetchall()
 
 
 class SafeSqliteConnection(_stdlib_sqlite3.Connection):
@@ -90,27 +120,25 @@ class SafeSqliteConnection(_stdlib_sqlite3.Connection):
             self._tx_lock_held = False
             self._op_lock.release()
 
-    def cursor(self, factory: Any = SafeSqliteCursor) -> _stdlib_sqlite3.Cursor:
+    def cursor(self, factory: Any = None) -> _stdlib_sqlite3.Cursor:
         with self._op_lock:
-            return super().cursor(factory)
+            target_factory = SafeSqliteCursor if (factory is None or factory is _stdlib_sqlite3.Cursor) else factory
+            return super().cursor(target_factory)
 
     def execute(self, sql: str, parameters: Any = (), /) -> _stdlib_sqlite3.Cursor:
         with self._op_lock:
-            cur = super().execute(sql, parameters)
-            self._sync_tx_lock()
-            return cur
+            cur = self.cursor()
+            return cur.execute(sql, parameters)
 
     def executemany(self, sql: str, parameters: Any, /) -> _stdlib_sqlite3.Cursor:
         with self._op_lock:
-            cur = super().executemany(sql, parameters)
-            self._sync_tx_lock()
-            return cur
+            cur = self.cursor()
+            return cur.executemany(sql, parameters)
 
     def executescript(self, sql_script: str, /) -> _stdlib_sqlite3.Cursor:
         with self._op_lock:
-            cur = super().executescript(sql_script)
-            self._sync_tx_lock()
-            return cur
+            cur = self.cursor()
+            return cur.executescript(sql_script)
 
     def commit(self) -> None:
         with self._op_lock:
