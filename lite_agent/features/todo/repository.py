@@ -63,13 +63,11 @@ def _ensure_schema(db_path: Optional[str] = None) -> None:
 
 
 def _ensure_schema_locked(target: str) -> None:
+    from lite_agent.core.sqlite_utils import connect_sqlite
     global _db_initialized, _initialized_path, _initialized_file_id
     os.makedirs(os.path.dirname(target), exist_ok=True)
-    conn = sqlite3.connect(target)
+    conn = connect_sqlite(target, foreign_keys=True)
     try:
-        conn.execute('PRAGMA journal_mode=WAL')
-        conn.execute('PRAGMA synchronous=NORMAL')
-        conn.execute('PRAGMA foreign_keys=ON')
         conn.execute('BEGIN IMMEDIATE')
 
         conn.execute("""
@@ -146,11 +144,10 @@ def _ensure_schema_locked(target: str) -> None:
 
 def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
     """Return an active connection with foreign keys enabled, ensuring schema lazily."""
+    from lite_agent.core.sqlite_utils import connect_sqlite
     target = resolve_db_path(db_path)
     _ensure_schema(target)
-    conn = sqlite3.connect(target)
-    conn.execute('PRAGMA foreign_keys=ON')
-    return conn
+    return connect_sqlite(target, foreign_keys=True)
 
 
 def generate_todo_id(title: str, db_path: Optional[str] = None) -> str:

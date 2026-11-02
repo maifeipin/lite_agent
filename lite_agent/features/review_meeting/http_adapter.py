@@ -89,8 +89,8 @@ def review_admin(http_handler: Any) -> bool:
             return True
     db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
     try:
-        with closing(sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)) as db:
-            db.row_factory = sqlite3.Row
+        from lite_agent.core.sqlite_utils import connect_sqlite
+        with closing(connect_sqlite(f'file:{db_path}?mode=ro', uri=True, row_factory=sqlite3.Row, wal=False)) as db:
             return access.is_host_session(db, bearer)
     except sqlite3.Error:
         return False
@@ -117,8 +117,8 @@ def review_operator(http_handler: Any, meeting_id: str, action: str = 'read') ->
         return None
     db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
     try:
-        with closing(sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)) as db:
-            db.row_factory = sqlite3.Row
+        from lite_agent.core.sqlite_utils import connect_sqlite
+        with closing(connect_sqlite(f'file:{db_path}?mode=ro', uri=True, row_factory=sqlite3.Row, wal=False)) as db:
             return access.cohost_actor(db, meeting_id, review_bearer(http_handler), action)
     except sqlite3.Error:
         return None
@@ -185,7 +185,8 @@ def review_long_wait(db_path: Path, meeting_id: str, since: int, wait: float, se
     try:
         deadline = time.monotonic() + wait
         uri = f'file:{db_path}?mode=ro'
-        with closing(sqlite3.connect(uri, uri=True, isolation_level=None, timeout=30)) as probe:
+        from lite_agent.core.sqlite_utils import connect_sqlite
+        with closing(connect_sqlite(uri, uri=True, isolation_level=None, timeout=30.0, wal=False)) as probe:
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:

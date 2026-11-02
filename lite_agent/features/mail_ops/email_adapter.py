@@ -28,16 +28,16 @@ def handle_email_html(http_handler: Any, parsed_url: Any) -> None:
         return
 
     try:
-        conn = sqlite3.connect(db_path)
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT es.subject, es.sender, es.email_date, eb.raw_html, eb.plain_text "
-            "FROM email_bodies eb "
-            "JOIN email_summaries es ON eb.account_name=es.account_name AND eb.uid=es.uid "
-            "WHERE eb.account_name=? AND eb.uid=?", (account, uid)
-        )
-        row = cur.fetchone()
-        conn.close()
+        from lite_agent.core.sqlite_utils import connect_sqlite
+        with connect_sqlite(db_path, close_on_exit=True) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT es.subject, es.sender, es.email_date, eb.raw_html, eb.plain_text "
+                "FROM email_bodies eb "
+                "JOIN email_summaries es ON eb.account_name=es.account_name AND eb.uid=es.uid "
+                "WHERE eb.account_name=? AND eb.uid=?", (account, uid)
+            )
+            row = cur.fetchone()
     except Exception as e:
         http_handler.send_error(500, f"Database error: {e}")
         return

@@ -80,10 +80,10 @@ class MemoryStore:
     """底层存储：SQLite 结构化 + ChromaDB 向量"""
 
     def __init__(self, db_path: Optional[str] = None):
+        from lite_agent.core.sqlite_utils import connect_sqlite
         target_path = db_path or os.environ.get("LITE_AGENT_MEMORY_DB_PATH") or SQLITE_PATH
         os.makedirs(os.path.dirname(os.path.abspath(target_path)), exist_ok=True)
-        self.conn = sqlite3.connect(target_path, check_same_thread=False)
-        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn = connect_sqlite(target_path, check_same_thread=False)
         self._init_schema()
         self._chroma = None
         self._chroma_ready = False
@@ -94,36 +94,8 @@ class MemoryStore:
         if self._chroma is not None:
             return self._chroma_ready
         try:
-            # 解决 CentOS/Debian 旧版 sqlite3 导致 chromadb 报错的问题，同时防止 pysqlite3 (SQLite 3.51.1)
-            # 在多线程并发 connect/close WAL 数据库时触发 unixBigLock 与 pInode->pLockMutex 的 C 层 AB-BA 死锁，
-            # 并在 chromadb 导入完成后恢复标准库 sqlite3，避免污染全局业务模块。
-            import sys
-            import threading
-            _orig_sqlite3 = sys.modules.get('sqlite3')
-            try:
-                __import__('pysqlite3')
-                _pysqlite3 = sys.modules.pop('pysqlite3')
-                if not getattr(_pysqlite3, '_lite_agent_safe_patched', False):
-                    _pysqlite_lock = threading.RLock()
-                    _orig_connect = _pysqlite3.connect
-
-                    class _SafePySqliteConnection(_pysqlite3.Connection):
-                        def close(self):
-                            with _pysqlite_lock:
-                                return super().close()
-
-                    def _safe_pysqlite_connect(*args, **kwargs):
-                        kwargs.setdefault('factory', _SafePySqliteConnection)
-                        with _pysqlite_lock:
-                            return _orig_connect(*args, **kwargs)
-
-                    _pysqlite3.connect = _safe_pysqlite_connect
-                    _pysqlite3._lite_agent_safe_patched = True
-                sys.modules['sqlite3'] = _pysqlite3
-            except ImportError:
-                _pysqlite3 = None
-
-            try:
+            from lite_agent.core.sqlite_utils import safe_chromadb_sqlite_env
+            with safe_chromadb_sqlite_env():
                 import chromadb
                 try:
                     import chromadb.db.impl.sqlite
@@ -137,9 +109,6 @@ class MemoryStore:
                     import chromadb.segment.impl.metadata.sqlite
                 except Exception:
                     pass
-            finally:
-                if _orig_sqlite3 is not None:
-                    sys.modules['sqlite3'] = _orig_sqlite3
             chroma_dir = os.path.join(DB_DIR, 'chroma')
             self._chroma = chromadb.PersistentClient(path=chroma_dir)
             self._collection = self._chroma.get_or_create_collection(
@@ -218,8 +187,9 @@ class MemoryStore:
              msg_type, memory_type, created_at, importance, json.dumps(topic_tags))
         )
         row_id = cur.lastrowid
+        self.conn.commit()
 
-        # 写入向量库
+        # 写入向量库（已在 SQLite 事务提交后执行，避免长耗时 embedding 占用写锁）
         if self._chroma_ready and role in ('user', 'bot'):
             try:
                 embeddings = self._embedding_function([content])
@@ -238,7 +208,6 @@ class MemoryStore:
             except Exception:
                 self._chroma_ready = False  # 向量库不可用时降级
 
-        self.conn.commit()
         return row_id
 
     def save_distilled(self, content: str, source_ids: List[int],

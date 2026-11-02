@@ -163,12 +163,11 @@ def _archive_db_path(config: dict) -> str:
 
 def archive_output(text: str, channel: str, config: dict, title: str = "") -> str:
     """Persist complete text locally and return a non-secret archive id."""
+    from lite_agent.core.sqlite_utils import connect_sqlite
     db_path = _archive_db_path(config)
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     archive_id = uuid.uuid4().hex[:16]
-    with sqlite3.connect(db_path, timeout=5.0) as conn:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
+    with connect_sqlite(db_path, timeout=10.0, close_on_exit=True) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS output_archive (
@@ -189,11 +188,11 @@ def archive_output(text: str, channel: str, config: dict, title: str = "") -> st
 
 
 def get_archived_output(archive_id: str, config: dict) -> Optional[dict]:
+    from lite_agent.core.sqlite_utils import connect_sqlite
     db_path = _archive_db_path(config)
     if not os.path.exists(db_path):
         return None
-    with sqlite3.connect(db_path, timeout=5.0) as conn:
-        conn.row_factory = sqlite3.Row
+    with connect_sqlite(db_path, timeout=10.0, row_factory=sqlite3.Row, close_on_exit=True) as conn:
         row = conn.execute(
             "SELECT id, channel, title, content, created_at "
             "FROM output_archive WHERE id=?", (archive_id,)

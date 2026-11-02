@@ -120,31 +120,34 @@ def _get_sqlite_overrides():
         db_path = os.environ.get("LITE_AGENT_SETTINGS_DB_PATH", os.path.join(base_dir, 'data', 'settings.db'))
     if os.path.exists(db_path):
         try:
-            conn = sqlite3.connect(db_path, timeout=5.0)
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='settings'")
-            if cursor.fetchone():
-                cursor.execute("SELECT key, value FROM settings")
+            from lite_agent.core.sqlite_utils import connect_sqlite
+            conn = connect_sqlite(db_path, timeout=10.0)
+            try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='settings'")
+                if cursor.fetchone():
+                    cursor.execute("SELECT key, value FROM settings")
 
-                for k, v in cursor.fetchall():
-                    # 核心安全红线: 分段精确判断，屏蔽一切对 edge 的重写
-                    if any(seg == 'edge' for seg in k.split('.')):
-                        continue
+                    for k, v in cursor.fetchall():
+                        # 核心安全红线: 分段精确判断，屏蔽一切对 edge 的重写
+                        if any(seg == 'edge' for seg in k.split('.')):
+                            continue
 
-                    # 安全防御: 段精确匹配，防止敏感信息写入，同时避免误伤 (如 rss.token_count)
-                    if any(seg in SENSITIVE_SEGS for seg in k.split('.')):
-                        continue
+                        # 安全防御: 段精确匹配，防止敏感信息写入，同时避免误伤 (如 rss.token_count)
+                        if any(seg in SENSITIVE_SEGS for seg in k.split('.')):
+                            continue
 
-                    try:
-                        parsed_v = json.loads(v)
-                        parts = k.split('.')
-                        curr = overrides
-                        for part in parts[:-1]:
-                            curr = curr.setdefault(part, {})
-                        curr[parts[-1]] = parsed_v
-                    except Exception as e:
-                        logging.warning(f"解析 SQLite 配置项 {k} 失败: {e}")
-            conn.close()
+                        try:
+                            parsed_v = json.loads(v)
+                            parts = k.split('.')
+                            curr = overrides
+                            for part in parts[:-1]:
+                                curr = curr.setdefault(part, {})
+                            curr[parts[-1]] = parsed_v
+                        except Exception as e:
+                            logging.warning(f"解析 SQLite 配置项 {k} 失败: {e}")
+            finally:
+                conn.close()
         except Exception as e:
             logging.warning(f"读取 SQLite settings.db 失败: {e}")
 
@@ -198,26 +201,27 @@ def _init_db():
     else:
         db_path = os.environ.get("LITE_AGENT_SETTINGS_DB_PATH", os.path.join(base_dir, 'data', 'settings.db'))
     if not _db_initialized:
+        from lite_agent.core.sqlite_utils import connect_sqlite
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        conn = sqlite3.connect(db_path, timeout=5.0)
-        conn.execute('PRAGMA journal_mode=WAL')
-        conn.execute('PRAGMA busy_timeout=5000')
-        cursor = conn.cursor()
-        cursor.execute('''CREATE TABLE IF NOT EXISTS settings (
-                            key TEXT PRIMARY KEY,
-                            value TEXT
-                        )''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS audit_log (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            action TEXT,
-                            target_key TEXT,
-                            old_value TEXT,
-                            new_value TEXT,
-                            operator TEXT,
-                            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                        )''')
-        conn.commit()
-        conn.close()
+        conn = connect_sqlite(db_path, timeout=10.0)
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''CREATE TABLE IF NOT EXISTS settings (
+                                key TEXT PRIMARY KEY,
+                                value TEXT
+                            )''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS audit_log (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                action TEXT,
+                                target_key TEXT,
+                                old_value TEXT,
+                                new_value TEXT,
+                                operator TEXT,
+                                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                            )''')
+            conn.commit()
+        finally:
+            conn.close()
         _db_initialized = True
     return db_path
 
@@ -231,7 +235,8 @@ def write_setting(key: str, value: Any, operator: str = "system") -> bool:
     db_path = _init_db()
     new_val_str = json.dumps(value, ensure_ascii=False)
 
-    conn = sqlite3.connect(db_path, timeout=5.0)
+    from lite_agent.core.sqlite_utils import connect_sqlite
+    conn = connect_sqlite(db_path, timeout=10.0)
     try:
         cursor = conn.cursor()
         cursor.execute("BEGIN IMMEDIATE")
@@ -297,15 +302,18 @@ def write_conf_d(module_name: str, data: dict, operator: str = "system") -> bool
         raise e
 
     try:
+        from lite_agent.core.sqlite_utils import connect_sqlite
         db_path = _init_db()
-        conn = sqlite3.connect(db_path, timeout=5.0)
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute("""
-            INSERT INTO audit_log (action, target_key, old_value, new_value, operator)
-            VALUES (?, ?, ?, ?, ?)
-        """, ('WRITE_CONFD', module_name, old_val_str, new_val_str, operator))
-        conn.commit()
-        conn.close()
+        conn = connect_sqlite(db_path, timeout=10.0)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("""
+                INSERT INTO audit_log (action, target_key, old_value, new_value, operator)
+                VALUES (?, ?, ?, ?, ?)
+            """, ('WRITE_CONFD', module_name, old_val_str, new_val_str, operator))
+            conn.commit()
+        finally:
+            conn.close()
     except Exception as e:
         logging.warning(f"Failed to write audit_log for conf_d: {e}")
         # P1-A: 审计失败必须回滚文件并抛异常，保证审计完整性
@@ -324,8 +332,9 @@ def write_conf_d(module_name: str, data: dict, operator: str = "system") -> bool
 
 def rollback_setting(audit_id: int, operator: str = "system") -> bool:
     """一键根据 audit_id 回滚设置，自动判定回滚对象 (SQLite / conf.d) 并生成新的回滚审计日志。"""
+    from lite_agent.core.sqlite_utils import connect_sqlite
     db_path = _init_db()
-    conn = sqlite3.connect(db_path, timeout=5.0)
+    conn = connect_sqlite(db_path, timeout=10.0)
     try:
         cursor = conn.cursor()
         cursor.execute("BEGIN IMMEDIATE")

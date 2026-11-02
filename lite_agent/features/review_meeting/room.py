@@ -52,11 +52,9 @@ def validate_name(name: str) -> str:
 
 
 def connect(path: Path) -> sqlite3.Connection:
+    from lite_agent.core.sqlite_utils import connect_sqlite
     path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path, timeout=30)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA foreign_keys=ON")
-    db.execute("PRAGMA journal_mode=WAL")
+    db = connect_sqlite(path, timeout=30.0, row_factory=sqlite3.Row, foreign_keys=True, close_on_exit=False)
     db.executescript("""
       CREATE TABLE IF NOT EXISTS meetings (
         id TEXT PRIMARY KEY, title TEXT NOT NULL, brief TEXT NOT NULL,
@@ -558,9 +556,10 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    from contextlib import closing
     a = parser().parse_args()
     try:
-        with connect(a.db) as db:
+        with closing(connect(a.db)) as db, db:
             db.execute("BEGIN IMMEDIATE")
             result = execute(db, a)
         print(json.dumps(result, ensure_ascii=False, indent=2))

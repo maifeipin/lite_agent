@@ -80,9 +80,8 @@ def connect_readonly_db(db_path: Optional[str] = None) -> Optional[sqlite3.Conne
         return None
 
     import urllib.parse
+    from lite_agent.core.sqlite_utils import connect_sqlite
     # SQLite URI 只读连接模式：规范编码防止文件名含 ? 或 # 等破坏 URI
     quoted_target = urllib.parse.quote(os.path.abspath(target), safe="/")
     uri = f"file:{quoted_target}?mode=ro"
-    conn = sqlite3.connect(uri, uri=True)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return connect_sqlite(uri, uri=True, row_factory=sqlite3.Row, wal=False)

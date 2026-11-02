@@ -69,7 +69,8 @@ def llm_usage_report(days: int = 7) -> str:
     start_time = time.time() - (days * 24 * 3600)
 
     try:
-        with sqlite3.connect(db_path) as conn:
+        from lite_agent.core.sqlite_utils import connect_sqlite
+        with connect_sqlite(db_path, close_on_exit=True) as conn:
             table_check = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='api_usage_log'").fetchone()
             if not table_check:
                 return "ℹ️ 数据库中尚未存在 API 使用量日志表 (可能是功能刚上线，还没有产生新调用)。"

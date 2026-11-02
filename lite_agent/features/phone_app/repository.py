@@ -30,11 +30,8 @@ class PhoneAppRepository:
         self._init_db()
 
     def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        return conn
+        from lite_agent.core.sqlite_utils import connect_sqlite
+        return connect_sqlite(self.db_path, timeout=10.0, row_factory=sqlite3.Row)
 
     def close(self):
         """显式清理/关闭钩子。"""

@@ -23,12 +23,15 @@ _INITIALIZED_DB_PATH = None
 
 
 def _conn() -> sqlite3.Connection:
+    from lite_agent.core.sqlite_utils import connect_sqlite
     os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(_DB_PATH, timeout=10, isolation_level=None)  # autocommit, 手动 BEGIN
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    return conn
+    return connect_sqlite(
+        _DB_PATH,
+        timeout=10.0,
+        row_factory=sqlite3.Row,
+        busy_timeout_ms=10000,
+        isolation_level=None,  # autocommit, 手动 BEGIN
+    )
 
 
 def init_db():

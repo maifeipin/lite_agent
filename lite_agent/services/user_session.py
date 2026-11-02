@@ -68,8 +68,8 @@ class UserSessionService:
 
         self._mem_conn: Optional[sqlite3.Connection] = None
         if self.db_path == ":memory:":
-            self._mem_conn = sqlite3.connect(":memory:", check_same_thread=False)
-            self._mem_conn.row_factory = sqlite3.Row
+            from lite_agent.core.sqlite_utils import connect_sqlite
+            self._mem_conn = connect_sqlite(":memory:", row_factory=sqlite3.Row, check_same_thread=False)
 
         self._ensure_schema()
 
@@ -78,10 +78,10 @@ class UserSessionService:
         if self._mem_conn is not None:
             yield self._mem_conn
         else:
+            from lite_agent.core.sqlite_utils import connect_sqlite
             if self.db_path != ":memory:":
                 os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
-            conn = sqlite3.connect(self.db_path, timeout=10.0, check_same_thread=False)
-            conn.row_factory = sqlite3.Row
+            conn = connect_sqlite(self.db_path, timeout=10.0, row_factory=sqlite3.Row, check_same_thread=False)
             try:
                 yield conn
             finally:

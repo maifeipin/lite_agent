@@ -666,19 +666,18 @@ class ApiHandler(BaseHTTPRequestHandler):
         emails = []
         if os.path.exists(db_path):
             try:
-                conn = sqlite3.connect(db_path)
-                conn.row_factory = sqlite3.Row
-                cur = conn.cursor()
-                cur.execute("""
-                    SELECT es.id, es.account_name, es.uid, es.sender, es.subject,
-                           es.email_date, es.importance, es.category, es.summary, es.processed
-                    FROM email_summaries es
-                    ORDER BY es.email_date DESC, es.id DESC
-                    LIMIT ?
-                """, (limit,))
-                for row in cur.fetchall():
-                    emails.append(dict(row))
-                conn.close()
+                from lite_agent.core.sqlite_utils import connect_sqlite
+                with connect_sqlite(db_path, row_factory=sqlite3.Row, close_on_exit=True) as conn:
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT es.id, es.account_name, es.uid, es.sender, es.subject,
+                               es.email_date, es.importance, es.category, es.summary, es.processed
+                        FROM email_summaries es
+                        ORDER BY es.email_date DESC, es.id DESC
+                        LIMIT ?
+                    """, (limit,))
+                    for row in cur.fetchall():
+                        emails.append(dict(row))
             except Exception:
                 pass
 
@@ -698,30 +697,29 @@ class ApiHandler(BaseHTTPRequestHandler):
         }
         if os.path.exists(db_path):
             try:
-                conn = sqlite3.connect(db_path)
-                conn.row_factory = sqlite3.Row
-                cur = conn.cursor()
-                tables = {r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-                if 'statements' in tables:
-                    row_total = cur.execute("SELECT count(*) FROM statements").fetchone()
-                    summary["total_statements"] = row_total[0] if row_total else 0
+                from lite_agent.core.sqlite_utils import connect_sqlite
+                with connect_sqlite(db_path, row_factory=sqlite3.Row, close_on_exit=True) as conn:
+                    cur = conn.cursor()
+                    tables = {r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+                    if 'statements' in tables:
+                        row_total = cur.execute("SELECT count(*) FROM statements").fetchone()
+                        summary["total_statements"] = row_total[0] if row_total else 0
 
-                    row_unpaid = cur.execute(
-                        "SELECT count(*), coalesce(sum(amount), 0) FROM statements WHERE paid = 0"
-                    ).fetchone()
-                    if row_unpaid:
-                        summary["unpaid_count"] = row_unpaid[0]
-                        summary["total_unpaid_cny"] = float(row_unpaid[1])
+                        row_unpaid = cur.execute(
+                            "SELECT count(*), coalesce(sum(amount), 0) FROM statements WHERE paid = 0"
+                        ).fetchone()
+                        if row_unpaid:
+                            summary["unpaid_count"] = row_unpaid[0]
+                            summary["total_unpaid_cny"] = float(row_unpaid[1])
 
-                    cur.execute("""
-                        SELECT id, bank, card_number, due_date, amount, currency, paid, statement_date
-                        FROM statements
-                        ORDER BY statement_date DESC, id DESC
-                        LIMIT 10
-                    """)
-                    for r in cur.fetchall():
-                        summary["recent_statements"].append(dict(r))
-                conn.close()
+                        cur.execute("""
+                            SELECT id, bank, card_number, due_date, amount, currency, paid, statement_date
+                            FROM statements
+                            ORDER BY statement_date DESC, id DESC
+                            LIMIT 10
+                        """)
+                        for r in cur.fetchall():
+                            summary["recent_statements"].append(dict(r))
             except Exception as e:
                 summary["health_status"] = f"degraded: {e}"
 
@@ -937,31 +935,29 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
+            from lite_agent.core.sqlite_utils import connect_sqlite
+            with connect_sqlite(db_path, row_factory=sqlite3.Row, close_on_exit=True) as conn:
+                # 总数
+                total_row = conn.execute("SELECT COUNT(*) as cnt FROM sessions").fetchone()
+                total = total_row["cnt"] if total_row else 0
 
-            # 总数
-            total_row = conn.execute("SELECT COUNT(*) as cnt FROM sessions").fetchone()
-            total = total_row["cnt"] if total_row else 0
+                # 查询会话，关联最新使用的模型
+                sql = """
+                    SELECT s.session_key, s.status, s.tool_calls,
+                           s.token_usage, s.updated_at, s.goal, s.title,
+                           (SELECT a.model FROM api_usage_log a
+                            WHERE a.session_key = s.session_key
+                            ORDER BY a.created_at DESC LIMIT 1) as model
+                    FROM sessions s
+                """
+                params = []
+                if channel_filter:
+                    sql += " WHERE s.session_key LIKE ?"
+                    params.append(f"{channel_filter}:%")
+                sql += " ORDER BY s.updated_at DESC LIMIT ?"
+                params.append(limit)
 
-            # 查询会话，关联最新使用的模型
-            sql = """
-                SELECT s.session_key, s.status, s.tool_calls,
-                       s.token_usage, s.updated_at, s.goal, s.title,
-                       (SELECT a.model FROM api_usage_log a
-                        WHERE a.session_key = s.session_key
-                        ORDER BY a.created_at DESC LIMIT 1) as model
-                FROM sessions s
-            """
-            params = []
-            if channel_filter:
-                sql += " WHERE s.session_key LIKE ?"
-                params.append(f"{channel_filter}:%")
-            sql += " ORDER BY s.updated_at DESC LIMIT ?"
-            params.append(limit)
-
-            rows = conn.execute(sql, params).fetchall()
-            conn.close()
+                rows = conn.execute(sql, params).fetchall()
 
             sessions = []
             for r in rows:
@@ -1010,8 +1006,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         session_mgr = self.server.api_server.agent.session_mgr
         if session_key not in session_mgr._cache:
-            import sqlite3
-            with sqlite3.connect(session_mgr.db_path) as conn:
+            from lite_agent.core.sqlite_utils import connect_sqlite
+            with connect_sqlite(session_mgr.db_path, close_on_exit=True) as conn:
                 row = conn.execute("SELECT 1 FROM sessions WHERE session_key=?", (session_key,)).fetchone()
                 if not row:
                     self.send_error(404, f"Session {session_key} not found")
@@ -1042,14 +1038,13 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT role, content, reasoning_content, tool_call_id, name, tool_calls_json, created_at FROM messages "
-                "WHERE session_key = ? ORDER BY created_at DESC LIMIT ?",
-                (session_key, limit)
-            ).fetchall()
-            conn.close()
+            from lite_agent.core.sqlite_utils import connect_sqlite
+            with connect_sqlite(db_path, row_factory=sqlite3.Row, close_on_exit=True) as conn:
+                rows = conn.execute(
+                    "SELECT role, content, reasoning_content, tool_call_id, name, tool_calls_json, created_at FROM messages "
+                    "WHERE session_key = ? ORDER BY created_at DESC LIMIT ?",
+                    (session_key, limit)
+                ).fetchall()
 
             messages = []
             for r in reversed(rows):

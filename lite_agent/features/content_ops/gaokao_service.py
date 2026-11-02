@@ -13,9 +13,8 @@ def get_db():
     """获取只读数据库连接"""
     if not os.path.exists(DB_PATH):
         raise FileNotFoundError(f"数据库不存在: {DB_PATH}")
-    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    return conn
+    from lite_agent.core.sqlite_utils import connect_sqlite
+    return connect_sqlite(f"file:{DB_PATH}?mode=ro", uri=True, row_factory=sqlite3.Row, wal=False)
 
 
 _NEW_GAOKAO_YEAR = {

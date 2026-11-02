@@ -728,15 +728,18 @@ class ExecutionLedger:
             os.makedirs(d, exist_ok=True)
 
     def _connect(self) -> sqlite3.Connection:
-        """创建一个新连接 (短生命周期，避免跨线程共享 cursor)。
+        """创建一个新连接 (短生命周期，退出 with 自动关闭，避免跨线程共享 cursor)。
 
-        WAL 模式 + busy_timeout + foreign_keys 在每次连接时设置。
+        WAL 模式 + busy_timeout + foreign_keys 在每次连接时由全局 connect_sqlite 设置。
         """
-        conn = sqlite3.connect(self.db_path, timeout=3.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=3000")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        from lite_agent.core.sqlite_utils import connect_sqlite
+        return connect_sqlite(
+            self.db_path,
+            timeout=10.0,
+            busy_timeout_ms=10000,
+            foreign_keys=True,
+            close_on_exit=True,
+        )
 
     @contextmanager
     def _write_lock_ctx(self):
