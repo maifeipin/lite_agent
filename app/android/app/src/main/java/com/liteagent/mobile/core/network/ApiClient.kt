@@ -5,7 +5,9 @@ import com.liteagent.mobile.core.network.models.*
 import com.liteagent.mobile.core.security.SecureTokenStorage
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Response
 import retrofit2.Retrofit
@@ -515,8 +517,8 @@ open class ApiClient(
     ): Result<String> {
         return try {
             val service = getApiService(serverUrl)
-            val mediaType = okhttp3.MediaType.parse(mimeType) ?: okhttp3.MediaType.parse("image/jpeg")
-            val requestBody = okhttp3.RequestBody.create(mediaType, imageBytes)
+            val mediaType = mimeType.toMediaTypeOrNull() ?: "image/jpeg".toMediaTypeOrNull()
+            val requestBody = imageBytes.toRequestBody(mediaType)
             val part = okhttp3.MultipartBody.Part.createFormData("file", fileName, requestBody)
             val response = service.uploadOcrImage(part)
             val body = response.body()

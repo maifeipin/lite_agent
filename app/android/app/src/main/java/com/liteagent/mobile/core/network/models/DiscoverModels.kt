@@ -58,14 +58,26 @@ data class RssBriefTopicItem(
     @SerializedName("topic") val topic: String = "",
     @SerializedName("sentiment") val sentiment: String = "中",
     @SerializedName("analysis") val analysis: String = ""
-)
+) {
+    val title: String
+        get() = topic
+
+    val isPositive: Boolean
+        get() = sentiment.contains("正") || sentiment.contains("好") || sentiment.lowercase() == "positive"
+
+    val isNegative: Boolean
+        get() = sentiment.contains("负") || sentiment.contains("差") || sentiment.contains("风险") || sentiment.lowercase() == "negative"
+}
 
 data class RssBriefResponse(
     @SerializedName("date") val date: String? = null,
     @SerializedName("summary") val summary: String? = null,
     @SerializedName("topics") val topics: List<RssBriefTopicItem> = emptyList(),
     @SerializedName("detail") val detail: String? = null
-)
+) {
+    val message: String?
+        get() = detail
+}
 
 /**
  * 复杂任务编排模型 (core.task_spec)
@@ -152,6 +164,9 @@ data class Socks5NodeItem(
 ) {
     val active: Boolean
         get() = isActive == 1
+
+    val displayLabel: String
+        get() = servername.ifBlank { host.ifBlank { "Node #$id" } }
 
     val isNaive: Boolean
         get() {

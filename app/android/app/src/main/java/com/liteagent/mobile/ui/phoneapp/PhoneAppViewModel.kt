@@ -30,13 +30,17 @@ data class PhoneAppUiState(
     val pendingReviewCount: Int
         get() = batches.count { it.status == "pending_review" }
 
+    val waitingApprovalCount: Int
+        get() = pendingReviewCount
+
     val onlineDeviceCount: Int
         get() = devices.count { it.isOnline }
 }
 
 class PhoneAppViewModel(
     private val tokenStorage: SecureTokenStorage,
-    private val apiClient: ApiClient
+    private val apiClient: ApiClient,
+    private val enablePolling: Boolean = true
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(PhoneAppUiState())
@@ -133,8 +137,8 @@ class PhoneAppViewModel(
     fun selectBatch(batchId: String, startLivePolling: Boolean = false): Job {
         activeDetailPollJob?.cancel()
         val gen = sessionGeneration
-        val server = boundServerUrl.ifEmpty { ServerUrlNormalizer.normalize(tokenStorage.getActiveServerUrl()) }
         val job = viewModelScope.launch {
+            val server = boundServerUrl.ifEmpty { ServerUrlNormalizer.normalize(tokenStorage.getActiveServerUrl()) }
             _uiState.value = _uiState.value.copy(isLoadingDetail = true, errorMessage = null)
             val res = apiClient.getPhoneBatchDetail(batchId, server)
             if (gen != sessionGeneration) return@launch
@@ -146,7 +150,7 @@ class PhoneAppViewModel(
                     selectedBatchDetail = detail
                 )
                 val status = detail.batch?.status ?: ""
-                if (startLivePolling && status in listOf("queued", "running", "cancel_requested")) {
+                if (enablePolling && startLivePolling && status in listOf("queued", "running", "cancel_requested")) {
                     startBatchPolling(batchId, gen, server)
                 }
             } else {
@@ -203,8 +207,8 @@ class PhoneAppViewModel(
         }
 
         val gen = sessionGeneration
-        val server = boundServerUrl.ifEmpty { ServerUrlNormalizer.normalize(tokenStorage.getActiveServerUrl()) }
         return viewModelScope.launch {
+            val server = boundServerUrl.ifEmpty { ServerUrlNormalizer.normalize(tokenStorage.getActiveServerUrl()) }
             _uiState.value = _uiState.value.copy(isSubmittingAction = true, errorMessage = null)
             val filters = mutableMapOf<String, Any>()
             if (selfOperatedOnly) filters["self_operated"] = true
@@ -242,8 +246,8 @@ class PhoneAppViewModel(
 
     fun approveAndExecuteBatch(batchId: String): Job {
         val gen = sessionGeneration
-        val server = boundServerUrl.ifEmpty { ServerUrlNormalizer.normalize(tokenStorage.getActiveServerUrl()) }
         return viewModelScope.launch {
+            val server = boundServerUrl.ifEmpty { ServerUrlNormalizer.normalize(tokenStorage.getActiveServerUrl()) }
             _uiState.value = _uiState.value.copy(isSubmittingAction = true, errorMessage = null)
             val apprRes = apiClient.approvePhoneBatch(batchId, server)
             if (gen != sessionGeneration) return@launch
@@ -280,8 +284,8 @@ class PhoneAppViewModel(
 
     fun executeBatch(batchId: String): Job {
         val gen = sessionGeneration
-        val server = boundServerUrl.ifEmpty { ServerUrlNormalizer.normalize(tokenStorage.getActiveServerUrl()) }
         return viewModelScope.launch {
+            val server = boundServerUrl.ifEmpty { ServerUrlNormalizer.normalize(tokenStorage.getActiveServerUrl()) }
             _uiState.value = _uiState.value.copy(isSubmittingAction = true, errorMessage = null)
             val res = apiClient.executePhoneBatch(batchId, server)
             if (gen != sessionGeneration) return@launch
@@ -304,8 +308,8 @@ class PhoneAppViewModel(
 
     fun rejectBatch(batchId: String, reason: String = "掌上审核驳回"): Job {
         val gen = sessionGeneration
-        val server = boundServerUrl.ifEmpty { ServerUrlNormalizer.normalize(tokenStorage.getActiveServerUrl()) }
         return viewModelScope.launch {
+            val server = boundServerUrl.ifEmpty { ServerUrlNormalizer.normalize(tokenStorage.getActiveServerUrl()) }
             _uiState.value = _uiState.value.copy(isSubmittingAction = true, errorMessage = null)
             val res = apiClient.rejectPhoneBatch(batchId, reason.ifBlank { "掌上审核驳回" }, server)
             if (gen != sessionGeneration) return@launch
@@ -330,8 +334,8 @@ class PhoneAppViewModel(
 
     fun cancelBatch(batchId: String): Job {
         val gen = sessionGeneration
-        val server = boundServerUrl.ifEmpty { ServerUrlNormalizer.normalize(tokenStorage.getActiveServerUrl()) }
         return viewModelScope.launch {
+            val server = boundServerUrl.ifEmpty { ServerUrlNormalizer.normalize(tokenStorage.getActiveServerUrl()) }
             _uiState.value = _uiState.value.copy(isSubmittingAction = true, errorMessage = null)
             val res = apiClient.cancelPhoneBatch(batchId, "用户在移动端主动取消", server)
             if (gen != sessionGeneration) return@launch
@@ -356,8 +360,8 @@ class PhoneAppViewModel(
 
     fun resumeDevice(deviceId: String): Job {
         val gen = sessionGeneration
-        val server = boundServerUrl.ifEmpty { ServerUrlNormalizer.normalize(tokenStorage.getActiveServerUrl()) }
         return viewModelScope.launch {
+            val server = boundServerUrl.ifEmpty { ServerUrlNormalizer.normalize(tokenStorage.getActiveServerUrl()) }
             val res = apiClient.resumePhoneDevice(deviceId, server)
             if (gen != sessionGeneration) return@launch
             if (res.isSuccess) {

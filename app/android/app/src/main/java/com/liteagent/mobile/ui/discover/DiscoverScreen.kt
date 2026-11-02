@@ -411,7 +411,7 @@ private fun RssBriefCard(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        text = if (topic.sourceCount > 0) "${topic.sourceCount} 篇信源" else "AI 聚合",
+                                        text = "AI 深度聚合 · ${topic.sentiment.ifBlank { "中立" }}",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = TextMuted
                                     )
@@ -530,13 +530,13 @@ private fun TaskSpecsCard(
                                     verticalArrangement = Arrangement.spacedBy(2.dp)
                                 ) {
                                     Text(
-                                        text = spec.name.ifBlank { spec.id },
+                                        text = spec.displayTitle,
                                         style = MaterialTheme.typography.bodyMedium,
                                         fontWeight = FontWeight.SemiBold
                                     )
-                                    if (!spec.description.isNullOrBlank()) {
+                                    if (spec.displayObjective.isNotBlank()) {
                                         Text(
-                                            text = spec.description,
+                                            text = spec.displayObjective,
                                             style = MaterialTheme.typography.bodySmall,
                                             color = TextSecondary,
                                             maxLines = 1,
@@ -553,7 +553,7 @@ private fun TaskSpecsCard(
                                 }
                                 Spacer(modifier = Modifier.width(10.dp))
                                 Button(
-                                    onClick = { onRunSpec(spec.id, spec.name.ifBlank { spec.id }) },
+                                    onClick = { onRunSpec(spec.id, spec.displayTitle) },
                                     enabled = !isRunning && spec.enabled,
                                     colors = ButtonDefaults.buttonColors(containerColor = PrimaryIndigo),
                                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),

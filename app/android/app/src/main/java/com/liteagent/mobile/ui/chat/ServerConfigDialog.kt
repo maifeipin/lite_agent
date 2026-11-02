@@ -54,6 +54,7 @@ fun AccountSettingsDialog(
     var testingNodeId by remember { mutableStateOf<Int?>(null) }
     var activatingNodeId by remember { mutableStateOf<Int?>(null) }
     var socks5StatusMessage by remember { mutableStateOf<String?>(null) }
+    val nodeLatencies = remember { mutableStateMapOf<Int, Int>() }
 
     fun loadSocks5(url: String) {
         if (url.isBlank()) return
@@ -262,18 +263,14 @@ fun AccountSettingsDialog(
                             socks5Nodes.take(5).forEach { node ->
                                 val isTesting = testingNodeId == node.id
                                 val isActivating = activatingNodeId == node.id
-                                val statusColor = when {
-                                    node.lastStatus == "ok" -> AccentGreen
-                                    node.lastStatus == "failed" -> AccentRose
-                                    else -> TextMuted
-                                }
+                                val measuredLat = nodeLatencies[node.id]
 
                                 Surface(
                                     color = SurfaceElevated,
                                     shape = RoundedCornerShape(10.dp),
                                     border = androidx.compose.foundation.BorderStroke(
                                         1.dp,
-                                        if (node.isActive) PrimaryIndigo else SurfaceBorder
+                                        if (node.active) PrimaryIndigo else SurfaceBorder
                                     ),
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
@@ -298,7 +295,7 @@ fun AccountSettingsDialog(
                                                     maxLines = 1,
                                                     overflow = TextOverflow.Ellipsis
                                                 )
-                                                if (node.isActive) {
+                                                if (node.active) {
                                                     Surface(
                                                         color = AccentGreen.copy(alpha = 0.15f),
                                                         shape = RoundedCornerShape(4.dp)
@@ -314,10 +311,10 @@ fun AccountSettingsDialog(
                                                 }
                                             }
 
-                                            if (node.lastLatencyMs != null) {
+                                            if (measuredLat != null) {
                                                 Text(
-                                                    text = "${node.lastLatencyMs.toInt()} ms",
-                                                    color = statusColor,
+                                                    text = "$measuredLat ms",
+                                                    color = AccentGreen,
                                                     fontSize = 11.sp,
                                                     fontWeight = FontWeight.Bold
                                                 )
@@ -334,13 +331,16 @@ fun AccountSettingsDialog(
                                                     testingNodeId = node.id
                                                     socks5StatusMessage = null
                                                     scope.launch {
-                                                        apiClient.testSocks5Node(node.id, activeServerUrl)
+                                                        apiClient.testSocks5Node(node.id, serverUrl = activeServerUrl)
                                                             .onSuccess { res ->
                                                                 val lat = res.latencyMs?.toInt()
-                                                                socks5StatusMessage = if (res.status == "ok") {
+                                                                if (lat != null) {
+                                                                    nodeLatencies[node.id] = lat
+                                                                }
+                                                                socks5StatusMessage = if (res.success) {
                                                                     "节点 ${node.displayLabel} 连通正常 (${lat ?: 0} ms)"
                                                                 } else {
-                                                                    "节点测速异常: ${res.message ?: res.status}"
+                                                                    "节点测速异常: ${res.error ?: res.message ?: "未连通"}"
                                                                 }
                                                                 loadSocks5(activeServerUrl)
                                                             }
@@ -361,7 +361,7 @@ fun AccountSettingsDialog(
                                                 }
                                             }
 
-                                            if (!node.isActive) {
+                                            if (!node.active) {
                                                 TextButton(
                                                     onClick = {
                                                         activatingNodeId = node.id

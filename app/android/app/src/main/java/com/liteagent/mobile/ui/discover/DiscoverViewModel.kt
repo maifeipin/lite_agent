@@ -38,8 +38,8 @@ data class DiscoverUiState(
             if (q.isEmpty()) return all
             return all.filter {
                 it.title.lowercase().contains(q) ||
-                (it.analysis?.lowercase()?.contains(q) == true) ||
-                (it.sentimentReason?.lowercase()?.contains(q) == true)
+                it.analysis.lowercase().contains(q) ||
+                it.sentiment.lowercase().contains(q)
             }
         }
 
@@ -48,8 +48,8 @@ data class DiscoverUiState(
             val q = searchQuery.trim().lowercase()
             if (q.isEmpty()) return taskSpecs
             return taskSpecs.filter {
-                it.name.lowercase().contains(q) ||
-                (it.description?.lowercase()?.contains(q) == true) ||
+                it.displayTitle.lowercase().contains(q) ||
+                it.displayObjective.lowercase().contains(q) ||
                 it.id.lowercase().contains(q)
             }
         }
@@ -161,7 +161,7 @@ class DiscoverViewModel(
                 _uiState.value = _uiState.value.copy(
                     runningTaskSpecIds = updatedSet,
                     taskSpecs = specs,
-                    actionMessage = resp.message ?: "已触发任务「$specName」执行"
+                    actionMessage = "已触发任务「$specName」执行 (${resp.taskId ?: resp.status ?: "queued"})"
                 )
             }.onFailure { err ->
                 _uiState.value = _uiState.value.copy(

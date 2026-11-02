@@ -22,7 +22,6 @@ import com.liteagent.mobile.core.storage.TodoDatabaseHelper
 import com.liteagent.mobile.ui.discover.DiscoverViewModel
 import com.liteagent.mobile.ui.meetings.MeetingsViewModel
 import com.liteagent.mobile.ui.phoneapp.PhoneAppViewModel
-import com.liteagent.mobile.ui.phoneapp.PhoneItemFilterState
 import com.liteagent.mobile.ui.todos.TodoFilter
 import com.liteagent.mobile.ui.todos.TodosUiState
 import com.liteagent.mobile.ui.todos.TodosViewModel
@@ -1469,15 +1468,14 @@ class SanityTest {
         testScheduler.advanceUntilIdle()
         assertEquals("发票金额：¥1,280.00", recognizedOut)
 
-        var renameSuccess = false
-        chatVm.renameCurrentSession("财务报销识别专场") { renameSuccess = true }
+        chatVm.renameCurrentSession("财务报销识别专场")
         testScheduler.advanceUntilIdle()
-        assertTrue(renameSuccess)
         assertEquals("财务报销识别专场", chatVm.currentSession.value?.title)
 
         chatVm.prefillPrompt("帮我核对这张发票")
-        assertEquals("帮我核对这张发票", chatVm.consumePrefillPrompt())
-        assertNull(chatVm.prefillPromptText.value)
+        assertEquals("帮我核对这张发票", chatVm.prefilledDraft.value)
+        chatVm.consumePrefilledDraft()
+        assertNull(chatVm.prefilledDraft.value)
     }
 
     @Test
@@ -1486,7 +1484,7 @@ class SanityTest {
         val storage = FakeTokenStorage(serverUrl)
         val fakeApi = FakeApiService()
         fakeApi.phoneDevicesResponse = listOf(
-            PhoneDeviceItem(id = "c68a3cf2", name = "OnePlus 9", status = "online")
+            PhoneDeviceItem(deviceId = "c68a3cf2", model = "OnePlus 9", status = "online")
         )
         val apiClient = FakeApiClient(fakeApi, storage)
 
@@ -1498,37 +1496,25 @@ class SanityTest {
 
         var createdBatch = false
         phoneVm.createBatch(
-            deviceId = "c68a3cf2",
-            appId = "xianyu",
-            appName = "闲鱼",
             query = "MacBook M3 Max",
-            maxItems = 10,
-            autoApprove = false,
+            deviceId = "c68a3cf2",
+            appIds = listOf("jd"),
             onSuccess = { createdBatch = true }
         )
         testScheduler.advanceUntilIdle()
         assertTrue(createdBatch)
 
-        val batchId = phoneVm.uiState.value.selectedBatch?.id ?: ""
+        val batchId = phoneVm.uiState.value.selectedBatchDetail?.batch?.batchId ?: ""
         assertTrue(batchId.isNotEmpty())
-        assertTrue(phoneVm.uiState.value.selectedBatch?.isWaitingApproval == true)
+        assertEquals("pending_review", phoneVm.uiState.value.selectedBatchDetail?.batch?.status)
 
-        phoneVm.approveBatch(batchId)
+        phoneVm.approveAndExecuteBatch(batchId)
         testScheduler.advanceUntilIdle()
-        assertEquals("approved", phoneVm.uiState.value.selectedBatch?.status)
-
-        phoneVm.executeBatch(batchId)
-        testScheduler.advanceUntilIdle()
-        assertEquals("completed", phoneVm.uiState.value.selectedBatch?.status)
-        assertEquals(2, phoneVm.uiState.value.filteredSelectedItems.size)
-
-        phoneVm.setItemFilter(PhoneItemFilterState.QUALIFIED)
-        assertEquals(1, phoneVm.uiState.value.filteredSelectedItems.size)
-        assertEquals("MacBook M3 Max 64G", phoneVm.uiState.value.filteredSelectedItems.first().title)
-
-        phoneVm.setItemFilter(PhoneItemFilterState.PENDING_REVIEW)
-        assertEquals(1, phoneVm.uiState.value.filteredSelectedItems.size)
-        assertEquals("MacBook M3 32G", phoneVm.uiState.value.filteredSelectedItems.first().title)
+        assertEquals("succeeded", phoneVm.uiState.value.selectedBatchDetail?.batch?.status)
+        assertEquals(1, phoneVm.uiState.value.selectedBatchDetail?.groupedResults?.matched?.size)
+        assertEquals("MacBook M3 Max 64G", phoneVm.uiState.value.selectedBatchDetail?.groupedResults?.matched?.first()?.title)
+        assertEquals(1, phoneVm.uiState.value.selectedBatchDetail?.groupedResults?.needsVerification?.size)
+        assertEquals("MacBook M3 32G", phoneVm.uiState.value.selectedBatchDetail?.groupedResults?.needsVerification?.first()?.title)
     }
 
     @Test
@@ -1553,13 +1539,13 @@ class SanityTest {
 
         discoverVm.runTaskSpec("spec_daily_digest", "每日情报汇总")
         testScheduler.advanceUntilIdle()
-        assertEquals("任务已启动", discoverVm.uiState.value.actionMessage)
+        assertTrue(discoverVm.uiState.value.actionMessage?.contains("每日情报汇总") == true)
 
         val nodes = apiClient.getSocks5Nodes(serverUrl).getOrNull()
         assertNotNull(nodes)
         assertEquals(1, nodes?.size)
 
-        val testRes = apiClient.testSocks5Node(1, serverUrl).getOrNull()
-        assertEquals("ok", testRes?.status)
+        val testRes = apiClient.testSocks5Node(1, serverUrl = serverUrl).getOrNull()
+        assertEquals(true, testRes?.success)
     }
 }

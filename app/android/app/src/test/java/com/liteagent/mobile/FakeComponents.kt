@@ -256,7 +256,7 @@ class FakeApiService : ApiService {
         sessionsResponse = sessionsResponse.map {
             if (it.sessionKey == request.sessionKey) it.copy(title = request.title) else it
         }
-        return Response.success(RenameSessionResponse(success = true, sessionKey = request.sessionKey, title = request.title))
+        return Response.success(RenameSessionResponse(status = "ok", sessionKey = request.sessionKey, title = request.title))
     }
 
     override suspend fun sendChatMessage(request: ChatRequest): Response<ChatResponse> {
@@ -265,7 +265,7 @@ class FakeApiService : ApiService {
 
     var ocrRecognizedText: String = "模拟OCR识别文字结果"
     override suspend fun uploadOcrImage(file: MultipartBody.Part): Response<OcrResponse> {
-        return Response.success(OcrResponse(success = true, text = ocrRecognizedText))
+        return Response.success(OcrResponse(text = ocrRecognizedText))
     }
 
     var dashboardCommandsResponse: List<DashboardCommandItem> = emptyList()
@@ -434,62 +434,61 @@ class FakeApiService : ApiService {
     }
 
     override suspend fun getPhoneBatchDetail(batchId: String): Response<PhoneBatchDetailResponse> {
-        val batch = phoneBatchesMap[batchId] ?: PhoneBatchItem(id = batchId, appName = "闲鱼", status = "waiting_approval")
-        return Response.success(PhoneBatchDetailResponse(success = true, batch = batch))
+        val batch = phoneBatchesMap[batchId] ?: PhoneBatchItem(batchId = batchId, query = "MacBook", status = "pending_review")
+        val summary = PhoneBatchSummaryStats(matchedCount = 1, needsVerificationCount = 1, rejectedCount = 0)
+        val grouped = PhoneGroupedResults(
+            matched = listOf(PhoneProductResultItem(title = "MacBook M3 Max 64G", amount = 13999.0, rawPriceText = "¥13999")),
+            needsVerification = listOf(PhoneProductResultItem(title = "MacBook M3 32G", amount = 9999.0, rawPriceText = "¥9999")),
+            rejected = emptyList()
+        )
+        return Response.success(PhoneBatchDetailResponse(success = true, batch = batch, summary = summary, groupedResults = grouped))
     }
 
     override suspend fun createPhoneBatch(request: CreatePhoneBatchRequest): Response<CreatePhoneBatchResponse> {
         val newId = "batch_${System.currentTimeMillis()}"
         val batch = PhoneBatchItem(
-            id = newId,
+            batchId = newId,
             deviceId = request.deviceId,
-            appId = request.appId,
-            appName = request.appName.ifBlank { request.appId },
+            appIds = request.appIds,
             query = request.query,
-            status = "waiting_approval",
-            scriptPreview = "adb shell input tap 500 500 # search ${request.query}"
+            status = "pending_review",
+            mode = request.mode,
+            scripts = mapOf("jd" to "adb shell input tap 500 500 # search ${request.query}")
         )
         phoneBatchesMap[newId] = batch
-        return Response.success(CreatePhoneBatchResponse(success = true, batchId = newId, batch = batch, message = "created"))
+        return Response.success(CreatePhoneBatchResponse(success = true, batchId = newId, status = "pending_review"))
     }
 
     override suspend fun approvePhoneBatch(batchId: String, request: Map<String, String>): Response<PhoneActionResponse> {
-        val existing = phoneBatchesMap[batchId] ?: PhoneBatchItem(id = batchId, status = "waiting_approval")
+        val existing = phoneBatchesMap[batchId] ?: PhoneBatchItem(batchId = batchId, status = "pending_review")
         val updated = existing.copy(status = "approved")
         phoneBatchesMap[batchId] = updated
-        return Response.success(PhoneActionResponse(success = true, message = "已批准脚本", batch = updated))
+        return Response.success(PhoneActionResponse(success = true, status = "approved", batchId = batchId))
     }
 
     override suspend fun executePhoneBatch(batchId: String, request: Map<String, String>): Response<PhoneActionResponse> {
-        val existing = phoneBatchesMap[batchId] ?: PhoneBatchItem(id = batchId, status = "approved")
-        val updated = existing.copy(
-            status = "completed",
-            counts = PhoneBatchCounts(total = 2, qualified = 1, pendingReview = 1, disqualified = 0),
-            items = listOf(
-                PhoneItemEvaluation(id = "item_1", title = "MacBook M3 Max 64G", priceText = "¥13999", state = "qualified", reason = "成色极佳且价格符合预期"),
-                PhoneItemEvaluation(id = "item_2", title = "MacBook M3 32G", priceText = "¥9999", state = "pending_review", reason = "未注明电池循环次数")
-            )
-        )
+        val existing = phoneBatchesMap[batchId] ?: PhoneBatchItem(batchId = batchId, status = "approved")
+        val updated = existing.copy(status = "succeeded")
         phoneBatchesMap[batchId] = updated
-        return Response.success(PhoneActionResponse(success = true, message = "执行完毕", batch = updated))
+        return Response.success(PhoneActionResponse(success = true, status = "succeeded", batchId = batchId))
     }
 
     override suspend fun rejectPhoneBatch(batchId: String, request: PhoneActionRequest): Response<PhoneActionResponse> {
-        val existing = phoneBatchesMap[batchId] ?: PhoneBatchItem(id = batchId, status = "waiting_approval")
+        val existing = phoneBatchesMap[batchId] ?: PhoneBatchItem(batchId = batchId, status = "pending_review")
         val updated = existing.copy(status = "rejected")
         phoneBatchesMap[batchId] = updated
-        return Response.success(PhoneActionResponse(success = true, message = "已驳回", batch = updated))
+        return Response.success(PhoneActionResponse(success = true, status = "rejected", batchId = batchId))
     }
 
     override suspend fun cancelPhoneBatch(batchId: String, request: PhoneActionRequest): Response<PhoneActionResponse> {
-        val existing = phoneBatchesMap[batchId] ?: PhoneBatchItem(id = batchId, status = "running")
+        val existing = phoneBatchesMap[batchId] ?: PhoneBatchItem(batchId = batchId, status = "running")
         val updated = existing.copy(status = "cancelled")
         phoneBatchesMap[batchId] = updated
-        return Response.success(PhoneActionResponse(success = true, message = "已终止", batch = updated))
+        return Response.success(PhoneActionResponse(success = true, status = "cancelled", batchId = batchId))
     }
 
     override suspend fun resumePhoneDevice(request: PhoneActionRequest): Response<PhoneActionResponse> {
-        return Response.success(PhoneActionResponse(success = true, message = "设备已恢复"))
+        return Response.success(PhoneActionResponse(success = true, status = "online", deviceId = request.deviceId))
     }
 
     // --- 发现中枢：邮件、账单、RSS 简报、TaskSpecs、Socks5 Mock ---
@@ -502,11 +501,10 @@ class FakeApiService : ApiService {
     }
 
     var rssBriefResponse: RssBriefResponse = RssBriefResponse(
-        success = true,
         date = "2026-10-25",
         summary = "今日全球科技与开源社区聚焦端侧大模型推理优化。",
         topics = listOf(
-            RssBriefTopicItem(title = "Android 端侧 Agent 架构演进", sentiment = "positive", analysis = "本地与云端协同工作流大幅降低延迟", sourceCount = 5)
+            RssBriefTopicItem(topic = "Android 端侧 Agent 架构演进", sentiment = "正", analysis = "本地与云端协同工作流大幅降低延迟")
         )
     )
     override suspend fun getRssBrief(): Response<RssBriefResponse> {
@@ -514,34 +512,44 @@ class FakeApiService : ApiService {
     }
 
     var taskSpecsResponse: List<TaskSpecItem> = listOf(
-        TaskSpecItem(id = "spec_daily_digest", name = "每日情报汇总", description = "自动拉取 RSS 与邮件生成简报", enabled = true)
+        TaskSpecItem(id = "spec_daily_digest", name = "每日情报汇总", status = "approved", enabled = true)
     )
     override suspend fun getTaskSpecs(): Response<TaskSpecsListResponse> {
-        return Response.success(TaskSpecsListResponse(success = true, specs = taskSpecsResponse))
+        return Response.success(TaskSpecsListResponse(data = taskSpecsResponse, total = taskSpecsResponse.size))
     }
 
     override suspend fun runTaskSpec(id: String, request: Map<String, String>): Response<TaskSpecRunResponse> {
-        return Response.success(TaskSpecRunResponse(success = true, taskId = "task_run_$id", message = "任务已启动"))
+        return Response.success(TaskSpecRunResponse(status = "started", taskId = "task_run_$id"))
     }
 
     var socks5NodesResponse: List<Socks5NodeItem> = listOf(
-        Socks5NodeItem(id = 1, name = "HK-Node-01", host = "127.0.0.1", port = 1080, isActive = true, lastStatus = "ok", lastLatencyMs = 32.5)
+        Socks5NodeItem(id = 1, servername = "HK-Node-01", host = "127.0.0.1", isActive = 1)
     )
     override suspend fun getSocks5Nodes(): Response<Socks5ListResponse> {
-        return Response.success(Socks5ListResponse(success = true, nodes = socks5NodesResponse))
+        return Response.success(Socks5ListResponse(success = true, data = socks5NodesResponse))
     }
 
     override suspend fun testSocks5Node(id: Int, host: String?): Response<Socks5TestResponse> {
-        return Response.success(Socks5TestResponse(success = true, status = "ok", latencyMs = 28.0, message = "OK"))
+        return Response.success(
+            Socks5TestResponse(
+                success = true,
+                result = Socks5TestResultDetail(success = true, latencyMs = 28.0, message = "OK")
+            )
+        )
     }
 
     override suspend fun checkSocks5Outbound(id: Int): Response<Socks5TestResponse> {
-        return Response.success(Socks5TestResponse(success = true, status = "ok", latencyMs = 35.0, message = "Outbound OK"))
+        return Response.success(
+            Socks5TestResponse(
+                success = true,
+                result = Socks5TestResultDetail(success = true, latencyMs = 35.0, message = "Outbound OK")
+            )
+        )
     }
 
     override suspend fun setActiveSocks5Node(request: Socks5SetActiveRequest): Response<Socks5SetActiveResponse> {
-        socks5NodesResponse = socks5NodesResponse.map { it.copy(isActive = it.id == request.id) }
-        return Response.success(Socks5SetActiveResponse(success = true, activeId = request.id, message = "已切换"))
+        socks5NodesResponse = socks5NodesResponse.map { it.copy(isActive = if (it.id == request.id) 1 else 0) }
+        return Response.success(Socks5SetActiveResponse(success = true, message = "已切换"))
     }
 }
 
