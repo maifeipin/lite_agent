@@ -42,7 +42,10 @@ import java.io.File
 @Composable
 fun ChatScreen(
     viewModel: ChatViewModel,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    onOpenDrawer: () -> Unit = {},
+    onToggleQuickBar: () -> Unit = {},
+    totalBadgeCount: Int = 0
 ) {
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
@@ -160,6 +163,7 @@ fun ChatScreen(
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         containerColor = MaterialTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { innerPadding ->
         Column(
@@ -177,7 +181,7 @@ fun ChatScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
@@ -186,6 +190,30 @@ fun ChatScreen(
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         modifier = Modifier.weight(1f)
                     ) {
+                        IconButton(
+                            onClick = onOpenDrawer,
+                            modifier = Modifier.size(38.dp)
+                        ) {
+                            BadgedBox(
+                                badge = {
+                                    if (totalBadgeCount > 0) {
+                                        Badge(
+                                            containerColor = AccentAmber,
+                                            contentColor = Color.Black
+                                        ) {
+                                            Text("$totalBadgeCount", fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Menu,
+                                    contentDescription = "打开导航抽屉",
+                                    tint = TextPrimary
+                                )
+                            }
+                        }
+
                         Box {
                             Surface(
                                 shape = RoundedCornerShape(20.dp),
@@ -277,20 +305,39 @@ fun ChatScreen(
 
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        horizontalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
-                        IconButton(onClick = { viewModel.createNewSession() }) {
+                        IconButton(
+                            onClick = onToggleQuickBar,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Apps,
+                                contentDescription = "展开或收起快捷导航栏",
+                                tint = TextSecondary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        IconButton(
+                            onClick = { viewModel.createNewSession() },
+                            modifier = Modifier.size(36.dp)
+                        ) {
                             Icon(
                                 imageVector = Icons.Default.AddComment,
                                 contentDescription = "新建会话",
-                                tint = MaterialTheme.colorScheme.primary
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
                             )
                         }
-                        IconButton(onClick = onOpenSettings) {
+                        IconButton(
+                            onClick = onOpenSettings,
+                            modifier = Modifier.size(36.dp)
+                        ) {
                             Icon(
                                 imageVector = Icons.Default.Settings,
                                 contentDescription = "服务器与凭据设置",
-                                tint = TextSecondary
+                                tint = TextSecondary,
+                                modifier = Modifier.size(20.dp)
                             )
                         }
                     }

@@ -39,6 +39,9 @@ import com.liteagent.mobile.ui.theme.*
 @Composable
 fun TodosScreen(
     viewModel: TodosViewModel,
+    onOpenDrawer: () -> Unit = {},
+    onToggleQuickBar: () -> Unit = {},
+    onOpenSettings: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -67,12 +70,16 @@ fun TodosScreen(
             .fillMaxSize()
             .autoDismissKeyboardOnTap(focusManager),
         containerColor = MaterialTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TodosTopBar(
                 isOffline = uiState.isOffline,
                 isRefreshing = uiState.isRefreshing,
-                onRefresh = { viewModel.refresh() }
+                onRefresh = { viewModel.refresh() },
+                onOpenDrawer = onOpenDrawer,
+                onToggleQuickBar = onToggleQuickBar,
+                onOpenSettings = onOpenSettings
             )
         },
         floatingActionButton = {
@@ -229,9 +236,18 @@ fun TodosScreen(
 private fun TodosTopBar(
     isOffline: Boolean,
     isRefreshing: Boolean,
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
+    onOpenDrawer: () -> Unit = {},
+    onToggleQuickBar: () -> Unit = {},
+    onOpenSettings: () -> Unit = {}
 ) {
     TopAppBar(
+        windowInsets = WindowInsets(0, 0, 0, 0),
+        navigationIcon = {
+            IconButton(onClick = onOpenDrawer) {
+                Icon(Icons.Default.Menu, contentDescription = "打开导航抽屉")
+            }
+        },
         title = {
             Column {
                 Text(
@@ -247,6 +263,9 @@ private fun TodosTopBar(
             }
         },
         actions = {
+            IconButton(onClick = onToggleQuickBar) {
+                Icon(Icons.Default.Apps, contentDescription = "快捷切换栏", tint = TextSecondary)
+            }
             IconButton(onClick = onRefresh, enabled = !isRefreshing) {
                 if (isRefreshing) {
                     CircularProgressIndicator(
@@ -257,6 +276,9 @@ private fun TodosTopBar(
                 } else {
                     Icon(Icons.Default.Refresh, contentDescription = "刷新待办")
                 }
+            }
+            IconButton(onClick = onOpenSettings) {
+                Icon(Icons.Default.Settings, contentDescription = "设置", tint = TextSecondary)
             }
         },
         colors = TopAppBarDefaults.topAppBarColors(

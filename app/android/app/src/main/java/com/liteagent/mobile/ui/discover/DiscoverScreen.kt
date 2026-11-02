@@ -37,6 +37,9 @@ fun DiscoverScreen(
     viewModel: DiscoverViewModel,
     onCheckUpdate: () -> Unit,
     onAskAiWithTopic: (String) -> Unit = {},
+    onOpenDrawer: () -> Unit = {},
+    onToggleQuickBar: () -> Unit = {},
+    onOpenSettings: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -44,8 +47,15 @@ fun DiscoverScreen(
     Scaffold(
         modifier = modifier.fillMaxSize(),
         containerColor = MaterialTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             TopAppBar(
+                windowInsets = WindowInsets(0, 0, 0, 0),
+                navigationIcon = {
+                    IconButton(onClick = onOpenDrawer) {
+                        Icon(Icons.Default.Menu, contentDescription = "打开导航抽屉")
+                    }
+                },
                 title = {
                     Column {
                         Text(
@@ -61,6 +71,9 @@ fun DiscoverScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = onToggleQuickBar) {
+                        Icon(Icons.Default.Apps, contentDescription = "快捷切换栏", tint = TextSecondary)
+                    }
                     IconButton(onClick = { viewModel.refresh() }, enabled = !uiState.isRefreshing) {
                         if (uiState.isRefreshing) {
                             CircularProgressIndicator(
@@ -71,6 +84,9 @@ fun DiscoverScreen(
                         } else {
                             Icon(Icons.Default.Refresh, contentDescription = "刷新")
                         }
+                    }
+                    IconButton(onClick = onOpenSettings) {
+                        Icon(Icons.Default.Settings, contentDescription = "设置", tint = TextSecondary)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
