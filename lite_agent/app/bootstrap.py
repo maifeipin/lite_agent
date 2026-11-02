@@ -92,14 +92,27 @@ def create_app(
     import json as _json
 
     def _handle_health(handler, parsed_url):
-        handler.send_response(200)
+        from lite_agent.core.version import get_version_info
+        cron_snap = cron_service.health_snapshot()
+        status, code = "healthy", 200
+        loop_age = cron_snap.get("loop_age_s")
+        if cron_snap.get("running") and loop_age is not None and loop_age > 180:
+            # 调度循环超过 3 分钟无心跳：进程虽存活但已卡死
+            status, code = "unhealthy", 503
+        elif cron_snap.get("running") and cron_snap["busy_workers"] >= cron_snap["max_workers"]:
+            # 工作线程全部被占用：新作业只能排队，无法按时执行
+            status = "degraded"
+        handler.send_response(code)
         handler._send_cors_headers()
         handler.send_header("Content-Type", "application/json")
+        handler.send_header("Cache-Control", "no-store")
         handler.end_headers()
         data = {
-            "status": "healthy",
+            "status": status,
             "mode": mode,
             "version": "1.0.0",
+            **get_version_info(),
+            "cron": cron_snap,
         }
         handler.wfile.write(_json.dumps(data).encode("utf-8"))
 

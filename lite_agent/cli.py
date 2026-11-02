@@ -357,6 +357,13 @@ def main():
         signal.signal(signal.SIGINT, handle_signal)
         signal.signal(signal.SIGTERM, handle_signal)
 
+        # 卡死诊断：`kill -USR1 <pid>` 将全部线程栈输出到 stderr (journal)，不影响进程运行
+        try:
+            import faulthandler
+            faulthandler.register(signal.SIGUSR1, all_threads=True)
+        except (AttributeError, ValueError, RuntimeError):
+            pass
+
         # 保持主线程存活
         while not is_stopping:
             time.sleep(1)

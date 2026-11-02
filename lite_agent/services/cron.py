@@ -78,6 +78,11 @@ class CronService:
         self._lock = threading.Lock()
         self._log_lock = threading.Lock()
         self._log_callback = log_callback or (lambda msg: None)
+        self.max_workers = 5
+        # 存活观测：调度循环心跳 (monotonic) 与在途作业开始时间
+        self._last_tick: Optional[float] = None
+        self._inflight: Dict[str, float] = {}
+        self._inflight_lock = threading.Lock()
 
     _init = __init__
 
@@ -175,7 +180,7 @@ class CronService:
             if self.running:
                 return
             self.running = True
-            self.executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="CronWorker")
+            self.executor = ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix="CronWorker")
             self._thread = threading.Thread(target=self._run_loop, daemon=True, name="CronEngine")
             self._thread.start()
 
@@ -201,6 +206,8 @@ class CronService:
             if job.is_running:
                 return
             job.is_running = True
+        with self._inflight_lock:
+            self._inflight[job.name] = time.monotonic()
         try:
             with self._log_lock:
                 self._log_callback(f"🕒 正在自动执行定时任务: {job.name}...")
@@ -213,11 +220,28 @@ class CronService:
             with self._log_lock:
                 self._log_callback(f"❌ 定时任务 [{job.name}] 执行失败: {e}\n{err_msg}")
         finally:
+            with self._inflight_lock:
+                self._inflight.pop(job.name, None)
             with job._job_lock:
                 job.is_running = False
 
+    def health_snapshot(self) -> Dict[str, Any]:
+        """返回调度器存活快照，供 /health 与外部监控判断是否卡死。"""
+        now = time.monotonic()
+        with self._inflight_lock:
+            inflight = {name: now - started for name, started in self._inflight.items()}
+        longest = max(inflight.items(), key=lambda kv: kv[1]) if inflight else None
+        return {
+            "running": self.running,
+            "loop_age_s": None if self._last_tick is None else round(now - self._last_tick, 1),
+            "busy_workers": len(inflight),
+            "max_workers": self.max_workers,
+            "longest_job": None if longest is None else {"name": longest[0], "age_s": round(longest[1], 1)},
+        }
+
     def _run_loop(self):
         while self.running:
+            self._last_tick = time.monotonic()
             now = datetime.now()
             with self._lock:
                 jobs_to_run = [job for job in self.jobs.values() if job.should_run(now)]
@@ -231,6 +255,7 @@ class CronService:
             for _ in range(60 - datetime.now().second):
                 if not self.running:
                     break
+                self._last_tick = time.monotonic()
                 time.sleep(1)
 
 
