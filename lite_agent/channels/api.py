@@ -595,13 +595,18 @@ class ApiHandler(BaseHTTPRequestHandler):
         has_update = latest_code > current_code
         force_update = bool(version_data.get('forceUpdate', False))
 
-        apk_path = os.path.join(PROJECT_ROOT, 'app', 'android', 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk')
-        size_bytes = 0
-        if os.path.exists(apk_path):
-            try:
-                size_bytes = os.path.getsize(apk_path)
-            except Exception:
-                pass
+        apk_candidates = [
+            os.path.join(PROJECT_ROOT, 'app', 'android', 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk'),
+            os.path.join(PROJECT_ROOT, 'dist', 'app-debug.apk'),
+        ]
+        size_bytes = int(version_data.get('sizeBytes', 0) or 0)
+        for apk_path in apk_candidates:
+            if os.path.exists(apk_path):
+                try:
+                    size_bytes = os.path.getsize(apk_path)
+                    break
+                except Exception:
+                    pass
 
         payload = {
             "hasUpdate": has_update,

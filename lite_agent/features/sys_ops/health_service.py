@@ -314,15 +314,20 @@ def get_health_report() -> str:
     memory_db = os.path.join(base_dir, 'data', 'memory.db')
 
     try:
+        import sys
+        _orig_sqlite3 = sys.modules.get('sqlite3')
         try:
             __import__('pysqlite3')
-            import sys
             sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
         except ImportError:
             pass
 
-        import chromadb
-        chromadb_available = True
+        try:
+            import chromadb
+            chromadb_available = True
+        finally:
+            if _orig_sqlite3 is not None:
+                sys.modules['sqlite3'] = _orig_sqlite3
     except ImportError:
         chromadb_available = False
 

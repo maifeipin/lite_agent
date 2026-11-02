@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: android-${{ github.ref }}
@@ -56,3 +56,45 @@ jobs:
           name: liteagent-debug-apk
           path: app/android/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 7
+
+      - name: Generate update.json and Publish GitHub Release (android-debug-latest)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK_PATH="app/android/app/build/outputs/apk/debug/app-debug.apk"
+          SIZE_BYTES=$(stat -c%s "$APK_PATH")
+          SHA256=$(sha256sum "$APK_PATH" | awk '{print $1}')
+          VERSION_CODE=$(grep -oP 'versionCode\s*=.*?orElse\("\K[0-9]+' app/android/app/build.gradle.kts || echo "5")
+          VERSION_NAME=$(grep -oP 'versionName\s*=.*?orElse\("\K[^"]+' app/android/app/build.gradle.kts || echo "1.3.0")
+          PUBLISHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          CHANGELOG=$(git log -1 --pretty=format:"%s (%h)")
+
+          python3 - <<EOF
+          import json
+          data = {
+              "hasUpdate": True,
+              "forceUpdate": False,
+              "channel": "debug",
+              "versionCode": int("$VERSION_CODE"),
+              "versionName": "$VERSION_NAME",
+              "packageName": "com.liteagent.mobile.debug",
+              "minSupportedVersionCode": 1,
+              "sizeBytes": int("$SIZE_BYTES"),
+              "sha256": "$SHA256",
+              "changelog": "$CHANGELOG",
+              "publishedAt": "$PUBLISHED_AT",
+              "downloadUrl": "https://github.com/${{ github.repository }}/releases/download/android-debug-latest/app-debug.apk"
+          }
+          with open("update.json", "w", encoding="utf-8") as f:
+              json.dump(data, f, ensure_ascii=False, indent=2)
+          EOF
+
+          if gh release view android-debug-latest >/dev/null 2>&1; then
+            gh release upload android-debug-latest "$APK_PATH" update.json --clobber
+            gh release edit android-debug-latest --title "Android Debug Latest (v${VERSION_NAME} #${VERSION_CODE})" --notes "Automated build from commit ${GITHUB_SHA}: ${CHANGELOG}"
+          else
+            gh release create android-debug-latest "$APK_PATH" update.json \
+              --title "Android Debug Latest (v${VERSION_NAME} #${VERSION_CODE})" \
+              --notes "Automated build from commit ${GITHUB_SHA}: ${CHANGELOG}" \
+              --prerelease
+          fi
