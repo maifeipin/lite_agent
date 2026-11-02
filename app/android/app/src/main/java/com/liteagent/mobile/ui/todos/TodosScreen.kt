@@ -823,10 +823,10 @@ private fun CreateTodoBottomSheet(
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             listOf(
-                                "tomorrow" to "明天 (推荐)",
                                 "today" to "今天",
-                                "weekend" to "本周末",
+                                "tomorrow" to "明天 (推荐)",
                                 "custom" to "📅 选择日期",
+                                "weekend" to "本周末",
                                 "none" to "无截止"
                             ).forEach { (key, label) ->
                                 FilterChip(
@@ -900,11 +900,11 @@ private fun CreateTodoBottomSheet(
                             ) {
                                 listOf(
                                     "10:00" to "10:00 (推荐)",
+                                    "custom" to "🕒 选择时间",
                                     "09:00" to "09:00",
                                     "14:00" to "14:00",
                                     "18:00" to "18:00",
-                                    "allday" to "全天",
-                                    "custom" to "🕒 选择时间"
+                                    "allday" to "全天"
                                 ).forEach { (key, label) ->
                                     FilterChip(
                                         selected = timeType == key,
