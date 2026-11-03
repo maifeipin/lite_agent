@@ -44,7 +44,7 @@ if [ "${1:-}" = "--remote" ]; then
     trap 'rm -rf "$TMP_DIST"' EXIT
 
     echo "🔨 [Remote] 在本地预构建静态产物与 Cache-Busting 指纹 (Build SHA: $LOCAL_SHA)..."
-    python3 "$SCRIPT_DIR/build_web_assets.py" "$SRC_DIR" "$TMP_DIST" "$LOCAL_SHA"
+    python3 "$SCRIPT_DIR/build_web_assets.py" "$TMP_DIST" "$LOCAL_SHA" --src "$SRC_DIR"
 
     # 3. 校验本地构建产物完整性与版本注入
     test -f "$TMP_DIST/index.html"
@@ -55,16 +55,16 @@ if [ "${1:-}" = "--remote" ]; then
     grep -q "style.css?v=" "$TMP_DIST/index.html"
     grep -q "$LOCAL_SHA" "$TMP_DIST/index.html"
 
-    # 4. 直接将预构建产物同步至远端 Nginx 静态目录
+    # 4. 直接将预构建产物同步至远端 Nginx 静态目录 (不覆盖远端用户属主)
     echo "🚀 [Remote] 同步本地预构建产物至 $REMOTE_HOST:$REMOTE_TARGET/ ..."
-    rsync -avz --delete \
+    rsync -avz --delete --no-owner --no-group \
         --exclude='.DS_Store' \
         --exclude='*.bak*' \
         "$TMP_DIST/" "$REMOTE_HOST:$REMOTE_TARGET/"
 
     # 5. 同时更新远端工作区内前端源文件
     echo "🔄 [Remote] 同步前端源文件至 $REMOTE_HOST:$REMOTE_AGENT_DIR/web_dashboard/ ..."
-    rsync -avz --delete \
+    rsync -avz --delete --no-owner --no-group \
         --exclude='.DS_Store' \
         --exclude='*.bak*' \
         --exclude='__pycache__' \
