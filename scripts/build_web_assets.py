@@ -104,7 +104,15 @@ def build_assets(src_dir: Path, dist_dir: Path, build_sha: Optional[str] = None)
     print(f"✅ Web 静态资源指纹与版本号注入完成: {index_html} (Build: {build_sha})")
 
 if __name__ == "__main__":
-    base = Path(__file__).resolve().parent.parent / "web_dashboard"
-    out = Path(sys.argv[1]) if len(sys.argv) > 1 else base
-    sha = sys.argv[2] if len(sys.argv) > 2 else None
-    build_assets(base, out, build_sha=sha)
+    import argparse
+    parser = argparse.ArgumentParser(description="Web Assets Fingerprint and Build SHA Injector")
+    parser.add_argument("out", nargs="?", default=None, help="Output destination directory")
+    parser.add_argument("sha", nargs="?", default=None, help="Build commit SHA")
+    parser.add_argument("--src", default=None, help="Source web_dashboard directory")
+    args = parser.parse_args()
+
+    default_src = Path(__file__).resolve().parent.parent / "web_dashboard"
+    src = Path(args.src) if args.src else default_src
+    out = Path(args.out) if args.out else default_src
+    sha = args.sha
+    build_assets(src, out, build_sha=sha)
