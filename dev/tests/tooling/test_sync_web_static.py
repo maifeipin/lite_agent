@@ -90,6 +90,47 @@ class TestSyncWebStatic(unittest.TestCase):
             self.assertIn('data-web-sha="cust9999"', content)
             self.assertIn('v1.0.0 (cust9999)', content)
 
+    def test_sync_web_static_remote_self_check_failure_propagation(self):
+        """验证远端自检失败时（如 grep SHA 失败或 test 失败）错误能可靠向上传播导致非零退出"""
+        with tempfile.TemporaryDirectory() as td:
+            mock_bin_dir = Path(td) / "bin"
+            mock_bin_dir.mkdir()
+
+            # 创建 mock rsync：模拟上传成功
+            mock_rsync = mock_bin_dir / "rsync"
+            mock_rsync.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            mock_rsync.chmod(0o755)
+
+            # 创建 mock ssh：模拟远端自检脚本执行（模拟 target 中 index.html 缺指纹，grep 失败）
+            mock_ssh = mock_bin_dir / "ssh"
+            # 当 ssh 被调用时，如果 remote 命令中的 grep 失败（或者直接让 ssh 模拟远端执行 set -e 后的退出码 1）
+            mock_ssh.write_text(
+                '#!/bin/sh\n'
+                '# 提取最后一个参数作为远程执行的指令\n'
+                'for arg do shift; done\n'
+                '# 检查是否包含 set -euo pipefail，确保加入了严格错误检测\n'
+                'echo "$arg" | grep -q "set -euo pipefail" || { echo "Missing set -euo pipefail" >&2; exit 2; }\n'
+                '# 模拟远端校验失败（返回退出码 1）\n'
+                'echo "❌ [Remote VPS] 版本自检失败: 未在 \\$TARGET/index.html 中找到构建指纹" >&2\n'
+                'exit 1\n',
+                encoding="utf-8",
+            )
+            mock_ssh.chmod(0o755)
+
+            env = os.environ.copy()
+            env["PATH"] = f"{mock_bin_dir}:{env.get('PATH', '')}"
+
+            res = subprocess.run(
+                ["bash", str(self.script_path), "--remote", "fake_host"],
+                cwd=str(self.repo_root),
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            self.assertNotEqual(res.returncode, 0, "远端自检失败时脚本必须以非零退出")
+            self.assertIn("版本自检失败", res.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

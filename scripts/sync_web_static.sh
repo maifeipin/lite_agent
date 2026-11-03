@@ -70,13 +70,17 @@ if [ "${1:-}" = "--remote" ]; then
         --exclude='__pycache__' \
         "$SRC_DIR/" "$REMOTE_HOST:$REMOTE_AGENT_DIR/web_dashboard/"
 
-    # 6. 在远端执行版本自检
+    # 6. 在远端执行版本自检（必须开启 set -euo pipefail，确保任何校验失败时 SSH 退出非 0）
     ssh "$REMOTE_HOST" "su - liteagent -c '
+        set -euo pipefail
         TARGET=\"$REMOTE_TARGET\"
         test -f \"\$TARGET/index.html\"
         test -f \"\$TARGET/main.js\"
         test -f \"\$TARGET/style.css\"
-        grep -q \"$LOCAL_SHA\" \"\$TARGET/index.html\"
+        if ! grep -q \"$LOCAL_SHA\" \"\$TARGET/index.html\"; then
+            echo \"❌ [Remote VPS] 版本自检失败: 未在 \$TARGET/index.html 中找到构建指纹 $LOCAL_SHA\" >&2
+            exit 1
+        fi
         echo \"✅ [Remote VPS] 远端静态资源版本校验成功: Build SHA = $LOCAL_SHA\"
     '"
     echo "🎉 [Remote] $REMOTE_HOST 远端前端发布全部完成 (版本确认为本地提交: $LOCAL_SHA)！"
