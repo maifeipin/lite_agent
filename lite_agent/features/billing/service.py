@@ -9,6 +9,7 @@ from typing import Optional, List, Dict, Any
 
 from lite_agent.core.config_loader import load_config
 from lite_agent.core.utils.masker import mask_secrets
+from lite_agent.integrations.mail.paths import get_parser_python_executable
 
 
 def get_billing_env(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -37,7 +38,8 @@ def run_billing_cmd(cmd_args: List[str], timeout: int = 60) -> str:
     if not os.path.exists(mail_client_py):
         return f"❌ 找不到账单脚本: {mail_client_py}，请确认账单解析程序是否在该目录。"
 
-    cmd = ["python3", mail_client_py] + cmd_args
+    py_bin = get_parser_python_executable(script_dir)
+    cmd = [py_bin, mail_client_py] + cmd_args
     try:
         r = subprocess.run(cmd, cwd=script_dir, capture_output=True, text=True, timeout=timeout)
         output = r.stdout.strip()

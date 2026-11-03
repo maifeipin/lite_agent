@@ -307,14 +307,23 @@ def _ensure_patched_pysqlite3() -> Optional[Any]:
         return _pysqlite3
 
 
+# ChromaDB 要求的最低 SQLite 版本为 3.35.0
+_MIN_CHROMADB_SQLITE_VERSION = (3, 35, 0)
+
+
 @contextmanager
 def safe_chromadb_sqlite_env():
     """
-    为 ChromaDB 导入与初始化提供受控的 pysqlite3 上下文环境：
-    1. 解决 Debian/CentOS 系统自带旧版 sqlite3 (<3.35) 不满足 ChromaDB 要求的问题；
-    2. 全局共享同一个 _PYSQLITE_GLOBAL_LOCK 防止 pysqlite3 (SQLite 3.51.1) 多线程 WAL 死锁；
+    为 ChromaDB 导入与初始化提供受控的 SQLite 上下文环境：
+    1. 若标准库内置 sqlite3 已经满足 Chroma 运行要求 (>=3.35.0)，作为无副作用 no-op 直接放行，
+       从代码层面保证绝不被外置 pysqlite3 替换；
+    2. 仅在宿主环境 SQLite 版本较旧 (<3.35.0) 且安装了 pysqlite3-binary 时，提供受控 pysqlite3 上下文；
     3. 退出上下文时强制恢复标准库 sqlite3，绝不污染业务模块。
     """
+    if _stdlib_sqlite3.sqlite_version_info >= _MIN_CHROMADB_SQLITE_VERSION:
+        yield _stdlib_sqlite3
+        return
+
     with _CHROMADB_ENV_LOCK:
         _orig_sqlite3 = sys.modules.get("sqlite3", _stdlib_sqlite3)
         _pysqlite3 = _ensure_patched_pysqlite3()
