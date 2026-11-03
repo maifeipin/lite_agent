@@ -4,9 +4,12 @@ Mail Statement Parser 路径与数据库只读连接助手。
 避免不同技能分别采用不同的相对路径或直接创建/写入默认数据库。
 """
 
+import logging
 import os
 import sqlite3
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 def get_parser_script_dir() -> str:
@@ -105,6 +108,14 @@ def _validate_explicit_executable(raw_path: str, source_desc: str) -> str:
 _logged_parser_python: Optional[str] = None
 
 
+def _record_and_log_parser_python(chosen: str, reason: str) -> str:
+    global _logged_parser_python
+    if _logged_parser_python != chosen:
+        _logged_parser_python = chosen
+        logger.info("选中 mail-statement-parser Python 解释器: %s (来源: %s)", chosen, reason)
+    return chosen
+
+
 def get_parser_python_executable(script_dir: Optional[str] = None) -> str:
     """
     解析 mail-statement-parser 专用 Python 解释器绝对路径。
@@ -117,15 +128,11 @@ def get_parser_python_executable(script_dir: Optional[str] = None) -> str:
        - 系统已知稳定解释器 (/usr/bin/python3 且可执行)
        - 当前进程宿主解释器 sys.executable
     """
-    global _logged_parser_python
-
     # 1. 显式环境变量配置
     env_py = os.environ.get("MAIL_STATEMENT_PARSER_PYTHON")
     if env_py is not None and env_py.strip():
         chosen = _validate_explicit_executable(env_py, "环境变量 MAIL_STATEMENT_PARSER_PYTHON")
-        if _logged_parser_python != chosen:
-            _logged_parser_python = chosen
-        return chosen
+        return _record_and_log_parser_python(chosen, "环境变量 MAIL_STATEMENT_PARSER_PYTHON")
 
     # 2. 显式配置文件配置
     base_dir = os.path.abspath(os.path.expanduser(script_dir)) if script_dir else get_parser_script_dir()
@@ -135,9 +142,7 @@ def get_parser_python_executable(script_dir: Optional[str] = None) -> str:
         configured_py = cfg.get("billing", {}).get("python_executable")
         if configured_py is not None and str(configured_py).strip():
             chosen = _validate_explicit_executable(str(configured_py), "配置文件 billing.python_executable")
-            if _logged_parser_python != chosen:
-                _logged_parser_python = chosen
-            return chosen
+            return _record_and_log_parser_python(chosen, "配置文件 billing.python_executable")
     except (FileNotFoundError, ValueError, PermissionError):
         raise
     except Exception:
@@ -147,22 +152,16 @@ def get_parser_python_executable(script_dir: Optional[str] = None) -> str:
     venv_py = os.path.join(base_dir, ".venv", "bin", "python")
     if os.path.isfile(venv_py) and os.access(venv_py, os.X_OK):
         chosen = os.path.abspath(venv_py)
-        if _logged_parser_python != chosen:
-            _logged_parser_python = chosen
-        return chosen
+        return _record_and_log_parser_python(chosen, f"独立虚拟环境 ({venv_py})")
 
     # 4. 受控回退：宿主环境默认系统解释器
     if os.path.isfile("/usr/bin/python3") and os.access("/usr/bin/python3", os.X_OK):
         chosen = "/usr/bin/python3"
-        if _logged_parser_python != chosen:
-            _logged_parser_python = chosen
-        return chosen
+        return _record_and_log_parser_python(chosen, "系统默认解释器 (/usr/bin/python3)")
 
     # 5. 终极兜底：当前进程解释器
     import sys
     chosen = sys.executable
-    if _logged_parser_python != chosen:
-        _logged_parser_python = chosen
-    return chosen
+    return _record_and_log_parser_python(chosen, "宿主进程当前解释器 (sys.executable)")
 
 

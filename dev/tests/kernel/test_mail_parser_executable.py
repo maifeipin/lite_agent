@@ -116,6 +116,22 @@ class TestMailParserExecutableAndSqliteGuard(unittest.TestCase):
                 self.assertIs(yielded, _stdlib_sqlite3)
                 self.assertIs(sys.modules.get("sqlite3"), orig_modules_sqlite3)
 
+    def test_parser_python_logs_selection_on_change(self):
+        """验证解释器发生变动或首次选定时，通过 logger.info 记录解释器路径与来源"""
+        fake_py = self._create_executable_file("logged_py", executable=True)
+        from lite_agent.integrations.mail import paths
+        orig_logged = paths._logged_parser_python
+        try:
+            paths._logged_parser_python = None
+            with self.assertLogs("lite_agent.integrations.mail.paths", level="INFO") as cm:
+                with mock.patch.dict(os.environ, {"MAIL_STATEMENT_PARSER_PYTHON": fake_py}):
+                    chosen = get_parser_python_executable()
+                    self.assertEqual(chosen, fake_py)
+                self.assertTrue(any("选中 mail-statement-parser Python 解释器" in msg for msg in cm.output))
+                self.assertTrue(any(fake_py in msg for msg in cm.output))
+        finally:
+            paths._logged_parser_python = orig_logged
+
 
 if __name__ == "__main__":
     unittest.main()

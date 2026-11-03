@@ -37,7 +37,7 @@
 
 本次验证通过的完整依赖清单已保存在：
 `dev/requirements/vps1-python313-lock.txt`
-包含 86 个精确锁定的 Python 3.13 x86_64 wheel 版本（含 `chromadb==1.5.9`、`openai==2.38.0`、`google-genai==1.47.0`、`pydantic==2.14.2`、`httpx[socks]==0.28.1` 等）。
+包含 111 个精确锁定的 Python 3.13 x86_64 wheel 版本（含 `chromadb==1.5.9`、`openai==2.38.0`、`google-genai==1.47.0`、`pydantic==2.14.2`、`httpx[socks]==0.28.1` 等）。
 
 ---
 
@@ -56,5 +56,7 @@ ExecStart=/home/liteagent/lite_agent/.venv313/bin/python /home/liteagent/lite_ag
    sudo systemctl daemon-reload
    sudo systemctl restart lite-agent.service
    ```
-2. 数据兼容性保证：
-   已在生产环境实测验证，Python 3.13 写入的 Chroma/SQLite 数据可被 Python 3.9 正常读取并解析，回滚无需数据格式转换。
+2. 数据兼容性范围界定 (实测验证):
+   - **本次验证范围**: 限定于当前依赖与数据组合（Python 3.13.18 + Chroma 1.5.9 与宿主 Python 3.9.2 环境）；
+   - **实测结果**: 在当前数据快照下，Python 3.13 写入的 SQLite/Chroma 向量集合经由 `safe_chromadb_sqlite_env` 包装后可被 Python 3.9 正常读取并解析，因此恢复服务配置即可直接回读数据，无需格式迁移；
+   - **边界限制**: 该结论不可扩大为未来任意升级均兼容的长期保证。若后续升级 ChromaDB 大版本或底层存储 Schema 发生变更，必须在升级前另行实测双向兼容性并保留数据冷快照。
