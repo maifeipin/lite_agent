@@ -696,6 +696,13 @@ function initAgentHealthCheck() {
     const statusText = document.getElementById('agent-status-text');
     const versionBadge = document.getElementById('agent-build-version');
 
+    // 读取前端页面构建时注入的真实 SHA，避免被动态覆盖导致版本漂移不可见
+    const metaShaTag = document.querySelector('meta[name="build-sha"]');
+    const webBuildSha = (metaShaTag ? metaShaTag.getAttribute('content') : '') ||
+                        (versionBadge ? versionBadge.getAttribute('data-web-sha') : '') ||
+                        '';
+    const webShortSha = webBuildSha ? webBuildSha.slice(0, 8) : '';
+
     async function checkHealth() {
         try {
             let resp = null;
@@ -716,11 +723,25 @@ function initAgentHealthCheck() {
                 if (statusText) {
                     statusText.textContent = 'Agent 连接正常';
                 }
-                if (versionBadge && data.build_sha) {
-                    const shortSha = String(data.build_sha).slice(0, 8);
-                    const vStr = data.version ? `v${data.version}` : '';
-                    versionBadge.textContent = `${vStr} (${shortSha})`.trim();
-                    versionBadge.title = `运行版本: ${vStr} | Commit: ${data.build_sha} | 模式: ${data.mode || 'full'}`;
+
+                if (versionBadge) {
+                    const serverBuildSha = String(data.build_sha || '').trim();
+                    const serverShortSha = serverBuildSha ? serverBuildSha.slice(0, 8) : '';
+                    const vStr = data.version ? `v${data.version}` : 'v1.0.0';
+
+                    // 版本对比：校验前端构建 SHA 与后端服务运行 SHA 是否一致
+                    if (!webShortSha || !serverShortSha || webShortSha === serverShortSha) {
+                        // 一致时展示统一版本
+                        versionBadge.classList.remove('mismatch');
+                        versionBadge.textContent = `${vStr} (${serverShortSha || webShortSha})`.trim();
+                        versionBadge.title = `前后端版本一致: ${vStr} | Commit: ${serverBuildSha || webBuildSha} | 模式: ${data.mode || 'full'}`;
+                    } else {
+                        // 发现前后端版本不一致：明确分别展示，并添加警告样式提示用户
+                        versionBadge.classList.add('mismatch');
+                        versionBadge.textContent = `Web:${webShortSha} · Svr:${serverShortSha}`;
+                        versionBadge.title = `⚠️ 前后端版本不一致！\n• 前端构建: ${webShortSha} (${webBuildSha})\n• 服务端运行: ${serverShortSha} (${serverBuildSha})\n提示: 请重启 Lite Agent 服务以加载最新提交，或刷新浏览器清除旧缓存。`;
+                        console.warn(`[Lite Agent] 前后端版本不一致: 前端构建=${webShortSha}, 服务端运行=${serverShortSha}`);
+                    }
                     versionBadge.style.display = 'inline-block';
                 }
                 return;
@@ -732,6 +753,12 @@ function initAgentHealthCheck() {
             }
             if (statusText) {
                 statusText.textContent = 'Agent 连接断开';
+            }
+            if (versionBadge && webShortSha) {
+                versionBadge.classList.remove('mismatch');
+                versionBadge.textContent = `Web: ${webShortSha} (离线)`;
+                versionBadge.title = `前端构建版本: ${webShortSha} | 服务端未连接`;
+                versionBadge.style.display = 'inline-block';
             }
         }
     }

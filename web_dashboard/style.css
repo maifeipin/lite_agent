@@ -376,6 +376,16 @@ body {
     font-family: 'JetBrains Mono', monospace;
     color: var(--text-muted);
     opacity: 0.85;
+    transition: color 0.2s, background 0.2s, border-color 0.2s;
+}
+
+.version-badge.mismatch {
+    color: #fbbf24;
+    background: rgba(245, 158, 11, 0.15);
+    padding: 1px 5px;
+    border-radius: 4px;
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    font-weight: 500;
 }
 
 /* 主内容区 */

@@ -90,7 +90,9 @@ def build_assets(src_dir: Path, dist_dir: Path, build_sha: Optional[str] = None)
     def replace_version_badge(match):
         pre = match.group(1)
         post = match.group(2)
-        return f'<span {pre}id="agent-build-version"{post}>v1.0.0 ({build_sha})</span>'
+        clean_pre = re.sub(r'data-web-sha=["\'][^"\']*["\']', '', pre)
+        clean_post = re.sub(r'data-web-sha=["\'][^"\']*["\']', '', post)
+        return f'<span {clean_pre.rstrip()} id="agent-build-version" data-web-sha="{build_sha}"{clean_post}>v1.0.0 ({build_sha})</span>'
 
     new_content = re.sub(
         r'<span\s+([^>]*?)id=["\']agent-build-version["\']([^>]*?)>.*?</span>',
@@ -104,4 +106,5 @@ def build_assets(src_dir: Path, dist_dir: Path, build_sha: Optional[str] = None)
 if __name__ == "__main__":
     base = Path(__file__).resolve().parent.parent / "web_dashboard"
     out = Path(sys.argv[1]) if len(sys.argv) > 1 else base
-    build_assets(base, out)
+    sha = sys.argv[2] if len(sys.argv) > 2 else None
+    build_assets(base, out, build_sha=sha)

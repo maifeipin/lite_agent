@@ -70,6 +70,26 @@ class TestSyncWebStatic(unittest.TestCase):
             finally:
                 os.chmod(target_dir, 0o755)
 
+    def test_sync_web_static_custom_env_sha(self):
+        """验证环境变量 LITE_AGENT_BUILD_SHA 能够精确注入到产物中"""
+        with tempfile.TemporaryDirectory() as td:
+            target_dir = Path(td) / "dist"
+            env = os.environ.copy()
+            env["LITE_AGENT_BUILD_SHA"] = "cust9999"
+            res = subprocess.run(
+                ["bash", str(self.script_path), str(target_dir)],
+                cwd=str(self.repo_root),
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            self.assertEqual(res.returncode, 0)
+            content = (target_dir / "index.html").read_text(encoding="utf-8")
+            self.assertIn('<meta name="build-sha" content="cust9999">', content)
+            self.assertIn('data-web-sha="cust9999"', content)
+            self.assertIn('v1.0.0 (cust9999)', content)
+
 
 if __name__ == "__main__":
     unittest.main()

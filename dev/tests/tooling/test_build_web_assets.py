@@ -62,7 +62,9 @@ class TestBuildWebAssets(unittest.TestCase):
             )
             build_assets(src, dist, build_sha="abc12345")
             out_html = (dist / "index.html").read_text()
-            self.assertIn('<span class="version-badge" id="agent-build-version" title="当前构建版本">v1.0.0 (abc12345)</span>', out_html)
+            self.assertIn('id="agent-build-version"', out_html)
+            self.assertIn('data-web-sha="abc12345"', out_html)
+            self.assertIn('v1.0.0 (abc12345)', out_html)
             self.assertIn('<meta name="build-sha" content="abc12345">', out_html)
 
 if __name__ == "__main__":
