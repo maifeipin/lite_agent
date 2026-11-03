@@ -38,11 +38,9 @@ def build_assets(src_dir: Path, dist_dir: Path, build_sha: Optional[str] = None)
     if not src_dir.exists():
         raise FileNotFoundError(f"Source directory not found: {src_dir}")
 
-    # 如果 dist_dir 与 src_dir 不同，则先同步全部文件到 dist_dir
+    # 如果 dist_dir 与 src_dir 不同，则先同步全部文件到 dist_dir (安全覆盖，绝不删除目录本身)
     if dist_dir.resolve() != src_dir.resolve():
-        if dist_dir.exists():
-            shutil.rmtree(dist_dir)
-        shutil.copytree(src_dir, dist_dir)
+        shutil.copytree(src_dir, dist_dir, dirs_exist_ok=True)
     
     index_html = dist_dir / "index.html"
     if not index_html.exists():
