@@ -85,3 +85,39 @@ def connect_readonly_db(db_path: Optional[str] = None) -> Optional[sqlite3.Conne
     quoted_target = urllib.parse.quote(os.path.abspath(target), safe="/")
     uri = f"file:{quoted_target}?mode=ro"
     return connect_sqlite(uri, uri=True, row_factory=sqlite3.Row, wal=False)
+
+
+def get_parser_python_executable(script_dir: Optional[str] = None) -> str:
+    """
+    解析 mail-statement-parser 专用 Python 解释器绝对路径。
+    优先级：
+    1. 环境变量 MAIL_STATEMENT_PARSER_PYTHON
+    2. config.json 中 billing.python_executable
+    3. script_dir/.venv/bin/python (若存在独立虚拟环境)
+    4. 回退：系统已知稳定解释器 (/usr/bin/python3) 或当前解释器 sys.executable
+    """
+    env_py = os.environ.get("MAIL_STATEMENT_PARSER_PYTHON")
+    if env_py and os.path.isfile(env_py):
+        return os.path.abspath(os.path.expanduser(env_py))
+
+    base_dir = os.path.abspath(os.path.expanduser(script_dir)) if script_dir else get_parser_script_dir()
+    try:
+        from lite_agent.core import config_loader
+        cfg = config_loader.load_config() or {}
+        configured_py = cfg.get("billing", {}).get("python_executable")
+        if configured_py and os.path.isfile(configured_py):
+            return os.path.abspath(os.path.expanduser(configured_py))
+    except Exception:
+        pass
+
+    # 若 parser 目录拥有独立虚拟环境，优先使用
+    venv_py = os.path.join(base_dir, ".venv", "bin", "python")
+    if os.path.isfile(venv_py):
+        return os.path.abspath(venv_py)
+
+    if os.path.isfile("/usr/bin/python3"):
+        return "/usr/bin/python3"
+
+    import sys
+    return sys.executable
+

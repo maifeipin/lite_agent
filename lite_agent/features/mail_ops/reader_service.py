@@ -12,6 +12,7 @@ from typing import Optional, List, Dict, Any
 
 from lite_agent.core.config_loader import load_config
 from lite_agent.core.model_config import is_gemini_driver
+from lite_agent.integrations.mail.paths import get_parser_python_executable
 from lite_agent.integrations.mail.process import run_process
 
 
@@ -97,7 +98,8 @@ def run_mail_reader_cmd(cmd_args: list, timeout=None) -> str:
 
     env.update(build_llm_pool_env(cfg))
 
-    cmd = [sys.executable, mail_client_py] + cmd_args
+    py_bin = get_parser_python_executable(billing_dir)
+    cmd = [py_bin, mail_client_py] + cmd_args
     try:
         r = run_process(cmd, cwd=billing_dir, capture_output=True, text=True, encoding='utf-8', timeout=timeout, env=env)
         output = r.stdout.strip()
@@ -425,7 +427,8 @@ def backfill_bodies() -> str:
     if not os.path.exists(script_path):
         return f"❌ 找不到回填脚本: {script_path}"
 
-    cmd = [sys.executable, script_path]
+    py_bin = get_parser_python_executable(billing_dir)
+    cmd = [py_bin, script_path]
     from lite_agent.integrations.mail.client import MailCLI
     env = MailCLI(script_dir=billing_dir, db_path=db_path)._build_env()
     try:

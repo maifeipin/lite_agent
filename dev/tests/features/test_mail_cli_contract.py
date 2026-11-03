@@ -116,3 +116,28 @@ def test_sync_receipt_accepts_identity_counters():
     }
     --- JSON_SUMMARY_END ---"""
     assert parse_json_summary(invalid_payload) is None
+
+
+def test_parser_python_executable_env_and_fallback(tmp_path, monkeypatch):
+    import os
+    from lite_agent.integrations.mail.paths import get_parser_python_executable
+
+    # 1. 环境变量优先
+    fake_py = tmp_path / "custom_python"
+    fake_py.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("MAIL_STATEMENT_PARSER_PYTHON", str(fake_py))
+    assert get_parser_python_executable() == str(fake_py)
+
+    # 2. 局部 venv 优先
+    monkeypatch.delenv("MAIL_STATEMENT_PARSER_PYTHON", raising=False)
+    fake_script_dir = tmp_path / "parser_root"
+    venv_py = fake_script_dir / ".venv" / "bin" / "python"
+    venv_py.parent.mkdir(parents=True)
+    venv_py.write_text("#!/bin/sh\n")
+    assert get_parser_python_executable(str(fake_script_dir)) == str(venv_py)
+
+    # 3. 回退测试：非真实存在路径则回退系统标准解释器或 sys.executable
+    monkeypatch.setenv("MAIL_STATEMENT_PARSER_PYTHON", "/non/existent/python")
+    fallback_py = get_parser_python_executable()
+    assert os.path.exists(fallback_py)
+
