@@ -22,6 +22,7 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from dev.tests.support.repo_paths import REPO_ROOT
 from lite_agent.features.todo.repository import TodoRepository
 from lite_agent.features.todo.service import TodoService
 from lite_agent.features.todo.rendering import render_markdown
@@ -45,7 +46,9 @@ todo_jobs = [j.name for j in cron.jobs.values() if 'todo' in j.name]
 assert len(todo_jobs) == 0, f"发现隐式 cron 注册: {todo_jobs}"
 print("OK")
 """
-    res = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    res = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, cwd=REPO_ROOT
+    )
     assert res.returncode == 0, f"隔离导入失败: {res.stderr}"
     assert "OK" in res.stdout
 
