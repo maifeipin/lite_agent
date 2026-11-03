@@ -105,6 +105,13 @@ def test_kernel_stage2_billing_debt_fully_cleared():
     ]
     assert len(stage2_items) == 0, f"architecture_rules.json 仍残留 {len(stage2_items)} 项 kernel_stage_2 债务"
 
+    # 验证 rules.json 中标记为 E0_closeout 的临时测试例外已全部清退
+    e0_items = [
+        item for item in rules_data.get("exceptions", [])
+        if item.get("removal_stage") == "E0_closeout"
+    ]
+    assert len(e0_items) == 0, f"rules.json 仍残留 {len(e0_items)} 项 E0_closeout 过渡债务: {e0_items}"
+
     # 验证 skills/ops_billing.py 内部调用已切换为 canonical 实现
     ops_billing_code = (PACKAGE_ROOT / "skills" / "ops_billing.py").read_text(encoding="utf-8")
     assert "lite_agent.core.billing_snapshot" not in ops_billing_code, "skills/ops_billing.py 内部调用仍导入 core.billing_snapshot"

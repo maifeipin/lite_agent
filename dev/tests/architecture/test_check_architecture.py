@@ -129,11 +129,11 @@ def test_exact_matching_refuses_prefix_or_wildcard_swallowing(repo_root, rules_c
 
 def test_d3_unrelated_tmp_path_function_does_not_satisfy_cross_repo_exception(repo_root, rules_config, tmp_path):
     # D3 复现反例: 函数名匹配已登记例外，但自身未声明受控 fixture 参数；同文件中的无关函数即便有 tmp_path 也无法放行
-    fake_file = tmp_path / "dev" / "tests" / "integration" / "test_mail_quality.py"
+    fake_file = tmp_path / "dev" / "tests" / "support" / "parser_isolation.py"
     fake_file.parent.mkdir(parents=True, exist_ok=True)
     fake_file.write_text(
         "import importlib\n"
-        "def test_real_cmb_case_is_repeat_safe_through_parser_cli_and_todo():\n"
+        "def isolated_parser_context():\n"
         "    importlib.import_module('statement_parser')\n"
         "\n"
         "def unrelated(tmp_path):\n"
@@ -142,7 +142,7 @@ def test_d3_unrelated_tmp_path_function_does_not_satisfy_cross_repo_exception(re
     )
 
     file_count, violations, approved = run_checks(
-        str(tmp_path), rules_config, explicit_files=["dev/tests/integration/test_mail_quality.py"]
+        str(tmp_path), rules_config, explicit_files=["dev/tests/support/parser_isolation.py"]
     )
     assert len(violations) == 1
     v = violations[0]
@@ -153,7 +153,7 @@ def test_d3_unrelated_tmp_path_function_does_not_satisfy_cross_repo_exception(re
 
 def test_d3_unregistered_scope_cross_repo_import_rejected(repo_root, rules_config, tmp_path):
     # D3: 违规函数名为 bad_func，即便带有 tmp_path，因未登记对应作用域例外，直接作为未授权违规拦截
-    fake_file = tmp_path / "dev" / "tests" / "integration" / "test_mail_quality.py"
+    fake_file = tmp_path / "dev" / "tests" / "support" / "parser_isolation.py"
     fake_file.parent.mkdir(parents=True, exist_ok=True)
     fake_file.write_text(
         "import importlib\n"
@@ -163,7 +163,7 @@ def test_d3_unregistered_scope_cross_repo_import_rejected(repo_root, rules_confi
     )
 
     file_count, violations, approved = run_checks(
-        str(tmp_path), rules_config, explicit_files=["dev/tests/integration/test_mail_quality.py"]
+        str(tmp_path), rules_config, explicit_files=["dev/tests/support/parser_isolation.py"]
     )
     assert len(violations) == 1
     assert violations[0]["rule"] == "RULE_DYNAMIC_IMPORT_REGISTERED"

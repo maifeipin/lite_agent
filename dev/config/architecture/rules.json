@@ -68,94 +68,84 @@
       "verification_requirement": "test_skill_engine.py 回归"
     },
     {
-      "file": "dev/tests/integration/test_mail_quality.py",
-      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
-      "target": "statement_db",
-      "scope": "parser_repo",
-      "reason": "受控测试动态加载 parser db 验证质量事件落地",
-      "owner": "test_infrastructure",
-      "removal_stage": "E0_closeout",
-      "verification_requirement": "绑定临时上下文与 tmp_path"
-    },
-    {
-      "file": "dev/tests/integration/test_mail_quality.py",
-      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
-      "target": "statement_models",
-      "scope": "parser_repo",
-      "reason": "受控测试动态加载 parser models 验证质量事件契约",
-      "owner": "test_infrastructure",
-      "removal_stage": "E0_closeout",
-      "verification_requirement": "绑定临时上下文与 tmp_path"
-    },
-    {
-      "file": "dev/tests/integration/test_mail_quality.py",
-      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
-      "target": "statement_parser",
-      "scope": "test_real_cmb_case_is_repeat_safe_through_parser_cli_and_todo",
-      "reason": "受控测试动态加载 parser 验证重解析契约",
-      "owner": "test_infrastructure",
-      "removal_stage": "E0_closeout",
-      "verification_requirement": "绑定临时上下文与 tmp_path"
-    },
-    {
-      "file": "dev/tests/integration/test_mail_evidence_regressions.py",
-      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
-      "target": "statement_parser",
-      "scope": "mail_store",
-      "reason": "受控测试动态加载 parser 验证 R6 阶段契约",
-      "owner": "test_infrastructure",
-      "removal_stage": "E0_closeout",
-      "verification_requirement": "绑定临时上下文与 tmp_path"
-    },
-    {
-      "file": "dev/tests/integration/test_mail_evidence_regressions.py",
-      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
-      "target": "billing_readmodel",
-      "scope": "mail_store",
-      "reason": "受控测试动态加载 readmodel 验证读模型契约",
-      "owner": "test_infrastructure",
-      "removal_stage": "E0_closeout",
-      "verification_requirement": "绑定临时上下文与 tmp_path"
-    },
-    {
-      "file": "dev/tests/integration/test_mail_evidence_regressions.py",
-      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
-      "target": "mail_quality",
-      "scope": "test_zero_is_present_for_purpose_requirements",
-      "reason": "受控测试动态加载 quality 验证质量模块",
-      "owner": "test_infrastructure",
-      "removal_stage": "E0_closeout",
-      "verification_requirement": "绑定临时上下文与 tmp_path"
-    },
-    {
-      "file": "dev/tests/integration/test_mail_evidence_regressions.py",
-      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
-      "target": "statement_evidence",
-      "scope": "test_purpose_isolation_keeps_confirmed_reminder_despite_detail_gap",
-      "reason": "受控测试动态加载 evidence 验证证据契约",
-      "owner": "test_infrastructure",
-      "removal_stage": "E0_closeout",
-      "verification_requirement": "绑定临时上下文与 tmp_path"
-    },
-    {
-      "file": "dev/tests/integration/test_mail_evidence_regressions.py",
-      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
-      "target": "mail_client",
-      "scope": "test_reminder_cli_never_claims_no_due_when_all_records_are_unverified",
-      "reason": "受控测试动态加载 client 验证离线重解析契约",
-      "owner": "test_infrastructure",
-      "removal_stage": "E0_closeout",
-      "verification_requirement": "绑定临时上下文与 tmp_path"
-    },
-    {
-      "file": "dev/tests/integration/test_mail_quality.py",
+      "file": "dev/tests/support/parser_isolation.py",
       "rule": "RULE_NO_CROSS_REPO_SYS_PATH",
       "target": "root",
-      "scope": "parser_repo",
-      "reason": "受控测试挂载 parser_repo 兄弟仓库路径",
+      "scope": "isolated_parser_context",
+      "reason": "受控测试生命周期管理器临时挂载外部 Parser 路径并在退出时还原",
       "owner": "test_infrastructure",
-      "removal_stage": "E0_closeout",
-      "verification_requirement": "绑定临时上下文与 tmp_path"
+      "removal_stage": "permanent_test_loader",
+      "verification_requirement": "绑定临时上下文与 tmp_path 并完成进入前状态恢复"
+    },
+    {
+      "file": "dev/tests/support/parser_isolation.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "statement_db",
+      "scope": "isolated_parser_context",
+      "reason": "受控测试隔离守卫动态加载 parser db 并在退出时还原原模块对象",
+      "owner": "test_infrastructure",
+      "removal_stage": "permanent_test_loader",
+      "verification_requirement": "绑定临时上下文与 tmp_path 并完成进入前状态恢复"
+    },
+    {
+      "file": "dev/tests/support/parser_isolation.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "statement_models",
+      "scope": "isolated_parser_context",
+      "reason": "受控测试隔离守卫动态加载 parser models 并在退出时还原原模块对象",
+      "owner": "test_infrastructure",
+      "removal_stage": "permanent_test_loader",
+      "verification_requirement": "绑定临时上下文与 tmp_path 并完成进入前状态恢复"
+    },
+    {
+      "file": "dev/tests/support/parser_isolation.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "statement_parser",
+      "scope": "isolated_parser_context",
+      "reason": "受控测试隔离守卫动态加载 parser 并在退出时还原原模块对象",
+      "owner": "test_infrastructure",
+      "removal_stage": "permanent_test_loader",
+      "verification_requirement": "绑定临时上下文与 tmp_path 并完成进入前状态恢复"
+    },
+    {
+      "file": "dev/tests/support/parser_isolation.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "billing_readmodel",
+      "scope": "isolated_parser_context",
+      "reason": "受控测试隔离守卫动态加载 readmodel 并在退出时还原原模块对象",
+      "owner": "test_infrastructure",
+      "removal_stage": "permanent_test_loader",
+      "verification_requirement": "绑定临时上下文与 tmp_path 并完成进入前状态恢复"
+    },
+    {
+      "file": "dev/tests/support/parser_isolation.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "mail_quality",
+      "scope": "isolated_parser_context",
+      "reason": "受控测试隔离守卫动态加载 quality 模块并在退出时还原原模块对象",
+      "owner": "test_infrastructure",
+      "removal_stage": "permanent_test_loader",
+      "verification_requirement": "绑定临时上下文与 tmp_path 并完成进入前状态恢复"
+    },
+    {
+      "file": "dev/tests/support/parser_isolation.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "statement_evidence",
+      "scope": "isolated_parser_context",
+      "reason": "受控测试隔离守卫动态加载 evidence 模块并在退出时还原原模块对象",
+      "owner": "test_infrastructure",
+      "removal_stage": "permanent_test_loader",
+      "verification_requirement": "绑定临时上下文与 tmp_path 并完成进入前状态恢复"
+    },
+    {
+      "file": "dev/tests/support/parser_isolation.py",
+      "rule": "RULE_DYNAMIC_IMPORT_REGISTERED",
+      "target": "mail_client",
+      "scope": "isolated_parser_context",
+      "reason": "受控测试隔离守卫动态加载 client 模块并在退出时还原原模块对象",
+      "owner": "test_infrastructure",
+      "removal_stage": "permanent_test_loader",
+      "verification_requirement": "绑定临时上下文与 tmp_path 并完成进入前状态恢复"
     },
     {
       "file": "lite_agent/app/plugins.py",
