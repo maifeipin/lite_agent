@@ -41,7 +41,7 @@ ALLOWED_PARSER_FIXTURES = {
 }
 
 ALLOWED_AGENT_ROOT_FILES = {
-    'agent.py', 'session.py', 'security.py', 'main.py',
+    'main.py',
     'config/examples/agent.json', 'config/architecture/rules.json',
     'config/architecture/core-manifest.txt', 'config/pytest.ini',
     'requirements/core.txt', 'requirements/test.txt', 'requirements/full.txt',

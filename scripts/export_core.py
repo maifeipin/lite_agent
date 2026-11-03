@@ -46,9 +46,6 @@ FORBIDDEN_EXTENSIONS = (
 
 REQUIRED_CORE_MODULES = {
     "main.py",
-    "agent.py",
-    "session.py",
-    "security.py",
     "dev/requirements/core.txt",
     "lite_agent/__init__.py",
     "lite_agent/cli.py",

@@ -210,10 +210,7 @@ def test_controlled_plugin_loader_allowed_and_rejected():
 
 def test_contract_types_identity_and_backward_compatibility():
     """验证 contracts 迁移前后类对象保持恒等 (同一对象，非包装)"""
-    import agent as root_agent
-    assert root_agent.Agent is agent.Agent
-    assert root_agent.IncomingMessage is contracts.IncomingMessage
-    assert root_agent.AgentResponse is contracts.AgentResponse
+    assert agent.Agent is lite_agent.agent.Agent
     assert agent.IncomingMessage is contracts.IncomingMessage
     assert agent.AgentResponse is contracts.AgentResponse
     assert lite_agent.core.task_result.TaskResult is contracts.TaskResult

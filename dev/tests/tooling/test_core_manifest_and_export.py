@@ -62,7 +62,7 @@ class TestCoreManifestAndExport(unittest.TestCase):
         """反例验证: 若 manifest 遗漏关键必需模块 (如 main.py)，必须非零退出 (exit_code=4)"""
         with tempfile.NamedTemporaryFile("w+", encoding="utf-8", suffix=".txt") as tf:
             # 故意漏写 main.py
-            tf.write("agent.py\nsession.py\nsecurity.py\ndev/requirements/core.txt\n")
+            tf.write("lite_agent/agent.py\nlite_agent/session.py\nlite_agent/security.py\ndev/requirements/core.txt\n")
             tf.flush()
 
             res = subprocess.run(
@@ -241,11 +241,16 @@ class TestCoreManifestAndExport(unittest.TestCase):
 
             # 验证导出的文件实际存在
             self.assertTrue(os.path.isfile(os.path.join(tmp_dir, "main.py")))
-            self.assertTrue(os.path.isfile(os.path.join(tmp_dir, "agent.py")))
+            self.assertTrue(os.path.isfile(os.path.join(tmp_dir, "lite_agent", "agent.py")))
             self.assertTrue(os.path.isfile(os.path.join(tmp_dir, "lite_agent", "core", "agent_runtime.py")))
             self.assertTrue(os.path.isfile(os.path.join(tmp_dir, "lite_agent", "services", "commands.py")))
             self.assertTrue(os.path.isfile(os.path.join(tmp_dir, "lite_agent", "app", "bootstrap.py")))
             self.assertTrue(os.path.isfile(os.path.join(tmp_dir, "lite_agent", "channels", "api.py")))
+
+            # 验证顶层垫片已彻底移除，禁止导出残留
+            self.assertFalse(os.path.exists(os.path.join(tmp_dir, "agent.py")))
+            self.assertFalse(os.path.exists(os.path.join(tmp_dir, "session.py")))
+            self.assertFalse(os.path.exists(os.path.join(tmp_dir, "security.py")))
 
             # 验证禁止的业务目录与私人配置绝不存在于导出目录中
             self.assertFalse(os.path.exists(os.path.join(tmp_dir, "features")))
