@@ -89,21 +89,48 @@ if [ ! -w "$TARGET_DIR" ]; then
     exit 1
 fi
 
-# 1. 使用 rsync 增量同步全部前端文件
-echo "🚀 正在使用 rsync 镜像同步前端文件..."
-rsync -av --delete \
-    --exclude='.DS_Store' \
-    --exclude='*.bak*' \
-    --exclude='__pycache__' \
-    "$SRC_DIR/" "$TARGET_DIR/"
-
-# 2. 执行静态资源指纹计算与 Cache-Busting 注入
-echo "🔨 正在计算 SHA-256 并注入 Cache-Busting 标识与构建版本..."
+# 确定可用 Python 解释器
 PYTHON_BIN="python3"
 if [ -x "$REPO_ROOT/.venv313/bin/python" ]; then
     PYTHON_BIN="$REPO_ROOT/.venv313/bin/python"
 fi
 
+# 1. 镜像同步全部前端文件
+if command -v rsync >/dev/null 2>&1; then
+    echo "🚀 正在使用 rsync 镜像同步前端文件..."
+    rsync -av --delete \
+        --exclude='.DS_Store' \
+        --exclude='*.bak*' \
+        --exclude='__pycache__' \
+        "$SRC_DIR/" "$TARGET_DIR/"
+else
+    echo "⚠️ 未安装 rsync，使用 Python 引擎安全同步前端文件..."
+    "$PYTHON_BIN" -c "
+import shutil
+from pathlib import Path
+src = Path('$SRC_DIR')
+dst = Path('$TARGET_DIR')
+dst.mkdir(parents=True, exist_ok=True)
+for item in dst.iterdir():
+    if item.name.startswith('.git') or '.bak' in item.name:
+        continue
+    if item.is_dir():
+        shutil.rmtree(item)
+    else:
+        item.unlink()
+for item in src.iterdir():
+    if item.name in ('.DS_Store', '__pycache__') or '.bak' in item.name:
+        continue
+    target = dst / item.name
+    if item.is_dir():
+        shutil.copytree(item, target)
+    else:
+        shutil.copy2(item, target)
+"
+fi
+
+# 2. 执行静态资源指纹计算与 Cache-Busting 注入
+echo "🔨 正在计算 SHA-256 并注入 Cache-Busting 标识与构建版本..."
 "$PYTHON_BIN" "$SCRIPT_DIR/build_web_assets.py" "$TARGET_DIR"
 
 # 3. 校验发布完整性
