@@ -13,6 +13,7 @@ import importlib
 import os
 import subprocess
 import sys
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -36,6 +37,59 @@ MANAGED_PARSER_MODULES = (
     "mail_llm",
     "parser_paths",
 )
+
+MANAGED_PARSER_ENV_KEYS = (
+    "MAIL_STATEMENT_DATA_ROOT",
+    "MAIL_STATEMENT_DB_PATH",
+    "MAIL_STATEMENT_REPORT_DIR",
+    "MAIL_STATEMENT_DOWNLOAD_DIR",
+)
+
+
+def is_valid_temporary_test_dir(path: Any) -> bool:
+    """
+    严格校验 tmp_path 是否为合法受控的临时测试目录：
+    1. 解析真实绝对路径 (realpath)，防范符号链接跨目录逃逸；
+    2. 仅允许位于 pytest/conftest 会话活跃根、系统标准临时目录 (tempfile.gettempdir())、
+       或操作系统受控临时根 (/tmp, /private/tmp, /var/folders, /var/tmp, /private/var/tmp) 之下；
+    3. 使用 os.path.commonpath 严格核对路径层级边界，避免 /tmp-evil 或 /var/lib 等持久系统目录被误放行。
+    """
+    try:
+        raw_path = os.fspath(path)
+    except Exception:
+        return False
+
+    if not raw_path or not isinstance(raw_path, str):
+        return False
+
+    norm_path = os.path.realpath(os.path.abspath(raw_path))
+
+    allowed_roots = []
+    # 1. 测试框架声明的会话活跃根 (conftest.py set_active_test_root)
+    try:
+        from dev.tests.support.isolation_guard import get_active_test_root
+        active_root = get_active_test_root()
+        if active_root:
+            allowed_roots.append(os.path.realpath(active_root))
+    except ImportError:
+        pass
+
+    # 2. Python 标准库 tempfile 根
+    allowed_roots.append(os.path.realpath(tempfile.gettempdir()))
+
+    # 3. 操作系统公认临时根 (Linux / macOS)
+    for sys_tmp in ("/tmp", "/private/tmp", "/var/folders", "/var/tmp", "/private/var/tmp"):
+        if os.path.exists(sys_tmp):
+            allowed_roots.append(os.path.realpath(sys_tmp))
+
+    for root in allowed_roots:
+        try:
+            if os.path.commonpath([root, norm_path]) == root:
+                return True
+        except ValueError:
+            continue
+
+    return False
 
 
 class ParserHarness:
@@ -103,10 +157,9 @@ def isolated_parser_context(tmp_path: Path) -> Iterator[ParserHarness]:
     保证退出时恢复进入前的 sys.modules 与 sys.path 状态。
     """
     assert os.environ.get("TESTING") == "1", "isolated_parser_context 必须在测试隔离环境下运行"
-    tmp_str = str(tmp_path).lower()
-    assert (
-        "temp" in tmp_str or "tmp" in tmp_str or "var" in tmp_str
-    ), f"tmp_path 必须位于受控临时目录: {tmp_path}"
+    assert is_valid_temporary_test_dir(tmp_path), (
+        f"tmp_path 必须位于受控临时测试目录下 (禁止非临时或符号链接逃逸路径: {tmp_path})"
+    )
 
     candidate = (
         os.environ.get("MAIL_STATEMENT_PARSER_DIR")
@@ -124,12 +177,7 @@ def isolated_parser_context(tmp_path: Path) -> Iterator[ParserHarness]:
     original_path = list(sys.path)
 
     # 3. 环境变量备份与临时重定向至 tmp_path
-    old_env = {
-        "MAIL_STATEMENT_DATA_ROOT": os.environ.get("MAIL_STATEMENT_DATA_ROOT"),
-        "MAIL_STATEMENT_DB_PATH": os.environ.get("MAIL_STATEMENT_DB_PATH"),
-        "MAIL_STATEMENT_REPORT_DIR": os.environ.get("MAIL_STATEMENT_REPORT_DIR"),
-        "MAIL_STATEMENT_DOWNLOAD_DIR": os.environ.get("MAIL_STATEMENT_DOWNLOAD_DIR"),
-    }
+    old_env = {k: os.environ.get(k) for k in MANAGED_PARSER_ENV_KEYS}
 
     try:
         os.environ["MAIL_STATEMENT_DATA_ROOT"] = str(tmp_path)
