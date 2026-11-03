@@ -39,13 +39,31 @@ class TestBuildWebAssets(unittest.TestCase):
                 '</body></html>'
             )
 
-            build_assets(src, dist)
+            build_assets(src, dist, build_sha="testsha1")
             out_html = (dist / "index.html").read_text()
             self.assertIn('href="theme.css?v=', out_html)
             self.assertIn('src="app.js?v=', out_html)
             # CDN 不受影响
             self.assertIn('href="https://cdn.example.com/ext.css"', out_html)
             self.assertIn('src="https://cdn.example.com/ext.js"', out_html)
+            # 版本号与 meta 注入
+            self.assertIn('<meta name="build-sha" content="testsha1">', out_html)
+
+    def test_build_assets_injects_version_badge(self):
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "src"
+            dist = Path(td) / "dist"
+            src.mkdir()
+            (src / "index.html").write_text(
+                '<!DOCTYPE html><html><head></head><body>'
+                '<div class="sidebar-footer-info">'
+                '<span class="version-badge" id="agent-build-version" title="当前构建版本"></span>'
+                '</div></body></html>'
+            )
+            build_assets(src, dist, build_sha="abc12345")
+            out_html = (dist / "index.html").read_text()
+            self.assertIn('<span class="version-badge" id="agent-build-version" title="当前构建版本">v1.0.0 (abc12345)</span>', out_html)
+            self.assertIn('<meta name="build-sha" content="abc12345">', out_html)
 
 if __name__ == "__main__":
     unittest.main()

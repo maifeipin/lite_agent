@@ -152,7 +152,8 @@ body {
 .sidebar.collapsed .nav-section h3,
 .sidebar.collapsed .filter-btn-text,
 .sidebar.collapsed .filter-btn .badge,
-.sidebar.collapsed .sidebar-footer span {
+.sidebar.collapsed .sidebar-footer span,
+.sidebar.collapsed .sidebar-footer-info {
     display: none !important;
 }
 
@@ -355,6 +356,26 @@ body {
 .status-indicator.online {
     background-color: var(--success);
     box-shadow: 0 0 8px var(--success);
+}
+
+.status-indicator.offline {
+    background-color: var(--danger, #ef4444);
+    box-shadow: 0 0 8px var(--danger, #ef4444);
+}
+
+.sidebar-footer-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    overflow: hidden;
+    line-height: 1.25;
+}
+
+.version-badge {
+    font-size: 0.72rem;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-muted);
+    opacity: 0.85;
 }
 
 /* 主内容区 */

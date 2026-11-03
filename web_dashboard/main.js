@@ -689,6 +689,59 @@ function initSidebarCollapse() {
 }
 
 // ============================================================
+//  Agent Health & Build Version Display
+// ============================================================
+function initAgentHealthCheck() {
+    const statusDot = document.querySelector('.sidebar-footer .status-indicator');
+    const statusText = document.getElementById('agent-status-text');
+    const versionBadge = document.getElementById('agent-build-version');
+
+    async function checkHealth() {
+        try {
+            let resp = null;
+            try {
+                resp = await fetch('/agent/health');
+            } catch (e) {
+                resp = await fetch('/health');
+            }
+            if (!resp || !resp.ok) {
+                resp = await fetch('/health');
+            }
+
+            if (resp && resp.ok) {
+                const data = await resp.json();
+                if (statusDot) {
+                    statusDot.className = 'status-indicator online';
+                }
+                if (statusText) {
+                    statusText.textContent = 'Agent 连接正常';
+                }
+                if (versionBadge && data.build_sha) {
+                    const shortSha = String(data.build_sha).slice(0, 8);
+                    const vStr = data.version ? `v${data.version}` : '';
+                    versionBadge.textContent = `${vStr} (${shortSha})`.trim();
+                    versionBadge.title = `运行版本: ${vStr} | Commit: ${data.build_sha} | 模式: ${data.mode || 'full'}`;
+                    versionBadge.style.display = 'inline-block';
+                }
+                return;
+            }
+            throw new Error(`Health response: ${resp ? resp.status : 'offline'}`);
+        } catch (err) {
+            if (statusDot) {
+                statusDot.className = 'status-indicator offline';
+            }
+            if (statusText) {
+                statusText.textContent = 'Agent 连接断开';
+            }
+        }
+    }
+
+    checkHealth();
+    // 每 60 秒轮询一次健康检查
+    setInterval(checkHealth, 60000);
+}
+
+// ============================================================
 //  Bootstrap
 // ============================================================
 document.addEventListener('DOMContentLoaded', () => {
@@ -697,6 +750,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initFilterButtons();
     initSidebarCollapse();
     initIntersectionObserver();
+    initAgentHealthCheck();
     if (typeof initTerminal === 'function') initTerminal();
     if (typeof initChatDrawer === 'function') initChatDrawer();
     initKeyboard();
