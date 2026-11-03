@@ -369,10 +369,12 @@ def main():
             time.sleep(1)
     except KeyboardInterrupt:
         print("\n🛑 捕获 Ctrl+C，正在退出...")
-        app.shutdown()
+        if 'app' in locals() and app is not None:
+            app.shutdown()
     except Exception as e:
         print(f"❌ Lite Agent 启动或运行异常: {e}，正在回滚释放已分配资源...")
-        app.shutdown()
+        if 'app' in locals() and app is not None:
+            app.shutdown()
         raise
 
 
