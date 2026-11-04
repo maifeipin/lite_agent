@@ -97,15 +97,16 @@ if [ ! -d "$TARGET_DIR" ]; then
     mkdir -p "$TARGET_DIR"
 fi
 
-if [ ! -w "$TARGET_DIR" ]; then
-    echo "❌ 错误: 目标目录无写入权限: $TARGET_DIR" >&2
-    exit 1
-fi
-
 # 确定可用 Python 解释器
 PYTHON_BIN="python3"
 if [ -x "$REPO_ROOT/.venv313/bin/python" ]; then
     PYTHON_BIN="$REPO_ROOT/.venv313/bin/python"
+fi
+
+# 校验写权限 (涵盖只读挂载与无写权限位目录，防范 root 容器环境下的 DAC 权限穿透)
+if [ ! -w "$TARGET_DIR" ] || ! "$PYTHON_BIN" -c "import os, sys; sys.exit(0 if (os.stat(sys.argv[1]).st_mode & 0o222) != 0 else 1)" "$TARGET_DIR" 2>/dev/null; then
+    echo "❌ 错误: 目标目录无写入权限: $TARGET_DIR" >&2
+    exit 1
 fi
 
 # 1. 镜像同步全部前端文件
