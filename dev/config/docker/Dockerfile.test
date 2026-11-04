@@ -1,5 +1,5 @@
-# Dockerfile.test - E0 阶段 Python 3.9 隔离验证容器环境
-FROM python:3.9-slim
+# Dockerfile.test - Python 3.13 隔离验证容器环境 (对齐生产 Python 3.13 运行时)
+FROM python:3.13-slim
 
 WORKDIR /app
 

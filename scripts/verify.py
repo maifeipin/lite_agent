@@ -6,7 +6,7 @@ E0 阶段可复现验证门禁入口 (scripts/verify.py)
 2. Agent 全量测试套件 (包含副作用隔离守卫与负向用例, sys.executable -m pytest)
 3. Parser 跨仓测试套件 (包含路径隔离与边界测试, unittest)
 4. 两仓 Git diff 规范校验 (git diff --check)
-5. Docker Python 3.9 脱敏快照只读隔离环境验证:
+5. Docker Python 3.13 脱敏快照只读隔离环境验证:
    - Parser 全量 unittest (只读挂载 :ro, 禁用外网)
    - AST 架构门禁 (只读挂载 :ro, 禁用外网)
    - Agent 全量 pytest (只读挂载 :ro)
@@ -272,16 +272,16 @@ def create_sanitized_snapshots(agent_root: str, parser_root: str) -> Tuple[str, 
 
 
 def ensure_docker_image(agent_root: str, force_rebuild: bool = False) -> bool:
-    """确认 lite_agent_test:3.9 镜像存在且包含离线 wheel 缓存，不满足则使用独立隔离构建上下文目录构建。"""
+    """确认 lite_agent_test:3.13 镜像存在且包含离线 wheel 缓存，不满足则使用独立隔离构建上下文目录构建。"""
     if not force_rebuild:
-        check_cmd = ["docker", "run", "--rm", "lite_agent_test:3.9", "test", "-d", "/wheels"]
+        check_cmd = ["docker", "run", "--rm", "lite_agent_test:3.13", "test", "-d", "/wheels"]
         res = subprocess.run(check_cmd, capture_output=True, text=True)
         if res.returncode == 0:
             return True
-    return build_isolated_docker_image(agent_root, "lite_agent_test:3.9")
+    return build_isolated_docker_image(agent_root, "lite_agent_test:3.13")
 
 
-def build_isolated_docker_image(agent_root: str, tag: str = "lite_agent_test:3.9") -> bool:
+def build_isolated_docker_image(agent_root: str, tag: str = "lite_agent_test:3.13") -> bool:
     """在独立临时目录构建测试镜像，绝对不向 Docker builder 传递仓库其它文件。"""
     dockerfile_src = os.path.join(agent_root, "dev/config/docker/Dockerfile.test")
     if not os.path.isfile(dockerfile_src):
@@ -503,7 +503,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--skip-docker",
         action="store_true",
-        help="跳过 Docker Python 3.9 容器验证",
+        help="跳过 Docker Python 3.13 容器验证",
     )
     parser.add_argument(
         "--skip-parser",
@@ -671,45 +671,45 @@ def main(argv=None):
     if need_parser:
         results.append(run_format_step("7. Parser Git 格式与末尾空白规范", parser_root))
 
-    # 7. Docker Python 3.9 隔离环境验证
+    # 7. Docker Python 3.13 隔离环境验证
     has_docker = shutil.which("docker") is not None and not args.skip_docker
     if has_docker:
         print("\n📦 正在构建并验证代码脱敏快照...")
         tmp_base, agent_snap, parser_snap = create_sanitized_snapshots(agent_root, parser_root if need_parser else agent_root)
         try:
             if need_parser:
-                # Docker Python 3.9: Parser 全量测试 (代码只读挂载 :ro，禁外网)
+                # Docker Python 3.13: Parser 全量测试 (代码只读挂载 :ro，禁外网)
                 results.append(run_step(
-                    "8. Docker Python 3.9: Parser 全量测试 (代码只读 :ro, 无外网)",
+                    "8. Docker Python 3.13: Parser 全量测试 (代码只读 :ro, 无外网)",
                     [
                         "docker", "run", "--rm", "--network=none",
                         "-v", f"{parser_snap}:/parser:ro",
                         "-e", "MAIL_STATEMENT_DATA_ROOT=/tmp/data_root",
                         "-e", "PYTHONDONTWRITEBYTECODE=1",
                         "-w", "/parser",
-                        "python:3.9-slim",
+                        "python:3.13-slim",
                         "python", "-m", "unittest", "discover", "-s", "tests", "-q"
                     ],
                     cwd=agent_root,
                     timeout=300,
                 ))
 
-            # Docker Python 3.9: AST 架构门禁 (代码只读挂载 :ro, 禁外网)
+            # Docker Python 3.13: AST 架构门禁 (代码只读挂载 :ro, 禁外网)
             results.append(run_step(
-                f"{'9' if need_parser else '7'}. Docker Python 3.9: AST 架构依赖门禁 (代码只读 :ro, 无外网)",
+                f"{'9' if need_parser else '7'}. Docker Python 3.13: AST 架构依赖门禁 (代码只读 :ro, 无外网)",
                 [
                     "docker", "run", "--rm", "--network=none",
                     "-v", f"{agent_snap}:/app:ro",
                     "-e", "PYTHONDONTWRITEBYTECODE=1",
                     "-w", "/app",
-                    "python:3.9-slim",
+                    "python:3.13-slim",
                     "python", "scripts/check_architecture.py"
                 ],
                 cwd=agent_root,
                 timeout=60,
             ))
 
-            # Docker Python 3.9: Agent 回归 pytest (按模式精确选择 core / full，代码只读挂载 :ro, 禁外网)
+            # Docker Python 3.13: Agent 回归 pytest (按模式精确选择 core / full，代码只读挂载 :ro, 禁外网)
             has_agent_image = ensure_docker_image(agent_root)
             if has_agent_image:
                 agent_test_cmd = [
@@ -734,21 +734,21 @@ def main(argv=None):
                 agent_test_cmd.extend([
                     "-e", "PYTHONDONTWRITEBYTECODE=1",
                     "-w", "/app",
-                    "lite_agent_test:3.9",
+                    "lite_agent_test:3.13",
                     "python", "-m", "pytest",
                     "-c", docker_pytest_ini, "--rootdir=.",
                 ] + target_pytest_args + [
                     "-q", "-p", "no:cacheprovider", "-p", docker_no_skips, "-o", "cache_dir=/tmp/.pytest_cache", "--tb=short"
                 ])
                 results.append(run_step(
-                    f"{'10' if need_parser else '8'}. Docker Python 3.9: Agent {'核心' if args.core_only else '全量'}回归测试 (代码只读 :ro, 无外网)",
+                    f"{'10' if need_parser else '8'}. Docker Python 3.13: Agent {'核心' if args.core_only else '全量'}回归测试 (代码只读 :ro, 无外网)",
                     agent_test_cmd,
                     cwd=agent_root,
                     timeout=600,
                 ))
             else:
                 results.append({
-                    "name": f"{'10' if need_parser else '8'}. Docker Python 3.9: Agent 回归测试",
+                    "name": f"{'10' if need_parser else '8'}. Docker Python 3.13: Agent 回归测试",
                     "passed": False,
                     "exit_code": 1,
                     "elapsed": 0,
@@ -760,9 +760,9 @@ def main(argv=None):
     elif args.skip_docker:
         print("\n⏩ 显式指定 --skip-docker，跳过容器验证")
     else:
-        print("\n⚠️ 未检测到 Docker 环境，Python 3.9 容器验证项标记为 PENDING")
+        print("\n⚠️ 未检测到 Docker 环境，Python 3.13 容器验证项标记为 PENDING")
         results.append({
-            "name": "Docker Python 3.9 容器验证",
+            "name": "Docker Python 3.13 容器验证",
             "passed": False,
             "exit_code": 1,
             "elapsed": 0,
@@ -797,7 +797,7 @@ def main(argv=None):
             for item in skipped_items:
                 print(f"   - {item}")
         else:
-            print("🎉 恭喜！所有硬性门禁（含本机与 Docker Python 3.9 全量双回归）全部通过！")
+            print("🎉 恭喜！所有硬性门禁（含本机与 Docker Python 3.13 全量双回归）全部通过！")
         sys.exit(0)
     else:
         print("⚠️ 存在未通过门禁项，请排查上方失败信息。")

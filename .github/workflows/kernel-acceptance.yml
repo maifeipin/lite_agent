@@ -148,10 +148,10 @@ jobs:
           python -m unittest discover -s tests -q
 
   # -------------------------------------------------------------
-  # Gate 5: Docker Python 3.9 只读隔离环境双回归
+  # Gate 5: Docker Python 3.13 只读隔离环境双回归
   # -------------------------------------------------------------
-  docker-python39-isolation:
-    name: 5. Docker Python 3.9 Sanitized Readonly Double Regression
+  docker-python313-isolation:
+    name: 5. Docker Python 3.13 Sanitized Readonly Double Regression
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Lite Agent
@@ -180,7 +180,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r dev/requirements/full.txt -r dev/requirements/test.txt
 
-      - name: Build Docker Python 3.9 Test Image
+      - name: Build Docker Python 3.13 Test Image
         run: |
           python -c "from scripts.verify import build_isolated_docker_image; assert build_isolated_docker_image('.')"
 
