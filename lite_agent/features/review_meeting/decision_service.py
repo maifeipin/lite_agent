@@ -16,7 +16,7 @@ from lite_agent.core.config_loader import load_config
 from lite_agent.core.model_router import ModelRouter
 from lite_agent.core.llm_gateway import LLMGateway
 from lite_agent.core.execution_ledger import ExecutionLedger
-from lite_agent.core.execution import ExecutionSource
+from lite_agent.contracts.execution import ExecutionSource
 
 
 # =========================================================

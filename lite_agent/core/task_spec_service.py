@@ -8,7 +8,7 @@ from typing import Optional
 from lite_agent.core.model_router import ModelRouter
 from lite_agent.core.model_policy import ModelSelector
 from lite_agent.core.llm_gateway import LLMGateway
-from lite_agent.core.execution import ExecutionSource
+from lite_agent.contracts.execution import ExecutionSource
 from lite_agent.core.task_spec import (
     BASE_POLICY,
     TaskSpecStore,

@@ -42,7 +42,7 @@ def fetch_dashboard(url):
 
 
 def test_core_dashboard_uses_its_own_registry_not_legacy_global():
-    from lite_agent.core.command_registry import _registry
+    from lite_agent.services.commands import default_command_registry as _registry
 
     app = create_app(mode="core")
     _registry.register("/foreign_dashboard_probe", lambda *_: None, show_in_dashboard=True)
@@ -97,7 +97,7 @@ def test_backup_star_import_resolves_existing_exports_without_running_backup():
 @pytest.mark.parametrize("prefix", ["/", "::"])
 def test_legacy_host_still_dispatches_global_compatibility_commands(prefix):
     from lite_agent.agent import Agent
-    from lite_agent.core.command_registry import _registry
+    from lite_agent.services.commands import default_command_registry as _registry
 
     calls = []
 

@@ -3,7 +3,7 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from lite_agent.core.execution import ExecutionResult
+from lite_agent.contracts.execution import ExecutionResult
 from lite_agent.core.model_invoker import GeminiInvoker, OpenAIInvoker
 from lite_agent.core.model_router import ModelRouter
 from lite_agent.core.model_policy import ExecutionPolicy, ModelSelector

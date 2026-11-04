@@ -24,7 +24,7 @@ from lite_agent.core.model_router import ModelRouter
 from lite_agent.core.model_event import ModelEventType
 from lite_agent.core.agent_runtime import AgentRuntime, RuntimeEventType
 from lite_agent.core.adaptive_budget import AdaptiveBudgetPolicy
-from lite_agent.core.execution import ExecutionContext, ActorType, ExecutionSource
+from lite_agent.contracts.execution import ExecutionContext, ActorType, ExecutionSource
 from lite_agent.core.execution_ledger import ExecutionLedger
 from lite_agent.core.runtime_recorder import RuntimeRecorder
 from lite_agent.core.llm_gateway import LLMGateway
@@ -47,8 +47,8 @@ from lite_agent.core.request_selector import (
     detect_miss,
     strip_miss_mark,
 )
-from lite_agent.core.command_registry import dispatch as _registry_dispatch
-from lite_agent.core.command_registry import _registry
+from lite_agent.services.commands import dispatch as _registry_dispatch
+from lite_agent.services.commands import default_command_registry as _registry
 
 # 仪表盘可见的系统指令
 _registry.register('/new', lambda a,m,args: None,
@@ -1040,7 +1040,7 @@ class Agent:
         return callback
 
     def _push_result(self, msg, result: str):
-        from lite_agent.core.task_result import TaskResult
+        from lite_agent.contracts.result import TaskResult
         task_result = result if isinstance(result, TaskResult) else None
         if task_result:
             result = task_result.content

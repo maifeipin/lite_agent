@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from lite_agent.core.constants import PROJECT_ROOT
-from lite_agent.core.execution import ExecutionContext
+from lite_agent.contracts.execution import ExecutionContext
 
 logger = logging.getLogger(__name__)
 

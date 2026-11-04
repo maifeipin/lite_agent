@@ -9,7 +9,7 @@ from lite_agent.features.billing.workflow import BillingWorkflow, _parse_json_su
 from lite_agent.core.execution_budget import ExecutionBudget, BudgetAdmissionError
 from lite_agent.core.llm_gateway import LLMGateway
 from lite_agent.core.output_delivery import prepare_channel_output
-from lite_agent.core.task_result import TaskResult
+from lite_agent.contracts.result import TaskResult
 from lite_agent.core.loop_detector import LoopDetector
 from lite_agent.core.worker_agent import WorkerAgent, WorkerOutcome
 from lite_agent.core.subtask_dag import Subtask

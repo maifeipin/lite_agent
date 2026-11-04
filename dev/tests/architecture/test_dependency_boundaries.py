@@ -15,8 +15,6 @@ import lite_agent.contracts.message
 import lite_agent.contracts.result
 import lite_agent.contracts.execution
 import lite_agent.agent as agent
-import lite_agent.core.task_result
-import lite_agent.core.execution
 from lite_agent.services.commands import CommandRegistry
 from lite_agent.core.skill_engine import SkillEngine
 from lite_agent.app.plugins import PluginContext, PluginLoader
@@ -209,16 +207,24 @@ def test_controlled_plugin_loader_allowed_and_rejected():
 # ============================================================
 
 def test_contract_types_identity_and_backward_compatibility():
-    """验证 contracts 迁移前后类对象保持恒等 (同一对象，非包装)"""
+    """验证 contracts 类对象全局单一源头，纯转发层移除后直接从 contracts 导出"""
     assert agent.Agent is lite_agent.agent.Agent
     assert agent.IncomingMessage is contracts.IncomingMessage
     assert agent.AgentResponse is contracts.AgentResponse
-    assert lite_agent.core.task_result.TaskResult is contracts.TaskResult
-    assert lite_agent.core.execution.ExecutionContext is contracts.ExecutionContext
-    assert lite_agent.core.execution.ExecutionResult is contracts.ExecutionResult
-    assert lite_agent.core.execution.SkillPolicy is contracts.SkillPolicy
-    assert lite_agent.core.execution.ActorType is contracts.ActorType
-    assert lite_agent.core.execution.ExecutionSource is contracts.ExecutionSource
+    assert contracts.result.TaskResult is contracts.TaskResult
+    assert contracts.execution.ExecutionContext is contracts.ExecutionContext
+    assert contracts.execution.ExecutionResult is contracts.ExecutionResult
+    assert contracts.execution.SkillPolicy is contracts.SkillPolicy
+    assert contracts.execution.ActorType is contracts.ActorType
+    assert contracts.execution.ExecutionSource is contracts.ExecutionSource
+
+    # 负向反例：纯转发垫片删除后，禁止再从 core 导入 execution、task_result、command_registry
+    with pytest.raises(ModuleNotFoundError):
+        __import__("lite_agent.core.execution")
+    with pytest.raises(ModuleNotFoundError):
+        __import__("lite_agent.core.task_result")
+    with pytest.raises(ModuleNotFoundError):
+        __import__("lite_agent.core.command_registry")
 
 
 def test_incoming_message_fields_and_binding():

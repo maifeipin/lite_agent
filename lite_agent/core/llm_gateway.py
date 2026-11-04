@@ -5,7 +5,7 @@ details, and ExecutionLedger owns persistence.  This gateway only connects the
 three so callers cannot accidentally skip usage accounting.
 """
 
-from lite_agent.core.execution import ActorType, ExecutionContext, ExecutionSource
+from lite_agent.contracts.execution import ActorType, ExecutionContext, ExecutionSource
 from lite_agent.core.execution_budget import estimate_input_tokens, BudgetAdmissionError
 from lite_agent.core.model_event import ModelEvent, ModelEventType
 

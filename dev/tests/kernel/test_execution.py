@@ -9,7 +9,7 @@ import json
 import pytest
 from types import MappingProxyType
 
-from lite_agent.core.execution import (
+from lite_agent.contracts.execution import (
     ActorType,
     ExecutionSource,
     ExecutionContext,

@@ -26,7 +26,7 @@ from lite_agent.core.skill_engine import (
     MAX_TOOL_RESULT_LEN,
     _write_audit,
 )
-from lite_agent.core.execution import ExecutionContext, ExecutionResult, ExecutionSource, ActorType, SkillPolicy
+from lite_agent.contracts.execution import ExecutionContext, ExecutionResult, ExecutionSource, ActorType, SkillPolicy
 from lite_agent.core.model_event import ModelEvent, ModelEventType
 from lite_agent.core.utils.masker import mask_secrets
 from lite_agent.core.worker_agent import WorkerAgent
@@ -1884,13 +1884,13 @@ def test_e2e_terminate_on_token_budget():
     """token_budget 超限 → TOKEN_BUDGET_EXCEEDED 事件, 不调用 after_reply。"""
     agent = _make_e2e_agent()
     # 设置很小的 token_budget
-    from lite_agent.core.execution import ExecutionContext, ActorType, ExecutionSource
+    from lite_agent.contracts.execution import ExecutionContext, ActorType, ExecutionSource
     # 通过 patch runtime.run 注入小预算 ctx
     # 更简单: 直接设置 ctx.token_budget
     orig_run = agent.runtime.run
 
     def patched_run(messages, tools, ctx, timeout=60.0, stream=True):
-        from lite_agent.core.execution import ExecutionContext
+        from lite_agent.contracts.execution import ExecutionContext
         new_ctx = ExecutionContext(
             actor_id=ctx.actor_id,
             actor_type=ctx.actor_type,

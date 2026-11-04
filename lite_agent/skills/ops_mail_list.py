@@ -3,7 +3,7 @@
 
 import sys, os
 from lite_agent.core.skill_engine import skill
-from lite_agent.core.command_registry import slash_command
+from lite_agent.services.commands import slash_command
 from lite_agent.features.mail_ops import query_service
 
 

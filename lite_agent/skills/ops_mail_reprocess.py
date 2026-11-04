@@ -2,7 +2,7 @@
 """补跑失败邮件技能 - AI 工具 + /reprocess 直通指令 (薄入口)"""
 
 from lite_agent.core.skill_engine import skill
-from lite_agent.core.command_registry import slash_command
+from lite_agent.services.commands import slash_command
 from lite_agent.features.mail_ops import query_service
 
 

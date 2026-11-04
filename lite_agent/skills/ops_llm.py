@@ -1,7 +1,7 @@
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from lite_agent.core.skill_engine import skill
-from lite_agent.core.command_registry import slash_command
+from lite_agent.services.commands import slash_command
 from lite_agent.features.sys_ops.llm_ops_service import (
     check_deepseek_balance as _check_deepseek_balance,
     llm_check_balance as _llm_check_balance,

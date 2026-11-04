@@ -30,7 +30,7 @@ from lite_agent.core.adaptive_budget import (
     BudgetAction,
     compact_messages,
 )
-from lite_agent.core.execution import ExecutionContext, ExecutionResult, ExecutionSource, ActorType
+from lite_agent.contracts.execution import ExecutionContext, ExecutionResult, ExecutionSource, ActorType
 from lite_agent.core.loop_detector import LoopDetector
 from lite_agent.core.model_event import ModelEvent, ModelEventType
 from lite_agent.core.model_invoker import ModelInvoker
@@ -72,7 +72,7 @@ class RuntimeEvent:
                 f"RuntimeEvent.type 必须是 RuntimeEventType 枚举，"
                 f"收到 {self.type!r}"
             )
-        from lite_agent.core.execution import _deep_freeze
+        from lite_agent.contracts.execution import _deep_freeze
         object.__setattr__(self, 'data', _deep_freeze(self.data))
         if not isinstance(self.meta, MappingProxyType):
             object.__setattr__(self, 'meta', _deep_freeze(self.meta) if isinstance(self.meta, dict) else MappingProxyType({}))

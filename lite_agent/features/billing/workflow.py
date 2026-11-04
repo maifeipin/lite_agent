@@ -7,11 +7,11 @@ import os
 import re
 import subprocess
 from lite_agent.features.billing.snapshot import build_snapshot, model_evidence, render_report
-from lite_agent.core.execution import ExecutionContext, ActorType, ExecutionSource
+from lite_agent.contracts.execution import ExecutionContext, ActorType, ExecutionSource
 from lite_agent.core.execution_budget import ExecutionBudget
 from lite_agent.core.llm_gateway import LLMGateway
 from lite_agent.core.model_policy import ExecutionPolicy, ModelSelector
-from lite_agent.core.task_result import TaskResult
+from lite_agent.contracts.result import TaskResult
 from lite_agent.core.utils.masker import mask_secrets
 
 from lite_agent.integrations.mail.sync_receipt import (

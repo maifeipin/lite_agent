@@ -12,10 +12,10 @@ from lite_agent.core.model_policy import ExecutionPolicy, ModelLock, ModelSelect
 from lite_agent.core.worker_agent import WorkerAgent, WorkerOutcome
 from lite_agent.core.skill_engine import SkillEngine
 from lite_agent.core.subtask_dag import Subtask, SubtaskDAG, SubtaskType, SubtaskStatus
-from lite_agent.core.execution import ExecutionContext, ActorType, ExecutionSource
+from lite_agent.contracts.execution import ExecutionContext, ActorType, ExecutionSource
 from lite_agent.core.execution_ledger import ExecutionLedger
 from lite_agent.core.execution_budget import ExecutionBudget
-from lite_agent.core.task_result import TaskResult
+from lite_agent.contracts.result import TaskResult
 from lite_agent.core.llm_gateway import LLMGateway
 from lite_agent.core.request_selector import RequestSelector
 from lite_agent.core.adaptive_budget import AdaptiveBudgetPolicy

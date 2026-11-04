@@ -1,6 +1,6 @@
 from unittest.mock import Mock,MagicMock,patch
 import pytest
-from lite_agent.core.task_result import TaskResult
+from lite_agent.contracts.result import TaskResult
 from lite_agent.core.output_delivery import prepare_channel_output
 from lite_agent.features.billing.workflow import BillingWorkflow
 

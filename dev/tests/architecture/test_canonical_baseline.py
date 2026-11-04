@@ -1,12 +1,13 @@
 """
-阶段 0 基线测试：契约类型同一性、命令注册表单例与 Agent 分发行为基线
+阶段 0/1 基线测试：契约类型单一源头、命令注册表单例与 Agent 分发行为基线
 (dev/tests/architecture/test_canonical_baseline.py)
 
 锁定：
-1. 契约类型保持对象身份一致 (is 恒成立，禁止新建包装或复制定义)；
-2. 技能装饰器注册与 Agent 分发使用同一个默认注册表 (default_command_registry is _registry)；
+1. 契约类型保持规范 contracts 源头 (禁止新建包装或复制定义)；
+2. 技能装饰器注册与 Agent 分发使用同一个默认注册表 (services.commands.default_command_registry)；
 3. 显式注入的独立 CommandRegistry 与默认全局注册表完全隔离；
-4. 命令元数据（描述、权限、仪表盘展示标记）完整保留。
+4. 命令元数据（描述、权限、仪表盘展示标记）完整保留；
+5. 负向反例：core/ 下已删除的 3 个纯转发模块禁止再被导入。
 """
 
 import pytest
@@ -15,30 +16,33 @@ from types import SimpleNamespace
 import lite_agent.contracts as contracts
 import lite_agent.contracts.execution as contracts_execution
 import lite_agent.contracts.result as contracts_result
-import lite_agent.core.execution as core_execution
-import lite_agent.core.task_result as core_task_result
-import lite_agent.core.command_registry as core_cmd_reg
 import lite_agent.services.commands as services_commands
 from lite_agent.services.commands import CommandRegistry, default_command_registry, slash_command
 from lite_agent.contracts.message import IncomingMessage
 
 
-def test_baseline_contract_types_identity():
-    """基线 1: 契约类型必须全局单一源头，core 兼容导出与 contracts 必须是同一个类对象。"""
-    assert core_execution.ExecutionContext is contracts_execution.ExecutionContext
-    assert core_execution.ExecutionResult is contracts_execution.ExecutionResult
-    assert core_execution.SkillPolicy is contracts_execution.SkillPolicy
-    assert core_execution.ActorType is contracts_execution.ActorType
-    assert core_execution.ExecutionSource is contracts_execution.ExecutionSource
-    assert core_task_result.TaskResult is contracts_result.TaskResult
+def test_baseline_contract_types_canonical_source():
+    """基线 1: 契约类型必须全局单一源头，规范定义位于 contracts。"""
+    assert contracts_execution.ExecutionContext is contracts.ExecutionContext
+    assert contracts_execution.ExecutionResult is contracts.ExecutionResult
+    assert contracts_execution.SkillPolicy is contracts.SkillPolicy
+    assert contracts_execution.ActorType is contracts.ActorType
+    assert contracts_execution.ExecutionSource is contracts.ExecutionSource
+    assert contracts_result.TaskResult is contracts.TaskResult
+
+    # 负向反例：已删除的 3 个纯转发垫片模块禁止导入
+    with pytest.raises(ModuleNotFoundError):
+        __import__("lite_agent.core.execution")
+    with pytest.raises(ModuleNotFoundError):
+        __import__("lite_agent.core.task_result")
+    with pytest.raises(ModuleNotFoundError):
+        __import__("lite_agent.core.command_registry")
 
 
 def test_baseline_command_registry_singleton_identity():
-    """基线 2: 默认注册表单例全局唯一，core._registry 与 services.default_command_registry 必须是同一实例。"""
-    assert core_cmd_reg._registry is default_command_registry
-    assert core_cmd_reg.dispatch is services_commands.dispatch
-    assert core_cmd_reg.slash_command is services_commands.slash_command
-    assert core_cmd_reg.CommandRegistry is CommandRegistry
+    """基线 2: 默认注册表单例全局唯一，services.default_command_registry 为标准源头。"""
+    assert services_commands.default_command_registry is default_command_registry
+    assert services_commands.CommandRegistry is CommandRegistry
 
 
 def test_baseline_slash_command_registration_and_agent_dispatch_consistency():
@@ -71,7 +75,6 @@ def test_baseline_slash_command_registration_and_agent_dispatch_consistency():
         assert any(item["name"] == test_cmd_name for item in dashboard_items)
 
         # 验证 Agent 使用默认注册表时可正常路由分发
-        from lite_agent.agent import Agent
         fake_agent = SimpleNamespace(command_registry=default_command_registry)
         fake_msg = IncomingMessage(
             channel="test",
@@ -83,11 +86,6 @@ def test_baseline_slash_command_registration_and_agent_dispatch_consistency():
         res = services_commands.dispatch(test_cmd_name, fake_agent, fake_msg, ["arg1", "arg2"])
         assert res == "baseline_ok"
         assert called == [(f"{test_cmd_name} arg1 arg2", ["arg1", "arg2"])]
-
-        # 验证 core_cmd_reg.dispatch 与 services_commands.dispatch 行为全等
-        res2 = core_cmd_reg.dispatch(test_cmd_name, fake_agent, fake_msg, ["arg3"])
-        assert res2 == "baseline_ok"
-        assert len(called) == 2
     finally:
         default_command_registry.unregister(test_cmd_name)
         assert default_command_registry.get(test_cmd_name) is None
