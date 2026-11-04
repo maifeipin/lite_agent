@@ -93,9 +93,14 @@ class TestParserIsolation(unittest.TestCase):
 
             # 反例：无 .git 且无 .git_commit_sha 时抛出 RuntimeError 拒绝无法核验的仓库
             (snap_dir / ".git_commit_sha").unlink()
-            with self.assertRaises(RuntimeError) as ctx:
-                verify_parser_fixed_version(snap_dir, expected_sha=PINNED_PARSER_SHA)
-            self.assertIn("无法获取 Parser 仓库 Git SHA", str(ctx.exception))
+            orig_env = os.environ.pop("PARSER_REAL_SHA", None)
+            try:
+                with self.assertRaises(RuntimeError) as ctx:
+                    verify_parser_fixed_version(snap_dir, expected_sha=PINNED_PARSER_SHA)
+                self.assertIn("无法获取 Parser 仓库 Git SHA", str(ctx.exception))
+            finally:
+                if orig_env is not None:
+                    os.environ["PARSER_REAL_SHA"] = orig_env
 
     def test_03_state_restoration_preserves_preexisting_module_objects(self):
         """正例：验证若进入前已有同名模块，退出时恢复原对象；非原有模块则 pop；环境还原进入前快照"""
