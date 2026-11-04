@@ -73,6 +73,30 @@ class TestParserIsolation(unittest.TestCase):
                 )
             self.assertIn("未锁定在已核准基线", str(ctx.exception))
 
+    def test_02b_verify_parser_fixed_version_snapshot_metadata(self):
+        """正反例：脱敏只读快照无 .git 时通过固化元数据 .git_commit_sha 验证 SHA"""
+        with tempfile.TemporaryDirectory() as td:
+            snap_dir = Path(td)
+            (snap_dir / "mail_client.py").write_text("# entry", encoding="utf-8")
+            (snap_dir / ".git_commit_sha").write_text(f"{PINNED_PARSER_SHA}\n", encoding="utf-8")
+
+            # 正例：快照中的固化 SHA 与 PINNED_PARSER_SHA 匹配
+            sha = verify_parser_fixed_version(snap_dir, expected_sha=PINNED_PARSER_SHA)
+            self.assertEqual(sha, PINNED_PARSER_SHA)
+
+            # 反例：快照中的固化 SHA 不匹配
+            with self.assertRaises(AssertionError) as ctx:
+                verify_parser_fixed_version(
+                    snap_dir, expected_sha="deadbeef00000000000000000000000000000000"
+                )
+            self.assertIn("未锁定在已核准基线", str(ctx.exception))
+
+            # 反例：无 .git 且无 .git_commit_sha 时抛出 RuntimeError 拒绝无法核验的仓库
+            (snap_dir / ".git_commit_sha").unlink()
+            with self.assertRaises(RuntimeError) as ctx:
+                verify_parser_fixed_version(snap_dir, expected_sha=PINNED_PARSER_SHA)
+            self.assertIn("无法获取 Parser 仓库 Git SHA", str(ctx.exception))
+
     def test_03_state_restoration_preserves_preexisting_module_objects(self):
         """正例：验证若进入前已有同名模块，退出时恢复原对象；非原有模块则 pop；环境还原进入前快照"""
         with tempfile.TemporaryDirectory() as td:

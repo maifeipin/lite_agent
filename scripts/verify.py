@@ -188,6 +188,23 @@ def create_sanitized_snapshots(agent_root: str, parser_root: str) -> Tuple[str, 
                     validate_safe_path(src, parser_root)
                     shutil.copy2(src, os.path.join(dst_scripts, f))
 
+        # 1b. 固化源外部 Parser 仓库的真实 Git Commit SHA 到快照元数据 (供只读隔离容器核验锁定版本)
+        real_parser_sha = ""
+        try:
+            res = subprocess.run(
+                ["git", "-C", parser_root, "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=5,
+            )
+            real_parser_sha = res.stdout.strip()
+        except Exception:
+            pass
+        if real_parser_sha:
+            with open(os.path.join(parser_snap, ".git_commit_sha"), "w", encoding="utf-8") as f:
+                f.write(f"{real_parser_sha}\n")
+
         # 2. 复制 Agent 源码与脱敏配置 (显式白名单：仅允许确定的 .py、受控静态资源与脱敏 fixture)
         for d in ALLOWED_AGENT_CODE_DIRS:
             src_d = os.path.join(agent_root, d)
@@ -352,10 +369,10 @@ def run_step(name: str, cmd: list, cwd: str, timeout: int = 180) -> Dict[str, An
             print(f"❌ {name} 失败 (退出码 {proc.returncode}, 耗时 {elapsed:.2f}s)")
             if stdout_snippet:
                 print("--- stdout ---")
-                print(stdout_snippet[-1200:])
+                print(stdout_snippet[-5000:])
             if stderr_snippet:
                 print("--- stderr ---")
-                print(stderr_snippet[-1200:])
+                print(stderr_snippet[-3000:])
 
         return {
             "name": name,
@@ -701,6 +718,15 @@ def main(argv=None):
                 ]
                 if need_parser:
                     agent_test_cmd.extend(["-v", f"{parser_snap}:/parser:ro", "-e", "MAIL_STATEMENT_PARSER_DIR=/parser"])
+                    sha_file = os.path.join(parser_snap, ".git_commit_sha")
+                    if os.path.isfile(sha_file):
+                        try:
+                            with open(sha_file, "r", encoding="utf-8") as sf:
+                                snap_sha = sf.read().strip()
+                            if snap_sha:
+                                agent_test_cmd.extend(["-e", f"PARSER_REAL_SHA={snap_sha}"])
+                        except Exception:
+                            pass
                 docker_test_dir = "dev/tests/" if os.path.isdir(os.path.join(agent_snap, "dev/tests")) else "tests/"
                 docker_pytest_ini = "dev/config/pytest.ini" if os.path.isfile(os.path.join(agent_snap, "dev/config/pytest.ini")) else "pytest.ini"
                 docker_no_skips = "dev.tests.support.no_skips" if docker_test_dir == "dev/tests/" else "tests.support.no_skips"
