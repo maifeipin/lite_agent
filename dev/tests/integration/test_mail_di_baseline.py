@@ -471,31 +471,62 @@ def test_canonical_drain_quality_events_todo_path_resolution_priorities(tmp_path
 
 
 def test_canonical_drain_clock_propagation_and_custom_consume_compatibility(tmp_path):
-    """验收 5.2: 默认消费、deadline 与积压探测统一使用传入的 time_fn；无 time_fn 参数的自定义消费回调仍能顺利执行。"""
-    # 1. 验证默认消费与探测使用统一时钟
+    """验收 5.2: 默认消费、deadline 与积压探测统一使用传入的 time_fn；断言事件读取、ACK 和积压探测收到逐步减少的剩余预算；无 time_fn 参数的自定义消费回调仍能顺利执行。"""
+    # 1. 验证非空短批次下统一时钟传递，且事件读取、ACK、积压探测收到逐步减少的剩余预算
+    todo_db = _ensure_todo_schema(str(tmp_path / "todo_clk.db"))
     client = Mock(spec=MailCLI)
-    client.quality_events.return_value = []
+    evt = _make_quality_event("evt_clk_drain", "k_clk_drain", revision=1, cycle_id=1)
+
+    # 第一次调用 quality_events 返回单条事件（短批次，触发出批次探测分支）；第二次返回空列表（无积压）
+    client.quality_events.side_effect = [[evt], []]
+    client.quality_ack.return_value = {"acked": True}
+
     mock_clock = Mock()
-    # 模拟 monotonic 递增: deadline 计算时取 100.0 (deadline=130.0), 后续检查积压探测取 110.0 (budget=20.0)
-    mock_clock.monotonic.side_effect = [100.0, 110.0, 110.0]
+    # 模拟 monotonic 逐步流逝：
+    # 1. drain 初始化计算 deadline: 100.0 -> deadline = 130.0
+    # 2. consume_quality_events 初始 remaining(): 105.0 -> timeout = 25.0
+    # 3. consume 循环头检查超时: 106.0 (< 130.0, 正常写入待办)
+    # 4. ACK 前 remaining(): 110.0 -> timeout = 20.0
+    # 5. drain 批次结束探测积压 budget: 115.0 -> budget = 15.0
+    mock_clock.monotonic.side_effect = [100.0, 105.0, 106.0, 110.0, 115.0]
 
     stats = canonical_sync.drain_quality_events(
         client=client,
-        todo_db_path=str(tmp_path / "todo.db"),
+        todo_db_path=todo_db,
         time_fn=mock_clock
     )
+
     assert stats["complete"] is True
-    assert mock_clock.monotonic.call_count >= 1
+    assert stats["stop_reason"] == "short_batch"
+    assert stats["backlog"] is False
+    assert stats["acked"] == 1
+
+    # 断言 quality_events 第一次拉取 (事件读取) 收到 timeout=25.0
+    first_read_kwargs = client.quality_events.call_args_list[0].kwargs
+    assert first_read_kwargs["timeout"] == 25.0
+
+    # 断言 quality_ack 收到 timeout=20.0
+    ack_kwargs = client.quality_ack.call_args.kwargs
+    assert ack_kwargs["timeout"] == 20.0
+
+    # 断言 quality_events 第二次探测 (末尾积压检查) 收到 timeout=15.0
+    second_probe_kwargs = client.quality_events.call_args_list[1].kwargs
+    assert second_probe_kwargs["timeout"] == 15.0
+
+    # 验证逐步递减的预算时序: 25.0 > 20.0 > 15.0
+    assert first_read_kwargs["timeout"] > ack_kwargs["timeout"] > second_probe_kwargs["timeout"]
 
     # 2. 验证无 time_fn 参数的自定义回调不会因注入 time_fn 抛出 TypeError
     def no_time_fn_consume(client=None, db_path=None, limit=100, stop_on_error=False, deadline=None):
         return {"total": 0, "errors": [], "complete": True}
 
+    mock_clock_custom = Mock()
+    mock_clock_custom.monotonic.return_value = 100.0
     stats_custom = canonical_sync.drain_quality_events(
         client=client,
-        todo_db_path=str(tmp_path / "todo.db"),
+        todo_db_path=str(tmp_path / "todo_custom.db"),
         consume_fn=no_time_fn_consume,
-        time_fn=mock_clock
+        time_fn=mock_clock_custom
     )
     assert stats_custom["complete"] is True
 

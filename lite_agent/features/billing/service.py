@@ -114,7 +114,7 @@ def get_snapshot(months: int = 1, detail_limit: int = 20) -> str:
 
 def fetch_and_consume(months: int = 1, account: str = '', cfg: Optional[Dict[str, Any]] = None) -> str:
     """拉取最新账单并入库，单次遍历流水线：下载归档 + 解析入库，并消费质量事件"""
-    from lite_agent.integrations.mail.sync_service import sync_and_consume
+    from lite_agent.features.billing.sync_service import sync_and_consume
     env = get_billing_env(cfg)
     res = sync_and_consume(
         script_dir=env["script_dir"],

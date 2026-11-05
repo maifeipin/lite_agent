@@ -8,18 +8,18 @@ from unittest.mock import Mock, patch
 import pytest
 
 from lite_agent.integrations.mail.client import MailCLI, MailCLIError
-from lite_agent.integrations.mail.sync_service import sync_and_consume, drain_quality_events
+from lite_agent.features.billing.sync_service import sync_and_consume, drain_quality_events
 from lite_agent.integrations.mail.sync_receipt import evaluate_sync_receipt
 from lite_agent.features.billing.workflow import BillingWorkflow
-from lite_agent.skills import ops_billing, ops_todo
+from lite_agent.skills import ops_billing
 from dev.tests.integration.test_mail_quality import parser_repo
 
 
 @pytest.fixture(autouse=True)
 def isolate_stores(tmp_path, monkeypatch):
-    monkeypatch.setattr(ops_todo, 'DB_PATH', str(tmp_path/'default-todos.db'))
-    monkeypatch.setattr(ops_todo, 'MD_PATH', str(tmp_path/'personal.md'))
-    monkeypatch.setattr('lite_agent.integrations.mail.sync_service.config_loader.load_config', lambda: {})
+    default_todo = str(tmp_path/'default-todos.db')
+    monkeypatch.setattr('lite_agent.features.billing.sync_service.config_loader.load_config',
+                        lambda: {'billing': {'todo_db_path': default_todo, 'repayment_todo': {'enabled': False}}})
 
 
 def receipt(account='box', **kwargs):
@@ -40,7 +40,7 @@ def test_runner_type_error_does_not_refetch_or_drop_database_env(tmp_path):
 
 
 def test_workflow_uses_own_default_database_not_unrelated_global_config(tmp_path,monkeypatch):
-    monkeypatch.setattr('lite_agent.integrations.mail.sync_service.config_loader.load_config',lambda:{'billing':{'statement_db_path':'/unrelated.db'}})
+    monkeypatch.setattr('lite_agent.features.billing.sync_service.config_loader.load_config',lambda:{'billing':{'statement_db_path':'/unrelated.db'}})
     runner=Mock(return_value=response())
     with patch('lite_agent.integrations.mail.client.run_process',runner), patch.object(MailCLI,'quality_events',return_value=[]):
         _,errors=BillingWorkflow({},Mock()).fetch(str(tmp_path),1)
@@ -53,7 +53,7 @@ def test_skill_forwards_configured_store_paths_and_real_parser_counter(tmp_path,
     monkeypatch.setattr(ops_billing,'_cfg',config)
     result={'summary':{'accounts':[{'account':'box','status':'ok','new_bills':7}]},'fetch_errors':[],
             'quality_stats':{'total':0,'errors':[]}}
-    with patch('lite_agent.integrations.mail.sync_service.sync_and_consume',return_value=result) as sync:
+    with patch('lite_agent.features.billing.sync_service.sync_and_consume',return_value=result) as sync:
         output=ops_billing.billing_fetch()
     assert sync.call_args.kwargs['todo_db_path']==config['billing']['todo_db_path']
     assert sync.call_args.kwargs['statement_db_path']==config['billing']['statement_db_path']
@@ -62,11 +62,11 @@ def test_skill_forwards_configured_store_paths_and_real_parser_counter(tmp_path,
 
 def test_default_todo_config_and_unexpected_fetch_failure_still_drains(tmp_path,monkeypatch):
     wanted=str(tmp_path/'chosen-todo.db')
-    monkeypatch.setattr('lite_agent.integrations.mail.sync_service.config_loader.load_config',lambda:{'billing':{'todo_db_path':wanted}})
+    monkeypatch.setattr('lite_agent.features.billing.sync_service.config_loader.load_config',lambda:{'billing':{'todo_db_path':wanted, 'repayment_todo': {'enabled': False}}})
     client=Mock()
     client.sync_fetch.side_effect=RuntimeError('password: hidden-value')
     client.quality_events.return_value=[]
-    with patch('lite_agent.integrations.mail.sync_service.consume_quality_events',return_value={'total':0}) as consume:
+    with patch('lite_agent.features.billing.sync_service.consume_quality_events',return_value={'total':0}) as consume:
         result=sync_and_consume(client=client)
     assert client.sync_fetch.call_count==1
     assert consume.call_args.kwargs['db_path']==wanted
@@ -84,7 +84,7 @@ def test_failed_quality_read_never_reports_empty_queue(tmp_path):
     assert result['quality_stats']['stop_reason']=='error'
     assert result['quality_stats']['backlog'] is None
     assert 'hidden-value' not in json.dumps(result)
-    with patch('lite_agent.integrations.mail.sync_service.sync_and_consume',return_value=result):
+    with patch('lite_agent.features.billing.sync_service.sync_and_consume',return_value=result):
         output=ops_billing.billing_fetch()
     assert '无法判断' in output and '无待处理解析异常' not in output
 
@@ -92,7 +92,7 @@ def test_failed_quality_read_never_reports_empty_queue(tmp_path):
 def test_backlog_probe_failure_is_not_complete(tmp_path):
     client=Mock()
     client.quality_events.side_effect=MailCLIError('probe failed')
-    with patch('lite_agent.integrations.mail.sync_service.consume_quality_events',return_value={'total':1,'acked':1}):
+    with patch('lite_agent.features.billing.sync_service.consume_quality_events',return_value={'total':1,'acked':1}):
         stats=drain_quality_events(client,event_limit=1,max_batches=1)
     assert stats['failed']==1 and not stats['complete']
     assert stats['backlog'] is None and stats['stop_reason']=='probe_failed'
@@ -101,7 +101,7 @@ def test_backlog_probe_failure_is_not_complete(tmp_path):
 
 def test_short_batch_does_not_hide_a_newly_arrived_event(tmp_path):
     client=Mock();client.quality_events.return_value=[{'event_id':'new-arrival'}]
-    with patch('lite_agent.integrations.mail.sync_service.consume_quality_events',return_value={'total':1,'acked':1}):
+    with patch('lite_agent.features.billing.sync_service.consume_quality_events',return_value={'total':1,'acked':1}):
         stats=drain_quality_events(client,event_limit=100)
     assert stats['batches']==1 and not stats['complete']
     assert stats['backlog'] and not stats['backlog_hit']
@@ -109,7 +109,7 @@ def test_short_batch_does_not_hide_a_newly_arrived_event(tmp_path):
 
 def test_no_progress_is_incomplete_even_without_write_failure():
     client=Mock()
-    with patch('lite_agent.integrations.mail.sync_service.consume_quality_events',return_value={'total':1,'skipped':1}):
+    with patch('lite_agent.features.billing.sync_service.consume_quality_events',return_value={'total':1,'skipped':1}):
         stats=drain_quality_events(client)
     assert stats['stop_reason']=='no_progress' and not stats['complete']
     assert stats['errors'] and stats['backlog']
@@ -125,7 +125,7 @@ def test_invalid_budgets_fail_before_fetch(kwargs):
 
 def test_caller_cannot_exceed_cost_ceiling():
     client=Mock();client.quality_events.return_value=[{'event_id':'remaining'}]
-    with patch('lite_agent.integrations.mail.sync_service.consume_quality_events',return_value={'total':100,'acked':100}) as consume:
+    with patch('lite_agent.features.billing.sync_service.consume_quality_events',return_value={'total':100,'acked':100}) as consume:
         stats=drain_quality_events(client,event_limit=10000,max_batches=10000)
     assert consume.call_count==3 and stats['total']==300
     assert all(call.kwargs['limit']==100 for call in consume.call_args_list)
@@ -175,7 +175,7 @@ def quality_event(key):
 
 def test_first_write_failure_stops_inside_batch(tmp_path):
     client=Mock();client.quality_events.return_value=[quality_event('one'),quality_event('two')]
-    with patch('lite_agent.integrations.mail.quality_todo.upsert_source_todo',side_effect=OSError('write failed')) as write:
+    with patch('lite_agent.features.billing.quality_todo.upsert_source_todo',side_effect=OSError('write failed')) as write:
         stats=drain_quality_events(client,str(tmp_path/'todos.db'))
     assert write.call_count==1 and stats['failed']==1
     client.quality_ack.assert_not_called()
@@ -185,7 +185,7 @@ def test_first_write_failure_stops_inside_batch(tmp_path):
 def test_first_ack_rejection_stops_inside_batch(tmp_path):
     client=Mock();client.quality_events.return_value=[quality_event('one'),quality_event('two')]
     client.quality_ack.return_value={'acked':False,'reason':'revision conflict'}
-    with patch('lite_agent.integrations.mail.quality_todo.upsert_source_todo',return_value={'id':'todo','status':'created'}) as write:
+    with patch('lite_agent.features.billing.quality_todo.upsert_source_todo',return_value={'id':'todo','status':'created'}) as write:
         stats=drain_quality_events(client,str(tmp_path/'todos.db'))
     assert write.call_count==1 and client.quality_ack.call_count==1
     assert stats['failed_acks']==1 and not stats['complete']
@@ -193,9 +193,10 @@ def test_first_ack_rejection_stops_inside_batch(tmp_path):
 
 def test_budget_expiry_after_todo_write_keeps_event_unacked(tmp_path):
     client=Mock();client.quality_events.return_value=[quality_event('one'),quality_event('two')]
-    with patch('lite_agent.integrations.mail.quality_todo.time.monotonic',side_effect=[0,0,0,31]), patch(
-            'lite_agent.integrations.mail.quality_todo.upsert_source_todo',return_value={'id':'todo','status':'created'}) as write:
-        stats=drain_quality_events(client,str(tmp_path/'todos.db'))
+    mock_time = Mock()
+    mock_time.monotonic.side_effect = [0, 0, 0, 31]
+    with patch('lite_agent.features.billing.quality_todo.upsert_source_todo',return_value={'id':'todo','status':'created'}) as write:
+        stats=drain_quality_events(client,str(tmp_path/'todos.db'),time_fn=mock_time)
     assert write.call_count==1 and stats['failed_acks']==1
     client.quality_ack.assert_not_called()
     assert '预算耗尽' in stats['errors'][0]

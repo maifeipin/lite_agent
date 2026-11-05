@@ -315,7 +315,7 @@ def test_source_diagnostics_use_sanitized_fixtures_through_real_entry(mail_store
 
 def test_drift_creates_todo_through_real_cli_and_delivery_is_idempotent(mail_store,parser_repo,tmp_path):
     from lite_agent.integrations.mail.client import MailCLI
-    from lite_agent.integrations.mail.quality_todo import consume_quality_events
+    from lite_agent.features.billing.quality_todo import consume_quality_events
     indices=[i for i in range(len(HEADER)-1) if i!=1]
     parse_case(mail_store,[HEADER[i] for i in indices],[[r[i] for i in indices] for r in ROWS])
     db,_,_,_,_=mail_store
@@ -340,7 +340,7 @@ def test_semantic_reordering_is_not_drift_and_numeric_zero_is_valid(mail_store):
 def test_real_reparse_resolves_only_verified_field_and_closes_its_todo(mail_store,parser_repo,tmp_path):
     import copy
     from lite_agent.integrations.mail.client import MailCLI
-    from lite_agent.integrations.mail.quality_todo import consume_quality_events
+    from lite_agent.features.billing.quality_todo import consume_quality_events
     db,_,_,parser,_=mail_store
     root,_,_=parser_repo
     rules=copy.deepcopy(parser.load_rule_files())

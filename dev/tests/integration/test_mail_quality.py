@@ -10,7 +10,7 @@ import pytest
 
 from dev.tests.support.parser_isolation import isolated_parser_context
 from lite_agent.integrations.mail.client import MailCLI, MailCLIError
-from lite_agent.integrations.mail.quality_todo import consume_quality_events
+from lite_agent.features.billing.quality_todo import consume_quality_events
 from lite_agent.skills import ops_todo as todo
 
 
@@ -103,7 +103,7 @@ def test_failed_todo_write_never_acknowledges_event(tmp_path,monkeypatch):
     client=Mock()
     client.quality_events.return_value=[{'event_id':'e','case_key':'k','event_type':'quality_detected',
         'revision':1,'cycle_id':1,'diagnostics':[]}]
-    monkeypatch.setattr('lite_agent.integrations.mail.quality_todo.upsert_source_todo',Mock(side_effect=OSError('disk full')))
+    monkeypatch.setattr('lite_agent.features.billing.quality_todo.upsert_source_todo',Mock(side_effect=OSError('disk full')))
     stats=consume_quality_events(client,str(tmp_path/'todo.db'))
     assert stats['failed']==1 and stats['acked']==0
     client.quality_ack.assert_not_called()
@@ -243,7 +243,7 @@ def test_real_cli_concurrent_consumers_share_one_todo(tmp_path,parser_repo):
         diagnostics=[models.Diagnostic(code='CURRENCY_UNKNOWN',reason='unknown')]))
     code='''import sys,json
 from lite_agent.integrations.mail.client import MailCLI
-from lite_agent.integrations.mail.quality_todo import consume_quality_events
+from lite_agent.features.billing.quality_todo import consume_quality_events
 print(json.dumps(consume_quality_events(MailCLI(sys.argv[1],db_path=sys.argv[2]),sys.argv[3])))'''
     env={**os.environ,'PYTHONDONTWRITEBYTECODE':'1'}
     processes=[subprocess.Popen([sys.executable,'-c',code,str(root),db,todos],cwd=Path(__file__).parents[3],
