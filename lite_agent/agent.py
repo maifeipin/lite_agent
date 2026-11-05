@@ -39,7 +39,6 @@ _NON_RETRYABLE_EXCEPTIONS = (
     openai.UnprocessableEntityError,
     openai.RateLimitError,
 )
-from lite_agent.core.cron_engine import CronManager
 from lite_agent.core.skill_engine import SkillEngine
 from lite_agent.core.request_selector import (
     MissMarkStreamFilter,
@@ -176,7 +175,8 @@ class Agent:
         from lite_agent.services.cron import default_cron_service
         self.command_registry = command_registry or default_command_registry
         self.workflow_registry = workflow_registry or default_workflow_registry
-        self.cron = cron or default_cron_service
+        # 显式注入始终优先 (含布尔值为假的合法替身); 仅 None 时兜底默认实例
+        self.cron = default_cron_service if cron is None else cron
 
         # 技能引擎
         self.skill_engine = skill_engine if skill_engine is not None else SkillEngine()
@@ -318,9 +318,6 @@ class Agent:
         reg.register('/memory_persona', _cmd_memory_persona,
                      category='记忆管理', description='查看/管理个人画像',
                      show_in_dashboard=False, guest_ok=False)
-
-        # 定时任务引擎
-        self.cron = CronManager()
 
         # 系统提示词
         self.system_prompt = self._build_system_prompt()
