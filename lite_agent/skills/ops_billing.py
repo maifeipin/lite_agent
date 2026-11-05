@@ -5,11 +5,9 @@ from lite_agent.features.billing import service as billing_service
 from lite_agent.features.billing.snapshot import build_snapshot, render_report
 
 from lite_agent.core.config_loader import load_config
-from lite_agent.core.cron_engine import CronManager
 
 # 向后兼容常量、配置与函数代理
 _cfg = load_config() or {}
-_mgr = CronManager()
 BILLING_SCRIPT_DIR = billing_service.get_billing_env()["script_dir"]
 MAIL_CLIENT_PY = billing_service.get_billing_env()["mail_client_py"]
 _run_billing_cmd = billing_service.run_billing_cmd

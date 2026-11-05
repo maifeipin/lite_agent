@@ -156,10 +156,15 @@ def test_masking_preserves_json_shape_and_masks_public_summary():
 def test_cron_calls_same_billing_fetch_once_and_registers_no_extra_fetch_job(monkeypatch):
     fetch=Mock(return_value='completed')
     monkeypatch.setattr(ops_billing,'billing_fetch',fetch)
-    before=len(ops_billing._mgr.jobs)
-    assert ops_billing._billing_fetch_cron() is None
-    fetch.assert_called_once_with(months=1)
-    assert len(ops_billing._mgr.jobs)==before
+    from lite_agent.app.bootstrap import create_app
+    app=create_app(mode='core',config={})
+    try:
+        before=len(app.cron_service.jobs)
+        assert ops_billing._billing_fetch_cron() is None
+        fetch.assert_called_once_with(months=1)
+        assert len(app.cron_service.jobs)==before
+    finally:
+        app.shutdown()
 
 
 def test_injected_client_cannot_ack_a_different_explicit_database(tmp_path):

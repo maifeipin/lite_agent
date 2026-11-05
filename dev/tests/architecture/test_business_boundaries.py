@@ -3,7 +3,7 @@ E2 架构边界与反例测试集 (test_e2_architecture_boundaries.py)
 
 验证内容：
 1. 隔离导入零副作用：单独导入 features.todo.service / features.billing.quality_todo 零文件、零数据库连接、零 cron 副作用。
-2. 调度接线唯一装配与幂等：register_todo_cron 注册一次，多次调用不翻倍。
+2. 调度接线唯一装配与幂等：Todo 插件任务注册到宿主调度器，重复加载不翻倍。
 3. Todo 事务与生命周期边界：
    - dropped 状态保护（不可被 source 事件复活）；
    - revision 单调递增保护（过期 revision 不覆盖，不复活 done）；
@@ -19,15 +19,12 @@ import sys
 import sqlite3
 import subprocess
 import pytest
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from dev.tests.support.repo_paths import REPO_ROOT
 from lite_agent.features.todo.repository import TodoRepository
 from lite_agent.features.todo.service import TodoService
 from lite_agent.features.todo.rendering import render_markdown
-from lite_agent.skills.ops_todo import register_todo_cron
-from lite_agent.core.cron_engine import CronManager
 from lite_agent.integrations.mail.client import MailCLI, MailCLIError
 
 
@@ -53,29 +50,24 @@ print("OK")
     assert "OK" in res.stdout
 
 
-def test_register_todo_cron_idempotency():
-    """验证 register_todo_cron 幂等性：多次注册不翻倍。"""
-    class DummyCronManager:
-        def __init__(self):
-            self.jobs = {}
+def test_todo_cron_registration_on_host_is_idempotent():
+    """Todo 插件任务注册到宿主实际调度器, 重复加载不翻倍 (唯一装配入口: features.todo.register)。"""
+    from lite_agent.app.bootstrap import create_app
 
-        def add_job(self, name, cron_expr, func):
-            self.jobs[len(self.jobs)] = SimpleNamespace(name=name, cron_expr=cron_expr, func=func)
+    app = create_app(mode="full", config={})
+    try:
+        app.plugin_loader.load_plugin_by_entry('lite_agent.features.todo', 'todo')
+        jobs = [j.name for j in app.cron_service.jobs.values()]
+        assert jobs.count('todo_tick') == 1
+        assert jobs.count('todo_brief') == 1
 
-    mgr = DummyCronManager()
-    assert not any(j.name == 'todo_tick' for j in mgr.jobs.values())
-    assert not any(j.name == 'todo_brief' for j in mgr.jobs.values())
-
-    # 首次注册
-    register_todo_cron(mgr)
-    assert sum(1 for j in mgr.jobs.values() if j.name == 'todo_tick') == 1
-    assert sum(1 for j in mgr.jobs.values() if j.name == 'todo_brief') == 1
-
-    # 重复注册
-    register_todo_cron(mgr)
-    register_todo_cron(mgr)
-    assert sum(1 for j in mgr.jobs.values() if j.name == 'todo_tick') == 1
-    assert sum(1 for j in mgr.jobs.values() if j.name == 'todo_brief') == 1
+        # 重复加载: 插件加载器缓存命中, 不重复注册
+        app.plugin_loader.load_plugin_by_entry('lite_agent.features.todo', 'todo')
+        jobs = [j.name for j in app.cron_service.jobs.values()]
+        assert jobs.count('todo_tick') == 1
+        assert jobs.count('todo_brief') == 1
+    finally:
+        app.shutdown()
 
 
 def test_todo_source_dropped_protection(tmp_path):

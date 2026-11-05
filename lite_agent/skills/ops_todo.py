@@ -10,7 +10,6 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from lite_agent.core.skill_engine import skill
-from lite_agent.core.cron_engine import CronManager
 from lite_agent.features.todo.repository import (
     DEFAULT_DB_PATH,
     _ensure_schema as _repo_ensure_schema,
@@ -282,14 +281,5 @@ def todo_push_brief(db_path: Optional[str] = None) -> str:
     return get_service(db_path).push_brief()
 
 
-def _todo_tick():
-    return get_service().tick()
-
-
-def register_todo_cron(mgr: Optional[CronManager] = None) -> None:
-    """Idempotent cron registration entry point."""
-    cron = mgr or CronManager()
-    if not any(j.name == 'todo_tick' for j in cron.jobs.values()):
-        cron.add_job('todo_tick', 'every_minute', _todo_tick)
-    if not any(j.name == 'todo_brief' for j in cron.jobs.values()):
-        cron.add_job('todo_brief', '08:30', todo_push_brief)
+def _todo_tick(db_path: Optional[str] = None):
+    return get_service(db_path).tick()

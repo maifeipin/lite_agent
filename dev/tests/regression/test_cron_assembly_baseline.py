@@ -272,16 +272,12 @@ class TestPluginJobManifest:
 
 
 # ===========================================================================
-# 已确认缺陷: _todo_tick(db_path=...) 参数不匹配 (生产路径 TypeError)
-# features/todo/__init__.py:101 传 db_path, ops_todo._todo_tick 无参数
+# Todo tick db_path 契约 (提交3 修复): _todo_tick 接受 db_path 并绑定实例库
+# features/todo/__init__.py 按配置注入 db_path
 # ===========================================================================
 class TestTodoTickDbPathContract:
     def test_todo_tick_accepts_db_path_when_configured(self):
-        """Todo 插件配置独立数据库时, _todo_tick 必须接受 db_path 参数。
-
-        当前签名 _todo_tick() 不接受参数, 插件 lambda 调用会 TypeError。
-        本用例在修复 (提交3) 前应为红。
-        """
+        """Todo 插件配置独立数据库时, _todo_tick 必须接受 db_path 参数。"""
         import inspect
         from lite_agent.skills import ops_todo
         sig = inspect.signature(ops_todo._todo_tick)
@@ -289,3 +285,19 @@ class TestTodoTickDbPathContract:
             "_todo_tick() 不接受 db_path, 但 features/todo 插件会传入; "
             "需修正签名以接受数据库路径参数"
         )
+
+    def test_host_todo_tick_binds_configured_db_path(self):
+        """宿主调度器上的 todo_tick 任务执行时必须使用配置的实例数据库。"""
+        from unittest.mock import patch
+        configured = "/tmp/stage3-commit3-todo.db"
+        app = create_app(mode="full", config={"todo": {"db_path": configured}})
+        try:
+            app.plugin_loader.load_plugin_by_entry("lite_agent.features.todo", "todo")
+            jobs = {j.name: j for j in app.cron_service.jobs.values()}
+            tick_job = jobs["todo_tick"]
+            from lite_agent.skills import ops_todo
+            with patch.object(ops_todo, "get_service") as gs:
+                tick_job.func()
+                gs.assert_called_once_with(configured)
+        finally:
+            app.shutdown()
