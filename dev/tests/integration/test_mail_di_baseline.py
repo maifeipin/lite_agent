@@ -429,3 +429,162 @@ def test_baseline_budget_expiry_keeps_event_unacked(tmp_path, consume_fn):
     assert stats["acked"] == 0
     assert any("预算耗尽" in err for err in stats["errors"])
     client.quality_ack.assert_not_called()
+
+
+# ==============================================================================
+# 5. 阶段 2 提交 2 专项验收：路径优先级、时钟统一传递、写入后超时与 is None 注入
+# ==============================================================================
+
+def test_canonical_drain_quality_events_todo_path_resolution_priorities(tmp_path, monkeypatch):
+    """验收 5.1: 正式 drain_quality_events 覆盖 显式路径 > billing 配置 > Repository 默认路径，且不读取 ops_todo。"""
+    cfg_todo = str(tmp_path / "cfg_drain.db")
+    explicit_todo = str(tmp_path / "explicit_drain.db")
+    monkeypatch.setattr(
+        "lite_agent.core.config_loader.load_config",
+        lambda: {"billing": {"todo_db_path": cfg_todo}}
+    )
+
+    client = Mock(spec=MailCLI)
+    captured = []
+
+    def mock_consume(client=None, db_path=None, limit=100, stop_on_error=False, deadline=None, **kwargs):
+        captured.append(db_path)
+        return {"total": 0, "errors": [], "complete": True}
+
+    # 1. 显式路径优先，且不被覆盖
+    canonical_sync.drain_quality_events(client=client, todo_db_path=explicit_todo, consume_fn=mock_consume)
+    assert captured[-1] == explicit_todo
+
+    # 2. 缺省显式路径时使用 billing 配置
+    canonical_sync.drain_quality_events(client=client, todo_db_path=None, consume_fn=mock_consume)
+    assert captured[-1] == cfg_todo
+
+    # 3. billing 配置也为空时，兜底 DEFAULT_DB_PATH
+    monkeypatch.setattr("lite_agent.core.config_loader.load_config", lambda: {})
+    canonical_sync.drain_quality_events(client=client, todo_db_path=None, consume_fn=mock_consume)
+    assert captured[-1] == DEFAULT_DB_PATH
+
+    # 4. 验证 features/billing/sync_service 源码中绝不包含 ops_todo 导入
+    import inspect
+    src = inspect.getsource(canonical_sync)
+    assert "ops_todo" not in src
+
+
+def test_canonical_drain_clock_propagation_and_custom_consume_compatibility(tmp_path):
+    """验收 5.2: 默认消费、deadline 与积压探测统一使用传入的 time_fn；无 time_fn 参数的自定义消费回调仍能顺利执行。"""
+    # 1. 验证默认消费与探测使用统一时钟
+    client = Mock(spec=MailCLI)
+    client.quality_events.return_value = []
+    mock_clock = Mock()
+    # 模拟 monotonic 递增: deadline 计算时取 100.0 (deadline=130.0), 后续检查积压探测取 110.0 (budget=20.0)
+    mock_clock.monotonic.side_effect = [100.0, 110.0, 110.0]
+
+    stats = canonical_sync.drain_quality_events(
+        client=client,
+        todo_db_path=str(tmp_path / "todo.db"),
+        time_fn=mock_clock
+    )
+    assert stats["complete"] is True
+    assert mock_clock.monotonic.call_count >= 1
+
+    # 2. 验证无 time_fn 参数的自定义回调不会因注入 time_fn 抛出 TypeError
+    def no_time_fn_consume(client=None, db_path=None, limit=100, stop_on_error=False, deadline=None):
+        return {"total": 0, "errors": [], "complete": True}
+
+    stats_custom = canonical_sync.drain_quality_events(
+        client=client,
+        todo_db_path=str(tmp_path / "todo.db"),
+        consume_fn=no_time_fn_consume,
+        time_fn=mock_clock
+    )
+    assert stats_custom["complete"] is True
+
+
+def test_canonical_timeout_after_todo_write_keeps_event_unacked(tmp_path):
+    """验收 5.3: 待办写入已入库成功，但在执行 ACK 前单调时钟到达 deadline，严禁执行 ACK，事件保留未确认。"""
+    todo_db = _ensure_todo_schema(str(tmp_path / "todos.db"))
+    client = Mock(spec=MailCLI)
+    evt = _make_quality_event("evt_post_write_to", "k_post_write_to", revision=1, cycle_id=1)
+    client.quality_events.return_value = [evt]
+
+    # 控制单调时钟：
+    # 1. remaining() 获取初始剩余时间拉取事件 -> 0.0 (deadline=10.0, 预算充足)
+    # 2. 循环头检查超时 -> 0.0 (预算充足，继续执行 Todo 写入)
+    # 3. Todo 写入成功后，准备执行 ACK 时调用 remaining() -> 11.0 (超过 deadline=10.0，预算耗尽抛出 TimeoutError)
+    # 4. 下一次循环或结束检查 -> 12.0
+    mock_time = Mock()
+    mock_time.monotonic.side_effect = [0.0, 0.0, 11.0, 12.0]
+
+    stats = canonical_quality.consume_quality_events(
+        client=client,
+        db_path=todo_db,
+        deadline=10.0,
+        time_fn=mock_time
+    )
+
+    # 验证待办已被写入
+    assert stats["created"] == 1
+    # 验证 ACK 失败且质量 ACK 绝未被调用
+    assert stats["failed_acks"] == 1
+    assert stats["acked"] == 0
+    client.quality_ack.assert_not_called()
+    assert any("预算耗尽" in err for err in stats["errors"])
+
+    # 查库验证待办真实存在
+    with sqlite3.connect(todo_db) as conn:
+        row = conn.execute("SELECT id, status FROM todos WHERE source_key='mail_quality:k_post_write_to'").fetchone()
+        assert row is not None
+        assert row[1] == "pending"
+
+
+class FalsyCallable:
+    """布尔值为 False 的可调用对象，用于检验 is None 注入契约，防止因布尔假被错误替换为默认实现。"""
+    def __init__(self, return_val=None):
+        self.called = False
+        self.call_args = None
+        self.return_val = return_val
+
+    def __bool__(self):
+        return False
+
+    def __call__(self, *args, **kwargs):
+        self.called = True
+        self.call_args = (args, kwargs)
+        if self.return_val is not None:
+            return self.return_val
+        return {"id": "falsy_todo_id", "status": "created", "created": True}
+
+
+def test_canonical_di_accepts_falsy_callable(tmp_path):
+    """验收 5.4: 验证布尔值为 False 的合法可调用对象仍被优先使用，绝不回退到默认实现。"""
+    falsy_upsert = FalsyCallable()
+    assert not bool(falsy_upsert)  # 确认其布尔值为 False
+
+    client = Mock(spec=MailCLI)
+    client.quality_events.return_value = [
+        _make_quality_event("evt_falsy", "k_falsy", revision=1, cycle_id=1)
+    ]
+    client.quality_ack.return_value = {"acked": True}
+
+    stats = canonical_quality.consume_quality_events(
+        client=client,
+        db_path=str(tmp_path / "todos.db"),
+        upsert_fn=falsy_upsert
+    )
+
+    assert falsy_upsert.called is True
+    assert stats["created"] == 1
+    assert stats["acked"] == 1
+    # ACK 时携带的 todo_id 来自 falsy_upsert 返回的 "falsy_todo_id"
+    assert client.quality_ack.call_args.kwargs["todo_id"] == "falsy_todo_id"
+
+    # 同样测试 falsy consume_fn 与 falsy drain_fn
+    falsy_consume = FalsyCallable(return_val={"total": 0, "errors": [], "complete": True})
+    stats_drain = canonical_sync.drain_quality_events(
+        client=client,
+        todo_db_path=str(tmp_path / "todos.db"),
+        consume_fn=falsy_consume
+    )
+    assert falsy_consume.called is True
+    assert stats_drain["complete"] is True
+
