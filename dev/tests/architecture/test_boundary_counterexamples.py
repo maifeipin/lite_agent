@@ -50,6 +50,24 @@ def test_lite_agent_negative_counterexamples(path, source):
     assert visitor.findings, (path, source)
 
 
+@pytest.mark.parametrize('path,source,expected_rule,expected_target', [
+    ('lite_agent/features/example.py', 'import lite_agent.integrations.mail.quality_todo', 'RULE_NO_LEGACY_MAIL_COMPAT_IMPORT', 'lite_agent.integrations.mail.quality_todo'),
+    ('lite_agent/features/example.py', 'import lite_agent.integrations.mail.sync_service', 'RULE_NO_LEGACY_MAIL_COMPAT_IMPORT', 'lite_agent.integrations.mail.sync_service'),
+    ('lite_agent/features/example.py', 'from lite_agent.integrations.mail import quality_todo', 'RULE_NO_LEGACY_MAIL_COMPAT_IMPORT', 'lite_agent.integrations.mail.quality_todo'),
+    ('lite_agent/features/example.py', 'from lite_agent.integrations.mail import sync_service', 'RULE_NO_LEGACY_MAIL_COMPAT_IMPORT', 'lite_agent.integrations.mail.sync_service'),
+    ('lite_agent/features/example.py', 'from lite_agent.integrations.mail.quality_todo import consume_quality_events', 'RULE_NO_LEGACY_MAIL_COMPAT_IMPORT', 'lite_agent.integrations.mail.quality_todo'),
+    ('lite_agent/features/example.py', 'from lite_agent.integrations.mail.sync_service import sync_and_consume', 'RULE_NO_LEGACY_MAIL_COMPAT_IMPORT', 'lite_agent.integrations.mail.sync_service'),
+    ('lite_agent/features/example.py', 'import importlib; importlib.import_module("lite_agent.integrations.mail.quality_todo")', 'RULE_NO_LEGACY_MAIL_COMPAT_IMPORT', 'lite_agent.integrations.mail.quality_todo'),
+    ('lite_agent/features/example.py', 'import importlib; importlib.import_module("lite_agent.integrations.mail.sync_service")', 'RULE_NO_LEGACY_MAIL_COMPAT_IMPORT', 'lite_agent.integrations.mail.sync_service'),
+])
+def test_legacy_mail_compat_import_bypasses_rejected(path, source, expected_rule, expected_target):
+    """验证导入已废弃拆除的邮件兼容垫片（直接import、from父包、from子模块、动态导入）均被架构检查硬拦截。"""
+    visitor = ArchitectureVisitor(path)
+    visitor.visit(ast.parse(source))
+    matching = [f for f in visitor.findings if f['rule'] == expected_rule and f['target'] == expected_target]
+    assert matching, f"Expected finding {expected_rule} for {expected_target} in {source}"
+
+
 @pytest.mark.parametrize('entries', [None, set(), frozenset()])
 def test_empty_plugin_allowlist_denies_before_import(entries):
     loader = PluginLoader(PluginContext(), entries)

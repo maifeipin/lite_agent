@@ -37,6 +37,10 @@
     "RULE_NO_SERVICES_DEPENDENCY": {
       "name": "禁止 services 服务层反向依赖完整 Agent 实现",
       "description": "services/ 通用服务层严禁反向依赖完整 agent.py 运行时，必须通过参数注入或契约类型解耦。"
+    },
+    "RULE_NO_LEGACY_MAIL_COMPAT_IMPORT": {
+      "name": "禁止导入已废弃拆除的邮件兼容垫片",
+      "description": "严禁导入已拆除的 integrations.mail.quality_todo 或 integrations.mail.sync_service（包括直接 import、from ... import 父包/子模块以及静态字符串动态导入），质量待办与邮件同步必须直接调用 features/billing/ 规范路径。"
     }
   },
   "exceptions": [
@@ -156,6 +160,26 @@
       "owner": "app_plugins",
       "removal_stage": "permanent_plugin_loader",
       "verification_requirement": "必须校验 entry 在 allowed_entries 显式白名单内"
+    },
+    {
+      "file": "dev/tests/integration/test_mail_di_baseline.py",
+      "rule": "RULE_NO_LEGACY_MAIL_COMPAT_IMPORT",
+      "target": "lite_agent.integrations.mail.quality_todo",
+      "scope": "test_legacy_compat_modules_physically_removed",
+      "reason": "负向反例测试断言已物理删除的垫片模块无法导入并验证 ModuleNotFoundError.name",
+      "owner": "mail_di_refactor",
+      "removal_stage": "permanent_negative_test",
+      "verification_requirement": "pytest.raises(ModuleNotFoundError) 校验异常 name"
+    },
+    {
+      "file": "dev/tests/integration/test_mail_di_baseline.py",
+      "rule": "RULE_NO_LEGACY_MAIL_COMPAT_IMPORT",
+      "target": "lite_agent.integrations.mail.sync_service",
+      "scope": "test_legacy_compat_modules_physically_removed",
+      "reason": "负向反例测试断言已物理删除的垫片模块无法导入并验证 ModuleNotFoundError.name",
+      "owner": "mail_di_refactor",
+      "removal_stage": "permanent_negative_test",
+      "verification_requirement": "pytest.raises(ModuleNotFoundError) 校验异常 name"
     }
   ]
 }

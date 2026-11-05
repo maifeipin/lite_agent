@@ -29,8 +29,6 @@ from unittest.mock import Mock
 from lite_agent.features.todo.repository import DEFAULT_DB_PATH, _ensure_schema
 from lite_agent.features.todo.service import TodoService
 from lite_agent.integrations.mail.client import MailCLI
-import lite_agent.integrations.mail.quality_todo as compat_quality
-import lite_agent.integrations.mail.sync_service as compat_sync
 import lite_agent.features.billing.quality_todo as canonical_quality
 import lite_agent.features.billing.sync_service as canonical_sync
 
@@ -62,11 +60,7 @@ def _make_quality_event(event_id: str, case_key: str, event_type: str = "quality
 # 1. 数据库路径分离与优先级基线
 # ==============================================================================
 
-@pytest.mark.parametrize("consume_fn", [
-    compat_quality.consume_quality_events,
-    canonical_quality.consume_quality_events,
-])
-def test_baseline_db_paths_strictly_separated(tmp_path, consume_fn):
+def test_baseline_db_paths_strictly_separated(tmp_path):
     """基线 1.1: statement_db_path 与 todo_db_path 严格隔离，互不串用。"""
     stmt_db = str(tmp_path / "statement.db")
     todo_db = _ensure_todo_schema(str(tmp_path / "todos.db"))
@@ -78,7 +72,7 @@ def test_baseline_db_paths_strictly_separated(tmp_path, consume_fn):
     ]
     client.quality_ack.return_value = {"acked": True}
 
-    stats = consume_fn(client=client, db_path=todo_db)
+    stats = canonical_quality.consume_quality_events(client=client, db_path=todo_db)
     assert stats["created"] == 1
     assert stats["acked"] == 1
 
@@ -93,26 +87,18 @@ def test_baseline_db_paths_strictly_separated(tmp_path, consume_fn):
     ).fetchone()
 
 
-@pytest.mark.parametrize("sync_fn", [
-    compat_sync.sync_and_consume,
-    canonical_sync.sync_and_consume,
-])
-def test_baseline_mail_cli_db_mismatch_strictly_rejected(tmp_path, sync_fn):
+def test_baseline_mail_cli_db_mismatch_strictly_rejected(tmp_path):
     """基线 1.2: 注入的 MailCLI 与显式传入的 statement_db_path 不一致时必须拒绝拉取。"""
     cli = MailCLI(script_dir=str(tmp_path), db_path=str(tmp_path / "actual.db"))
     with pytest.raises(ValueError, match="Injected MailCLI does not use the requested statement database"):
-        sync_fn(
+        canonical_sync.sync_and_consume(
             statement_db_path=str(tmp_path / "expected_different.db"),
             client=cli,
             run_fetch=True
         )
 
 
-@pytest.mark.parametrize("sync_fn", [
-    compat_sync.sync_and_consume,
-    canonical_sync.sync_and_consume,
-])
-def test_baseline_sync_and_consume_todo_path_priority(tmp_path, monkeypatch, sync_fn):
+def test_baseline_sync_and_consume_todo_path_priority(tmp_path, monkeypatch):
     """基线 1.3: 顶层 sync_and_consume 遵循 显式入参 > billing配置 > DEFAULT_DB_PATH 优先级。"""
     cfg_todo = str(tmp_path / "cfg_todo.db")
     explicit_todo = str(tmp_path / "explicit_todo.db")
@@ -131,16 +117,16 @@ def test_baseline_sync_and_consume_todo_path_priority(tmp_path, monkeypatch, syn
         return {"complete": True, "acked": 0, "created": 0, "errors": [], "backlog_hit": False}
 
     # 1. 显式传入优先于配置
-    sync_fn(todo_db_path=explicit_todo, client=client, run_fetch=False, drain_fn=mock_drain)
+    canonical_sync.sync_and_consume(todo_db_path=explicit_todo, client=client, run_fetch=False, drain_fn=mock_drain)
     assert captured_paths[-1] == os.path.abspath(explicit_todo)
 
     # 2. 缺省显式入参时使用配置
-    sync_fn(todo_db_path=None, client=client, run_fetch=False, drain_fn=mock_drain)
+    canonical_sync.sync_and_consume(todo_db_path=None, client=client, run_fetch=False, drain_fn=mock_drain)
     assert captured_paths[-1] == os.path.abspath(cfg_todo)
 
     # 3. 配置也为空时使用 DEFAULT_DB_PATH
     monkeypatch.setattr("lite_agent.core.config_loader.load_config", lambda: {})
-    sync_fn(todo_db_path=None, client=client, run_fetch=False, drain_fn=mock_drain)
+    canonical_sync.sync_and_consume(todo_db_path=None, client=client, run_fetch=False, drain_fn=mock_drain)
     assert captured_paths[-1] == os.path.abspath(DEFAULT_DB_PATH)
 
 
@@ -161,11 +147,11 @@ def test_baseline_drain_quality_events_todo_path_resolution(tmp_path, monkeypatc
         return {"total": 0, "errors": [], "complete": True}
 
     # 1. 显式路径优先
-    compat_sync.drain_quality_events(client=client, todo_db_path=explicit_todo, consume_fn=mock_consume)
+    canonical_sync.drain_quality_events(client=client, todo_db_path=explicit_todo, consume_fn=mock_consume)
     assert captured[-1] == explicit_todo
 
     # 2. 缺省显式路径时使用配置
-    compat_sync.drain_quality_events(client=client, todo_db_path=None, consume_fn=mock_consume)
+    canonical_sync.drain_quality_events(client=client, todo_db_path=None, consume_fn=mock_consume)
     assert captured[-1] == cfg_todo
 
 
@@ -174,11 +160,7 @@ def test_baseline_drain_quality_events_todo_path_resolution(tmp_path, monkeypatc
 # 2. ACK 严格语义与多轮重试幂等基线
 # ==============================================================================
 
-@pytest.mark.parametrize("consume_fn", [
-    compat_quality.consume_quality_events,
-    canonical_quality.consume_quality_events,
-])
-def test_baseline_write_failure_never_acknowledges(tmp_path, consume_fn):
+def test_baseline_write_failure_never_acknowledges(tmp_path):
     """基线 2.1: Todo 写入抛出异常时，严禁执行 ACK，事件保留未确认。"""
     todo_db = _ensure_todo_schema(str(tmp_path / "todos.db"))
     client = Mock(spec=MailCLI)
@@ -187,18 +169,14 @@ def test_baseline_write_failure_never_acknowledges(tmp_path, consume_fn):
     ]
 
     mock_upsert = Mock(side_effect=OSError("disk read-only"))
-    stats = consume_fn(client=client, db_path=todo_db, upsert_fn=mock_upsert)
+    stats = canonical_quality.consume_quality_events(client=client, db_path=todo_db, upsert_fn=mock_upsert)
 
     assert stats["failed"] == 1
     assert stats["acked"] == 0
     client.quality_ack.assert_not_called()
 
 
-@pytest.mark.parametrize("consume_fn", [
-    compat_quality.consume_quality_events,
-    canonical_quality.consume_quality_events,
-])
-def test_baseline_ack_failure_and_subsequent_retry_quality_detected(tmp_path, consume_fn):
+def test_baseline_ack_failure_and_subsequent_retry_quality_detected(tmp_path):
     """基线 2.2: quality_detected 首次写入成功但 ACK 失败后，下一轮重试不重复建 Todo 并正确 ACK。"""
     todo_db = _ensure_todo_schema(str(tmp_path / "todos.db"))
     client = Mock(spec=MailCLI)
@@ -208,7 +186,7 @@ def test_baseline_ack_failure_and_subsequent_retry_quality_detected(tmp_path, co
     client.quality_events.return_value = [evt]
     client.quality_ack.return_value = {"acked": False, "reason": "ack timeout"}
 
-    stats1 = consume_fn(client=client, db_path=todo_db)
+    stats1 = canonical_quality.consume_quality_events(client=client, db_path=todo_db)
     assert stats1["created"] == 1
     assert stats1["acked"] == 0
     assert stats1["failed_acks"] == 1
@@ -229,7 +207,7 @@ def test_baseline_ack_failure_and_subsequent_retry_quality_detected(tmp_path, co
     client.quality_ack.reset_mock()
     client.quality_ack.return_value = {"acked": True}
 
-    stats2 = consume_fn(client=client, db_path=todo_db)
+    stats2 = canonical_quality.consume_quality_events(client=client, db_path=todo_db)
     assert stats2["acked"] == 1
     assert stats2["failed"] == 0
     assert stats2["failed_acks"] == 0
@@ -245,11 +223,7 @@ def test_baseline_ack_failure_and_subsequent_retry_quality_detected(tmp_path, co
         assert count == 1
 
 
-@pytest.mark.parametrize("consume_fn", [
-    compat_quality.consume_quality_events,
-    canonical_quality.consume_quality_events,
-])
-def test_baseline_ack_failure_and_subsequent_retry_quality_resolved(tmp_path, consume_fn):
+def test_baseline_ack_failure_and_subsequent_retry_quality_resolved(tmp_path):
     """基线 2.3: quality_resolved 解决成功但 ACK 失败后，下一轮重试保持幂等并正确完成 ACK。"""
     todo_db = _ensure_todo_schema(str(tmp_path / "todos.db"))
     client = Mock(spec=MailCLI)
@@ -270,7 +244,7 @@ def test_baseline_ack_failure_and_subsequent_retry_quality_resolved(tmp_path, co
     client.quality_events.return_value = [evt_resolve]
     client.quality_ack.side_effect = RuntimeError("network rpc dropped")
 
-    stats1 = consume_fn(client=client, db_path=todo_db)
+    stats1 = canonical_quality.consume_quality_events(client=client, db_path=todo_db)
     assert stats1["resolved"] == 1
     assert stats1["failed_acks"] == 1
     assert stats1["acked"] == 0
@@ -285,7 +259,7 @@ def test_baseline_ack_failure_and_subsequent_retry_quality_resolved(tmp_path, co
     client.quality_ack.side_effect = None
     client.quality_ack.return_value = {"acked": True}
 
-    stats2 = consume_fn(client=client, db_path=todo_db)
+    stats2 = canonical_quality.consume_quality_events(client=client, db_path=todo_db)
     assert stats2["acked"] == 1
     assert stats2["failed"] == 0
     assert stats2["failed_acks"] == 0
@@ -334,11 +308,7 @@ def test_baseline_custom_consume_fn_parameter_compatibility(tmp_path):
     assert called_args["deadline"] is not None
 
 
-@pytest.mark.parametrize("sync_fn", [
-    compat_sync.sync_and_consume,
-    canonical_sync.sync_and_consume,
-])
-def test_baseline_custom_drain_fn_invocation_in_sync_and_consume(tmp_path, monkeypatch, sync_fn):
+def test_baseline_custom_drain_fn_invocation_in_sync_and_consume(tmp_path, monkeypatch):
     """基线 3.2: sync_and_consume 能够正确将已解析的路径与参数传递给自定义 drain_fn。"""
     monkeypatch.setattr(
         "lite_agent.core.config_loader.load_config",
@@ -359,7 +329,7 @@ def test_baseline_custom_drain_fn_invocation_in_sync_and_consume(tmp_path, monke
             "backlog_hit": False,
         }
 
-    res = sync_fn(
+    res = canonical_sync.sync_and_consume(
         todo_db_path=todo_db,
         event_limit=50,
         max_batches=2,
@@ -381,11 +351,7 @@ def test_baseline_custom_drain_fn_invocation_in_sync_and_consume(tmp_path, monke
 # 4. 单次 Fetch、协作式 30s 预算与超时语义基线
 # ==============================================================================
 
-@pytest.mark.parametrize("sync_fn", [
-    compat_sync.sync_and_consume,
-    canonical_sync.sync_and_consume,
-])
-def test_baseline_sync_fetch_single_execution_on_failure(tmp_path, monkeypatch, sync_fn):
+def test_baseline_sync_fetch_single_execution_on_failure(tmp_path, monkeypatch):
     """基线 4.1: sync_fetch 遇到失败时仅执行 1 次，绝不重复拉取，但继续消费已有事件。"""
     monkeypatch.setattr(
         "lite_agent.core.config_loader.load_config",
@@ -403,7 +369,7 @@ def test_baseline_sync_fetch_single_execution_on_failure(tmp_path, monkeypatch, 
         "backlog_hit": False
     })
 
-    res = sync_fn(client=client, run_fetch=True, drain_fn=mock_drain)
+    res = canonical_sync.sync_and_consume(client=client, run_fetch=True, drain_fn=mock_drain)
 
     assert client.sync_fetch.call_count == 1
     assert mock_drain.call_count == 1
@@ -412,11 +378,7 @@ def test_baseline_sync_fetch_single_execution_on_failure(tmp_path, monkeypatch, 
     assert res["status"] == "failed"
 
 
-@pytest.mark.parametrize("consume_fn", [
-    compat_quality.consume_quality_events,
-    canonical_quality.consume_quality_events,
-])
-def test_baseline_budget_expiry_keeps_event_unacked(tmp_path, consume_fn):
+def test_baseline_budget_expiry_keeps_event_unacked(tmp_path):
     """基线 4.2: 待办消费过程中若协作式预算耗尽，未 ACK 事件保留待重试。"""
     client = Mock(spec=MailCLI)
     client.quality_events.return_value = [
@@ -424,7 +386,7 @@ def test_baseline_budget_expiry_keeps_event_unacked(tmp_path, consume_fn):
     ]
 
     # deadline 设定为过去时间戳
-    stats = consume_fn(client=client, db_path=str(tmp_path / "todos.db"), deadline=1.0, time_fn=Mock(monotonic=lambda: 2.0))
+    stats = canonical_quality.consume_quality_events(client=client, db_path=str(tmp_path / "todos.db"), deadline=1.0, time_fn=Mock(monotonic=lambda: 2.0))
     assert stats["failed"] == 1
     assert stats["acked"] == 0
     assert any("预算耗尽" in err for err in stats["errors"])
@@ -618,4 +580,29 @@ def test_canonical_di_accepts_falsy_callable(tmp_path):
     )
     assert falsy_consume.called is True
     assert stats_drain["complete"] is True
+
+
+# ==============================================================================
+# 6. 阶段 2 提交 4 负向反例测试：已物理删除的垫片模块无法导入并验证 ModuleNotFoundError.name
+# ==============================================================================
+
+def test_legacy_compat_modules_physically_removed():
+    """负向反例：验证已物理删除的兼容垫片无法被直接导入，且异常的 name 属性严格匹配被删除模块名。"""
+    with pytest.raises(ModuleNotFoundError) as exc_info_qt:
+        import lite_agent.integrations.mail.quality_todo  # noqa: F401
+    assert exc_info_qt.value.name == "lite_agent.integrations.mail.quality_todo"
+
+    with pytest.raises(ModuleNotFoundError) as exc_info_sync:
+        import lite_agent.integrations.mail.sync_service  # noqa: F401
+    assert exc_info_sync.value.name == "lite_agent.integrations.mail.sync_service"
+
+    # 同时验证从父包导入也必然失败
+    with pytest.raises(ImportError) as exc_info_from_qt:
+        from lite_agent.integrations.mail import quality_todo  # noqa: F401
+    assert "cannot import name 'quality_todo'" in str(exc_info_from_qt.value)
+
+    with pytest.raises(ImportError) as exc_info_from_sync:
+        from lite_agent.integrations.mail import sync_service  # noqa: F401
+    assert "cannot import name 'sync_service'" in str(exc_info_from_sync.value)
+
 

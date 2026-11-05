@@ -40,6 +40,13 @@ PARSER_MODULES = {
     "mail_llm",
 }
 
+DEPRECATED_MAIL_COMPAT_MODULES = {
+    "lite_agent.integrations.mail.quality_todo",
+    "lite_agent.integrations.mail.sync_service",
+    "integrations.mail.quality_todo",
+    "integrations.mail.sync_service",
+}
+
 
 def load_rules_config(config_path: str) -> dict:
     if not os.path.exists(config_path):
@@ -245,6 +252,16 @@ class ArchitectureVisitor(ast.NodeVisitor):
                     "features/billing 必须通过 MailCLI 调用外部 Parser 读模型，禁止直接连接数据库",
                 )
 
+            # 规则 9: 禁止导入已废弃拆除的邮件兼容垫片模块
+            if mod_name in DEPRECATED_MAIL_COMPAT_MODULES or any(mod_name.startswith(p + ".") for p in DEPRECATED_MAIL_COMPAT_MODULES):
+                self._record_finding(
+                    "RULE_NO_LEGACY_MAIL_COMPAT_IMPORT",
+                    mod_name,
+                    node.lineno,
+                    f"导入已废弃拆除的邮件兼容垫片模块: {mod_name}",
+                    "已拆除的兼容垫片严禁重新引入，质量待办与账单同步请改用 features.billing",
+                )
+
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom):
@@ -268,6 +285,27 @@ class ArchitectureVisitor(ast.NodeVisitor):
                 node.lineno,
                 f"from {resolved_mod} import ...",
                 "改用 MailCLI 或 integrations 适配器进行跨仓调用",
+            )
+
+        # 规则 9: 禁止从父包或直接导入已废弃拆除的邮件兼容垫片模块
+        if resolved_mod in ("lite_agent.integrations.mail", "integrations.mail"):
+            for alias in node.names:
+                if alias.name in ("quality_todo", "sync_service"):
+                    full_mod = f"{resolved_mod}.{alias.name}"
+                    self._record_finding(
+                        "RULE_NO_LEGACY_MAIL_COMPAT_IMPORT",
+                        full_mod,
+                        node.lineno,
+                        f"从父包导入已废弃拆除的邮件兼容垫片模块: {full_mod}",
+                        "已拆除的兼容垫片严禁重新引入，质量待办与账单同步请改用 features.billing",
+                    )
+        elif resolved_mod in DEPRECATED_MAIL_COMPAT_MODULES or any(resolved_mod.startswith(p + ".") for p in DEPRECATED_MAIL_COMPAT_MODULES):
+            self._record_finding(
+                "RULE_NO_LEGACY_MAIL_COMPAT_IMPORT",
+                resolved_mod,
+                node.lineno,
+                f"从已废弃拆除的邮件兼容垫片模块导入: {resolved_mod}",
+                "已拆除的兼容垫片严禁重新引入，质量待办与账单同步请改用 features.billing",
             )
 
         # 规则 2: 基础内核代码与公共 channels 严禁导入业务特性、技能与脚本 (支持绝对与相对导入解析)
@@ -424,6 +462,14 @@ class ArchitectureVisitor(ast.NodeVisitor):
                     "动态导入未知变量/表达式必须在 architecture_rules.json 中显式登记",
                 )
             else:
+                if target_name in DEPRECATED_MAIL_COMPAT_MODULES or any(target_name.startswith(p + ".") for p in DEPRECATED_MAIL_COMPAT_MODULES):
+                    self._record_finding(
+                        "RULE_NO_LEGACY_MAIL_COMPAT_IMPORT",
+                        target_name,
+                        node.lineno,
+                        f"动态导入已废弃拆除的邮件兼容垫片模块: {target_name}",
+                        "已拆除的兼容垫片严禁重新引入，质量待办与账单同步请改用 features.billing",
+                    )
                 root_mod = target_name.split(".")[0]
                 if (root_mod in PARSER_MODULES
                         or ((self.is_kernel or self.is_channels) and root_mod in ("features", "skills", "scripts"))
@@ -547,6 +593,11 @@ def verify_exception_requirements(
                     return False, "动态加载前缺少无条件 entry_name not in self.allowed_entries 拒绝门禁"
         if not guarded:
             return False, "缺少无条件的白名单拒绝门禁"
+
+    # 3. 对 RULE_NO_LEGACY_MAIL_COMPAT_IMPORT 负向测试例外，验证必须在测试函数内部且不能在模块顶层
+    if rule == "RULE_NO_LEGACY_MAIL_COMPAT_IMPORT":
+        if scope == "<module>":
+            return False, "已拆除模块的负向反例导入必须在测试函数内部，严禁出现在顶层"
 
     return True, ""
 
