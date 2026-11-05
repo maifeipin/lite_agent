@@ -68,6 +68,45 @@ def test_legacy_mail_compat_import_bypasses_rejected(path, source, expected_rule
     assert matching, f"Expected finding {expected_rule} for {expected_target} in {source}"
 
 
+@pytest.mark.parametrize('source,target', [
+    ('import importlib; importlib.import_module(".quality_todo", "lite_agent.integrations.mail")', 'lite_agent.integrations.mail.quality_todo'),
+    ('from importlib import import_module; import_module(".sync_service", package="lite_agent.integrations.mail")', 'lite_agent.integrations.mail.sync_service'),
+    ('import importlib as il; il.import_module(name=".quality_todo", package="lite_agent.integrations.mail")', 'lite_agent.integrations.mail.quality_todo'),
+    ('from importlib import import_module as load; alias = load; alias("..mail.sync_service", "lite_agent.integrations.mail")', 'lite_agent.integrations.mail.sync_service'),
+    ('import importlib; importlib.import_module(".sync_service.child", "lite_agent.integrations.mail")', 'lite_agent.integrations.mail.sync_service.child'),
+])
+def test_relative_legacy_mail_compat_import_rejected(source, target):
+    visitor = ArchitectureVisitor('lite_agent/features/example.py')
+    visitor.visit(ast.parse(source))
+    assert any(f['rule'] == 'RULE_NO_LEGACY_MAIL_COMPAT_IMPORT' and f['target'] == target
+               for f in visitor.findings)
+
+
+@pytest.mark.parametrize('source', [
+    'import importlib; importlib.import_module(".quality_todo", package_name)',
+    'import importlib; importlib.import_module(".sync_service", package=get_package())',
+    'import importlib; importlib.import_module(".quality_todo")',
+    'import importlib; importlib.import_module(".quality_todo", package=None)',
+    'import importlib; importlib.import_module("....quality_todo", "lite_agent")',
+])
+def test_unresolved_relative_import_requires_registration(source):
+    visitor = ArchitectureVisitor('lite_agent/features/example.py')
+    visitor.visit(ast.parse(source))
+    assert any(f['rule'] == 'RULE_DYNAMIC_IMPORT_REGISTERED' and f['target'] == '<dynamic_expression>'
+               for f in visitor.findings)
+
+
+@pytest.mark.parametrize('source', [
+    'import importlib; importlib.import_module(".client", "lite_agent.integrations.mail")',
+    'import importlib; importlib.import_module("lite_agent.integrations.mail.client", package_name)',
+    '__import__("lite_agent.integrations.mail.client", globals())',
+])
+def test_supported_mail_imports_are_not_rejected(source):
+    visitor = ArchitectureVisitor('lite_agent/features/example.py')
+    visitor.visit(ast.parse(source))
+    assert not visitor.findings
+
+
 @pytest.mark.parametrize('entries', [None, set(), frozenset()])
 def test_empty_plugin_allowlist_denies_before_import(entries):
     loader = PluginLoader(PluginContext(), entries)

@@ -20,6 +20,7 @@
 """
 
 import ast
+from importlib.util import resolve_name
 import json
 import os
 import subprocess
@@ -430,12 +431,15 @@ class ArchitectureVisitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call):
         func = node.func
         is_dynamic = False
+        is_import_module = False
 
         # 检查是否调用动态导入（支持别名跟踪）
         if isinstance(func, ast.Name):
+            is_import_module = func.id in self.import_module_aliases
             if func.id in self.import_module_aliases or func.id in self.dunder_import_aliases:
                 is_dynamic = True
         elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            is_import_module = func.attr == "import_module" and func.value.id in self.importlib_aliases
             is_dynamic = (
                 (func.attr == "import_module" and func.value.id in self.importlib_aliases)
                 or (func.attr == "__import__" and func.value.id in self.builtins_aliases)
@@ -452,6 +456,20 @@ class ArchitectureVisitor(ast.NodeVisitor):
                     target_name = "<dynamic_expression>"
             else:
                 target_name = "<no_args>"
+
+            # import_module 的相对名称取决于 package；先静态解析再执行所有边界检查。
+            # __import__ 的第二个参数是 globals，不能按 package 处理。
+            if is_import_module and target_name.startswith("."):
+                package_arg = node.args[1] if len(node.args) > 1 else next(
+                    (kw.value for kw in node.keywords if kw.arg == "package"), None
+                )
+                if isinstance(package_arg, ast.Constant) and isinstance(package_arg.value, str) and package_arg.value:
+                    try:
+                        target_name = resolve_name(target_name, package_arg.value)
+                    except (ImportError, ValueError):
+                        target_name = "<dynamic_expression>"
+                else:
+                    target_name = "<dynamic_expression>"
 
             if target_name == "<dynamic_expression>":
                 self._record_finding(
