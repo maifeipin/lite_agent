@@ -68,6 +68,35 @@ def test_legacy_mail_compat_import_bypasses_rejected(path, source, expected_rule
     assert matching, f"Expected finding {expected_rule} for {expected_target} in {source}"
 
 
+@pytest.mark.parametrize('path,source,expected_rule,expected_target', [
+    ('lite_agent/features/example.py', 'import lite_agent.core.cron_engine', 'RULE_NO_LEGACY_CRON_ENGINE_IMPORT', 'lite_agent.core.cron_engine'),
+    ('lite_agent/features/example.py', 'import core.cron_engine', 'RULE_NO_LEGACY_CRON_ENGINE_IMPORT', 'core.cron_engine'),
+    ('lite_agent/core/example.py', 'from lite_agent.core import cron_engine', 'RULE_NO_LEGACY_CRON_ENGINE_IMPORT', 'lite_agent.core.cron_engine'),
+    ('lite_agent/features/example.py', 'from lite_agent.core.cron_engine import CronManager', 'RULE_NO_LEGACY_CRON_ENGINE_IMPORT', 'lite_agent.core.cron_engine'),
+    ('lite_agent/features/example.py', 'import importlib; importlib.import_module("lite_agent.core.cron_engine")', 'RULE_NO_LEGACY_CRON_ENGINE_IMPORT', 'lite_agent.core.cron_engine'),
+    ('lite_agent/features/example.py', 'import importlib; importlib.import_module(".cron_engine", package="lite_agent.core")', 'RULE_NO_LEGACY_CRON_ENGINE_IMPORT', 'lite_agent.core.cron_engine'),
+])
+def test_legacy_cron_engine_import_bypasses_rejected(path, source, expected_rule, expected_target):
+    """验证导入已废弃拆除的 core.cron_engine 兼容包装（直接import、裸路径、from父包、from子模块、动态/相对动态导入）均被架构检查硬拦截。"""
+    visitor = ArchitectureVisitor(path)
+    visitor.visit(ast.parse(source))
+    matching = [f for f in visitor.findings if f['rule'] == expected_rule and f['target'] == expected_target]
+    assert matching, f"Expected finding {expected_rule} for {expected_target} in {source}"
+
+
+@pytest.mark.parametrize('source', [
+    'from lite_agent.core import config_loader',
+    'from lite_agent.services.cron import CronService, default_cron_service',
+    'import lite_agent.services.cron',
+    'import importlib; importlib.import_module("lite_agent.services.cron")',
+])
+def test_supported_cron_imports_are_not_rejected(source):
+    """规范路径 lite_agent.services.cron 及 core 包内其他模块的正常导入不得被误伤。"""
+    visitor = ArchitectureVisitor('lite_agent/features/example.py')
+    visitor.visit(ast.parse(source))
+    assert not visitor.findings
+
+
 @pytest.mark.parametrize('source,target', [
     ('import importlib; importlib.import_module(".quality_todo", "lite_agent.integrations.mail")', 'lite_agent.integrations.mail.quality_todo'),
     ('from importlib import import_module; import_module(".sync_service", package="lite_agent.integrations.mail")', 'lite_agent.integrations.mail.sync_service'),

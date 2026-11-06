@@ -57,17 +57,17 @@ def test_full_engines_do_not_share_tool_registry():
     assert first._registry is not second._registry
 
 
-def test_legacy_cron_constructor_does_not_erase_registered_jobs():
-    from lite_agent.core.cron_engine import CronManager
-    prior = CronManager._instance
-    CronManager._instance = None
+def test_default_cron_service_is_stable_shared_fallback():
+    """裸 Agent 兜底的模块级调度器是稳定单对象: 重复获取不重建、不清空已注册任务。"""
+    from lite_agent.services import cron as cron_module
+    first = cron_module.default_cron_service
+    first.add_job('review-job', '03:00', lambda: None)
     try:
-        first = CronManager()
-        first.add_job('review-job', '03:00', lambda: None)
-        second = CronManager()
+        from lite_agent.services.cron import default_cron_service as second
+        assert second is first
         assert 'review-job' in second._job_names
     finally:
-        CronManager._instance = prior
+        first.remove_job_by_name('review-job')
 
 
 def test_shutdown_unregisters_plugin_tools_and_jobs():

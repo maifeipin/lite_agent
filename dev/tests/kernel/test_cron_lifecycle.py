@@ -8,9 +8,9 @@
 
 已由其他文件锁定、此处不重复的契约:
 - 同分钟单次提交 / 并发抢占同一分钟槽位 / 时钟回滚 / 非法表达式:
-  kernel/test_cron_engine.py
+  kernel/test_cron_service.py
 - 跨重启不承诺恰好一次 (内存调度器 at-least-once, 恰好一次由业务回执兜底):
-  kernel/test_cron_engine.py::test_restart_has_no_persistent_cron_claim_and_no_missed_slot_replay
+  kernel/test_cron_service.py::test_restart_has_no_persistent_cron_claim_and_no_missed_slot_replay
 - 调度循环心跳与在途观测 (health_snapshot): kernel/test_cron_health.py
 """
 

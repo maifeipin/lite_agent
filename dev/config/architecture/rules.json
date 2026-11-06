@@ -41,6 +41,10 @@
     "RULE_NO_LEGACY_MAIL_COMPAT_IMPORT": {
       "name": "禁止导入已废弃拆除的邮件兼容垫片",
       "description": "严禁导入已拆除的 integrations.mail.quality_todo 或 integrations.mail.sync_service（包括直接 import、from ... import 父包/子模块以及静态字符串动态导入），质量待办与邮件同步必须直接调用 features/billing/ 规范路径。"
+    },
+    "RULE_NO_LEGACY_CRON_ENGINE_IMPORT": {
+      "name": "禁止导入已废弃拆除的 core.cron_engine 兼容包装",
+      "description": "严禁导入已拆除的 lite_agent.core.cron_engine 单例包装（包括直接 import、from ... import 父包/子模块以及静态字符串动态导入），定时调度必须直接使用 lite_agent.services.cron。"
     }
   },
   "exceptions": [
@@ -178,6 +182,16 @@
       "scope": "test_legacy_compat_modules_physically_removed",
       "reason": "负向反例测试断言已物理删除的垫片模块无法导入并验证 ModuleNotFoundError.name",
       "owner": "mail_di_refactor",
+      "removal_stage": "permanent_negative_test",
+      "verification_requirement": "pytest.raises(ModuleNotFoundError) 校验异常 name"
+    },
+    {
+      "file": "dev/tests/kernel/test_cron_service.py",
+      "rule": "RULE_NO_LEGACY_CRON_ENGINE_IMPORT",
+      "target": "lite_agent.core.cron_engine",
+      "scope": "test_legacy_cron_engine_module_physically_removed",
+      "reason": "负向反例测试断言已物理删除的兼容包装模块无法导入并验证 ModuleNotFoundError.name",
+      "owner": "cron_ownership_refactor",
       "removal_stage": "permanent_negative_test",
       "verification_requirement": "pytest.raises(ModuleNotFoundError) 校验异常 name"
     }

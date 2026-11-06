@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
 import pytest
-from lite_agent.core.cron_engine import CronJob, CronManager
+from lite_agent.services.cron import CronJob, CronService
 
 
 def job(expr, enabled=True):
@@ -92,8 +92,7 @@ def test_restart_has_no_persistent_cron_claim_and_no_missed_slot_replay():
 
 
 def test_job_exception_keeps_run_lock_clear_and_retries_next_slot():
-    manager = object.__new__(CronManager)
-    manager._init()
+    manager = CronService()
     manager.set_log_callback(lambda text: None)
     callback = Mock(side_effect=[RuntimeError('fixture'), None])
     task = CronJob(1, 'fixture', 'every_minute', callback)
@@ -105,3 +104,18 @@ def test_job_exception_keeps_run_lock_clear_and_retries_next_slot():
     assert task.should_run(first + timedelta(minutes=1))
     manager._execute_job_task(task)
     assert callback.call_count == 2
+
+
+def test_legacy_cron_engine_module_physically_removed():
+    """负向反例: 已物理删除的 core.cron_engine 兼容包装无法导入, 且异常 name 严格匹配。"""
+    import sys
+    sys.modules.pop("lite_agent.core.cron_engine", None)
+
+    with pytest.raises(ModuleNotFoundError) as exc_info:
+        import lite_agent.core.cron_engine  # noqa: F401
+    assert exc_info.value.name == "lite_agent.core.cron_engine"
+
+    # 从父包导入同样必然失败
+    with pytest.raises(ImportError) as exc_info_from:
+        from lite_agent.core import cron_engine  # noqa: F401
+    assert "cannot import name 'cron_engine'" in str(exc_info_from.value)

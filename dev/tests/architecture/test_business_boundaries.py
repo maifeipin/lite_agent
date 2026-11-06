@@ -35,10 +35,10 @@ import sys, os
 from lite_agent.features.todo.service import TodoService
 from lite_agent.features.todo.repository import TodoRepository
 from lite_agent.features.billing.quality_todo import consume_quality_events
-from lite_agent.core.cron_engine import CronManager
+from lite_agent.services.cron import default_cron_service
 
-# 检查当前 cron 中是否有被隐式注册的 todo 任务
-cron = CronManager()
+# 检查共享兜底调度器中是否有被隐式注册的 todo 任务
+cron = default_cron_service
 todo_jobs = [j.name for j in cron.jobs.values() if 'todo' in j.name]
 assert len(todo_jobs) == 0, f"发现隐式 cron 注册: {todo_jobs}"
 print("OK")

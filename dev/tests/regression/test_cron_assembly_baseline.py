@@ -163,7 +163,7 @@ class TestExplicitInjectionPrecedence:
 class TestMemoryEnableDoesNotOverrideCron:
     """缺陷红测试组 (提交2 修复): 记忆启用路径不得改变基础组件。
 
-    当前 _register_memory_commands 末尾执行 self.cron = CronManager(),
+    修复前 _register_memory_commands 末尾执行 self.cron = CronManager(),
     在 MEMORY_AVAILABLE 为真时于构造期覆盖注入。修复后本组转绿。
     """
 
@@ -196,7 +196,7 @@ class TestMemoryEnableDoesNotOverrideCron:
             pytest.skip("memory_engine 未安装, 跳过")
         stub = CronService()
         agent = _make_agent(cron_marker=stub)
-        # Agent 持有的调度器必须就是注入实例, 而非新建的 CronManager 单例
+        # Agent 持有的调度器必须就是注入实例, 而非新建的其他调度器
         assert agent.cron is stub
 
 

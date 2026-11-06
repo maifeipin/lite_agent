@@ -86,7 +86,7 @@ CORE_TEST_FILES = [
     "dev/tests/tooling/test_clean_core_environment.py",
     "dev/tests/kernel/test_config_loader_settings.py",
     "dev/tests/tooling/test_core_manifest_and_export.py",
-    "dev/tests/kernel/test_cron_engine.py",
+    "dev/tests/kernel/test_cron_service.py",
     "dev/tests/kernel/test_execution.py",
     "dev/tests/kernel/test_execution_budget.py",
     "dev/tests/kernel/test_execution_ledger.py",
