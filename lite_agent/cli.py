@@ -99,90 +99,127 @@ def _is_noop_enrich_output(text: str) -> bool:
 
 
 def _register_configured_cron_jobs(app, agent, config: dict):
-    """从 config.json 的 cron_jobs 列表注册通用定时任务。"""
+    """从 config.json 的 cron_jobs 列表注册通用定时任务 (事务式)。
+
+    契约:
+    - 可重复执行: 相同定义 (同名 + 同时间表达式 + 同目标) 保留原 CronJob
+      对象与执行状态, 不重建;
+    - 同名不同定义 (含与非配置来源任务撞名): 立即报错, 不做热更新替换;
+    - 任一项注册失败: 回滚本批新增任务 (不触碰既有任务), 向上抛出;
+    - 注册后比对预期清单, 任一缺失即抛出, 阻止启动;
+    - 本函数只登记任务不登记 handler; handler 由插件事务管理, 任务执行时
+      经 get_handler 解析, 二者随宿主生命周期一致回收。
+    """
+    import json
     import subprocess
     from lite_agent.core.constants import PROJECT_ROOT
     root = config.get("project_root", PROJECT_ROOT)
     cron_srv = app.cron_service
 
-    for job in config.get("cron_jobs", []):
-        if "name" not in job:
-            continue
-        name = job["name"]
-
-        # 时间时段展开
-        times = []
+    def _expand_times(job):
         if "time_range" in job and isinstance(job["time_range"], dict):
             tr = job["time_range"]
             start_h = tr.get("start", 0)
             end_h = tr.get("end", 23)
             minute = tr.get("minute", 0)
-            for h in range(start_h, end_h + 1):
-                times.append(f"{h:02d}:{minute:02d}")
-        elif "times" in job and isinstance(job["times"], list):
-            times = list(job["times"])
-        elif "time" in job:
-            times = [job["time"]]
-        else:
-            raise ValueError(f"Cron 作业 [{name}] 缺少时间配置 (time/time_range/times)")
+            return [f"{h:02d}:{minute:02d}" for h in range(start_h, end_h + 1)]
+        if "times" in job and isinstance(job["times"], list):
+            return list(job["times"])
+        if "time" in job:
+            return [job["time"]]
+        raise ValueError(f"Cron 作业 [{job['name']}] 缺少时间配置 (time/time_range/times)")
 
-        # 检查是否为合法任务定义
+    def _definition_key(job):
+        if "command" in job:
+            return ("command", job["command"].format(root=root))
+        return (
+            "skill",
+            job["skill"],
+            json.dumps(job.get("kwargs", {}), sort_keys=True, ensure_ascii=False),
+            bool(job.get("push_on_output", False)),
+        )
+
+    def _make_command_task(cmd):
+        def _task():
+            return subprocess.run(
+                cmd, shell=True, capture_output=True, text=True, timeout=120
+            ).stdout.strip() or "(无输出)"
+        return _task
+
+    def _make_skill_task(target, kw, job_name, push):
+        def _task():
+            # 1. 优先从 cron_service 的专属 job_handlers 获取
+            handler = cron_srv.get_handler(target) if hasattr(cron_srv, "get_handler") else None
+            if handler is not None:
+                return handler(**kw) if kw else handler()
+            # 2. 从 skill_engine 获取模型工具技能
+            fn_name = target.split("::")[-1]
+            engine = getattr(app, "skill_engine", None)
+            tool_info = engine.get_tool(fn_name) if engine else None
+            if tool_info and "func" in tool_info:
+                text = tool_info["func"](**kw) if kw else tool_info["func"]()
+                if push and text and not text.startswith("✅") and not text.startswith("(") \
+                        and not (fn_name == "mail_llm_enrich" and _is_noop_enrich_output(text)):
+                    from lite_agent.contracts.message import AgentResponse
+                    from lite_agent.services.owner_delivery import send_owner_response
+                    color = "red" if any(err in text for err in (
+                        "✉️", "⚠️", "❌", "失败", "错误", "Error", "Exception"
+                    )) else "blue"
+                    send_owner_response(
+                        getattr(agent, "channels", []) or [],
+                        config.get("channels", {}) or {},
+                        AgentResponse(text, title=job_name, color=color),
+                    )
+                return text
+            raise RuntimeError(f"未找到指定的 Cron 技能: {target}")
+        return _task
+
+    # 1. 展开预期任务清单 (名称, 时间表达式, 定义指纹, 源配置)
+    planned = []
+    for job in config.get("cron_jobs", []):
+        if "name" not in job:
+            continue
+        name = job["name"]
         if "command" not in job and "skill" not in job:
             raise ValueError(f"无效的 Cron 作业配置: [{name}] 缺少 command 或 skill 目标")
+        times = _expand_times(job)
+        def_key = _definition_key(job)
+        for t in times:
+            j_name = name if len(times) <= 1 else f"{name}#{t}"
+            planned.append((j_name, t, def_key, job))
 
-        if "command" in job:
-            cmd = job["command"].format(root=root)
-            for t in times:
-                j_name = name if len(times) <= 1 else f"{name}#{t}"
-                try:
-                    cron_srv.add_job(
-                        j_name,
-                        t,
-                        lambda c=cmd: subprocess.run(
-                            c, shell=True, capture_output=True, text=True, timeout=120
-                        ).stdout.strip() or "(无输出)",
+    # 2. 事务式注册: 同名同定义跳过, 同名冲突报错, 失败回滚本批新增
+    added = []
+    try:
+        for j_name, t, def_key, job in planned:
+            existing = next((j for j in cron_srv.jobs.values() if j.name == j_name), None)
+            if existing is not None:
+                prev = getattr(existing, "_config_def", None)
+                if prev is None or prev != (t, def_key):
+                    raise ValueError(
+                        f"Cron 作业 [{j_name}] 同名定义冲突: 已存在 "
+                        f"{'非配置来源' if prev is None else '不同定义的'}任务, "
+                        f"不做热更新替换, 请更名或修正配置"
                     )
-                except Exception as e:
-                    logger.warning(f"注册 Cron 命令作业 [{j_name}] 失败: {e}")
-        elif "skill" in job:
-            skill_target = job["skill"]
-            kwargs = job.get("kwargs", {})
-            for t in times:
-                j_name = name if len(times) <= 1 else f"{name}#{t}"
-                def _make_skill_task(target=skill_target, kw=kwargs,
-                                     job_name=name, push=job.get("push_on_output", False)):
-                    def _task():
-                        # 1. 优先从 cron_service 的专属 job_handlers 获取
-                        handler = cron_srv.get_handler(target) if hasattr(cron_srv, "get_handler") else None
-                        if handler is not None:
-                            return handler(**kw) if kw else handler()
-                        # 2. 从 skill_engine 获取模型工具技能
-                        fn_name = target.split("::")[-1]
-                        engine = getattr(app, "skill_engine", None)
-                        tool_info = engine.get_tool(fn_name) if engine else None
-                        if tool_info and "func" in tool_info:
-                            text = tool_info["func"](**kw) if kw else tool_info["func"]()
-                            if push and text and not text.startswith("✅") and not text.startswith("(") \
-                                    and not (fn_name == "mail_llm_enrich" and _is_noop_enrich_output(text)):
-                                from lite_agent.contracts.message import AgentResponse
-                                from lite_agent.services.owner_delivery import send_owner_response
-                                color = "red" if any(err in text for err in (
-                                    "✉️", "⚠️", "❌", "失败", "错误", "Error", "Exception"
-                                )) else "blue"
-                                send_owner_response(
-                                    getattr(agent, "channels", []) or [],
-                                    config.get("channels", {}) or {},
-                                    AgentResponse(text, title=job_name, color=color),
-                                )
-                            return text
-                        raise RuntimeError(f"未找到指定的 Cron 技能: {target}")
-                    return _task
-                try:
-                    # 去重：若已注册同名或同槽任务先移除，防止重复触发
-                    cron_srv.remove_job_by_name(j_name)
-                    cron_srv.add_job(j_name, t, _make_skill_task())
-                except Exception as e:
-                    logger.warning(f"注册 Cron 技能作业 [{j_name}] 失败: {e}")
+                continue  # 相同定义: 保留原 CronJob 对象与执行状态
+            if "command" in job:
+                func = _make_command_task(job["command"].format(root=root))
+            else:
+                func = _make_skill_task(job["skill"], job.get("kwargs", {}),
+                                        job["name"], job.get("push_on_output", False))
+            job_id = cron_srv.add_job(j_name, t, func)
+            cron_srv.jobs[job_id]._config_def = (t, def_key)
+            added.append(j_name)
+    except Exception:
+        for n in added:
+            cron_srv.remove_job_by_name(n)
+        raise
+
+    # 3. 启动前清单比对: 预期任务缺失即阻止启动
+    registered = {j.name for j in cron_srv.jobs.values()}
+    missing = [j_name for j_name, _, _, _ in planned if j_name not in registered]
+    if missing:
+        raise RuntimeError(f"启动中止: 配置定时任务未全部注册, 缺失: {missing}")
 
 
 def main():

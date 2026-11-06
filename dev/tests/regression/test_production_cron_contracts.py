@@ -135,6 +135,70 @@ def test_mail_cron_resolves_with_current_host_and_no_second_push(monkeypatch):
             app.shutdown()
 
 
+def test_rerun_same_definition_preserves_job_object_and_execution_state():
+    """Stage 3 提交4: 重复执行注册, 相同定义保留原 CronJob 对象与执行状态。"""
+    app = bare_app({'probe': {'func': lambda: 'ok'}})
+    cfg = {'cron_jobs': [{'name': 'job', 'time': '04:30', 'skill': 'probe'}]}
+    _register_configured_cron_jobs(app, None, cfg)
+    job = next(j for j in app.cron_service.jobs.values() if j.name == 'job')
+    job._last_run_minute = '2026-11-06 04:30'  # 模拟已执行状态
+    job_id_before = job.id
+    _register_configured_cron_jobs(app, None, cfg)
+    after = next(j for j in app.cron_service.jobs.values() if j.name == 'job')
+    assert after is job and after.id == job_id_before
+    assert after._last_run_minute == '2026-11-06 04:30'
+
+
+def test_same_name_non_config_origin_conflicts():
+    """Stage 3 提交4: 配置任务与插件/手动登记的同名任务冲突即报错。"""
+    app = bare_app({'probe': {'func': lambda: 'ok'}})
+    app.cron_service.add_job('plugin_owned', '04:30', lambda: 'plugin')
+    with pytest.raises(ValueError, match='同名定义冲突'):
+        _register_configured_cron_jobs(app, None, {'cron_jobs': [
+            {'name': 'plugin_owned', 'time': '04:30', 'skill': 'probe'},
+        ]})
+    # 既有任务原样保留
+    job = next(j for j in app.cron_service.jobs.values() if j.name == 'plugin_owned')
+    assert job.func() == 'plugin'
+
+
+def test_batch_failure_rolls_back_only_new_jobs():
+    """Stage 3 提交4: 批内失败回滚本批新增, 不触碰既有任务。"""
+    app = bare_app({'probe': {'func': lambda: 'ok'}})
+    app.cron_service.add_job('pre_existing', '01:00', lambda: 'keep')
+    cfg = {'cron_jobs': [
+        {'name': 'new_one', 'time': '02:00', 'skill': 'probe'},
+        {'name': 'pre_existing', 'time': '03:00', 'skill': 'probe'},  # 撞名触发失败
+    ]}
+    with pytest.raises(ValueError, match='同名定义冲突'):
+        _register_configured_cron_jobs(app, None, cfg)
+    names = {j.name for j in app.cron_service.jobs.values()}
+    assert 'new_one' not in names, '本批新增未回滚'
+    assert 'pre_existing' in names, '既有任务被误删'
+    # 回滚后可重新以合法配置注册 (无残留锁状态)
+    _register_configured_cron_jobs(app, None, {'cron_jobs': [
+        {'name': 'new_one', 'time': '02:00', 'skill': 'probe'},
+    ]})
+    assert 'new_one' in {j.name for j in app.cron_service.jobs.values()}
+
+
+def test_missing_expected_job_blocks_startup(monkeypatch):
+    """Stage 3 提交4: 注册后预期清单缺失即抛出, 阻止启动。"""
+    app = bare_app({'probe': {'func': lambda: 'ok'}})
+    real_add = app.cron_service.add_job
+
+    def flaky_add(name, expr, func, enabled=True):
+        # 静默改名: 调用方不报错, 但预期名称缺失
+        return real_add(name if name != 'vanished' else 'vanished#mangled', expr, func, enabled)
+
+    monkeypatch.setattr(app.cron_service, 'add_job', flaky_add)
+    with pytest.raises(RuntimeError, match='缺失'):
+        _register_configured_cron_jobs(app, None, {'cron_jobs': [
+            {'name': 'kept', 'time': '02:00', 'skill': 'probe'},
+            {'name': 'vanished', 'time': '03:00', 'skill': 'probe'},
+        ]})
+
+
 def test_cron_service_log_callback_is_wired_to_stdout():
     """回归：cron 引擎的执行日志必须落到 stdout（journald 采集）。
 

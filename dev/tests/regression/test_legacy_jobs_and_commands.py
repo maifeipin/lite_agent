@@ -56,8 +56,8 @@ def test_v1_legacy_cron_handlers_registered_and_executable_without_missing_skill
         app.shutdown()
 
 
-def test_v1_cron_registration_deduplication():
-    """V1: 重复注册同名或同 slot cron 任务时，必须通过 remove_job_by_name 实现安全幂等去重。"""
+def test_v1_cron_registration_same_name_different_definition_rejected():
+    """V1 (Stage 3 新契约): 同名不同定义的配置任务必须报错, 不做热更新替换。"""
     from lite_agent.cli import _register_configured_cron_jobs
 
     app = create_app(mode="core", config=BASE_CONFIG)
@@ -72,12 +72,10 @@ def test_v1_cron_registration_deduplication():
     }
 
     try:
-        _register_configured_cron_jobs(app, mock_agent, cfg)
-        jobs = list(app.cron_service.jobs.values())
-        named_jobs = [j for j in jobs if j.name == "test_job_1"]
-        assert len(named_jobs) == 1, "同名任务未去重"
-        # 验证保留的是最新的调度槽位 09:00
-        assert named_jobs[0].cron_expr == "09:00"
+        with pytest.raises(ValueError, match="同名定义冲突"):
+            _register_configured_cron_jobs(app, mock_agent, cfg)
+        # 冲突报错后本批新增全部回滚, 不残留半注册状态
+        assert "test_job_1" not in {j.name for j in app.cron_service.jobs.values()}
     finally:
         app.shutdown()
 
