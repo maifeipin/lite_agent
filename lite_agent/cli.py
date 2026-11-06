@@ -117,17 +117,38 @@ def _register_configured_cron_jobs(app, agent, config: dict):
     cron_srv = app.cron_service
 
     def _expand_times(job):
+        """展开任务时间槽。展开后无时间槽即视为非法配置, 直接拒绝 (不静默丢失任务)。"""
+        name = job["name"]
+
+        def _int_field(value, field, minimum, maximum):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"Cron 作业 [{name}] time_range.{field} 必须是整数: {value!r}")
+            if not minimum <= value <= maximum:
+                raise ValueError(
+                    f"Cron 作业 [{name}] time_range.{field} 超出范围 "
+                    f"[{minimum}, {maximum}]: {value}"
+                )
+            return value
+
         if "time_range" in job and isinstance(job["time_range"], dict):
             tr = job["time_range"]
-            start_h = tr.get("start", 0)
-            end_h = tr.get("end", 23)
-            minute = tr.get("minute", 0)
+            start_h = _int_field(tr.get("start", 0), "start", 0, 23)
+            end_h = _int_field(tr.get("end", 23), "end", 0, 23)
+            minute = _int_field(tr.get("minute", 0), "minute", 0, 59)
+            if start_h > end_h:
+                raise ValueError(
+                    f"Cron 作业 [{name}] time_range 起点 {start_h} 晚于终点 {end_h}, "
+                    f"展开后无时间槽"
+                )
             return [f"{h:02d}:{minute:02d}" for h in range(start_h, end_h + 1)]
         if "times" in job and isinstance(job["times"], list):
-            return list(job["times"])
+            times = list(job["times"])
+            if not times:
+                raise ValueError(f"Cron 作业 [{name}] times 为空列表, 展开后无时间槽")
+            return times
         if "time" in job:
             return [job["time"]]
-        raise ValueError(f"Cron 作业 [{job['name']}] 缺少时间配置 (time/time_range/times)")
+        raise ValueError(f"Cron 作业 [{name}] 缺少时间配置 (time/time_range/times)")
 
     def _definition_key(job):
         if "command" in job:

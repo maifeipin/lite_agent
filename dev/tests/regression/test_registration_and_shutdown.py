@@ -1,6 +1,43 @@
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pytest
+
+
+@pytest.mark.parametrize("bad_job", [
+    {"name": "empty-times", "times": [], "skill": "ops_x::run"},
+    {"name": "reversed-range", "time_range": {"start": 20, "end": 8}, "skill": "ops_x::run"},
+    {"name": "range-out-of-bounds", "time_range": {"start": 0, "end": 24}, "skill": "ops_x::run"},
+    {"name": "minute-out-of-bounds", "time_range": {"start": 1, "end": 2, "minute": 60}, "skill": "ops_x::run"},
+    {"name": "non-int-range", "time_range": {"start": "0", "end": 1}, "skill": "ops_x::run"},
+])
+def test_invalid_time_config_rejected_without_touching_existing_jobs(bad_job):
+    """展开后无时间槽的配置必须拒绝 (不得静默注册零任务), 且失败不改动既有任务。"""
+    from lite_agent.cli import _register_configured_cron_jobs
+    from lite_agent.services.cron import CronService
+    cron = CronService()
+    cron.add_job("pre-existing", "03:00", lambda: None)
+    app = SimpleNamespace(cron_service=cron)
+    with pytest.raises(ValueError):
+        _register_configured_cron_jobs(app, None, {"cron_jobs": [bad_job]})
+    assert {j.name for j in cron.jobs.values()} == {"pre-existing"}
+
+
+def test_valid_single_hour_range_and_multi_times_still_expand():
+    """边界正例: start==end 单小时合法; 非空 times 正常展开为多个任务名。"""
+    from lite_agent.cli import _register_configured_cron_jobs
+    from lite_agent.services.cron import CronService
+    cron = CronService()
+    app = SimpleNamespace(cron_service=cron)
+    _register_configured_cron_jobs(app, None, {"cron_jobs": [
+        {"name": "single-hour", "time_range": {"start": 5, "end": 5, "minute": 30},
+         "skill": "ops_x::run"},
+        {"name": "multi", "times": ["09:00", "18:00"], "skill": "ops_x::run"},
+    ]})
+    assert "single-hour" in cron._job_names
+    assert "multi#09:00" in cron._job_names
+    assert "multi#18:00" in cron._job_names
+
 
 def test_failed_registration_executes_cleanup():
     from lite_agent.app.bootstrap import create_app

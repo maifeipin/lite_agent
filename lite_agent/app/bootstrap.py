@@ -62,7 +62,12 @@ class Application:
         return self.plugin_loader.loaded_plugins
 
     def shutdown(self):
-        """释放应用所有注册的句柄与后台任务。"""
+        """释放应用所有注册的句柄与后台任务。
+
+        先停止调度并等待在途任务执行完毕, 再按注册倒序释放插件 handler、任务
+        与其余受管资源——避免在途任务执行时其依赖资源已被插件清理提前关闭。
+        """
+        self.cron_service.stop(wait=True, timeout=2.0)
         return self.lifecycle.shutdown()
 
 
@@ -209,7 +214,9 @@ def create_app(
     lifecycle.register_resource("command_registry", cmd_registry.clear)
     lifecycle.register_resource("workflow_registry", workflow_registry.clear)
     lifecycle.register_resource("route_registry", route_registry.clear)
-    lifecycle.register_resource("cron_service", lambda: (cron_service.stop(wait=True, timeout=2.0), cron_service.clear()))
+    # 停止与排空在途任务由 Application.shutdown 前置执行 (必须先于插件资源清理);
+    # 此处仅负责清空任务与 handler 注册表。
+    lifecycle.register_resource("cron_service", cron_service.clear)
     lifecycle.register_resource("domain_registry", ctx.domain_registry.clear)
     if skill_engine is not None and hasattr(skill_engine, "clear"):
         lifecycle.register_resource("skill_engine", skill_engine.clear)

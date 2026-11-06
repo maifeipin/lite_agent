@@ -16,7 +16,10 @@
 
 import threading
 import time
+from types import ModuleType
+from unittest.mock import patch
 
+from lite_agent.app.plugins import PluginLoader
 from lite_agent.services.cron import CronService
 from lite_agent.app.bootstrap import create_app
 
@@ -160,3 +163,54 @@ def test_app_shutdown_stops_and_clears_only_its_own_cron_service():
         assert fired.wait(timeout=5), "外部调度器在应用 shutdown 后仍可独立启停运行"
     finally:
         external.stop()
+
+
+def test_shutdown_drains_inflight_job_before_plugin_resource_cleanup():
+    """真实插件资源必须在在途任务结束之后才释放, 而非提前关闭。
+
+    生命周期按注册倒序清理, 插件清理 (后注册) 天然早于宿主资源。若 shutdown
+    不在前置阶段停止调度并排空在途任务, 插件资源会先于任务释放。
+    """
+    order = []
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_job():
+        started.set()
+        release.wait(timeout=10)
+        order.append("job_finished")
+        return "ok"
+
+    def plugin_cleanup():
+        order.append("plugin_cleanup")
+
+    app = create_app(mode="core", config={})
+    app.cron_service.add_job("blocking", "every_minute", blocking_job)
+    app.cron_service.start()
+    assert started.wait(timeout=5), "调度循环应及时提交到期任务"
+
+    def register(ctx):
+        ctx.register_cleanup("plugin_resource", plugin_cleanup)
+
+    plugin = ModuleType("review_plugin")
+    plugin.register = register
+    loader = PluginLoader(app.plugin_loader.context, {"review_plugin"})
+    with patch("lite_agent.app.plugins.importlib.import_module", return_value=plugin):
+        loader.load_plugin_by_entry("review_plugin")
+
+    stopper = threading.Thread(target=app.shutdown)
+    stopper.start()
+
+    deadline = time.time() + 3
+    while time.time() < deadline and app.cron_service.running:
+        time.sleep(0.01)
+    assert app.cron_service.running is False, "shutdown 必须停止接收新任务"
+    assert stopper.is_alive(), "在途任务未完成前, shutdown 应阻塞等待"
+    assert order == [], f"在途任务结束前不得释放插件资源, 实际: {order}"
+
+    release.set()
+    stopper.join(timeout=5)
+    assert not stopper.is_alive()
+    assert order == ["job_finished", "plugin_cleanup"], (
+        f"必须先排空在途任务再释放插件资源, 实际: {order}"
+    )
