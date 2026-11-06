@@ -168,12 +168,20 @@ class CronService:
             if job_id not in self.jobs:
                 return f"❌ 找不到序号为 {job_id} 的任务。"
             job = self.jobs[job_id]
+        # 与调度循环 (_execute_job_task) 共用同一执行锁: 在途时拒绝并发, 不绕过
+        with job._job_lock:
+            if job.is_running:
+                return f"⏳ 任务 [{job.name}] 正在执行中，请稍后再试。"
+            job.is_running = True
         try:
             result = job.func()
             return f"🚀 手动执行 [{job.name}] 成功:\n{result}"
         except Exception as e:
             err_msg = traceback.format_exc()
             return f"❌ 手动执行 [{job.name}] 失败: {e}\n{err_msg}"
+        finally:
+            with job._job_lock:
+                job.is_running = False
 
     def start(self):
         with self._lock:
