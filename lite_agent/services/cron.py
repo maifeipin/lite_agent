@@ -86,6 +86,9 @@ class CronService:
         self._inflight_cond = threading.Condition(self._inflight_lock)
         # 关闭中：拒绝新的手动/自动执行，便于 stop 排空既有在途任务
         self._stopping = False
+        self._stop_in_progress = False
+        self._stop_lock = threading.Lock()
+        self._generation = 0
 
     _init = __init__
 
@@ -217,9 +220,17 @@ class CronService:
 
     def start(self):
         with self._lock:
+            if self._stop_in_progress:
+                raise RuntimeError("调度器正在停止并排空任务，请等待 stop 完成后再启动。")
             if self.running:
                 return
+            if self._thread is not None and self._thread.is_alive():
+                raise RuntimeError("上一次调度循环尚未退出，不能启动新的调度循环。")
+            with self._inflight_lock:
+                if self._stopping and self._inflight:
+                    raise RuntimeError("上一次执行尚未排空，不能重新启动调度器。")
             self._stopping = False  # 允许 stop 后重新启动, 恢复接收新执行
+            self._generation += 1
             self.running = True
             self.executor = ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix="CronWorker")
             self._thread = threading.Thread(target=self._run_loop, daemon=True, name="CronEngine")
@@ -233,30 +244,38 @@ class CronService:
         - wait=True 时等待自动线程池与手动调用线程上的全部在途任务结束
           (timeout=None 表示无限等待, 用于应用关闭确保插件资源不被提前释放)。
         """
-        with self._lock:
-            self._stopping = True
-            was_running = self.running
-            self.running = False
-        if was_running:
-            if self._thread and self._thread.is_alive():
-                self._thread.join(timeout=timeout)
-            if self.executor:
-                try:
-                    self.executor.shutdown(wait=wait, cancel_futures=True)
-                except TypeError:
-                    self.executor.shutdown(wait=wait)
-                except Exception:
-                    pass
-                self.executor = None
-        if wait:
-            self._wait_inflight(timeout)
+        # 序列化停止调用；只处理本次捕获的循环和执行器，不能误关后续实例。
+        with self._stop_lock:
+            with self._lock:
+                self._stop_in_progress = True
+                self._stopping = True
+                self.running = False
+                thread, executor = self._thread, self.executor
+            try:
+                if thread is not None and thread.is_alive():
+                    thread.join(timeout=timeout)
+                if executor is not None:
+                    try:
+                        executor.shutdown(wait=wait, cancel_futures=True)
+                    except TypeError:
+                        executor.shutdown(wait=wait)
+                if wait:
+                    self._wait_inflight(timeout)
+            finally:
+                with self._lock:
+                    if self.executor is executor:
+                        self.executor = None
+                    self._stop_in_progress = False
 
-    def _execute_job_task(self, job: CronJob):
-        with job._job_lock:
-            if job.is_running:
+    def _execute_job_task(self, job: CronJob, generation: Optional[int] = None):
+        with self._lock:
+            if self._stopping or (generation is not None and generation != self._generation):
                 return
-            job.is_running = True
-        self._mark_inflight(job.name, via_pool=True)
+            with job._job_lock:
+                if job.is_running:
+                    return
+                job.is_running = True
+            self._mark_inflight(job.name, via_pool=True)
         try:
             with self._log_lock:
                 self._log_callback(f"🕒 正在自动执行定时任务: {job.name}...")
@@ -293,11 +312,14 @@ class CronService:
             self._last_tick = time.monotonic()
             now = datetime.now()
             with self._lock:
+                if not self.running:
+                    break
                 jobs_to_run = [job for job in self.jobs.values() if job.should_run(now)]
+                executor, generation = self.executor, self._generation
             for job in jobs_to_run:
                 try:
-                    if self.executor:
-                        self.executor.submit(self._execute_job_task, job)
+                    if executor:
+                        executor.submit(self._execute_job_task, job, generation)
                 except RuntimeError:
                     pass
             # 睡眠 1 秒检测停止，避免长 sleep 导致无法退出

@@ -19,6 +19,8 @@ import time
 from types import ModuleType
 from unittest.mock import patch
 
+import pytest
+
 from lite_agent.app.plugins import PluginLoader
 from lite_agent.services.cron import CronService
 from lite_agent.app.bootstrap import create_app
@@ -305,3 +307,111 @@ def test_stop_rejects_new_manual_run_while_draining_and_accepts_after_restart():
         assert "成功" in svc.run_job_manually(job_id), "重新 start 后应恢复接收手动执行"
     finally:
         svc.stop()
+
+
+@pytest.mark.parametrize("started_loop", [False, True])
+def test_start_rejected_while_stop_drains_manual_job(started_loop):
+    """stop 尚在排空时不能启动新循环；完整停止后允许正常重启。"""
+    svc = CronService()
+    entered, release, draining = threading.Event(), threading.Event(), threading.Event()
+    results, errors = [], []
+
+    def job():
+        entered.set()
+        assert release.wait(10)
+        return "done"
+
+    job_id = svc.add_job("manual", "every_minute", job, enabled=False)
+    if started_loop:
+        svc.start()
+    old_thread, old_executor = svc._thread, svc.executor
+    original_wait = svc._wait_inflight
+
+    def observe_drain(timeout):
+        draining.set()
+        original_wait(timeout)
+
+    svc._wait_inflight = observe_drain
+    manual = threading.Thread(target=lambda: results.append(svc.run_job_manually(job_id)))
+
+    def stop():
+        try:
+            svc.stop(wait=True, timeout=None)
+        except Exception as exc:
+            errors.append(exc)
+
+    stopper = threading.Thread(target=stop)
+    manual.start()
+    try:
+        assert entered.wait(5)
+        stopper.start()
+        assert draining.wait(5)
+        with pytest.raises(RuntimeError, match="正在停止"):
+            svc.start()
+        assert svc.running is False
+        assert svc._thread is old_thread
+        assert svc.executor is old_executor
+        assert "关闭" in svc.run_job_manually(job_id)
+    finally:
+        release.set()
+        manual.join(5)
+        if stopper.ident is not None:
+            stopper.join(5)
+        svc.stop(wait=True, timeout=None)
+    assert not manual.is_alive() and not stopper.is_alive()
+    assert not errors
+    assert results and "成功" in results[0]
+    assert svc.running is False and svc.executor is None
+    if old_thread is not None:
+        assert not old_thread.is_alive()
+
+    svc.start()
+    try:
+        assert svc.running
+        assert svc._thread is not old_thread
+        assert "成功" in svc.run_job_manually(job_id)
+    finally:
+        svc.stop(wait=True, timeout=None)
+
+
+def test_timed_out_manual_drain_blocks_restart_until_job_finishes():
+    svc = CronService()
+    entered, release = threading.Event(), threading.Event()
+
+    def job():
+        entered.set()
+        assert release.wait(10)
+
+    job_id = svc.add_job("manual", "every_minute", job, enabled=False)
+    manual = threading.Thread(target=svc.run_job_manually, args=(job_id,))
+    manual.start()
+    try:
+        assert entered.wait(5)
+        svc.stop(wait=True, timeout=0)
+        with pytest.raises(RuntimeError, match="尚未排空"):
+            svc.start()
+    finally:
+        release.set()
+        manual.join(5)
+        svc.stop(wait=True, timeout=None)
+    svc.start()
+    svc.stop(wait=True, timeout=None)
+
+
+def test_old_pool_generation_cannot_execute_after_restart():
+    svc = CronService()
+    calls = []
+    job_id = svc.add_job("probe", "every_minute", lambda: calls.append("called"), enabled=False)
+    svc.start()
+    old_generation = svc._generation
+    svc.stop(wait=True, timeout=None)
+    svc.start()
+    try:
+        # 模拟旧执行器已取出、但尚未进入执行入口的回调。
+        svc._execute_job_task(svc.jobs[job_id], old_generation)
+        assert calls == []
+        assert svc.health_snapshot()["busy_workers"] == 0
+        svc._execute_job_task(svc.jobs[job_id], svc._generation)
+        assert calls == ["called"]
+    finally:
+        svc.stop(wait=True, timeout=None)
