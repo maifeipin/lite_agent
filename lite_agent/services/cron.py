@@ -79,10 +79,13 @@ class CronService:
         self._log_lock = threading.Lock()
         self._log_callback = log_callback or (lambda msg: None)
         self.max_workers = 5
-        # 存活观测：调度循环心跳 (monotonic) 与在途作业开始时间
+        # 存活观测：调度循环心跳 (monotonic) 与在途作业 (自动与手动统一登记)
         self._last_tick: Optional[float] = None
-        self._inflight: Dict[str, float] = {}
+        self._inflight: Dict[str, Dict[str, Any]] = {}
         self._inflight_lock = threading.Lock()
+        self._inflight_cond = threading.Condition(self._inflight_lock)
+        # 关闭中：拒绝新的手动/自动执行，便于 stop 排空既有在途任务
+        self._stopping = False
 
     _init = __init__
 
@@ -163,16 +166,44 @@ class CronService:
             state = "已开启" if job.enabled else "已暂停"
             return f"✅ 任务 [{job.id}] {job.name} {state}。"
 
+    def _mark_inflight(self, name: str, via_pool: bool):
+        """登记在途作业。自动 (线程池) 与手动 (调用线程) 统一登记, 供 stop 排空。"""
+        with self._inflight_lock:
+            self._inflight[name] = {"started": time.monotonic(), "via_pool": via_pool}
+
+    def _clear_inflight(self, name: str):
+        with self._inflight_lock:
+            self._inflight.pop(name, None)
+            self._inflight_cond.notify_all()
+
+    def _wait_inflight(self, timeout: Optional[float]):
+        """等待所有在途作业结束 (自动线程池 + 手动调用线程)。timeout=None 表示无限等待。"""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._inflight_cond:
+            while self._inflight:
+                if deadline is None:
+                    self._inflight_cond.wait()
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return
+                    self._inflight_cond.wait(remaining)
+
     def run_job_manually(self, job_id: int) -> str:
+        # 与 stop 的关闭标志在同一临界区判定并登记: 关闭开始后不再接收新执行,
+        # 已接收的手动执行会被 stop 排空后才释放插件资源。
         with self._lock:
+            if self._stopping:
+                return "⏳ 调度器正在关闭，已拒绝新的手动执行。"
             if job_id not in self.jobs:
                 return f"❌ 找不到序号为 {job_id} 的任务。"
             job = self.jobs[job_id]
-        # 与调度循环 (_execute_job_task) 共用同一执行锁: 在途时拒绝并发, 不绕过
-        with job._job_lock:
-            if job.is_running:
-                return f"⏳ 任务 [{job.name}] 正在执行中，请稍后再试。"
-            job.is_running = True
+            # 与调度循环 (_execute_job_task) 共用同一执行锁: 在途时拒绝并发, 不绕过
+            with job._job_lock:
+                if job.is_running:
+                    return f"⏳ 任务 [{job.name}] 正在执行中，请稍后再试。"
+                job.is_running = True
+            self._mark_inflight(job.name, via_pool=False)
         try:
             result = job.func()
             return f"🚀 手动执行 [{job.name}] 成功:\n{result}"
@@ -180,6 +211,7 @@ class CronService:
             err_msg = traceback.format_exc()
             return f"❌ 手动执行 [{job.name}] 失败: {e}\n{err_msg}"
         finally:
+            self._clear_inflight(job.name)
             with job._job_lock:
                 job.is_running = False
 
@@ -187,35 +219,44 @@ class CronService:
         with self._lock:
             if self.running:
                 return
+            self._stopping = False  # 允许 stop 后重新启动, 恢复接收新执行
             self.running = True
             self.executor = ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix="CronWorker")
             self._thread = threading.Thread(target=self._run_loop, daemon=True, name="CronEngine")
             self._thread.start()
 
-    def stop(self, wait: bool = True, timeout: float = 3.0):
-        """停止调度引擎，释放线程与后台资源。"""
+    def stop(self, wait: bool = True, timeout: Optional[float] = 3.0):
+        """停止调度并排空在途任务。
+
+        - 先置关闭标志: 拒绝新的手动/自动执行;
+        - 停止调度循环并关闭线程池;
+        - wait=True 时等待自动线程池与手动调用线程上的全部在途任务结束
+          (timeout=None 表示无限等待, 用于应用关闭确保插件资源不被提前释放)。
+        """
         with self._lock:
-            if not self.running:
-                return
+            self._stopping = True
+            was_running = self.running
             self.running = False
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=timeout)
-        if self.executor:
-            try:
-                self.executor.shutdown(wait=wait, cancel_futures=True)
-            except TypeError:
-                self.executor.shutdown(wait=wait)
-            except Exception:
-                pass
-            self.executor = None
+        if was_running:
+            if self._thread and self._thread.is_alive():
+                self._thread.join(timeout=timeout)
+            if self.executor:
+                try:
+                    self.executor.shutdown(wait=wait, cancel_futures=True)
+                except TypeError:
+                    self.executor.shutdown(wait=wait)
+                except Exception:
+                    pass
+                self.executor = None
+        if wait:
+            self._wait_inflight(timeout)
 
     def _execute_job_task(self, job: CronJob):
         with job._job_lock:
             if job.is_running:
                 return
             job.is_running = True
-        with self._inflight_lock:
-            self._inflight[job.name] = time.monotonic()
+        self._mark_inflight(job.name, via_pool=True)
         try:
             with self._log_lock:
                 self._log_callback(f"🕒 正在自动执行定时任务: {job.name}...")
@@ -228,8 +269,7 @@ class CronService:
             with self._log_lock:
                 self._log_callback(f"❌ 定时任务 [{job.name}] 执行失败: {e}\n{err_msg}")
         finally:
-            with self._inflight_lock:
-                self._inflight.pop(job.name, None)
+            self._clear_inflight(job.name)
             with job._job_lock:
                 job.is_running = False
 
@@ -237,12 +277,13 @@ class CronService:
         """返回调度器存活快照，供 /health 与外部监控判断是否卡死。"""
         now = time.monotonic()
         with self._inflight_lock:
-            inflight = {name: now - started for name, started in self._inflight.items()}
+            inflight = {name: now - rec["started"] for name, rec in self._inflight.items()}
+            pool_busy = sum(1 for rec in self._inflight.values() if rec["via_pool"])
         longest = max(inflight.items(), key=lambda kv: kv[1]) if inflight else None
         return {
             "running": self.running,
             "loop_age_s": None if self._last_tick is None else round(now - self._last_tick, 1),
-            "busy_workers": len(inflight),
+            "busy_workers": pool_busy,
             "max_workers": self.max_workers,
             "longest_job": None if longest is None else {"name": longest[0], "age_s": round(longest[1], 1)},
         }

@@ -165,7 +165,7 @@ def test_app_shutdown_stops_and_clears_only_its_own_cron_service():
         external.stop()
 
 
-def test_shutdown_drains_inflight_job_before_plugin_resource_cleanup():
+def test_shutdown_waits_for_inflight_job_before_plugin_resource_cleanup():
     """真实插件资源必须在在途任务结束之后才释放, 而非提前关闭。
 
     生命周期按注册倒序清理, 插件清理 (后注册) 天然早于宿主资源。若 shutdown
@@ -214,3 +214,94 @@ def test_shutdown_drains_inflight_job_before_plugin_resource_cleanup():
     assert order == ["job_finished", "plugin_cleanup"], (
         f"必须先排空在途任务再释放插件资源, 实际: {order}"
     )
+
+
+def test_shutdown_waits_for_manual_job_without_started_loop():
+    """未启动调度循环、仅有手动执行在途时, shutdown 同样要排空后才释放插件资源。"""
+    order = []
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_job():
+        started.set()
+        release.wait(timeout=10)
+        order.append("job_finished")
+        return "ok"
+
+    def plugin_cleanup():
+        order.append("plugin_cleanup")
+
+    app = create_app(mode="core", config={})
+    job_id = app.cron_service.add_job("manual-blocking", "every_minute", blocking_job)
+    assert app.cron_service.running is False, "本场景刻意不启动调度循环"
+
+    def register(ctx):
+        ctx.register_cleanup("plugin_resource", plugin_cleanup)
+
+    plugin = ModuleType("review_plugin")
+    plugin.register = register
+    loader = PluginLoader(app.plugin_loader.context, {"review_plugin"})
+    with patch("lite_agent.app.plugins.importlib.import_module", return_value=plugin):
+        loader.load_plugin_by_entry("review_plugin")
+
+    results = []
+    manual = threading.Thread(target=lambda: results.append(app.cron_service.run_job_manually(job_id)))
+    manual.start()
+    assert started.wait(timeout=5)
+
+    stopper = threading.Thread(target=app.shutdown)
+    stopper.start()
+    deadline = time.time() + 3
+    while time.time() < deadline and not app.cron_service._stopping:
+        time.sleep(0.01)
+    assert app.cron_service._stopping
+    assert stopper.is_alive(), "手动任务未完成前, shutdown 应阻塞等待"
+    assert order == [], f"手动任务在途时不得释放插件资源, 实际: {order}"
+
+    release.set()
+    manual.join(timeout=5)
+    stopper.join(timeout=5)
+    assert not stopper.is_alive()
+    assert order == ["job_finished", "plugin_cleanup"], (
+        f"必须先排空手动任务再释放插件资源, 实际: {order}"
+    )
+    assert any("成功" in r for r in results), "手动执行保持同步返回语义"
+
+
+def test_stop_rejects_new_manual_run_while_draining_and_accepts_after_restart():
+    """stop 开始后拒绝新的手动执行; stop 完成后重新 start 恢复接收。"""
+    svc = CronService()
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_job():
+        started.set()
+        release.wait(timeout=10)
+        return "ok"
+
+    job_id = svc.add_job("blocking", "every_minute", blocking_job)
+    results = []
+    manual = threading.Thread(target=lambda: results.append(svc.run_job_manually(job_id)))
+    manual.start()
+    assert started.wait(timeout=5)
+
+    stopper = threading.Thread(target=lambda: svc.stop(wait=True, timeout=None))
+    stopper.start()
+    deadline = time.time() + 3
+    while time.time() < deadline and not svc._stopping:
+        time.sleep(0.01)
+    assert svc._stopping
+
+    rejected = svc.run_job_manually(job_id)
+    assert "关闭" in rejected, "关闭中不得接收新的手动执行"
+
+    release.set()
+    manual.join(timeout=5)
+    stopper.join(timeout=5)
+    assert any("成功" in r for r in results)
+
+    svc.start()
+    try:
+        assert "成功" in svc.run_job_manually(job_id), "重新 start 后应恢复接收手动执行"
+    finally:
+        svc.stop()
