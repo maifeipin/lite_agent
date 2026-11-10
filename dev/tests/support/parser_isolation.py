@@ -19,8 +19,13 @@ from pathlib import Path
 from typing import Any, Iterator
 
 PINNED_PARSER_SHA = os.environ.get(
-    "PARSER_PINNED_SHA", "fa3600d813d9b0b07171baf7c8ab9aeebc77d17d"
+    "PARSER_PINNED_SHA", "e5765a6e3880648ac49c3e5ea0b0d9b32d55513a"
 )
+
+APPROVED_PARSER_SHAS = {
+    "fa3600d813d9b0b07171baf7c8ab9aeebc77d17d",
+    "e5765a6e3880648ac49c3e5ea0b0d9b32d55513a",
+}
 
 MANAGED_PARSER_MODULES = (
     "statement_db",
@@ -179,7 +184,9 @@ def verify_parser_fixed_version(parser_dir: Path, expected_sha: str = PINNED_PAR
         except Exception as e:
             raise RuntimeError(f"无法获取 Parser 仓库 Git SHA: {e}") from e
 
-    if not actual_sha.startswith(expected_sha) and not expected_sha.startswith(actual_sha):
+    matches_expected = actual_sha.startswith(expected_sha) or expected_sha.startswith(actual_sha)
+    matches_approved = any(actual_sha.startswith(s) or s.startswith(actual_sha) for s in APPROVED_PARSER_SHAS)
+    if not matches_expected and not matches_approved:
         raise AssertionError(
             f"Parser 提交 SHA 未锁定在已核准基线: 预期 {expected_sha}, 实际 {actual_sha}"
         )

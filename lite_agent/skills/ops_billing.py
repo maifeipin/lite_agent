@@ -176,3 +176,66 @@ def billing_txns_over(amount: float, months: int = 3) -> str:
 )
 def billing_parse_health(threshold: float = 0.5, days: int = 30) -> str:
     return billing_service.check_parse_health(threshold=threshold, days=days)
+
+
+@skill(
+    name="billing_export_expenses",
+    description="自定义时间范围查询开支明细与汇总（支持查几年、按年份、近半年/一年/三年、起止日期或全量），生成 Excel 兼容的 UTF-8 BOM CSV 并组织 Markdown 报表上传至 HedgeDoc",
+    params={
+        "months": {
+            "type": "integer",
+            "description": "回溯月数，例如 6 (近半年), 12 (近一年), 36 (近三年), 0 (全部历史)。默认 6",
+            "default": 6,
+        },
+        "year": {
+            "type": "string",
+            "description": "指定年份或范围，例如 '2024', '2022-2024', '今年', '去年', '全部'",
+            "default": "",
+        },
+        "start_date": {
+            "type": "string",
+            "description": "起始日期，格式 YYYY-MM-DD 或 YYYY-MM",
+            "default": "",
+        },
+        "end_date": {
+            "type": "string",
+            "description": "截止日期，格式 YYYY-MM-DD 或 YYYY-MM",
+            "default": "",
+        },
+        "bank_code": {
+            "type": "string",
+            "description": "筛选指定银行代码，如 CMB (招行), CITIC (中信), ICBC (工行), HX (华夏)。留空则查询全部银行",
+            "default": "",
+        },
+        "upload_hedgedoc": {
+            "type": "boolean",
+            "description": "是否上传 Markdown 格式的完整汇总报表至 HedgeDoc 在线查阅，默认 true",
+            "default": True,
+        },
+        "public": {
+            "type": "boolean",
+            "description": "是否公开分享 HedgeDoc 笔记。默认 false 保留为仅所有者可见的私有笔记；仅当用户明确要求公开链接时才设为 true",
+            "default": False,
+        },
+    },
+    side_effect=False,
+)
+def billing_export_expenses(
+    months: int = 6,
+    year: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    bank_code: str = "",
+    upload_hedgedoc: bool = True,
+    public: bool = False,
+) -> str:
+    return billing_service.export_expenses(
+        start_date=start_date or None,
+        end_date=end_date or None,
+        months=months,
+        year=year or None,
+        bank_code=bank_code or None,
+        upload_hedgedoc=upload_hedgedoc,
+        public=public,
+    )
+

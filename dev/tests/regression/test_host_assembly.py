@@ -109,7 +109,7 @@ PLUGIN_OWNED_TOOLS = {
     'lite_agent.features.billing': [
         'billing_report', 'billing_due_soon', 'billing_unpaid', 'billing_mark_paid',
         'billing_reconcile', 'billing_recent', 'billing_snapshot', 'billing_fetch',
-        'billing_txns_over', 'billing_parse_health',
+        'billing_txns_over', 'billing_parse_health', 'billing_export_expenses',
     ],
     'lite_agent.features.todo': [
         'todo_add', 'todo_list', 'todo_get', 'todo_start', 'todo_done',
