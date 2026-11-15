@@ -489,3 +489,60 @@ def test_empty_models_dict_is_treated_as_models_schema():
         mock_urlopen.assert_not_called()
         assert "配置错误" in result
         assert "已终止查询" in result
+
+
+def test_session_db_path_priority_config_over_env(tmp_path, monkeypatch):
+    """T2: 验证数据库解析优先级完全与 Agent 一致: 配置路径 > 环境变量 > 默认路径"""
+    import sqlite3
+    import time
+    cfg_db = tmp_path / "cfg_instance.db"
+    env_db = tmp_path / "env_instance.db"
+
+    # 在 cfg_db 写入 5555 tokens
+    c1 = sqlite3.connect(str(cfg_db))
+    c1.execute("CREATE TABLE api_usage_log (model TEXT, prompt_tokens INT, completion_tokens INT, total_tokens INT, created_at REAL)")
+    c1.execute("INSERT INTO api_usage_log VALUES (?, ?, ?, ?, ?)", ("m_cfg", 555, 5000, 5555, time.time()))
+    c1.commit()
+    c1.close()
+
+    # 在 env_db 写入 9999 tokens
+    c2 = sqlite3.connect(str(env_db))
+    c2.execute("CREATE TABLE api_usage_log (model TEXT, prompt_tokens INT, completion_tokens INT, total_tokens INT, created_at REAL)")
+    c2.execute("INSERT INTO api_usage_log VALUES (?, ?, ?, ?, ?)", ("m_cfg", 999, 9000, 9999, time.time()))
+    c2.commit()
+    c2.close()
+
+    monkeypatch.setenv("LITE_AGENT_SESSION_DB_PATH", str(env_db))
+    config = {
+        "session": {"db_path": str(cfg_db)},
+        "llm": {
+            "default": "m",
+            "models": {
+                "m": {"driver": "ark", "model": "m_cfg", "api_key": "k"}
+            }
+        }
+    }
+    # 状态查询必须优先读取配置路径中的 5555，绝不能读取环境变量中的 9999
+    result = check_active_llm_status(config)
+    assert "5,555" in result
+    assert "9,999" not in result
+
+
+def test_ops_llm_skill_entry_resolves_config_db_path(tmp_path, monkeypatch):
+    """T2: 验证独立用量技能入口在无显式 config 传入时，自动加载配置并使用 session.db_path"""
+    import sqlite3
+    import time
+    from lite_agent.skills.ops_llm import llm_usage_report as skill_report
+
+    skill_db = tmp_path / "skill_instance.db"
+    conn = sqlite3.connect(str(skill_db))
+    conn.execute("CREATE TABLE api_usage_log (model TEXT, prompt_tokens INT, completion_tokens INT, total_tokens INT, created_at REAL)")
+    conn.execute("INSERT INTO api_usage_log VALUES (?, ?, ?, ?, ?)", ("deepseek-chat", 1000, 2000, 3000, time.time()))
+    conn.commit()
+    conn.close()
+
+    fake_config = {"session": {"db_path": str(skill_db)}}
+    with patch("lite_agent.core.config_loader.load_config", return_value=fake_config):
+        output = skill_report(days=7)
+        assert "3,000" in output
+        assert "deepseek-chat" in output

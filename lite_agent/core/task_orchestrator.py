@@ -671,6 +671,7 @@ class TaskOrchestrator:
             self._log_and_persist(f"  [WORKER:{subtask.id}] 启动 model={subtask.assigned_model} allowlist={subtask.tools[:3] if subtask.tools else 'all'}...", log_callback)
 
             fallback_attempted = False
+            outcome = None
             try:
                 worker = self._make_worker(
                     subtask, subtask.assigned_model, log_callback,
@@ -683,6 +684,13 @@ class TaskOrchestrator:
                     parent_execution_id=parent_execution_id,
                 )
             except Exception as primary_error:
+                # 若执行中途发生异常（例如已走过步骤或已产生工具调用），无法证明未产生副作用，严禁自动回退
+                if subtask.steps_used > 0 or subtask.tool_results or (outcome and getattr(outcome, "tool_results", None)):
+                    self._log_and_persist(
+                        f"  ⚠️ {subtask.id} 主模型执行中发生异常（steps={subtask.steps_used}），存在潜在副作用，终止自动回退",
+                        log_callback,
+                    )
+                    raise
                 if not subtask.fallback_models:
                     raise
                 self._log_and_persist(
@@ -703,7 +711,7 @@ class TaskOrchestrator:
                     and not fallback_attempted
                 ):
                     # 关键边界控制：若执行过程中已产生工具调用副作用，严禁不透明整段重跑新 Worker
-                    if subtask.tool_results:
+                    if self._has_side_effects(outcome, subtask):
                         self._log_and_persist(
                             f"  ⚠️ {subtask.id} 已执行工具调用具有副作用，终止自动回退重跑",
                             log_callback,
@@ -792,6 +800,14 @@ class TaskOrchestrator:
             evidence_config=getattr(self, 'config', {}),
         )
 
+    @staticmethod
+    def _has_side_effects(outcome: Optional[WorkerOutcome], subtask: Subtask) -> bool:
+        if subtask.tool_results:
+            return True
+        if outcome and getattr(outcome, "tool_results", None):
+            return True
+        return False
+
     def _run_worker_fallbacks(self, subtask: Subtask, upstream: dict,
                               goal: str, global_strategy: str,
                               log_callback: Callable,
@@ -829,6 +845,13 @@ class TaskOrchestrator:
                 )
                 if last_outcome.status == "done":
                     return last_outcome
+                # 关键边界控制：若备用模型执行已产生工具副作用，严禁继续回退下一个备用！
+                if self._has_side_effects(last_outcome, subtask):
+                    self._log_and_persist(
+                        f"  ⚠️ {subtask.id} 备用模型执行已产生工具副作用，终止后续备用回退",
+                        log_callback,
+                    )
+                    return last_outcome
                 if last_outcome.terminal_reason != "model_error":
                     return last_outcome
             except Exception as exc:
@@ -836,6 +859,12 @@ class TaskOrchestrator:
                     f"❌ Fallback 执行失败: {exc}", status="failed",
                     terminal_reason="worker_exception",
                 )
+                if subtask.steps_used > 0 or subtask.tool_results:
+                    self._log_and_persist(
+                        f"  ⚠️ {subtask.id} 备用模型执行中发生异常，终止后续备用回退",
+                        log_callback,
+                    )
+                    return last_outcome
         return last_outcome
 
     def _can_execute_directly(self, subtask: Subtask) -> bool:

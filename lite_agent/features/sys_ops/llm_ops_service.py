@@ -79,18 +79,24 @@ def _resolve_default_model_binding(config: Optional[dict] = None) -> Tuple[str, 
 
 def _resolve_session_db_path(config: Optional[dict] = None) -> str:
     """
-    统一解析会话与用量数据库路径，优先级：
-    1. 环境变量 LITE_AGENT_SESSION_DB_PATH
-    2. 配置字典 session.db_path
+    统一解析会话与用量数据库路径，与 Agent/SessionManager 保持完全一致的优先级：
+    1. 配置字典 session.db_path
+    2. 环境变量 LITE_AGENT_SESSION_DB_PATH
     3. 默认项目路径 PROJECT_ROOT/data/sessions.db
     """
+    if config is None:
+        try:
+            from lite_agent.core import config_loader
+            config = config_loader.load_config() or {}
+        except Exception:
+            config = {}
+
+    cfg_db = (config.get("session") or {}).get("db_path")
+    if cfg_db:
+        return cfg_db
     env_db = os.environ.get("LITE_AGENT_SESSION_DB_PATH")
     if env_db:
         return env_db
-    if config:
-        cfg_db = (config.get("session") or {}).get("db_path")
-        if cfg_db:
-            return cfg_db
     from lite_agent.core.constants import PROJECT_ROOT
     return os.path.join(PROJECT_ROOT, "data", "sessions.db")
 
@@ -228,6 +234,13 @@ def llm_check_balance() -> str:
 
 
 def llm_usage_report(days: int = 7, config: Optional[dict] = None) -> str:
+    if config is None:
+        try:
+            from lite_agent.core import config_loader
+            config = config_loader.load_config() or {}
+        except Exception:
+            return "❌ 统计 API 消耗量失败: 无法读取配置文件"
+
     db_path = _resolve_session_db_path(config)
     if not os.path.exists(db_path):
         return f"❌ 找不到会话数据库: {db_path}"
