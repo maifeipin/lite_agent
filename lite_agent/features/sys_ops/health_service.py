@@ -286,11 +286,11 @@ def get_health_report() -> str:
             report.append(f"📡 **启用的通讯通道**: ✅ {', '.join(channels) if channels else '无'}")
 
             try:
-                from lite_agent.features.sys_ops.llm_ops_service import check_deepseek_balance
-                balance_text = check_deepseek_balance()
-                report.append(f"💰 **大模型计费与余额**: \n{balance_text}")
+                from lite_agent.features.sys_ops.llm_ops_service import llm_check_balance
+                balance_text = llm_check_balance()
+                report.append(f"💰 **大模型状态与余量**: \n{balance_text}")
             except Exception as e:
-                report.append(f"💰 **大模型计费与余额**: ❌ 查询失败 ({e})")
+                report.append(f"💰 **大模型状态与余量**: ❌ 查询失败 ({e})")
         except Exception as e:
             report.append(f"🔑 **配置文件解析**: ❌ 失败 ({e})")
     else:
