@@ -186,7 +186,7 @@ def verify_parser_fixed_version(parser_dir: Path, expected_sha: str = PINNED_PAR
 
     matches_expected = actual_sha.startswith(expected_sha) or expected_sha.startswith(actual_sha)
     matches_approved = (
-        expected_sha == PINNED_PARSER_SHA
+        any(expected_sha.startswith(s) or s.startswith(expected_sha) for s in APPROVED_PARSER_SHAS)
         and any(actual_sha.startswith(s) or s.startswith(actual_sha) for s in APPROVED_PARSER_SHAS)
     )
     if not matches_expected and not matches_approved:

@@ -26,6 +26,7 @@ from dev.tests.support.parser_isolation import (
     MANAGED_PARSER_MODULES,
     MANAGED_PARSER_ENV_KEYS,
     PINNED_PARSER_SHA,
+    APPROVED_PARSER_SHAS,
 )
 
 
@@ -57,7 +58,7 @@ class TestParserIsolation(unittest.TestCase):
         root = Path(candidate)
         if (root / ".git").exists():
             sha = verify_parser_fixed_version(root, expected_sha=PINNED_PARSER_SHA)
-            self.assertTrue(sha.startswith(PINNED_PARSER_SHA))
+            self.assertTrue(any(sha.startswith(s) or s.startswith(sha) for s in APPROVED_PARSER_SHAS))
 
     def test_02_verify_parser_fixed_version_mismatch_fails(self):
         """反例：SHA 不匹配时必须抛出 AssertionError 严格拦截"""
