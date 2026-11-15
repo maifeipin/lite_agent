@@ -9,6 +9,9 @@ from lite_agent.core.model_config import (
     supports_vision,
 )
 from lite_agent.core.model_endpoint import (
+    PROTOCOL_GEMINI,
+    PROTOCOL_OPENAI,
+    SUPPORTED_PROTOCOLS,
     EndpointDefinition,
     ModelDefinition,
     normalize_llm_config,
@@ -21,6 +24,7 @@ class ModelRouter:
 
     def __init__(self, config: dict):
         llm_cfg = config.get("llm", {}) or {}
+        self.schema_version = int(llm_cfg.get("schema_version", 1) or 1)
         self.endpoints, self.models, self.default_model = normalize_llm_config(llm_cfg)
         self.models_cfg: dict[str, dict] = llm_cfg.get("models", {}) or {}
         self._endpoint_clients: dict[str, object] = {}
@@ -34,16 +38,23 @@ class ModelRouter:
             key = resolve_credential(ep.credential_ref, ep.extra.get("legacy_key", ""))
             if not key:
                 continue
-            if is_gemini_driver(ep.provider):
+
+            # 真正消费 protocol 分派适配器
+            protocol = ep.protocol or (PROTOCOL_GEMINI if is_gemini_driver(ep.provider) else PROTOCOL_OPENAI)
+            if protocol == PROTOCOL_GEMINI or is_gemini_driver(ep.provider):
                 self._endpoint_clients[ep_id] = self._make_gemini_client(ep_id, key, ep.proxy, ep_id)
-            else:
+            elif protocol == PROTOCOL_OPENAI:
                 import httpx
                 http_client = httpx.Client(proxy=ep.proxy) if ep.proxy else None
+                # 统一设置 max_retries=0，禁止 SDK 隐式重试，受控重试完全由 Gateway/Runtime 接管
                 self._endpoint_clients[ep_id] = OpenAI(
                     api_key=key,
                     base_url=ep.base_url,
                     http_client=http_client,
+                    max_retries=0,
                 )
+            else:
+                raise ValueError(f"不支持的端点协议: {protocol}")
 
         # 2. 将端点客户端绑定至模型规范名
         for name, m_def in self.models.items():
@@ -53,26 +64,28 @@ class ModelRouter:
             if m_def.endpoint_ref in self._endpoint_clients:
                 self._clients[name] = self._endpoint_clients[m_def.endpoint_ref]
 
-        # 3. 兜底旧版直接按 models_cfg 初始化的场景
-        for name, cfg in self.models_cfg.items():
-            if name not in self._drivers:
-                self._drivers[name] = cfg.get("driver", DRIVER_OPENAI)
-            if name not in self._clients:
-                driver = cfg.get("driver", DRIVER_OPENAI)
-                raw_key = cfg.get("api_key", "")
-                if not raw_key:
-                    continue
-                if is_gemini_driver(driver):
-                    self._clients[name] = self._make_gemini_client(name, raw_key, cfg.get("proxy"), cfg.get("model", name))
-                else:
-                    import httpx
-                    proxy_url = cfg.get("proxy")
-                    http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
-                    self._clients[name] = OpenAI(
-                        api_key=raw_key,
-                        base_url=cfg.get("base_url", ""),
-                        http_client=http_client,
-                    )
+        # 3. 仅在 schema_version < 2 的旧版配置下兜底直接按 models_cfg 初始化的场景
+        if self.schema_version < 2:
+            for name, cfg in self.models_cfg.items():
+                if name not in self._drivers:
+                    self._drivers[name] = cfg.get("driver", DRIVER_OPENAI)
+                if name not in self._clients:
+                    driver = cfg.get("driver", DRIVER_OPENAI)
+                    raw_key = cfg.get("api_key", "")
+                    if not raw_key:
+                        continue
+                    if is_gemini_driver(driver):
+                        self._clients[name] = self._make_gemini_client(name, raw_key, cfg.get("proxy"), cfg.get("model", name))
+                    else:
+                        import httpx
+                        proxy_url = cfg.get("proxy")
+                        http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
+                        self._clients[name] = OpenAI(
+                            api_key=raw_key,
+                            base_url=cfg.get("base_url", ""),
+                            http_client=http_client,
+                            max_retries=0,
+                        )
 
     def _make_gemini_client(self, name: str, api_key: str, proxy: Optional[str] = None, model_name: str = ""):
         try:
@@ -182,18 +195,37 @@ class ModelRouter:
         return resolved
 
     def supports_vision(self, model_name: str) -> bool:
-        cfg = self.models_cfg.get(model_name, {})
-        return supports_vision(cfg.get("tags", []))
+        models = getattr(self, "models", {}) or {}
+        m_def = models.get(model_name)
+        if m_def:
+            if m_def.capabilities.get("vision") or m_def.capabilities.get("multimodal"):
+                return True
+            if supports_vision(m_def.tags):
+                return True
+        cfg = getattr(self, "models_cfg", {}).get(model_name, {})
+        return supports_vision(cfg)
 
     def supports_streaming(self, model_name: str) -> bool:
         """检查模型是否支持流式输出。Gemini 原生驱动及显式声明 capabilities.stream=False 的模型均不支持流式。"""
         if not model_name:
             return True
+        models = getattr(self, "models", {}) or {}
+        m_def = models.get(model_name)
+        if m_def:
+            if m_def.capabilities.get("stream") is False or m_def.capabilities.get("streaming") is False:
+                return False
+            endpoints = getattr(self, "endpoints", {}) or {}
+            ep = endpoints.get(m_def.endpoint_ref)
+            if ep and is_gemini_driver(ep.provider):
+                return False
+            if m_def.capabilities.get("stream") is True or m_def.capabilities.get("streaming") is True:
+                return True
+
         driver = self.get_driver(model_name)
         if is_gemini_driver(driver):
             return False
-        cfg = self.models_cfg.get(model_name, {}) or {}
+        cfg = getattr(self, "models_cfg", {}).get(model_name, {}) or {}
         caps = cfg.get("capabilities", {})
-        if isinstance(caps, dict) and caps.get("stream") is False:
+        if isinstance(caps, dict) and (caps.get("stream") is False or caps.get("streaming") is False):
             return False
         return True

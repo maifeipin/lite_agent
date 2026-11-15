@@ -62,6 +62,8 @@ class ModelSelector:
     def __init__(self, config: dict):
         self.config = config
         self.llm_cfg = config.get("llm", {}) or {}
+        from lite_agent.core.model_endpoint import normalize_llm_config
+        self.endpoints, self.normalized_models, self.default_model = normalize_llm_config(self.llm_cfg)
         self.models = self.llm_cfg.get("models", {}) or {}
         self.routing = config.get("task_routing", {}) or {}
         self._aliases = self._build_aliases()
@@ -116,12 +118,28 @@ class ModelSelector:
 
     def _model_supports_streaming(self, model_name: str) -> bool:
         """检查模型是否具备流式能力；Gemini 适配器目前未实现流式，显式排除。"""
+        # 1. 优先从归一化模型定义中查询真实端点与能力
+        m_def = self.normalized_models.get(model_name)
+        if m_def:
+            if m_def.capabilities.get("stream") is False or m_def.capabilities.get("streaming") is False:
+                return False
+            ep = self.endpoints.get(m_def.endpoint_ref)
+            if ep and ep.provider == "gemini_native":
+                return False
+            if m_def.capabilities.get("stream") is True or m_def.capabilities.get("streaming") is True:
+                return True
+
+        # 2. 回退到原始配置检查
         cfg = self.models.get(model_name, {})
         driver = (cfg or {}).get("driver", "")
+        if not driver and (cfg or {}).get("endpoint_ref"):
+            ep_raw = (self.llm_cfg.get("endpoints") or {}).get((cfg or {}).get("endpoint_ref"))
+            if ep_raw:
+                driver = ep_raw.get("provider", "")
         if driver == "gemini_native":
             return False
         caps = (cfg or {}).get("capabilities", {})
-        if isinstance(caps, dict) and caps.get("stream") is False:
+        if isinstance(caps, dict) and (caps.get("stream") is False or caps.get("streaming") is False):
             return False
         return True
 

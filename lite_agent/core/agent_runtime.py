@@ -588,13 +588,19 @@ class AgentRuntime:
                 # 已向调用方产出内容 -> 不可重试（流已部分发送）
                 if has_output:
                     raise
-                # 不可重试的异常类型（4xx 鉴权/限流等）
+                # 跨协议统一错误分类检查：401/403/额度耗尽/400等非重试类型绝对不重试
+                from lite_agent.core.llm_error import classify_llm_error, is_retryable_error
+                err_category = classify_llm_error(e)
+                if not is_retryable_error(err_category):
+                    raise
+                # 不可重试的异常类型（调用方特定配置）
                 if isinstance(e, self.non_retryable_exceptions):
                     raise
                 # 已用完重试次数
                 if attempt >= self.max_retries:
                     raise
-                # 可以重试：重置 finish_reason，进入下一次尝试
+                # 可以重试：受控退避后进入下一次尝试
+                time.sleep(min(0.2 * (2 ** attempt), 1.0))
                 state.finish_reason = "stop"
                 continue
         # 不应到达此处

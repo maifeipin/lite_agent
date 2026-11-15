@@ -246,6 +246,7 @@ class GeminiInvoker(ModelInvoker):
             thinking_config=self._thinking_config(types, kwargs),
         )
 
+        # 受控重试：使用统一错误分类器，非可重试错误（如 401/403/配额耗尽）立即终止，纯频控限流进行受控短退避
         retry_count = max(0, int(kwargs.get("max_retries", 2)))
         max_attempts = retry_count + 1
         response = None
@@ -258,8 +259,9 @@ class GeminiInvoker(ModelInvoker):
                 )
                 break
             except Exception as e:
-                # 彻底消除 35 秒阻塞式 sleep：重试与退避统一交由 Gateway/调用方管控
-                if "429" in str(e) and attempt < max_attempts - 1:
+                from lite_agent.core.llm_error import classify_llm_error, is_retryable_error
+                cat = classify_llm_error(e)
+                if is_retryable_error(cat) and attempt < max_attempts - 1:
                     backoff = min(0.5 * (2 ** attempt), 2.0)
                     time.sleep(backoff)
                 else:

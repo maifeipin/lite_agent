@@ -76,8 +76,26 @@ class LLMGateway:
 
         if not provider and self.router is not None and model:
             provider = self.router.get_driver(model)
+
+        max_retries = int(kwargs.get("max_retries", 0) or 0)
+
         if self.ledger is None:
-            return self._normalize_usage(invoker.invoke_sync(messages=messages, tools=tools, **kwargs), messages, tools, kwargs)
+            last_exc = None
+            for attempt in range(max_retries + 1):
+                try:
+                    return self._normalize_usage(
+                        invoker.invoke_sync(messages=messages, tools=tools, **kwargs),
+                        messages, tools, kwargs
+                    )
+                except Exception as exc:
+                    last_exc = exc
+                    error_cat = classify_llm_error(exc)
+                    if not is_retryable_error(error_cat) or attempt >= max_retries:
+                        raise exc
+                    import time
+                    time.sleep(min(0.2 * (2 ** attempt), 1.0))
+            if last_exc:
+                raise last_exc
 
         max_output_tokens = int(
             kwargs.get("max_tokens", getattr(invoker, "max_tokens", 0)) or 0
@@ -101,8 +119,21 @@ class LLMGateway:
             self.ledger.record_and_project(
                 execution.id, 0, "STEP_START", {"step": 1, "max_steps": 1}, step=1
             )
-            result = invoker.invoke_sync(messages=messages, tools=tools, **kwargs)
-            result = self._normalize_usage(result, messages, tools, kwargs)
+            last_exc = None
+            result = None
+            for attempt in range(max_retries + 1):
+                try:
+                    raw_result = invoker.invoke_sync(messages=messages, tools=tools, **kwargs)
+                    result = self._normalize_usage(raw_result, messages, tools, kwargs)
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    error_cat = classify_llm_error(exc)
+                    if not is_retryable_error(error_cat) or attempt >= max_retries:
+                        raise exc
+                    import time
+                    time.sleep(min(0.2 * (2 ** attempt), 1.0))
+
             prompt_tokens = int(result.get("prompt_tokens", 0) or 0)
             completion_tokens = int(result.get("completion_tokens", 0) or 0)
             total_tokens = int(result.get("usage_total", 0) or 0)

@@ -66,12 +66,14 @@ def _resolve_default_model_binding(config: Optional[dict] = None) -> Tuple[str, 
         if ep_ref:
             endpoints = llm_cfg.get("endpoints", {}) or {}
             ep_data = endpoints.get(ep_ref, {})
-            m_cfg.setdefault("driver", ep_data.get("provider", "openai"))
-            m_cfg.setdefault("base_url", ep_data.get("base_url", ""))
+            # 严格以 endpoint 为准强制覆盖，杜绝模型内旧字段污染身份绑定
+            m_cfg["driver"] = ep_data.get("provider", "openai")
+            m_cfg["base_url"] = ep_data.get("base_url", "")
+            m_cfg["management_ref"] = ep_data.get("management_ref")
             from lite_agent.core.model_endpoint import resolve_credential
             cred_ref = ep_data.get("credential_ref", "")
-            key = resolve_credential(cred_ref, ep_data.get("api_key", ""))
-            m_cfg.setdefault("api_key", key)
+            key = resolve_credential(cred_ref, ep_data.get("extra", {}).get("legacy_key", ""))
+            m_cfg["api_key"] = key
         return default_key, m_cfg
 
     # 旧平铺单模型结构兼容兜底 (仅在完全没有 models 字段的旧版配置时生效)
@@ -166,8 +168,9 @@ def check_active_llm_status(config: Optional[dict] = None) -> str:
     if not api_key or api_key.startswith("${"):
         return f"{header}\n🔑 **API 凭据**: ❌ 未配置或环境变量未解析"
 
-    # 2. 检查是否为可信的 DeepSeek 官方绑定 (严格比对 driver == 'deepseek'，别名或模型名绝不参与判定)
-    is_official_ds = (driver == "deepseek") and _is_official_deepseek_endpoint(base_url)
+    # 2. 检查是否为可信的 DeepSeek 官方绑定 (消费 management_ref 或显式官方端点，别名或模型名绝不参与判定)
+    management_ref = model_cfg.get("management_ref")
+    is_official_ds = (driver == "deepseek" or management_ref == "deepseek-official-balance") and _is_official_deepseek_endpoint(base_url)
 
     if is_official_ds:
         return _query_deepseek_official_balance(api_key, header)
