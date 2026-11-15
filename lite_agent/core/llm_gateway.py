@@ -7,6 +7,7 @@ three so callers cannot accidentally skip usage accounting.
 
 from lite_agent.contracts.execution import ActorType, ExecutionContext, ExecutionSource
 from lite_agent.core.execution_budget import estimate_input_tokens, BudgetAdmissionError
+from lite_agent.core.llm_error import classify_llm_error, is_retryable_error, LLMErrorCategory
 from lite_agent.core.model_event import ModelEvent, ModelEventType
 
 
@@ -125,12 +126,15 @@ class LLMGateway:
                 step=1,
             )
             return result
-        except Exception:
+        except Exception as exc:
+            error_cat = classify_llm_error(exc)
             self.ledger.record_and_project(
-                execution.id, 1, "ERROR", {"msg": f"{role} model call failed"}, step=1
+                execution.id, 1, "ERROR",
+                {"msg": f"{role} model call failed ({error_cat.value})", "category": error_cat.value},
+                step=1,
             )
             self.ledger.finish(
-                execution.id, status="failed", terminal_reason="model_exception"
+                execution.id, status="failed", terminal_reason=f"model_{error_cat.value}"
             )
             raise
 

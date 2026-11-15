@@ -8,37 +8,73 @@ from lite_agent.core.model_config import (
     is_gemini_driver,
     supports_vision,
 )
+from lite_agent.core.model_endpoint import (
+    EndpointDefinition,
+    ModelDefinition,
+    normalize_llm_config,
+    resolve_credential,
+)
 from lite_agent.core.model_invoker import GeminiInvoker, OpenAIInvoker
 
 
 class ModelRouter:
 
     def __init__(self, config: dict):
-        llm_cfg = config.get("llm", {})
-        self.models_cfg: dict[str, dict] = llm_cfg.get("models", {})
+        llm_cfg = config.get("llm", {}) or {}
+        self.endpoints, self.models, self.default_model = normalize_llm_config(llm_cfg)
+        self.models_cfg: dict[str, dict] = llm_cfg.get("models", {}) or {}
+        self._endpoint_clients: dict[str, object] = {}
         self._clients: dict[str, object] = {}
         self._drivers: dict[str, str] = {}
         self._init_clients()
 
     def _init_clients(self):
-        for name, cfg in self.models_cfg.items():
-            # 显式 driver，不再靠 tags/URL 字符串推测。
-            driver = cfg.get("driver", DRIVER_OPENAI)
-            self._drivers[name] = driver
-
-            if is_gemini_driver(driver):
-                self._clients[name] = self._make_gemini_client(name, cfg)
+        # 1. 优先按归一化后的 Endpoints 初始化并共享客户端
+        for ep_id, ep in self.endpoints.items():
+            key = resolve_credential(ep.credential_ref, ep.extra.get("legacy_key", ""))
+            if not key:
+                continue
+            if is_gemini_driver(ep.provider):
+                self._endpoint_clients[ep_id] = self._make_gemini_client(ep_id, key, ep.proxy, ep_id)
             else:
                 import httpx
-                proxy_url = cfg.get("proxy")
-                http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
-                self._clients[name] = OpenAI(
-                    api_key=cfg["api_key"],
-                    base_url=cfg["base_url"],
-                    http_client=http_client
+                http_client = httpx.Client(proxy=ep.proxy) if ep.proxy else None
+                self._endpoint_clients[ep_id] = OpenAI(
+                    api_key=key,
+                    base_url=ep.base_url,
+                    http_client=http_client,
                 )
 
-    def _make_gemini_client(self, name: str, cfg: dict):
+        # 2. 将端点客户端绑定至模型规范名
+        for name, m_def in self.models.items():
+            ep = self.endpoints.get(m_def.endpoint_ref)
+            driver = ep.provider if ep else DRIVER_OPENAI
+            self._drivers[name] = driver
+            if m_def.endpoint_ref in self._endpoint_clients:
+                self._clients[name] = self._endpoint_clients[m_def.endpoint_ref]
+
+        # 3. 兜底旧版直接按 models_cfg 初始化的场景
+        for name, cfg in self.models_cfg.items():
+            if name not in self._drivers:
+                self._drivers[name] = cfg.get("driver", DRIVER_OPENAI)
+            if name not in self._clients:
+                driver = cfg.get("driver", DRIVER_OPENAI)
+                raw_key = cfg.get("api_key", "")
+                if not raw_key:
+                    continue
+                if is_gemini_driver(driver):
+                    self._clients[name] = self._make_gemini_client(name, raw_key, cfg.get("proxy"), cfg.get("model", name))
+                else:
+                    import httpx
+                    proxy_url = cfg.get("proxy")
+                    http_client = httpx.Client(proxy=proxy_url) if proxy_url else None
+                    self._clients[name] = OpenAI(
+                        api_key=raw_key,
+                        base_url=cfg.get("base_url", ""),
+                        http_client=http_client,
+                    )
+
+    def _make_gemini_client(self, name: str, api_key: str, proxy: Optional[str] = None, model_name: str = ""):
         try:
             from google import genai
         except ImportError:
@@ -46,8 +82,6 @@ class ModelRouter:
                 "Gemini 模型需要 google-genai 库: pip install google-genai"
             )
 
-        # 代理只来自显式配置，不再读取 HTTPS_PROXY 环境变量兜底。
-        proxy = cfg.get("proxy", "")
         http_options = {}
         if proxy:
             http_options = {
@@ -56,10 +90,10 @@ class ModelRouter:
             }
 
         client = genai.Client(
-            api_key=cfg["api_key"],
+            api_key=api_key,
             http_options=http_options,
         )
-        print(f"  🤖 Gemini[{name}] 客户端就绪 model={cfg.get('model', name)}")
+        print(f"  🤖 Gemini[{name}] 客户端就绪 model={model_name or name}")
         return client
 
     def get_driver(self, model_name: str) -> str:
@@ -67,6 +101,19 @@ class ModelRouter:
 
     def get_client(self, model_name: str) -> Optional[object]:
         return self._clients.get(model_name)
+
+    def close(self):
+        """关闭所有打开的 HTTP 客户端"""
+        seen = set()
+        for client in list(self._endpoint_clients.values()) + list(self._clients.values()):
+            if client and id(client) not in seen:
+                seen.add(id(client))
+                close_fn = getattr(client, "close", None)
+                if callable(close_fn):
+                    try:
+                        close_fn()
+                    except Exception:
+                        pass
 
     def get_invoker(self, model_name: str, **kwargs):
         """Build the existing protocol adapter for a configured model.
@@ -94,6 +141,7 @@ class ModelRouter:
             **common,
             timeout=kwargs.get("timeout", profile["timeout"]),
             provider=self.get_driver(model_name),
+            infer_reasoning_from_name=False,
         )
 
     def get_call_profile(self, model_name: str,

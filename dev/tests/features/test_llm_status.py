@@ -546,3 +546,47 @@ def test_ops_llm_skill_entry_resolves_config_db_path(tmp_path, monkeypatch):
         output = skill_report(days=7)
         assert "3,000" in output
         assert "deepseek-chat" in output
+
+
+def test_schema_2_endpoint_binding_in_llm_status(monkeypatch):
+    """验证 Schema Version 2 端点绑定配置在状态查询中正确解析"""
+    monkeypatch.setenv("TEST_DS_BIND_KEY", "sk-schema2-valid-key")
+    config = {
+        "llm": {
+            "schema_version": 2,
+            "default": "flash",
+            "endpoints": {
+                "ds-official": {
+                    "provider": "deepseek",
+                    "protocol": "openai_chat_completions",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "credential_ref": "TEST_DS_BIND_KEY",
+                    "management_ref": "deepseek-official-balance"
+                }
+            },
+            "models": {
+                "flash": {
+                    "endpoint_ref": "ds-official",
+                    "model": "deepseek-v4-flash"
+                }
+            }
+        }
+    }
+
+    mock_resp_data = {
+        "is_available": True,
+        "balance_infos": [
+            {"currency": "CNY", "total_balance": "88.88"}
+        ]
+    }
+    mock_response = MagicMock()
+    mock_response.read.return_value = json.dumps(mock_resp_data).encode("utf-8")
+    mock_response.__enter__.return_value = mock_response
+
+    with patch("urllib.request.urlopen", return_value=mock_response) as mock_urlopen:
+        result = check_active_llm_status(config)
+        assert "88.88" in result
+        assert "CNY" in result
+        assert mock_urlopen.call_count == 1
+        req = mock_urlopen.call_args[0][0]
+        assert req.get_header("Authorization") == "Bearer sk-schema2-valid-key"

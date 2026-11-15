@@ -61,7 +61,18 @@ def _resolve_default_model_binding(config: Optional[dict] = None) -> Tuple[str, 
             return "", None
         if default_key not in models:
             return default_key, None
-        return default_key, models[default_key]
+        m_cfg = dict(models[default_key])
+        ep_ref = m_cfg.get("endpoint_ref")
+        if ep_ref:
+            endpoints = llm_cfg.get("endpoints", {}) or {}
+            ep_data = endpoints.get(ep_ref, {})
+            m_cfg.setdefault("driver", ep_data.get("provider", "openai"))
+            m_cfg.setdefault("base_url", ep_data.get("base_url", ""))
+            from lite_agent.core.model_endpoint import resolve_credential
+            cred_ref = ep_data.get("credential_ref", "")
+            key = resolve_credential(cred_ref, ep_data.get("api_key", ""))
+            m_cfg.setdefault("api_key", key)
+        return default_key, m_cfg
 
     # 旧平铺单模型结构兼容兜底 (仅在完全没有 models 字段的旧版配置时生效)
     # 严格要求显式声明 driver，绝不猜测缺省为 deepseek

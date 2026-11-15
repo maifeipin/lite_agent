@@ -96,23 +96,43 @@ def validate_model_config(config: dict) -> list[tuple[str, str]]:
     # 先收集缺失项，再按凭据域聚合报错，避免为同一个缺失密钥重复输出。
     missing_api_keys: dict[tuple[str, str], list[str]] = {}
 
-    # 1. 每个模型的 driver 与必需字段
+    endpoints = llm.get("endpoints", {}) or {}
+    schema_version = llm.get("schema_version", 1)
+    if schema_version >= 2 and endpoints:
+        for ep_name, ep_cfg in endpoints.items():
+            if not isinstance(ep_cfg, dict):
+                _error(f"端点 {ep_name!r} 的配置不是对象")
+                continue
+            prov = ep_cfg.get("provider", "")
+            if not prov or prov not in DRIVERS:
+                _error(f"端点 {ep_name!r} 缺少有效 provider（可选: {', '.join(DRIVERS)}）")
+            if not is_gemini_driver(prov) and not ep_cfg.get("base_url"):
+                _error(f"端点 {ep_name!r} 缺少 base_url")
+            if not ep_cfg.get("credential_ref") and not ep_cfg.get("api_key"):
+                _error(f"端点 {ep_name!r} 缺少 credential_ref 凭据引用")
+
+    # 1. 每个模型的 driver/endpoint 与必需字段
     for name, cfg in models.items():
         if not isinstance(cfg, dict):
             _error(f"模型 {name!r} 的配置不是对象")
             continue
-        driver = cfg.get("driver", "")
-        if not driver:
-            _error(f"模型 {name!r} 缺少显式 driver 字段（可选: {', '.join(DRIVERS)}）")
-        elif driver not in DRIVERS:
-            _error(f"模型 {name!r} 的 driver {driver!r} 非法（可选: {', '.join(DRIVERS)}）")
+        ep_ref = cfg.get("endpoint_ref")
+        if ep_ref:
+            if ep_ref not in endpoints:
+                _error(f"模型 {name!r} 引用了未配置的 endpoint: {ep_ref!r}")
+        else:
+            driver = cfg.get("driver", "")
+            if not driver:
+                _error(f"模型 {name!r} 缺少显式 driver 或 endpoint_ref 字段（可选: {', '.join(DRIVERS)}）")
+            elif driver not in DRIVERS:
+                _error(f"模型 {name!r} 的 driver {driver!r} 非法（可选: {', '.join(DRIVERS)}）")
+            if not cfg.get("api_key"):
+                credential_scope = (driver, cfg.get("base_url", ""))
+                missing_api_keys.setdefault(credential_scope, []).append(name)
+            if driver and not is_gemini_driver(driver) and not cfg.get("base_url"):
+                _error(f"模型 {name!r} 缺少 base_url（OpenAI-compatible 必需）")
         if not cfg.get("model"):
             _error(f"模型 {name!r} 缺少 model 字段（实际 API model 名）")
-        if not cfg.get("api_key"):
-            credential_scope = (driver, cfg.get("base_url", ""))
-            missing_api_keys.setdefault(credential_scope, []).append(name)
-        if driver and not is_gemini_driver(driver) and not cfg.get("base_url"):
-            _error(f"模型 {name!r} 缺少 base_url（OpenAI-compatible 必需）")
         for tag in (cfg.get("tags") or []):
             if tag not in KNOWN_CAPABILITIES:
                 _warning(f"模型 {name!r} 含未知能力标签 {tag!r}")
