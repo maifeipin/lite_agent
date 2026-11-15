@@ -590,3 +590,44 @@ def test_schema_2_endpoint_binding_in_llm_status(monkeypatch):
         assert mock_urlopen.call_count == 1
         req = mock_urlopen.call_args[0][0]
         assert req.get_header("Authorization") == "Bearer sk-schema2-valid-key"
+
+
+def test_get_today_usage_summary(tmp_path):
+    """验证获取当天用量汇总能够正确统计并格式化"""
+    import sqlite3
+    import time
+    from lite_agent.features.sys_ops.llm_ops_service import get_today_usage_summary
+
+    db_path = str(tmp_path / "sessions.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE api_usage_log ("
+        "id INTEGER PRIMARY KEY, session_key TEXT, model TEXT, "
+        "prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER, "
+        "created_at REAL)"
+    )
+    now = time.time()
+    yesterday = now - 86400 * 2
+    # 插入今天的记录
+    conn.execute(
+        "INSERT INTO api_usage_log (session_key, model, prompt_tokens, completion_tokens, total_tokens, created_at) "
+        "VALUES ('s1', 'deepseek-chat', 100, 50, 150, ?)", (now,)
+    )
+    conn.execute(
+        "INSERT INTO api_usage_log (session_key, model, prompt_tokens, completion_tokens, total_tokens, created_at) "
+        "VALUES ('s2', 'deepseek-chat', 200, 100, 300, ?)", (now,)
+    )
+    # 插入前天的记录（不计入今天）
+    conn.execute(
+        "INSERT INTO api_usage_log (session_key, model, prompt_tokens, completion_tokens, total_tokens, created_at) "
+        "VALUES ('s3', 'deepseek-chat', 1000, 500, 1500, ?)", (yesterday,)
+    )
+    conn.commit()
+    conn.close()
+
+    config = {"session": {"db_path": db_path}}
+    summary = get_today_usage_summary(config)
+    assert "今日模型用量汇总" in summary
+    assert "450" in summary  # 150 + 300
+    assert "2 次调用" in summary
+    assert "deepseek-chat" in summary

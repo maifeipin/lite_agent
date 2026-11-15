@@ -296,3 +296,55 @@ def llm_usage_report(days: int = 7, config: Optional[dict] = None) -> str:
             return "\n".join(lines)
     except Exception:
         return "❌ 统计 API 消耗量失败: 数据库查询异常"
+
+
+def get_today_usage_summary(config: Optional[dict] = None) -> str:
+    """查询当天（从 00:00:00 至今）在本地 api_usage_log 的全模型汇总用量。"""
+    import datetime
+    db_path = _resolve_session_db_path(config)
+    if not os.path.exists(db_path):
+        return "📊 **今日模型用量汇总**: 暂无调用记录"
+
+    today_start = datetime.datetime.now().replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).timestamp()
+
+    try:
+        from lite_agent.core.sqlite_utils import connect_sqlite
+        with connect_sqlite(db_path, close_on_exit=True) as conn:
+            table_check = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='api_usage_log'"
+            ).fetchone()
+            if not table_check:
+                return "📊 **今日模型用量汇总**: 暂无调用记录"
+
+            rows = conn.execute(
+                "SELECT model, COUNT(*), SUM(total_tokens), SUM(prompt_tokens), SUM(completion_tokens) "
+                "FROM api_usage_log WHERE created_at >= ? "
+                "GROUP BY model ORDER BY SUM(total_tokens) DESC",
+                (today_start,)
+            ).fetchall()
+
+            if not rows:
+                return "📊 **今日模型用量汇总**: 今日暂无模型调用记录"
+
+            total_tokens_all = 0
+            total_calls_all = 0
+            item_lines = []
+            for row in rows:
+                model_name = row[0] or "unknown"
+                calls = row[1] or 0
+                total_tok = row[2] or 0
+                prompt_tok = row[3] or 0
+                comp_tok = row[4] or 0
+
+                total_tokens_all += total_tok
+                total_calls_all += calls
+                item_lines.append(
+                    f"  - `{model_name}`: {total_tok:,} Tokens ({calls} 次, Prompt: {prompt_tok:,} / Completion: {comp_tok:,})"
+                )
+
+            header = f"📊 **今日模型用量汇总**: 共 **{total_tokens_all:,}** Tokens ({total_calls_all} 次调用)"
+            return "\n".join([header] + item_lines)
+    except Exception:
+        return "📊 **今日模型用量汇总**: 用量统计暂不可用"

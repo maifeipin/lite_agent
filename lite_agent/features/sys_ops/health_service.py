@@ -286,9 +286,15 @@ def get_health_report() -> str:
             report.append(f"📡 **启用的通讯通道**: ✅ {', '.join(channels) if channels else '无'}")
 
             try:
-                from lite_agent.features.sys_ops.llm_ops_service import llm_check_balance
+                from lite_agent.features.sys_ops.llm_ops_service import (
+                    llm_check_balance,
+                    get_today_usage_summary,
+                )
                 balance_text = llm_check_balance()
                 report.append(f"💰 **大模型状态与余量**: \n{balance_text}")
+                today_usage = get_today_usage_summary(config=cfg)
+                if today_usage:
+                    report.append(today_usage)
             except Exception as e:
                 report.append(f"💰 **大模型状态与余量**: ❌ 查询失败 ({e})")
         except Exception as e:
