@@ -1145,17 +1145,19 @@ class Agent:
         request_driver = self.model_driver
         request_max_tokens = self.max_tokens
         request_runtime = self.runtime
-        request_stream = not is_gemini_driver(request_driver)
         request_profile = {
             "timeout": 60.0,
             "max_retries": 1,
             "invoke_kwargs": {},
         }
+        default_key = self._config.get("llm", {}).get("default", "")
         if self._request_model_router is not None:
-            default_key = self._config.get("llm", {}).get("default", "")
+            request_stream = self._request_model_router.supports_streaming(default_key)
             request_profile = self._request_model_router.get_call_profile(
                 default_key, "tool_loop"
             )
+        else:
+            request_stream = not is_gemini_driver(request_driver)
         override = getattr(msg, "model_override", "") or None
         if not msg.is_guest:
             if override is None:
@@ -1183,7 +1185,7 @@ class Agent:
                 request_model = request_invoker.model_name
                 request_driver = router.get_driver(selected_model)
                 request_max_tokens = request_profile["max_tokens"]
-                request_stream = not is_gemini_driver(request_driver)
+                request_stream = router.supports_streaming(selected_model)
                 request_runtime = AgentRuntime(
                     model_invoker=request_invoker,
                     skill_engine=self.skill_engine,

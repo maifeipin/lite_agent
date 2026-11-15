@@ -136,3 +136,16 @@ class ModelRouter:
     def supports_vision(self, model_name: str) -> bool:
         cfg = self.models_cfg.get(model_name, {})
         return supports_vision(cfg.get("tags", []))
+
+    def supports_streaming(self, model_name: str) -> bool:
+        """检查模型是否支持流式输出。Gemini 原生驱动及显式声明 capabilities.stream=False 的模型均不支持流式。"""
+        if not model_name:
+            return True
+        driver = self.get_driver(model_name)
+        if is_gemini_driver(driver):
+            return False
+        cfg = self.models_cfg.get(model_name, {}) or {}
+        caps = cfg.get("capabilities", {})
+        if isinstance(caps, dict) and caps.get("stream") is False:
+            return False
+        return True

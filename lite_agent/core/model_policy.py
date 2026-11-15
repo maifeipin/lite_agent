@@ -209,11 +209,19 @@ class ModelSelector:
             reason = "llm:default"
 
         if not self._allowed(selected, allowed) or (require_stream and not self._model_supports_streaming(selected)):
-            candidate_pool = allowed_names if allowed_names is not None else list(self.models.keys())
-            selected = next(
-                (name for name in candidate_pool if name in self.models and (not require_stream or self._model_supports_streaming(name))), ""
-            )
-            reason = "allowed:stream_capable" if require_stream else "allowed:first"
+            if require_stream and (selected in self.models or allowed_names is not None):
+                candidate_pool = allowed_names if allowed_names is not None else list(self.models.keys())
+                selected = next(
+                    (name for name in candidate_pool if name in self.models and self._model_supports_streaming(name)), ""
+                )
+                reason = "allowed:stream_capable"
+            elif allowed_names is not None:
+                selected = next(
+                    (name for name in allowed_names if name in self.models), ""
+                )
+                reason = "allowed:first"
+            else:
+                selected = ""
         if not selected or selected not in self.models:
             raise ModelPolicyError(f"{role} 没有可用的已配置模型 (流式要求={require_stream})")
         return ModelDecision(

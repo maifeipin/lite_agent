@@ -171,3 +171,52 @@ def test_gemini_excluded_when_require_stream_is_true():
     with pytest.raises(ModelPolicyError, match="不支持流式"):
         selector.select("chat", policy=ExecutionPolicy.user_locked("gemini-flash"), require_stream=True)
 
+
+def test_missing_or_invalid_default_raises_model_policy_error():
+    # 当 default 缺失时，不能静默兜底为第一个模型，必须抛出 ModelPolicyError
+    cfg_missing = {
+        "llm": {
+            "models": {
+                "m1": {"driver": "deepseek", "model": "m1"}
+            }
+        }
+    }
+    selector_missing = ModelSelector(cfg_missing)
+    with pytest.raises(ModelPolicyError, match="没有可用的已配置模型"):
+        selector_missing.select("chat")
+
+    # 当 default 配置为不存在的 key 时，同样不能静默兜底为第一个模型
+    cfg_typo = {
+        "llm": {
+            "default": "invalid_typo",
+            "models": {
+                "m1": {"driver": "deepseek", "model": "m1"}
+            }
+        }
+    }
+    selector_typo = ModelSelector(cfg_typo)
+    with pytest.raises(ModelPolicyError, match="没有可用的已配置模型"):
+        selector_typo.select("chat")
+
+
+def test_model_router_supports_streaming_capabilities():
+    from lite_agent.core.model_router import ModelRouter
+    router = ModelRouter.__new__(ModelRouter)
+    router.models_cfg = {
+        "ds": {"driver": "deepseek"},
+        "gemini": {"driver": "gemini_native"},
+        "non_stream_ds": {
+            "driver": "deepseek",
+            "capabilities": {"stream": False}
+        }
+    }
+    router._drivers = {
+        "ds": "deepseek",
+        "gemini": "gemini_native",
+        "non_stream_ds": "deepseek"
+    }
+    assert router.supports_streaming("ds") is True
+    assert router.supports_streaming("gemini") is False
+    assert router.supports_streaming("non_stream_ds") is False
+
+

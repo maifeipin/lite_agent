@@ -32,7 +32,9 @@ class SwitchModelTests(unittest.TestCase):
                 else:
                     saved = json.loads(path.read_text())
                     self.assertNotIn('api_key', saved)
-                    self.assertEqual(saved['models']['flash']['api_key'], 'test-key-not-a-real-secret')
+                    # 关键安全断言：切模型坚决不向 JSON 写入明文 Key，保留现有环境变量引用
+                    self.assertEqual(saved['models']['flash']['api_key'], '${DEEPSEEK_API_KEY}')
+                    self.assertNotIn('test-key-not-a-real-secret', json.dumps(saved))
                     self.assertEqual(saved['models']['old'], cfg['models']['old'])
                     self.assertEqual(saved['models']['flash']['profiles'],
                                      cfg['models']['flash']['profiles'])

@@ -19,17 +19,26 @@ def _is_official_deepseek_endpoint(base_url: str) -> bool:
         return False
     try:
         parsed = urlparse(base_url)
+        if parsed.scheme.lower() != "https":
+            return False
+        if parsed.username or parsed.password:
+            return False
+        if parsed.port not in (None, 443):
+            return False
         host = (parsed.hostname or "").lower()
-        return host == "api.deepseek.com"
+        if host != "api.deepseek.com":
+            return False
+        path = parsed.path.rstrip("/")
+        return path in ("", "/v1", "/user/balance")
     except Exception:
         return False
 
 
-def _resolve_default_model_binding(config: Optional[dict] = None) -> Tuple[str, dict]:
+def _resolve_default_model_binding(config: Optional[dict] = None) -> Tuple[str, Optional[dict]]:
     """
     从配置中解析当前生效的默认模型及其绑定配置字典。
-    严格优先从 models[default] 获取，避免读取无主性的顶层平铺残留。
-    返回: (model_key, model_cfg)
+    严格按 models[default] 获取，绝不静默兜底为其他模型。
+    返回: (default_key, model_cfg_or_none)
     """
     if config is None:
         try:
@@ -42,29 +51,57 @@ def _resolve_default_model_binding(config: Optional[dict] = None) -> Tuple[str, 
     default_key = llm_cfg.get("default", "")
     models = llm_cfg.get("models", {}) or {}
 
-    if default_key and default_key in models:
+    if models:
+        # 当 models 存在时，default 必须显式存在且必须位于 models 中
+        # 绝不静默兜底为第一个模型，必须如实报告配置错误！
+        if not default_key:
+            return "", None
+        if default_key not in models:
+            return default_key, None
         return default_key, models[default_key]
 
-    # 若 models 中未指明 default，但 models 不为空，取第一个
-    if models:
-        first_key = next(iter(models))
-        return first_key, models[first_key]
-
-    # 旧平铺单模型结构兼容兜底
+    # 旧平铺单模型结构兼容兜底 (仅在完全没有 models 字典的旧版配置时生效)
+    # 严格要求显式声明 driver，绝不猜测缺省为 deepseek
+    driver = llm_cfg.get("driver")
+    if not driver:
+        return default_key or "default", None
     legacy_cfg = {
         "model": llm_cfg.get("model", "unknown"),
-        "driver": llm_cfg.get("driver", "deepseek"),
-        "base_url": llm_cfg.get("base_url", "https://api.deepseek.com/v1"),
+        "driver": driver,
+        "base_url": llm_cfg.get("base_url", ""),
         "api_key": llm_cfg.get("api_key", ""),
     }
     return default_key or "default", legacy_cfg
+
+
+def _get_model_local_usage(model_name: str, days: int = 7) -> str:
+    """查询指定模型最近 N 天在本地 api_usage_log 的 Token 消耗总量"""
+    from lite_agent.core.constants import PROJECT_ROOT
+    from lite_agent.core.sqlite_utils import connect_sqlite
+    db_path = os.path.join(PROJECT_ROOT, "data", "sessions.db")
+    if not os.path.exists(db_path):
+        return f"📊 **近 {days} 天本地消耗**: 暂无调用记录"
+    start_time = time.time() - (days * 24 * 3600)
+    try:
+        with connect_sqlite(db_path, close_on_exit=True) as conn:
+            table_check = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='api_usage_log'").fetchone()
+            if not table_check:
+                return f"📊 **近 {days} 天本地消耗**: 暂无调用记录"
+            row = conn.execute(
+                "SELECT SUM(total_tokens) FROM api_usage_log WHERE model = ? AND created_at >= ?",
+                (model_name, start_time)
+            ).fetchone()
+            total = (row[0] if row and row[0] is not None else 0)
+            return f"📊 **近 {days} 天本地消耗**: **{total:,}** Tokens"
+    except Exception:
+        return f"📊 **近 {days} 天本地消耗**: 暂无调用记录"
 
 
 def check_active_llm_status(config: Optional[dict] = None) -> str:
     """
     查询当前配置的默认大模型（Default Model）的计费/余额或状态。
     仅当明确绑定官方 DeepSeek 且端点可信时，才向 DeepSeek 官方余额接口发起请求；
-    其余驱动/端点返回明确的不支持提示与指引，坚决防止凭据错配外泄或 401 误报。
+    其余驱动/端点返回明确的不支持提示与本地统计指引，坚决防止凭据错配外泄或 401 误报。
     """
     try:
         if config is None:
@@ -74,6 +111,10 @@ def check_active_llm_status(config: Optional[dict] = None) -> str:
         return f"❌ 无法读取配置文件: {e}"
 
     default_key, model_cfg = _resolve_default_model_binding(config)
+    if not default_key or model_cfg is None:
+        target_name = f"`{default_key}`" if default_key else "(未设置)"
+        return f"🧠 **默认模型**: {target_name}\n❌ **配置错误**: 默认模型未配置或在 `llm.models` 中不存在，已终止查询。"
+
     api_model = model_cfg.get("model", default_key or "unknown")
     driver = (model_cfg.get("driver") or "").lower()
     base_url = model_cfg.get("base_url", "")
@@ -85,8 +126,8 @@ def check_active_llm_status(config: Optional[dict] = None) -> str:
     if not api_key or api_key.startswith("${"):
         return f"{header}\n🔑 **API 凭据**: ❌ 未配置或环境变量未解析"
 
-    # 2. 检查是否为可信的 DeepSeek 官方绑定
-    is_official_ds = (driver == "deepseek" or "deepseek" in default_key.lower()) and _is_official_deepseek_endpoint(base_url)
+    # 2. 检查是否为可信的 DeepSeek 官方绑定 (严格比对 driver == 'deepseek'，别名或模型名绝不参与判定)
+    is_official_ds = (driver == "deepseek") and _is_official_deepseek_endpoint(base_url)
 
     if is_official_ds:
         return _query_deepseek_official_balance(api_key, header)
@@ -98,10 +139,12 @@ def check_active_llm_status(config: Optional[dict] = None) -> str:
     elif driver == "gemini_native":
         provider_name = "Google Gemini"
 
+    local_usage = _get_model_local_usage(api_model)
     notice_lines = [
         header,
         f"🏢 **服务商驱动**: {provider_name}",
         "ℹ️ **余额查询**: 当前厂商/端点未提供公开 API 余额查询，请登录对应平台控制台核对账户余量。",
+        local_usage,
     ]
     return "\n".join(notice_lines)
 
@@ -135,7 +178,7 @@ def _query_deepseek_official_balance(api_key: str, header: str) -> str:
                     lines.append("\n⚠️ **警告: 您的余额可能已耗尽，请及时充值！**")
                 return "\n".join(lines)
             else:
-                return f"{header}\n⚠️ 获取到的余额数据异常: {json.dumps(data)}"
+                return f"{header}\n⚠️ **账户不可用**: DeepSeek 官方返回账户不可用 (is_available=false)，请登录控制台检查充值状态与配额。"
     except urllib.error.HTTPError as e:
         # 安全规范：不直接透传响应原文，避免泄露请求头或内部凭据信息
         if e.code == 401:
@@ -145,10 +188,10 @@ def _query_deepseek_official_balance(api_key: str, header: str) -> str:
         elif e.code == 429:
             return f"{header}\n⚠️ **频控限制 (HTTP 429)**: 查询余额过于频繁，请稍后重试。"
         return f"{header}\n❌ **请求失败 (HTTP {e.code})**: DeepSeek 余额接口响应异常。"
-    except urllib.error.URLError as e:
-        return f"{header}\n❌ 请求 DeepSeek API 网络失败: {e.reason}"
-    except Exception as e:
-        return f"{header}\n❌ 解析余额数据失败: {e}"
+    except urllib.error.URLError:
+        return f"{header}\n❌ **网络异常**: 请求 DeepSeek 官方端点失败，请检查网络连通性与代理设置。"
+    except Exception:
+        return f"{header}\n❌ **数据解析异常**: 解析 DeepSeek 余额数据格式失败。"
 
 
 def check_deepseek_balance() -> str:

@@ -300,3 +300,107 @@ def test_sqlite_override_protected_keys_rejected(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="protected/sensitive"):
         cl.write_setting("llm.models.flash", {"api_key": "stolen-key"})
 
+
+def test_endpoint_url_strict_validation():
+    # 严格检验: 仅允许官方 HTTPS, 443 端口, 无 userinfo, 且 path 白名单
+    assert _is_official_deepseek_endpoint("https://api.deepseek.com") is True
+    assert _is_official_deepseek_endpoint("https://api.deepseek.com/") is True
+    assert _is_official_deepseek_endpoint("https://api.deepseek.com/v1") is True
+    assert _is_official_deepseek_endpoint("https://api.deepseek.com/user/balance") is True
+    # 拒绝非 HTTPS
+    assert _is_official_deepseek_endpoint("http://api.deepseek.com/v1") is False
+    # 拒绝含 userinfo
+    assert _is_official_deepseek_endpoint("https://user:pass@api.deepseek.com/v1") is False
+    # 拒绝自定义端口
+    assert _is_official_deepseek_endpoint("https://api.deepseek.com:8443/v1") is False
+    # 拒绝非白名单路径
+    assert _is_official_deepseek_endpoint("https://api.deepseek.com/v1/unexpected") is False
+    assert _is_official_deepseek_endpoint("https://api.deepseek.com/other") is False
+
+
+def test_legacy_without_explicit_binding_no_network():
+    """没有 models 且没有显式 driver 的旧平铺配置，坚决不盲目发送网络请求"""
+    config = {
+        "llm": {
+            "api_key": "fake-legacy-unbound-key"
+        }
+    }
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        result = check_active_llm_status(config)
+        mock_urlopen.assert_not_called()
+        assert "配置错误" in result
+        assert "已终止查询" in result
+
+
+def test_alias_does_not_override_explicit_driver_no_network():
+    """别名即使包含 deepseek，只要显式 driver 为 ark，绝不发起 DeepSeek 网络请求"""
+    config = {
+        "llm": {
+            "default": "deepseek-test",
+            "models": {
+                "deepseek-test": {
+                    "driver": "ark",
+                    "model": "doubao-pro",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "api_key": "ark-secret-key"
+                }
+            }
+        }
+    }
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        result = check_active_llm_status(config)
+        mock_urlopen.assert_not_called()
+        assert "火山引擎方舟" in result
+        assert "当前厂商/端点未提供公开 API 余额查询" in result
+
+
+def test_invalid_default_does_not_query_first_model_no_network():
+    """default 拼错或在 models 中不存在时，坚决不静默兜底为第一个模型，直接报错且零网络请求"""
+    config = {
+        "llm": {
+            "default": "typo",
+            "models": {
+                "first": {
+                    "driver": "deepseek",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "api_key": "sk-real-first-key"
+                }
+            }
+        }
+    }
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        result = check_active_llm_status(config)
+        mock_urlopen.assert_not_called()
+        assert "配置错误" in result
+        assert "已终止查询" in result
+
+
+def test_response_body_marker_sanitization():
+    """当官方接口返回 200 但 is_available=false 且伴随敏感字段时，绝不透传 JSON 原文"""
+    config = {
+        "llm": {
+            "default": "flash",
+            "models": {
+                "flash": {
+                    "driver": "deepseek",
+                    "model": "deepseek-v4-flash",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "api_key": "sk-valid-key"
+                }
+            }
+        }
+    }
+    mock_resp_data = {
+        "is_available": False,
+        "internal_leak_marker": "SUPER_SECRET_PAYLOAD_12345"
+    }
+    mock_response = MagicMock()
+    mock_response.read.return_value = json.dumps(mock_resp_data).encode("utf-8")
+    mock_response.__enter__.return_value = mock_response
+
+    with patch("urllib.request.urlopen", return_value=mock_response):
+        result = check_active_llm_status(config)
+        assert "账户不可用" in result
+        assert "SUPER_SECRET_PAYLOAD_12345" not in result
+
+

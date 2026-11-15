@@ -109,17 +109,10 @@ def mask_secret(s):
 
 
 def prompt_api_key(target, models_dict, cli_key=None, yes=False):
-    if cli_key:
-        return cli_key.strip()
-    if yes or not sys.stdin.isatty():
-        return None
-    cur_key = models_dict.get(target, {}).get("api_key", "")
-    try:
-        ans = input(f"请输入 {target} 的新 API Key (当前: {mask_secret(cur_key)}，回车保持原样): ").strip()
-        return ans if ans else None
-    except (KeyboardInterrupt, EOFError):
-        print("\n已取消输入")
-        return None
+    # 遵循零明文密钥落盘原则，切换脚本不再在控制台交互收集明文 Key 写回 JSON
+    if cli_key and not yes:
+        print("⚠️ 提示: API Key 属于物理凭据，应配置在 .env 环境变量中。根据零明文规范，切换模型时不向 JSON 持久化明文 Key。")
+    return None
 
 
 def main():
@@ -298,18 +291,15 @@ def apply_switch(target_model, llm_cfg, routing_cfg, specs_cfg, committee_cfg,
         raise ValueError(f"未知模型: {target_model}")
     print(f"准备切换主模型及路由模型为 {target_model}；保留会审评委配置。")
     if new_api_key:
-        print(f"将更新模型 {target_model} 的 API Key: {mask_secret(new_api_key)}")
+        print("⚠️ 提示: API Key 属于物理凭据，应配置在 .env 环境变量中。根据零明文规范，本工具不向 JSON 持久化明文 Key，保留现有引用。")
     if not yes and input("确认应用？[Y/n]: ").strip().lower() not in ("", "y", "yes"):
         return False
     do_restart = restart and (yes or input("立即重启服务？[Y/n]: ").strip().lower() in ("", "y", "yes"))
     updates = {LLM_JSON: copy.deepcopy(llm_cfg)}
     updates[LLM_JSON]["default"] = target_model
-    if new_api_key:
-        if "models" in updates[LLM_JSON] and target_model in updates[LLM_JSON]["models"]:
-            updates[LLM_JSON]["models"][target_model]["api_key"] = new_api_key
-        # 核心安全规范：切模型绝不向顶层平铺写回 Key，防止顶层无主污染
-        if "api_key" in updates[LLM_JSON]:
-            del updates[LLM_JSON]["api_key"]
+    # 核心安全规范：切模型仅更新角色指针与路由，绝不向 JSON 写入明文 Key，且彻底清除顶层平铺残留
+    if "api_key" in updates[LLM_JSON]:
+        del updates[LLM_JSON]["api_key"]
     if routing_cfg:
         routing = copy.deepcopy(routing_cfg)
         routing["planner_model"] = routing["classifier_model"] = target_model
