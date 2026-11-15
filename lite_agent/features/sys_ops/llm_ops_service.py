@@ -49,9 +49,12 @@ def _resolve_default_model_binding(config: Optional[dict] = None) -> Tuple[str, 
 
     llm_cfg = config.get("llm", {}) or {}
     default_key = llm_cfg.get("default", "")
-    models = llm_cfg.get("models", {}) or {}
 
-    if models:
+    # 判断是否为多模型架构 (models 字段在配置中声明，即使为空字典也属于新 schema)
+    if "models" in llm_cfg:
+        models = llm_cfg["models"]
+        if not isinstance(models, dict):
+            return default_key or "default", None
         # 当 models 存在时，default 必须显式存在且必须位于 models 中
         # 绝不静默兜底为第一个模型，必须如实报告配置错误！
         if not default_key:
@@ -60,7 +63,7 @@ def _resolve_default_model_binding(config: Optional[dict] = None) -> Tuple[str, 
             return default_key, None
         return default_key, models[default_key]
 
-    # 旧平铺单模型结构兼容兜底 (仅在完全没有 models 字典的旧版配置时生效)
+    # 旧平铺单模型结构兼容兜底 (仅在完全没有 models 字段的旧版配置时生效)
     # 严格要求显式声明 driver，绝不猜测缺省为 deepseek
     driver = llm_cfg.get("driver")
     if not driver:
@@ -74,27 +77,47 @@ def _resolve_default_model_binding(config: Optional[dict] = None) -> Tuple[str, 
     return default_key or "default", legacy_cfg
 
 
-def _get_model_local_usage(model_name: str, days: int = 7) -> str:
-    """查询指定模型最近 N 天在本地 api_usage_log 的 Token 消耗总量"""
+def _resolve_session_db_path(config: Optional[dict] = None) -> str:
+    """
+    统一解析会话与用量数据库路径，优先级：
+    1. 环境变量 LITE_AGENT_SESSION_DB_PATH
+    2. 配置字典 session.db_path
+    3. 默认项目路径 PROJECT_ROOT/data/sessions.db
+    """
+    env_db = os.environ.get("LITE_AGENT_SESSION_DB_PATH")
+    if env_db:
+        return env_db
+    if config:
+        cfg_db = (config.get("session") or {}).get("db_path")
+        if cfg_db:
+            return cfg_db
     from lite_agent.core.constants import PROJECT_ROOT
+    return os.path.join(PROJECT_ROOT, "data", "sessions.db")
+
+
+def _get_model_local_usage(model_name: str, days: int = 7, config: Optional[dict] = None) -> str:
+    """查询指定模型最近 N 天在本地 api_usage_log 的 Token 消耗总量"""
     from lite_agent.core.sqlite_utils import connect_sqlite
-    db_path = os.path.join(PROJECT_ROOT, "data", "sessions.db")
+    db_path = _resolve_session_db_path(config)
     if not os.path.exists(db_path):
-        return f"📊 **近 {days} 天本地消耗**: 暂无调用记录"
+        return f"📊 **近 {days} 天本地已记录用量**: 暂无调用记录"
     start_time = time.time() - (days * 24 * 3600)
     try:
         with connect_sqlite(db_path, close_on_exit=True) as conn:
             table_check = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='api_usage_log'").fetchone()
             if not table_check:
-                return f"📊 **近 {days} 天本地消耗**: 暂无调用记录"
+                return f"📊 **近 {days} 天本地已记录用量**: 暂无调用记录"
             row = conn.execute(
                 "SELECT SUM(total_tokens) FROM api_usage_log WHERE model = ? AND created_at >= ?",
                 (model_name, start_time)
             ).fetchone()
             total = (row[0] if row and row[0] is not None else 0)
-            return f"📊 **近 {days} 天本地消耗**: **{total:,}** Tokens"
+            if total == 0:
+                return f"📊 **近 {days} 天本地已记录用量**: 暂无调用记录"
+            return f"📊 **近 {days} 天本地已记录用量**: **{total:,}** Tokens (本地已记录，非账户全量)"
     except Exception:
-        return f"📊 **近 {days} 天本地消耗**: 暂无调用记录"
+        # F2: 查询失败时不能伪装为“暂无调用记录”，应返回明确的暂不可用状态，且不泄露底层异常
+        return f"📊 **近 {days} 天本地已记录用量**: 用量统计暂不可用"
 
 
 def check_active_llm_status(config: Optional[dict] = None) -> str:
@@ -107,8 +130,8 @@ def check_active_llm_status(config: Optional[dict] = None) -> str:
         if config is None:
             from lite_agent.core import config_loader
             config = config_loader.load_config() or {}
-    except Exception as e:
-        return f"❌ 无法读取配置文件: {e}"
+    except Exception:
+        return "❌ 无法读取配置文件: 配置解析异常"
 
     default_key, model_cfg = _resolve_default_model_binding(config)
     if not default_key or model_cfg is None:
@@ -139,7 +162,7 @@ def check_active_llm_status(config: Optional[dict] = None) -> str:
     elif driver == "gemini_native":
         provider_name = "Google Gemini"
 
-    local_usage = _get_model_local_usage(api_model)
+    local_usage = _get_model_local_usage(api_model, config=config)
     notice_lines = [
         header,
         f"🏢 **服务商驱动**: {provider_name}",
@@ -204,11 +227,10 @@ def llm_check_balance() -> str:
     return check_active_llm_status()
 
 
-def llm_usage_report(days: int = 7) -> str:
-    from lite_agent.core.constants import PROJECT_ROOT
-    db_path = os.path.join(PROJECT_ROOT, "data", "sessions.db")
+def llm_usage_report(days: int = 7, config: Optional[dict] = None) -> str:
+    db_path = _resolve_session_db_path(config)
     if not os.path.exists(db_path):
-        return "❌ 找不到数据库文件 data/sessions.db"
+        return f"❌ 找不到会话数据库: {db_path}"
 
     start_time = time.time() - (days * 24 * 3600)
 
@@ -228,7 +250,7 @@ def llm_usage_report(days: int = 7) -> str:
             if not rows:
                 return f"ℹ️ 最近 {days} 天内没有任何 API 调用记录。"
 
-            lines = [f"📊 **最近 {days} 天大模型 API 消耗统计**", "| 模型名称 | 提示词 Token | 生成 Token | 总 Token |", "|:---|---:|---:|---:|"]
+            lines = [f"📊 **最近 {days} 天大模型 API 消耗统计 (本地已记录)**", "| 模型名称 | 提示词 Token | 生成 Token | 总 Token |", "|:---|---:|---:|---:|"]
             total_all = 0
             for row in rows:
                 model = row[0] or "unknown"
@@ -240,5 +262,5 @@ def llm_usage_report(days: int = 7) -> str:
 
             lines.append(f"\n💡 **期间累计总消耗**: **{total_all:,}** Tokens")
             return "\n".join(lines)
-    except Exception as e:
-        return f"❌ 统计 API 消耗量失败: {e}"
+    except Exception:
+        return "❌ 统计 API 消耗量失败: 数据库查询异常"

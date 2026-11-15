@@ -702,13 +702,20 @@ class TaskOrchestrator:
                     outcome.terminal_reason == "model_error"
                     and not fallback_attempted
                 ):
-                    fallback = self._run_worker_fallbacks(
-                        subtask, upstream, goal, global_strategy,
-                        log_callback, parent_execution_id,
-                        worker_max_steps, worker_token_budget,
-                    )
-                    if fallback is not None:
-                        outcome = fallback
+                    # 关键边界控制：若执行过程中已产生工具调用副作用，严禁不透明整段重跑新 Worker
+                    if subtask.tool_results:
+                        self._log_and_persist(
+                            f"  ⚠️ {subtask.id} 已执行工具调用具有副作用，终止自动回退重跑",
+                            log_callback,
+                        )
+                    else:
+                        fallback = self._run_worker_fallbacks(
+                            subtask, upstream, goal, global_strategy,
+                            log_callback, parent_execution_id,
+                            worker_max_steps, worker_token_budget,
+                        )
+                        if fallback is not None:
+                            outcome = fallback
                 if outcome.status != "done":
                     raise RuntimeError(
                         f"{outcome.terminal_reason}: {outcome.content}"

@@ -390,3 +390,35 @@ def test_unavailable_primary_worker_uses_declared_fallback():
     assert [call.args[1] for call in orch._make_worker.call_args_list] == [
         "glm", "flash",
     ]
+
+
+def test_worker_with_tool_side_effects_does_not_transparently_rerun_fallback():
+    """验证当 Worker 在失败前已产生工具调用副作用时，严禁盲目创建新 Worker 重新整段运行"""
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    primary = MagicMock()
+    # 模拟主模型产生过工具执行结果但因模型错误失败
+    primary.run.return_value = WorkerOutcome(
+        "model failed after tool call", status="failed", terminal_reason="model_error",
+        tool_results=[{"tool": "modify_file", "output": "file written"}]
+    )
+    orch._make_worker = MagicMock(return_value=primary)
+    orch._log_and_persist = MagicMock()
+    orch.direct_tool_execution = False
+    subtask = Subtask(
+        id="s1", name="mutation_task", assigned_model="glm",
+        fallback_models=["flash"],
+        tool_results=[{"tool": "modify_file", "output": "file written"}]
+    )
+    results = {}
+
+    orch._run_single_subtask(
+        subtask, {}, results, threading.Lock(), parent_execution_id="parent"
+    )
+
+    assert results["s1"]["status"] == "failed"
+    assert "model failed after tool call" in results["s1"]["error"]
+    # 关键断言：仅创建了主 worker，未对 fallback 运行第二次
+    orch._make_worker.assert_called_once()
+    # 确认记录了副作用终止告警
+    log_messages = [call.args[0] for call in orch._log_and_persist.call_args_list]
+    assert any("具有副作用，终止自动回退重跑" in msg for msg in log_messages)

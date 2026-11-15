@@ -404,3 +404,88 @@ def test_response_body_marker_sanitization():
         assert "SUPER_SECRET_PAYLOAD_12345" not in result
 
 
+def test_get_model_local_usage_honors_env_session_db_path(tmp_path, monkeypatch):
+    """F1: 验证尊重 LITE_AGENT_SESSION_DB_PATH，正确读取独立实例的用量数据"""
+    import sqlite3
+    import time
+    db_file = tmp_path / "configured_sessions.db"
+    conn = sqlite3.connect(str(db_file))
+    conn.execute(
+        "CREATE TABLE api_usage_log (id INTEGER PRIMARY KEY, model TEXT, prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER, created_at REAL)"
+    )
+    conn.execute(
+        "INSERT INTO api_usage_log (model, prompt_tokens, completion_tokens, total_tokens, created_at) VALUES (?, ?, ?, ?, ?)",
+        ("doubao-seed-2.0-pro", 2345, 10000, 12345, time.time())
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setenv("LITE_AGENT_SESSION_DB_PATH", str(db_file))
+    # 将 PROJECT_ROOT 指向空目录，避免读取工作区默认数据库
+    import lite_agent.core.constants as consts
+    monkeypatch.setattr(consts, "PROJECT_ROOT", str(tmp_path / "empty_dir"))
+
+    config = {
+        "llm": {
+            "default": "doubao-pro",
+            "models": {
+                "doubao-pro": {
+                    "driver": "ark",
+                    "model": "doubao-seed-2.0-pro",
+                    "api_key": "ark-test-key"
+                }
+            }
+        }
+    }
+
+    result = check_active_llm_status(config)
+    assert "12,345" in result
+    assert "本地已记录" in result
+    assert "暂无调用记录" not in result
+
+
+def test_get_model_local_usage_db_failure_reports_unavailable(tmp_path, monkeypatch):
+    """F2: 验证数据库异常时报告用量统计暂不可用，坚决不伪装成'暂无调用记录'或泄露底层异常"""
+    corrupt_file = tmp_path / "corrupt_sessions.db"
+    corrupt_file.write_text("NOT A SQLITE FILE")
+
+    monkeypatch.setenv("LITE_AGENT_SESSION_DB_PATH", str(corrupt_file))
+    import lite_agent.core.constants as consts
+    monkeypatch.setattr(consts, "PROJECT_ROOT", str(tmp_path / "empty_dir"))
+
+    config = {
+        "llm": {
+            "default": "doubao-pro",
+            "models": {
+                "doubao-pro": {
+                    "driver": "ark",
+                    "model": "doubao-seed-2.0-pro",
+                    "api_key": "ark-test-key"
+                }
+            }
+        }
+    }
+
+    result = check_active_llm_status(config)
+    assert "用量统计暂不可用" in result
+    assert "暂无调用记录" not in result
+    # 坚决不输出底层 sqlite 错误栈
+    assert "DatabaseError" not in result
+    assert "file is not a database" not in result
+
+
+def test_empty_models_dict_is_treated_as_models_schema():
+    """验证空 models 字典属于新 schema，坚决不静默兜底为旧平铺配置发送请求"""
+    config = {
+        "llm": {
+            "models": {},
+            "driver": "deepseek",
+            "api_key": "fake-key",
+            "base_url": "https://api.deepseek.com/v1"
+        }
+    }
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        result = check_active_llm_status(config)
+        mock_urlopen.assert_not_called()
+        assert "配置错误" in result
+        assert "已终止查询" in result
