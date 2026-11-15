@@ -132,3 +132,42 @@ def test_allowed_model_fallback_preserves_policy_order():
     )
 
     assert decision.model == "doubao-pro"
+
+
+def test_gemini_excluded_when_require_stream_is_true():
+    cfg = {
+        "llm": {
+            "default": "gemini-flash",
+            "models": {
+                "gemini-flash": {
+                    "driver": "gemini_native",
+                    "model": "gemini-2.5-flash"
+                },
+                "flash": {
+                    "driver": "deepseek",
+                    "model": "deepseek-v4-flash"
+                }
+            }
+        },
+        "task_routing": {
+            "route_rules": [{
+                "type": "text",
+                "model": "flash",
+                "fallback": "gemini-flash",
+                "allowed_models": ["flash", "gemini-flash"]
+            }]
+        }
+    }
+    selector = ModelSelector(cfg)
+    # 默认如果需要流式，gemini-flash 不能作为 default，自动挑选支持流式的 flash
+    decision = selector.select("chat", require_stream=True)
+    assert decision.model == "flash"
+
+    # 在 route fallback 中，gemini-flash 也不能作为流式 fallback
+    fallbacks = selector.fallback_models("flash", subtask_type="text", require_stream=True)
+    assert "gemini-flash" not in fallbacks
+
+    # 如果 HARD 锁定到了 gemini 且要求流式，直接报错拒绝
+    with pytest.raises(ModelPolicyError, match="不支持流式"):
+        selector.select("chat", policy=ExecutionPolicy.user_locked("gemini-flash"), require_stream=True)
+
