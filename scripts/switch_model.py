@@ -307,8 +307,9 @@ def apply_switch(target_model, llm_cfg, routing_cfg, specs_cfg, committee_cfg,
     if new_api_key:
         if "models" in updates[LLM_JSON] and target_model in updates[LLM_JSON]["models"]:
             updates[LLM_JSON]["models"][target_model]["api_key"] = new_api_key
+        # 核心安全规范：切模型绝不向顶层平铺写回 Key，防止顶层无主污染
         if "api_key" in updates[LLM_JSON]:
-            updates[LLM_JSON]["api_key"] = new_api_key
+            del updates[LLM_JSON]["api_key"]
     if routing_cfg:
         routing = copy.deepcopy(routing_cfg)
         routing["planner_model"] = routing["classifier_model"] = target_model

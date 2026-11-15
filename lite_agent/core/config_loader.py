@@ -20,7 +20,29 @@ _merged_cache = None
 _merged_ttl = 0
 _db_initialized = False
 
-SENSITIVE_SEGS = {'api_key', 'apikey', 'token', 'secret', 'password', 'passwd', 'credential', 'authorization', 'private_key', 'webhook'}
+SENSITIVE_SEGS = {
+    'api_key', 'apikey', 'token', 'secret', 'password', 'passwd', 'credential',
+    'authorization', 'private_key', 'webhook', 'base_url', 'endpoint',
+    'credential_ref', 'driver', 'protocol', 'provider'
+}
+
+
+def _contains_protected_keys(obj) -> bool:
+    """递归检查对象中是否包含受保护或敏感配置键"""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if any(seg in SENSITIVE_SEGS for seg in str(k).split('.')):
+                return True
+            if any(seg == 'edge' for seg in str(k).split('.')):
+                return True
+            if _contains_protected_keys(v):
+                return True
+    elif isinstance(obj, list):
+        for item in obj:
+            if _contains_protected_keys(item):
+                return True
+    return False
+
 
 def load_env():
     if os.environ.get("LITE_AGENT_DISABLE_DOTENV") == "1" or os.environ.get("TESTING") == "1":
@@ -34,7 +56,10 @@ def load_env():
                 if line and not line.startswith('#'):
                     if '=' in line:
                         k, v = line.split('=', 1)
-                        os.environ[k.strip()] = v.strip().strip("'").strip('"')
+                        key = k.strip()
+                        # 遵循规范：部署进程环境变量 > .env 补缺，不无条件覆盖已有环境
+                        if key not in os.environ:
+                            os.environ[key] = v.strip().strip("'").strip('"')
 
 def _replace_vars(obj):
     if isinstance(obj, dict):
@@ -102,6 +127,13 @@ def _get_base_config():
     # 核心安全红线：清除基底数据中的 edge (递归清除)
     _remove_edge_keys(base_data)
 
+    # 彻底清除已有多模型拓扑时顶层遗留的无主平铺凭据 (如 llm.api_key)，防止深合并复活
+    llm = base_data.get("llm")
+    if isinstance(llm, dict) and "models" in llm:
+        for k in ("api_key", "base_url"):
+            if k in llm:
+                del llm[k]
+
     # 变量展开仅在受信任的 base 层进行
     _base_cache = _replace_vars(base_data)
     return _base_cache
@@ -139,6 +171,9 @@ def _get_sqlite_overrides():
 
                         try:
                             parsed_v = json.loads(v)
+                            # 递归防御：防止通过复合对象向 SQLite 注入敏感凭据或被保护的端点
+                            if _contains_protected_keys(parsed_v):
+                                continue
                             parts = k.split('.')
                             curr = overrides
                             for part in parts[:-1]:
@@ -231,6 +266,8 @@ def write_setting(key: str, value: Any, operator: str = "system") -> bool:
         raise ValueError("Access to 'edge' configuration is strictly blocked by Security Red Line.")
     if any(seg in SENSITIVE_SEGS for seg in key.split('.')):
         raise ValueError(f"Writing to sensitive key '{key}' via SQLite is prohibited.")
+    if _contains_protected_keys(value):
+        raise ValueError(f"Value for '{key}' contains protected/sensitive configuration fields.")
 
     db_path = _init_db()
     new_val_str = json.dumps(value, ensure_ascii=False)

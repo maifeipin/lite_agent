@@ -31,8 +31,8 @@ class SwitchModelTests(unittest.TestCase):
                     self.assertEqual(path.read_bytes(), original)
                 else:
                     saved = json.loads(path.read_text())
-                    self.assertEqual(saved['api_key'], 'test-key-not-a-real-secret')
-                    self.assertEqual(saved['models']['flash']['api_key'], saved['api_key'])
+                    self.assertNotIn('api_key', saved)
+                    self.assertEqual(saved['models']['flash']['api_key'], 'test-key-not-a-real-secret')
                     self.assertEqual(saved['models']['old'], cfg['models']['old'])
                     self.assertEqual(saved['models']['flash']['profiles'],
                                      cfg['models']['flash']['profiles'])

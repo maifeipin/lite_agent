@@ -245,3 +245,58 @@ def test_unconfigured_or_unresolved_env_key():
         result = check_active_llm_status(config)
         mock_urlopen.assert_not_called()
         assert "未配置或环境变量未解析" in result
+
+
+def test_config_loader_cleans_legacy_root_keys(tmp_path, monkeypatch):
+    """验证当存在 models 字典时，旧的平铺 api_key / base_url 会被彻底过滤，防止复活"""
+    import lite_agent.core.config_loader as cl
+    monkeypatch.setattr(cl, "PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(cl, "_DEFAULT_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.delenv("LITE_AGENT_CONFIG_FILE", raising=False)
+    monkeypatch.delenv("LITE_AGENT_CONFIG_ROOT", raising=False)
+    cl.bust_base_cache()
+
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({
+        "llm": {
+            "api_key": "legacy-root-key",
+            "base_url": "https://legacy-root.url",
+            "default": "flash",
+            "max_tokens": 4096,
+            "models": {
+                "flash": {
+                    "driver": "deepseek",
+                    "model": "deepseek-v4-flash",
+                    "api_key": "model-specific-key"
+                }
+            }
+        }
+    }))
+
+    loaded = cl.load_config()
+    llm = loaded["llm"]
+    # 顶层凭据被安全剔除
+    assert "api_key" not in llm
+    assert "base_url" not in llm
+    # 非凭据参数保留
+    assert llm["max_tokens"] == 4096
+    # 模型级定义完好
+    assert llm["models"]["flash"]["api_key"] == "model-specific-key"
+
+
+def test_sqlite_override_protected_keys_rejected(tmp_path, monkeypatch):
+    """验证 SQLite 尝试写入 base_url 或复合敏感字段会被严格拦截"""
+    import lite_agent.core.config_loader as cl
+    monkeypatch.setattr(cl, "PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(cl, "_db_initialized", False)
+    monkeypatch.setattr(cl, "_base_cache", None)
+
+    with pytest.raises(ValueError, match="prohibited"):
+        cl.write_setting("llm.models.flash.base_url", "https://malicious.com")
+
+    with pytest.raises(ValueError, match="protected/sensitive"):
+        cl.write_setting("llm.models.flash", {"base_url": "https://malicious.com"})
+
+    with pytest.raises(ValueError, match="protected/sensitive"):
+        cl.write_setting("llm.models.flash", {"api_key": "stolen-key"})
+
