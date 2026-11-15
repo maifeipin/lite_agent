@@ -338,3 +338,65 @@ def test_classify_llm_error_categories():
     assert is_retryable_error(LLMErrorCategory.RATE_LIMIT_429) is True
     assert is_retryable_error(LLMErrorCategory.AUTH_401) is False
     assert is_retryable_error(LLMErrorCategory.BAD_REQUEST_400) is False
+
+
+def test_worker_accepts_v2_vision_without_legacy_tags():
+    from lite_agent.core.worker_agent import WorkerAgent
+    worker = WorkerAgent.__new__(WorkerAgent)
+    worker.model_cfg = {"capabilities": {"vision": True}}
+    assert worker._supports_vision() is True
+
+
+@pytest.mark.parametrize("version", [0, 3, "2", True])
+def test_schema_version_is_not_silently_coerced(version):
+    errors = validate_model_config({"llm": {"schema_version": version}})
+    assert any("schema_version" in msg for level, msg in errors if level == "error")
+
+
+def test_v2_rejects_inline_models_and_secret_fallback(monkeypatch):
+    monkeypatch.setenv("TEST_EP_KEY", "test-key")
+    config = {"llm": {
+        "schema_version": 2, "default": "m",
+        "endpoints": {"ep": {
+            "provider": "deepseek", "protocol": "openai_chat_completions",
+            "base_url": "https://api.deepseek.com/v1", "credential_ref": "TEST_EP_KEY",
+            "extra": {"legacy_key": "test-forbidden-fallback"},
+        }},
+        "models": {"m": {"driver": "deepseek", "model": "m", "api_key": "inline",
+                           "base_url": "https://api.deepseek.com/v1"}},
+    }}
+    errors = [msg for level, msg in validate_model_config(config) if level == "error"]
+    assert any("legacy_key" in msg for msg in errors)
+    assert any("必须使用 endpoint_ref" in msg for msg in errors)
+    assert "test-forbidden-fallback" not in str(errors)
+
+
+def test_loader_preserves_credential_reference_and_sqlite_cannot_rebind(monkeypatch):
+    from lite_agent.core import config_loader
+    monkeypatch.setenv("TEST_REFERENCE_KEY", "test-secret-value")
+    original = {"credential_ref": "${TEST_REFERENCE_KEY}", "api_key": "${TEST_REFERENCE_KEY}"}
+    expanded = config_loader._replace_vars(original)
+    assert expanded["credential_ref"] == "${TEST_REFERENCE_KEY}"
+    assert expanded["api_key"] == "test-secret-value"  # legacy configuration still works
+    for key in ("endpoint_ref", "management_ref", "legacy_key"):
+        with pytest.raises(ValueError):
+            config_loader.write_setting(f"llm.models.m.{key}", "replacement")
+        with pytest.raises(ValueError):
+            config_loader.write_setting("llm.models.m", {key: "replacement"})
+
+
+def test_v2_missing_env_cannot_use_legacy_key_for_inference_or_monitor(monkeypatch):
+    monkeypatch.delenv("REVIEW_ABSENT_KEY", raising=False)
+    config = {"llm": {"schema_version": 2, "default": "m", "models": {
+        "m": {"endpoint_ref": "ep", "model": "m"}}, "endpoints": {"ep": {
+            "provider": "deepseek", "protocol": "openai_chat_completions",
+            "base_url": "https://api.deepseek.com/v1", "credential_ref": "REVIEW_ABSENT_KEY",
+            "extra": {"legacy_key": "fake-fallback"},
+        }}}}
+    from lite_agent.features.sys_ops.llm_ops_service import check_active_llm_status
+    with patch("lite_agent.core.model_router.OpenAI") as client, patch("urllib.request.urlopen") as query:
+        router = ModelRouter(config)
+        assert router.get_client("m") is None
+        assert "未配置" in check_active_llm_status(config)
+        client.assert_not_called()
+        query.assert_not_called()

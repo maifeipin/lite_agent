@@ -23,7 +23,8 @@ _db_initialized = False
 SENSITIVE_SEGS = {
     'api_key', 'apikey', 'token', 'secret', 'password', 'passwd', 'credential',
     'authorization', 'private_key', 'webhook', 'base_url', 'endpoint',
-    'credential_ref', 'driver', 'protocol', 'provider'
+    'credential_ref', 'driver', 'protocol', 'provider', 'endpoint_ref',
+    'management_ref', 'legacy_key'
 }
 
 
@@ -63,7 +64,9 @@ def load_env():
 
 def _replace_vars(obj):
     if isinstance(obj, dict):
-        return {k: _replace_vars(v) for k, v in obj.items()}
+        # Keep credential references symbolic until the trusted binding boundary.
+        return {k: v if k == 'credential_ref' else _replace_vars(v)
+                for k, v in obj.items()}
     elif isinstance(obj, list):
         return [_replace_vars(v) for v in obj]
     elif isinstance(obj, str):

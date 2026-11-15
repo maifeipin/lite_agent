@@ -325,4 +325,4 @@ class WorkerAgent:
         )
 
     def _supports_vision(self) -> bool:
-        return supports_vision(self.model_cfg.get("tags", []))
+        return supports_vision(self.model_cfg)

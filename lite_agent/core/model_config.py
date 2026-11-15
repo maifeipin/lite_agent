@@ -71,6 +71,12 @@ def validate_model_config(config: dict, require_credentials: bool = True) -> lis
     models = llm.get("models", {}) or {}
     routing = config.get("task_routing", {}) or {}
 
+    schema_version = llm.get("schema_version", 1)
+    if type(schema_version) is not int or schema_version not in (1, 2):
+        return [("error", "llm.schema_version 必须为受支持的整数版本 1 或 2")]
+    if schema_version == 2 and not isinstance(llm.get("endpoints"), dict):
+        return [("error", "Schema v2 必须配置 endpoints 对象")]
+
     if not models:
         issues.append(("error", "llm.models 为空，未配置任何模型"))
         return issues
@@ -144,12 +150,17 @@ def validate_model_config(config: dict, require_credentials: bool = True) -> lis
             # v2 严禁明文 api_key
             if "api_key" in ep_cfg:
                 _error(f"端点 {ep_name!r} (Schema v2) 禁止直接配置明文 api_key，必须使用 credential_ref 环境变量引用")
+            if (ep_cfg.get("extra") or {}).get("legacy_key"):
+                _error(f"端点 {ep_name!r} (Schema v2) 禁止 legacy_key 凭据兜底")
+            management = ep_cfg.get("management_ref")
+            if management and (management != "deepseek-official-balance" or prov != DRIVER_DEEPSEEK):
+                _error(f"端点 {ep_name!r} 的 management_ref 与 provider 不匹配或尚不支持")
 
             cred_ref = ep_cfg.get("credential_ref")
             if not cred_ref:
                 _error(f"端点 {ep_name!r} 缺少 credential_ref 凭据引用")
             elif not is_valid_credential_ref(cred_ref):
-                _error(f"端点 {ep_name!r} 的 credential_ref {cred_ref!r} 格式非法，必须为合法环境变量名")
+                _error(f"端点 {ep_name!r} 的 credential_ref 格式非法，必须为合法环境变量名")
             elif require_credentials:
                 var_name = extract_env_var_name(cred_ref)
                 if not resolve_credential(var_name):
@@ -165,10 +176,12 @@ def validate_model_config(config: dict, require_credentials: bool = True) -> lis
             if ep_ref not in endpoints:
                 _error(f"模型 {name!r} 引用了未配置的 endpoint: {ep_ref!r}")
             # V1: 杜绝 v2 混合配置冲突
-            conflicting_keys = [k for k in ("driver", "base_url", "api_key") if k in cfg]
+            conflicting_keys = [k for k in ("driver", "base_url", "api_key", "proxy") if k in cfg]
             if conflicting_keys:
                 _error(f"模型 {name!r} 既配置了 endpoint_ref 又声明了内联字段 ({', '.join(conflicting_keys)})，二者冲突")
         else:
+            if schema_version == 2:
+                _error(f"模型 {name!r} (Schema v2) 必须使用 endpoint_ref")
             driver = cfg.get("driver", "")
             if not driver:
                 _error(f"模型 {name!r} 缺少显式 driver 或 endpoint_ref 字段（可选: {', '.join(DRIVERS)}）")

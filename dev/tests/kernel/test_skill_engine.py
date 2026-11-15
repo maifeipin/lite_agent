@@ -476,7 +476,8 @@ def test_t13_non_retryable_exceptions():
 
     assert openai.BadRequestError in _NON_RETRYABLE_EXCEPTIONS
     assert openai.AuthenticationError in _NON_RETRYABLE_EXCEPTIONS
-    assert openai.RateLimitError in _NON_RETRYABLE_EXCEPTIONS
+    # 429 is classified by its provider code: rate limiting may retry, quota cannot.
+    assert openai.RateLimitError not in _NON_RETRYABLE_EXCEPTIONS
     assert openai.NotFoundError in _NON_RETRYABLE_EXCEPTIONS
     assert openai.PermissionDeniedError in _NON_RETRYABLE_EXCEPTIONS
 

@@ -35,7 +35,8 @@ class ModelRouter:
     def _init_clients(self):
         # 1. 优先按归一化后的 Endpoints 初始化并共享客户端
         for ep_id, ep in self.endpoints.items():
-            key = resolve_credential(ep.credential_ref, ep.extra.get("legacy_key", ""))
+            fallback = ep.extra.get("legacy_key", "") if self.schema_version < 2 else ""
+            key = resolve_credential(ep.credential_ref, fallback)
             if not key:
                 continue
 

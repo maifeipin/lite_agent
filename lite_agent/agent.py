@@ -37,7 +37,6 @@ _NON_RETRYABLE_EXCEPTIONS = (
     openai.NotFoundError,
     openai.PermissionDeniedError,
     openai.UnprocessableEntityError,
-    openai.RateLimitError,
 )
 from lite_agent.core.skill_engine import SkillEngine
 from lite_agent.core.request_selector import (

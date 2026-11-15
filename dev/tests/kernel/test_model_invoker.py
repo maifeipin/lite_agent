@@ -619,6 +619,31 @@ class TestGeminiSync:
             for p in reversed(patches):
                 p.stop()
 
+    @pytest.mark.parametrize("with_ledger", [False, True])
+    @pytest.mark.parametrize("error, expected_calls", [("503 service unavailable", 2), ("429 insufficient_quota", 1)])
+    def test_gateway_bounds_actual_gemini_adapter_attempts(self, gemini_invoker, tmp_path, with_ledger, error, expected_calls):
+        from lite_agent.core.llm_gateway import LLMGateway
+        from lite_agent.core.execution_ledger import ExecutionLedger
+        client_call = MagicMock(side_effect=RuntimeError(error))
+        gemini_invoker.client.models.generate_content = client_call
+        ledger = ExecutionLedger(str(tmp_path / "gemini-attempts.db")) if with_ledger else None
+        patches = self._setup_gemini_patches()
+        patches.append(patch("lite_agent.core.llm_gateway.time.sleep"))
+        for item in patches:
+            item.start()
+        try:
+            with pytest.raises(RuntimeError, match=error):
+                LLMGateway(ledger=ledger).invoke_sync(
+                    [{"role": "user", "content": "test"}],
+                    invoker=gemini_invoker, max_retries=1,
+                )
+            assert client_call.call_count == expected_calls
+            if ledger:
+                assert len(ledger.list_recent()) == expected_calls
+        finally:
+            for item in reversed(patches):
+                item.stop()
+
     def test_gemini_response_unified_called(self, gemini_invoker):
         """Gemini 响应应经过 gemini_response_to_unified 转换。"""
         patches = self._setup_gemini_patches()

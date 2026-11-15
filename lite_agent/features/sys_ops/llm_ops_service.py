@@ -72,7 +72,8 @@ def _resolve_default_model_binding(config: Optional[dict] = None) -> Tuple[str, 
             m_cfg["management_ref"] = ep_data.get("management_ref")
             from lite_agent.core.model_endpoint import resolve_credential
             cred_ref = ep_data.get("credential_ref", "")
-            key = resolve_credential(cred_ref, ep_data.get("extra", {}).get("legacy_key", ""))
+            # endpoint_ref always resolves a reference, never an inline secret fallback.
+            key = resolve_credential(cred_ref)
             m_cfg["api_key"] = key
         return default_key, m_cfg
 
@@ -170,7 +171,11 @@ def check_active_llm_status(config: Optional[dict] = None) -> str:
 
     # 2. 检查是否为可信的 DeepSeek 官方绑定 (消费 management_ref 或显式官方端点，别名或模型名绝不参与判定)
     management_ref = model_cfg.get("management_ref")
-    is_official_ds = (driver == "deepseek" or management_ref == "deepseek-official-balance") and _is_official_deepseek_endpoint(base_url)
+    management_allowed = (
+        not model_cfg.get("endpoint_ref")
+        or management_ref == "deepseek-official-balance"
+    )
+    is_official_ds = driver == "deepseek" and management_allowed and _is_official_deepseek_endpoint(base_url)
 
     if is_official_ds:
         return _query_deepseek_official_balance(api_key, header)

@@ -55,7 +55,10 @@ def build_model_snapshot(config: dict) -> dict:
         driver = ep.provider if ep else cfg.get("driver", "")
         base_url = ep.base_url if ep else cfg.get("base_url", "")
         configured = (
-            bool(resolve_credential(ep.credential_ref, ep.extra.get("legacy_key", "")))
+            bool(resolve_credential(
+                ep.credential_ref,
+                ep.extra.get("legacy_key", "") if llm_cfg.get("schema_version", 1) < 2 else "",
+            ))
             if ep else bool(cfg.get("api_key"))
         )
         tags = list(m_def.tags) if m_def else list(cfg.get("tags") or [])
