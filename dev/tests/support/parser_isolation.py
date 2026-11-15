@@ -185,7 +185,10 @@ def verify_parser_fixed_version(parser_dir: Path, expected_sha: str = PINNED_PAR
             raise RuntimeError(f"无法获取 Parser 仓库 Git SHA: {e}") from e
 
     matches_expected = actual_sha.startswith(expected_sha) or expected_sha.startswith(actual_sha)
-    matches_approved = any(actual_sha.startswith(s) or s.startswith(actual_sha) for s in APPROVED_PARSER_SHAS)
+    matches_approved = (
+        expected_sha == PINNED_PARSER_SHA
+        and any(actual_sha.startswith(s) or s.startswith(actual_sha) for s in APPROVED_PARSER_SHAS)
+    )
     if not matches_expected and not matches_approved:
         raise AssertionError(
             f"Parser 提交 SHA 未锁定在已核准基线: 预期 {expected_sha}, 实际 {actual_sha}"
