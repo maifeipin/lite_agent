@@ -488,3 +488,136 @@ def test_adapter_total_timeout_covers_post_stdout_hang():
         assert "超时" in (res.error or "")
         assert elapsed < 5.0
 
+
+def test_ws_client_accepts_session_token_verifier():
+    """Android App 注入的 UserSessionService sessionToken 应可直接通过 /ws/pc-cli/client 鉴权。"""
+    repo = PcCliRepository(":memory:")
+    hub = PcCliHub(repo=repo)
+    ws_server = PcCliWsServer(
+        hub=hub,
+        host="127.0.0.1",
+        port=0,
+        daemon_token="dtok",
+        client_token="static_ctok",
+        client_token_verifier=lambda tok: tok == "valid_android_session_tok",
+    )
+    ws_server.start()
+    try:
+        async def _scenario():
+            url = f"ws://127.0.0.1:{ws_server.bound_port}/ws/pc-cli/client"
+            c_ok = await StdlibWsClient.connect(url)
+            await c_ok.send_json({"type": "auth", "token": "valid_android_session_tok"})
+            reply_ok = json.loads(await asyncio.wait_for(c_ok.recv_text(), timeout=3.0) or "{}")
+            await c_ok.close()
+
+            c_bad = await StdlibWsClient.connect(url)
+            await c_bad.send_json({"type": "auth", "token": "wrong_tok"})
+            reply_bad = json.loads(await asyncio.wait_for(c_bad.recv_text(), timeout=3.0) or "{}")
+            await c_bad.close()
+            return reply_ok, reply_bad
+
+        r_ok, r_bad = asyncio.run(_scenario())
+        assert r_ok == {"type": "auth.ok"}
+        assert r_bad and r_bad.get("type") == "auth.error"
+    finally:
+        ws_server.stop()
+        hub.close()
+
+
+def test_daemon_restart_reconciles_orphaned_turns():
+    """Daemon 进程重启重连时 node.hello 携带空 active_turns，Hub 应自动收尾孤儿 running 回合，解锁 Bot。"""
+    repo = PcCliRepository(":memory:")
+    hub = PcCliHub(repo=repo)
+    try:
+        hub.handle_daemon_hello(
+            "conn_1",
+            lambda _: None,
+            {"node_id": "mac-1", "engines": ["agy"], "workspace_roots": ["/Users/demo"], "active_turns": []},
+        )
+        ok_b, b_res = hub.create_bot(name="mac-agy", node_id="mac-1", engine="agy", cwd="/Users/demo")
+        assert ok_b is True
+        bot_id = b_res["bot"]["bot_id"]
+
+        ok_t, t_res = hub.start_turn(bot_id, "查看可用空间")
+        assert ok_t is True
+        turn_id = t_res["turn"]["turn_id"]
+
+        # 模拟网络抖动但进程仍在跑：上报同一 turn_id，不应误杀
+        hub.handle_daemon_hello(
+            "conn_2",
+            lambda _: None,
+            {"node_id": "mac-1", "engines": ["agy"], "workspace_roots": ["/Users/demo"], "active_turns": [turn_id]},
+        )
+        assert hub.repo.get_active_turn_for_bot(bot_id)["turn_id"] == turn_id
+
+        # 模拟 Daemon 进程重启：active_turns 为空，Hub 应自动收尾孤儿回合
+        hub.handle_daemon_hello(
+            "conn_3",
+            lambda _: None,
+            {"node_id": "mac-1", "engines": ["agy"], "workspace_roots": ["/Users/demo"], "active_turns": []},
+        )
+        assert hub.repo.get_active_turn_for_bot(bot_id) is None
+        assert hub.repo.get_turn(turn_id)["status"] == TurnStatus.FAILED.value
+        assert hub.repo.get_bot(bot_id)["status"] == BotStatus.ERROR.value
+
+        # 解锁后应可立即下发新指令
+        ok_t2, _ = hub.start_turn(bot_id, "重试查看空间")
+        assert ok_t2 is True
+    finally:
+        hub.close()
+
+
+def test_host_assembly_shares_user_session_service_with_pc_cli_ws():
+    """复核 P1 #2：宿主装配 pc_cli 插件时，WS 必须与 REST 共享同一个基于配置路径的 UserSessionService，并用真实签发 Token 验通。"""
+    from types import SimpleNamespace
+    from lite_agent.services.user_session import UserSessionService
+
+    with tempfile.TemporaryDirectory() as tmp:
+        custom_session_db = os.path.join(tmp, "custom_auth.db")
+        pc_cli_db = os.path.join(tmp, "pc_cli.db")
+        fake_agent = SimpleNamespace(_config=None)  # 故意不传 _config，同时验证 plugins.py 配置投影生效
+        app = create_app(
+            mode="full",
+            agent=fake_agent,
+            config={
+                "user_session_db": custom_session_db,
+                "pc_cli": {
+                    "enabled": True,
+                    "db_path": pc_cli_db,
+                    "ws_host": "127.0.0.1",
+                    "ws_port": 0,
+                    "daemon_token": "dtok_real",
+                    "client_token": "static_ctok_real",
+                },
+            },
+        )
+        try:
+            app.plugin_loader.load_plugin_by_entry("lite_agent.features.pc_cli", plugin_name="pc_cli")
+            shared_svc = getattr(fake_agent, "user_session_service", None)
+            ws_server = getattr(fake_agent, "pc_cli_ws_server", None)
+            assert shared_svc is not None
+            assert ws_server is not None
+            assert os.path.abspath(shared_svc.db_path) == os.path.abspath(custom_session_db)
+
+            # 模拟 REST 登录签发真实 session_token（写入同一自定义会话库）
+            issued = UserSessionService(config={"user_session_db": custom_session_db}).create_session(
+                username="tester",
+                device_id="android-1",
+                device_name="OnePlus",
+            )
+            real_token = issued["session_token"]
+
+            async def _ws_auth(tok: str):
+                url = f"ws://127.0.0.1:{ws_server.bound_port}/ws/pc-cli/client"
+                cli = await StdlibWsClient.connect(url)
+                await cli.send_json({"type": "auth", "token": tok})
+                reply = json.loads(await asyncio.wait_for(cli.recv_text(), timeout=3.0) or "{}")
+                await cli.close()
+                return reply
+
+            assert asyncio.run(_ws_auth(real_token)) == {"type": "auth.ok"}
+            assert asyncio.run(_ws_auth("invalid_real_token")).get("type") == "auth.error"
+        finally:
+            app.shutdown()
+
+

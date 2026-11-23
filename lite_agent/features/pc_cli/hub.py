@@ -136,9 +136,45 @@ class PcCliHub:
             workspace_roots=workspace_roots,
             status=NodeStatus.ONLINE.value,
         )
+        if isinstance(payload.get("active_turns"), list):
+            self._reconcile_node_active_turns(node_id, payload["active_turns"])
         self._broadcast_clients({"type": "nodes.updated", "nodes": self.repo.list_nodes()})
         logger.info(f"PC 节点上线: {node_id} ({platform}, engines={engines})")
         return node
+
+    def _reconcile_node_active_turns(self, node_id: str, reported_active_turns: List[Any]) -> None:
+        """Daemon 重连上线时对账活跃回合：若守护进程已重启，自动收尾孤儿 running 回合，避免 Bot 永久卡死。"""
+        reported_ids = {str(t) for t in reported_active_turns if t}
+        reconciled = 0
+        err_msg = "守护进程已重启，原回合已中断"
+        for bot in self.repo.list_bots(include_archived=True):
+            if bot.get("node_id") != node_id:
+                continue
+            bot_id = bot["bot_id"]
+            active = self.repo.get_active_turn_for_bot(bot_id)
+            if not active:
+                continue
+            turn_id = active["turn_id"]
+            if turn_id in reported_ids:
+                continue
+            self.repo.finish_turn(turn_id, status=TurnStatus.FAILED.value, error_message=err_msg)
+            self.repo.expire_pending_approvals(bot_id=bot_id)
+            ev = self.repo.append_event(
+                bot_id=bot_id,
+                turn_id=turn_id,
+                event_type=EventType.TURN_STATUS.value,
+                payload={
+                    "status": TurnStatus.FAILED.value,
+                    "error": err_msg,
+                    "native_session_id": bot.get("native_session_id"),
+                },
+            )
+            self.repo.set_bot_status(bot_id, BotStatus.ERROR.value, last_summary=err_msg)
+            self._broadcast_clients({"type": "bot.event", "bot_id": bot_id, "event": ev}, bot_id_filter=bot_id)
+            reconciled += 1
+            logger.warning(f"节点 {node_id} 重连对账：已自动收尾孤儿回合 bot={bot_id} turn={turn_id}")
+        if reconciled:
+            self._broadcast_clients({"type": "bots.updated", "bots": self.repo.list_bots()})
 
     def handle_daemon_disconnect(self, node_id: str, conn_id: str) -> None:
         removed = False

@@ -61,14 +61,40 @@ def register(context: Any) -> None:
     ws_server: Optional[PcCliWsServer] = None
 
     if pc_cfg.get("start_ws_server", True):
+        session_verifier = None
+        try:
+            from lite_agent.services.user_session import UserSessionService
+
+            session_service = getattr(agent, "user_session_service", None)
+            if session_service is None:
+                session_cfg = getattr(agent, "_config", None) or cfg
+                session_service = UserSessionService(config=session_cfg)
+                if agent is not None:
+                    try:
+                        agent.user_session_service = session_service
+                    except Exception:
+                        pass
+            if session_service.is_available():
+                session_verifier = lambda tok: bool(
+                    session_service.verify_access_token(tok, required_scope="user:general")[0]
+                )
+        except Exception as e:
+            logger.warning(f"PC CLI WebSocket 会话鉴权初始化失败，将回退静态 Token 鉴权: {e}")
+
         ws_server = PcCliWsServer(
             hub=hub,
             host=ws_host,
             port=ws_port,
             daemon_token=daemon_token,
             client_token=client_token,
+            client_token_verifier=session_verifier,
         )
         ws_server.start()
+        if agent is not None:
+            try:
+                agent.pc_cli_ws_server = ws_server
+            except Exception:
+                pass
 
     if hasattr(context, "register_route"):
         context.register_route(

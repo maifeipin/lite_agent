@@ -21,6 +21,11 @@ import com.liteagent.mobile.core.network.models.*
 import com.liteagent.mobile.core.storage.TodoDatabaseHelper
 import com.liteagent.mobile.ui.discover.DiscoverViewModel
 import com.liteagent.mobile.ui.meetings.MeetingsViewModel
+import com.liteagent.mobile.ui.pcbots.PcBotsAuthSnapshot
+import com.liteagent.mobile.ui.pcbots.buildMobilePwaUrl
+import com.liteagent.mobile.ui.pcbots.buildTokenInjectionScript
+import com.liteagent.mobile.ui.pcbots.isSameOrigin
+import com.liteagent.mobile.ui.pcbots.resolveTokenForUrl
 import com.liteagent.mobile.ui.phoneapp.PhoneAppViewModel
 import com.liteagent.mobile.ui.todos.TodoFilter
 import com.liteagent.mobile.ui.todos.TodosUiState
@@ -64,12 +69,31 @@ class SanityTest {
 
     @Test
     fun navigation_tabs_complete() {
-        assertEquals(4, NavigationTab.values().size)
+        assertEquals(5, NavigationTab.values().size)
         val tabNames = NavigationTab.values().map { it.name }
         assertTrue(tabNames.contains("CHAT"))
         assertTrue(tabNames.contains("TODOS"))
         assertTrue(tabNames.contains("MEETINGS"))
+        assertTrue(tabNames.contains("PC_BOTS"))
         assertTrue(tabNames.contains("DISCOVER"))
+    }
+
+    @Test
+    fun pc_bots_url_origin_and_injection_script() {
+        assertEquals("https://mail.maifeipin.com/mobile/", buildMobilePwaUrl("https://mail.maifeipin.com/"))
+        assertEquals("https://mail.maifeipin.com/mobile/", buildMobilePwaUrl("https://mail.maifeipin.com/agent/api/v1/chat"))
+        assertTrue(isSameOrigin("https://mail.maifeipin.com/mobile/?bot=1", "https://mail.maifeipin.com/mobile/"))
+        assertFalse(isSameOrigin("https://evil.example.com/mobile/", "https://mail.maifeipin.com/mobile/"))
+        assertFalse(isSameOrigin("http://mail.maifeipin.com/mobile/", "https://mail.maifeipin.com/mobile/"))
+
+        val script = buildTokenInjectionScript("tok_\"abc\"\\123")
+        assertTrue(script.contains("pc_cli_client_token"))
+        assertTrue(script.contains("\\\"abc\\\""))
+
+        val snapA = PcBotsAuthSnapshot("https://a.example.com/", "https://a.example.com/mobile/", "tok_a")
+        assertEquals("tok_a", resolveTokenForUrl("https://a.example.com/mobile/?bot=1", snapA))
+        assertNull(resolveTokenForUrl("https://b.example.com/mobile/", snapA))
+        assertNull(resolveTokenForUrl("https://a.example.com/mobile/", null))
     }
 
     @Test

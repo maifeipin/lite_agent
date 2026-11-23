@@ -17,7 +17,7 @@ import logging
 import struct
 import threading
 import uuid
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from lite_agent.features.pc_cli.hub import PcCliHub
 
@@ -166,12 +166,14 @@ class PcCliWsServer:
         port: int = 8889,
         daemon_token: str = "",
         client_token: str = "",
+        client_token_verifier: Optional[Callable[[str], bool]] = None,
     ):
         self.hub = hub
         self.host = host
         self.port = port
         self.daemon_token = daemon_token
         self.client_token = client_token
+        self.client_token_verifier = client_token_verifier
         self.bound_port: int = port
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -286,7 +288,7 @@ class PcCliWsServer:
                 return
             role = "daemon"
         elif norm_path == "/ws/pc-cli/client":
-            if not self.client_token:
+            if not self.client_token and self.client_token_verifier is None:
                 await self._reject_http(writer, 503, "Client Token Not Configured")
                 return
             role = "client"
@@ -310,10 +312,20 @@ class PcCliWsServer:
         if role == "daemon":
             await self._serve_daemon(conn)
         else:
-            pre_authed = bool(
-                _extract_bearer(headers) and hmac.compare_digest(_extract_bearer(headers), self.client_token)
-            )
+            pre_authed = self._verify_client_token(_extract_bearer(headers))
             await self._serve_client(conn, pre_authed=pre_authed)
+
+    def _verify_client_token(self, token: str) -> bool:
+        if not token:
+            return False
+        if self.client_token and hmac.compare_digest(token, self.client_token):
+            return True
+        if self.client_token_verifier is not None:
+            try:
+                return bool(self.client_token_verifier(token))
+            except Exception:
+                return False
+        return False
 
     async def _serve_daemon(self, conn: _WsConnection) -> None:
         conn_id = f"dconn_{uuid.uuid4().hex[:10]}"
@@ -366,7 +378,7 @@ class PcCliWsServer:
                     return
                 msg = json.loads(raw)
                 token = str(msg.get("token") or "")
-                if msg.get("type") != "auth" or not token or not hmac.compare_digest(token, self.client_token):
+                if msg.get("type") != "auth" or not self._verify_client_token(token):
                     await conn.send_json({"type": "auth.error", "error": "Unauthorized"})
                     return
                 authed = True

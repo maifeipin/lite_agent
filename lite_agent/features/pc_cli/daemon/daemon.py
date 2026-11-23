@@ -103,6 +103,7 @@ class PcCliDaemon:
                 "platform": sys.platform,
                 "engines": engines,
                 "workspace_roots": self.config.workspace_roots,
+                "active_turns": list(self._active_turns.values()),
             })
 
             async def _heartbeat() -> None:

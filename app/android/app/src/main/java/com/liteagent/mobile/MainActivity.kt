@@ -48,6 +48,7 @@ import com.liteagent.mobile.ui.discover.DiscoverViewModelFactory
 import com.liteagent.mobile.ui.meetings.MeetingsScreen
 import com.liteagent.mobile.ui.meetings.MeetingsViewModel
 import com.liteagent.mobile.ui.meetings.MeetingsViewModelFactory
+import com.liteagent.mobile.ui.pcbots.PcBotsScreen
 import com.liteagent.mobile.ui.phoneapp.PhoneAppScreen
 import com.liteagent.mobile.ui.phoneapp.PhoneAppViewModel
 import com.liteagent.mobile.ui.phoneapp.PhoneAppViewModelFactory
@@ -167,6 +168,7 @@ enum class NavigationTab(val label: String, val shortLabel: String, val icon: Im
     CHAT("AI 助理", "助理", Icons.Default.Chat),
     TODOS("待办日程 (GTD)", "待办", Icons.Default.CheckCircle),
     MEETINGS("会审与执行", "会审&执行", Icons.Default.Groups),
+    PC_BOTS("PC 终端 (Bots)", "PC Bots", Icons.Default.Terminal),
     DISCOVER("发现与概览", "发现", Icons.Default.Explore)
 }
 
@@ -427,6 +429,17 @@ fun MainAppScaffold(
                     )
 
                     NavigationDrawerItem(
+                        icon = { Icon(Icons.Default.Terminal, contentDescription = null) },
+                        label = { Text("PC 终端 (Bots)", fontWeight = FontWeight.Medium) },
+                        selected = selectedTab == NavigationTab.PC_BOTS,
+                        onClick = {
+                            selectedTab = NavigationTab.PC_BOTS
+                            coroutineScope.launch { drawerState.close() }
+                        },
+                        modifier = Modifier.padding(vertical = 2.dp)
+                    )
+
+                    NavigationDrawerItem(
                         icon = { Icon(Icons.Default.Explore, contentDescription = null) },
                         label = { Text("发现与概览", fontWeight = FontWeight.Medium) },
                         selected = selectedTab == NavigationTab.DISCOVER,
@@ -624,6 +637,14 @@ fun MainAppScaffold(
                                 }
                             )
                             FilterChip(
+                                selected = selectedTab == NavigationTab.PC_BOTS,
+                                onClick = {
+                                    selectedTab = NavigationTab.PC_BOTS
+                                    showQuickSwitchBar = false
+                                },
+                                label = { Text("💻 PC Bots", fontSize = 12.sp) }
+                            )
+                            FilterChip(
                                 selected = selectedTab == NavigationTab.DISCOVER,
                                 onClick = {
                                     selectedTab = NavigationTab.DISCOVER
@@ -742,6 +763,12 @@ fun MainAppScaffold(
                                 }
                             }
                         }
+                        NavigationTab.PC_BOTS -> PcBotsScreen(
+                            tokenStorage = tokenStorage,
+                            onOpenDrawer = openDrawer,
+                            onToggleQuickBar = toggleQuickBar,
+                            onOpenSettings = { showServerConfig = true }
+                        )
                         NavigationTab.DISCOVER -> DiscoverScreen(
                             viewModel = discoverViewModel,
                             onCheckUpdate = { updateController.checkManually() },
