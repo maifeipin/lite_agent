@@ -90,12 +90,24 @@ function getDocTimestamp(doc) {
         const t = Date.parse(doc.email_date);
         if (!isNaN(t)) return t / 1000;
     }
-    if (doc.updated_at) {
-        if (typeof doc.updated_at === 'number') return doc.updated_at;
-        const t = Date.parse(doc.updated_at);
-        if (!isNaN(t)) return t / 1000;
+    let bestTs = 0;
+    if (doc.due_at) {
+        const s = String(doc.due_at).trim();
+        const t = Date.parse(s.includes('T') ? s : s.replace(' ', 'T'));
+        if (!isNaN(t)) bestTs = Math.max(bestTs, t / 1000);
     }
-    return 0;
+    if (doc.updated_at) {
+        if (typeof doc.updated_at === 'number') bestTs = Math.max(bestTs, doc.updated_at);
+        else {
+            const t = Date.parse(doc.updated_at);
+            if (!isNaN(t)) bestTs = Math.max(bestTs, t / 1000);
+        }
+    }
+    if (doc.created_at) {
+        const t = Date.parse(doc.created_at);
+        if (!isNaN(t)) bestTs = Math.max(bestTs, t / 1000);
+    }
+    return bestTs;
 }
 
 function jsonParseSafe(s) {
@@ -677,6 +689,86 @@ function initSidebarCollapse() {
 }
 
 // ============================================================
+//  Agent Health & Build Version Display
+// ============================================================
+function initAgentHealthCheck() {
+    const statusDot = document.querySelector('.sidebar-footer .status-indicator');
+    const statusText = document.getElementById('agent-status-text');
+    const versionBadge = document.getElementById('agent-build-version');
+
+    // 读取前端页面构建时注入的真实 SHA，避免被动态覆盖导致版本漂移不可见
+    const metaShaTag = document.querySelector('meta[name="build-sha"]');
+    const webBuildSha = (metaShaTag ? metaShaTag.getAttribute('content') : '') ||
+                        (versionBadge ? versionBadge.getAttribute('data-web-sha') : '') ||
+                        '';
+    const webShortSha = webBuildSha ? webBuildSha.slice(0, 8) : '';
+
+    async function checkHealth() {
+        try {
+            let resp = null;
+            try {
+                resp = await fetch('/agent/health');
+            } catch (e) {
+                resp = await fetch('/health');
+            }
+            if (!resp || !resp.ok) {
+                resp = await fetch('/health');
+            }
+
+            if (resp && resp.ok) {
+                const data = await resp.json();
+                if (statusDot) {
+                    statusDot.className = 'status-indicator online';
+                }
+                if (statusText) {
+                    statusText.textContent = 'Agent 连接正常';
+                }
+
+                if (versionBadge) {
+                    const serverBuildSha = String(data.build_sha || '').trim();
+                    const serverShortSha = serverBuildSha ? serverBuildSha.slice(0, 8) : '';
+                    const vStr = data.version ? `v${data.version}` : 'v1.0.0';
+
+                    // 版本对比：校验前端构建 SHA 与后端服务运行 SHA 是否一致
+                    if (!webShortSha || !serverShortSha || webShortSha === serverShortSha) {
+                        // 一致时展示统一版本
+                        versionBadge.classList.remove('mismatch');
+                        versionBadge.textContent = `${vStr} (${serverShortSha || webShortSha})`.trim();
+                        versionBadge.title = `前后端版本一致: ${vStr} | Commit: ${serverBuildSha || webBuildSha} | 模式: ${data.mode || 'full'}`;
+                    } else {
+                        // 发现前后端版本不一致：明确分别展示，并添加警告样式提示用户
+                        versionBadge.classList.add('mismatch');
+                        versionBadge.textContent = `Web:${webShortSha} · Svr:${serverShortSha}`;
+                        versionBadge.title = `⚠️ 前后端版本不一致！\n• 前端构建: ${webShortSha} (${webBuildSha})\n• 服务端运行: ${serverShortSha} (${serverBuildSha})\n提示: 请重启 Lite Agent 服务以加载最新提交，或刷新浏览器清除旧缓存。`;
+                        console.warn(`[Lite Agent] 前后端版本不一致: 前端构建=${webShortSha}, 服务端运行=${serverShortSha}`);
+                    }
+                    versionBadge.style.display = 'inline-block';
+                }
+                return;
+            }
+            throw new Error(`Health response: ${resp ? resp.status : 'offline'}`);
+        } catch (err) {
+            if (statusDot) {
+                statusDot.className = 'status-indicator offline';
+            }
+            if (statusText) {
+                statusText.textContent = 'Agent 连接断开';
+            }
+            if (versionBadge && webShortSha) {
+                versionBadge.classList.remove('mismatch');
+                versionBadge.textContent = `Web: ${webShortSha} (离线)`;
+                versionBadge.title = `前端构建版本: ${webShortSha} | 服务端未连接`;
+                versionBadge.style.display = 'inline-block';
+            }
+        }
+    }
+
+    checkHealth();
+    // 每 60 秒轮询一次健康检查
+    setInterval(checkHealth, 60000);
+}
+
+// ============================================================
 //  Bootstrap
 // ============================================================
 document.addEventListener('DOMContentLoaded', () => {
@@ -685,6 +777,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initFilterButtons();
     initSidebarCollapse();
     initIntersectionObserver();
+    initAgentHealthCheck();
     if (typeof initTerminal === 'function') initTerminal();
     if (typeof initChatDrawer === 'function') initChatDrawer();
     initKeyboard();

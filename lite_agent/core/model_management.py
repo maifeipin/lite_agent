@@ -42,22 +42,38 @@ def build_model_snapshot(config: dict) -> dict:
             "tools": list(raw.get("tools") or []),
         })
 
+    from lite_agent.core.model_endpoint import normalize_llm_config, resolve_credential
+    endpoints_map, norm_models_map, _ = normalize_llm_config(llm_cfg)
+
     models = []
     for name, cfg in models_cfg.items():
         if not isinstance(cfg, dict):
             continue
-        driver = cfg.get("driver", "")
+        m_def = norm_models_map.get(name)
+        ep = endpoints_map.get(m_def.endpoint_ref) if m_def else None
+
+        driver = ep.provider if ep else cfg.get("driver", "")
+        base_url = ep.base_url if ep else cfg.get("base_url", "")
+        configured = (
+            bool(resolve_credential(
+                ep.credential_ref,
+                ep.extra.get("legacy_key", "") if llm_cfg.get("schema_version", 1) < 2 else "",
+            ))
+            if ep else bool(cfg.get("api_key"))
+        )
+        tags = list(m_def.tags) if m_def else list(cfg.get("tags") or [])
+
         models.append({
             "name": name,
             "model": cfg.get("model", name),
             "provider": _provider_label(driver),
             "driver": driver,
-            "endpoint": _safe_endpoint(cfg),
-            "tags": list(cfg.get("tags") or []),
+            "endpoint": _safe_endpoint({"base_url": base_url}),
+            "tags": tags,
             "max_tokens": cfg.get("max_tokens"),
             "max_steps": cfg.get("max_steps"),
             "temperature": cfg.get("temperature"),
-            "configured": bool(cfg.get("api_key")),
+            "configured": configured,
         })
 
     # 校验问题复用中央强校验器，这里只取 message，保留原有 issues 展示格式。

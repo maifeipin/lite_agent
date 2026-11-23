@@ -23,31 +23,42 @@ class SwitchModelTests(unittest.TestCase):
                      patch.object(switch, 'restart_service',
                                   side_effect=[RuntimeError('failed'), None] if fail else None), \
                      patch('builtins.print') as output:
-                    self.assertEqual(switch.apply_switch('flash', cfg, {}, {}, {},
-                                     new_api_key='test-key-not-a-real-secret', yes=True), not fail)
-                self.assertNotIn('test-key-not-a-real-secret', str(output.call_args_list))
+                    self.assertEqual(switch.apply_switch('flash', cfg, {}, {}, {}, yes=True), not fail)
                 self.assertEqual(cfg['models']['flash']['api_key'], '${DEEPSEEK_API_KEY}')
                 if fail:
                     self.assertEqual(path.read_bytes(), original)
                 else:
                     saved = json.loads(path.read_text())
-                    self.assertEqual(saved['api_key'], 'test-key-not-a-real-secret')
-                    self.assertEqual(saved['models']['flash']['api_key'], saved['api_key'])
+                    self.assertNotIn('api_key', saved)
+                    # 关键安全断言：切模型坚决不向 JSON 写入明文 Key，保留现有环境变量引用
+                    self.assertEqual(saved['models']['flash']['api_key'], '${DEEPSEEK_API_KEY}')
                     self.assertEqual(saved['models']['old'], cfg['models']['old'])
                     self.assertEqual(saved['models']['flash']['profiles'],
                                      cfg['models']['flash']['profiles'])
 
-    def test_cli_alias_passes_key_without_prompt_or_restart(self):
+    def test_cli_rejects_api_key_flag_without_writes_or_restart(self):
         cfg = {'default': 'old', 'models': {'flash': {'aliases': ['ds']}}}
         with patch.object(switch.os.path, 'exists', return_value=True), \
              patch.object(switch, 'load_json', side_effect=[cfg, {}, {}, {}]), \
-             patch.object(switch, 'apply_switch', return_value=True) as apply, \
-             patch('builtins.input', side_effect=AssertionError('unexpected prompt')), \
+             patch.object(switch, 'apply_switch') as apply, \
+             patch.object(switch, 'restart_service') as restart, \
+             patch('builtins.print') as output, \
              patch.object(switch.sys, 'argv', ['switch_model.py', 'DS', '--yes',
-                          '--no-restart', '--api-key', ' test-key ']):
+                          '--no-restart', '--api-key', 'secret-key-to-reject']), \
+             self.assertRaises(SystemExit) as cm:
             switch.main()
-        apply.assert_called_once_with('flash', cfg, {}, {}, {},
-                                      new_api_key='test-key', yes=True, restart=False)
+        self.assertEqual(cm.exception.code, 1)
+        apply.assert_not_called()
+        restart.assert_not_called()
+        # 绝不把传入的秘密复述在错误信息中
+        self.assertNotIn('secret-key-to-reject', str(output.call_args_list))
+
+    def test_apply_switch_rejects_new_api_key(self):
+        cfg = {'default': 'old', 'models': {'flash': {}}}
+        with patch('builtins.print') as output:
+            result = switch.apply_switch('flash', cfg, {}, {}, {}, new_api_key='leak_secret', yes=True)
+            self.assertFalse(result)
+            self.assertNotIn('leak_secret', str(output.call_args_list))
 
     def test_success_and_failure_restore_all_files(self):
         for fail in (False, True):

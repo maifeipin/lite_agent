@@ -21,7 +21,7 @@ from types import MappingProxyType, SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 from lite_agent.core.agent_runtime import AgentRuntime, RuntimeEvent, RuntimeEventType
-from lite_agent.core.execution import ExecutionContext, ExecutionResult, ExecutionSource, ActorType
+from lite_agent.contracts.execution import ExecutionContext, ExecutionResult, ExecutionSource, ActorType
 from lite_agent.core.model_event import ModelEvent, ModelEventType
 from lite_agent.core.model_invoker import OpenAIInvoker
 

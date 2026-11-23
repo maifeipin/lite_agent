@@ -25,7 +25,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from lite_agent.core.agent_runtime import RuntimeEvent, RuntimeEventType
-from lite_agent.core.execution import ExecutionContext, ActorType, ExecutionSource
+from lite_agent.contracts.execution import ExecutionContext, ActorType, ExecutionSource
 from lite_agent.core.execution_ledger import ExecutionLedger, ExecutionHandle
 from lite_agent.core.runtime_recorder import RuntimeRecorder
 

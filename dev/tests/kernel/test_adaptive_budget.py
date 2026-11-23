@@ -8,7 +8,7 @@ from lite_agent.core.adaptive_budget import (
     compact_messages,
 )
 from lite_agent.core.agent_runtime import AgentRuntime, RuntimeEventType
-from lite_agent.core.execution import (
+from lite_agent.contracts.execution import (
     ActorType,
     ExecutionContext,
     ExecutionResult,

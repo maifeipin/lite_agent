@@ -6,7 +6,7 @@ RSS 技能入口 (skills/ops_rss.py)。
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from lite_agent.core.command_registry import slash_command
+from lite_agent.services.commands import slash_command
 from lite_agent.features.content_ops import rss_service
 
 # 兼容常量与配置导出

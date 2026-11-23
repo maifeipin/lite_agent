@@ -498,9 +498,8 @@ class TaskSpecStore:
         self._init_schema()
 
     def _connect(self):
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+        from lite_agent.core.sqlite_utils import connect_sqlite
+        return connect_sqlite(self.db_path, row_factory=sqlite3.Row, close_on_exit=True)
 
     def _init_schema(self):
         with self._connect() as conn:

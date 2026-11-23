@@ -2,6 +2,7 @@ config.json
 /conf.d/*.json
 data/sessions.db
 __pycache__/
+/.venv*/
 *.pyc
 .env
 workspace/

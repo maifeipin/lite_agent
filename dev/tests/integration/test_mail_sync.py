@@ -16,16 +16,18 @@ from lite_agent.integrations.mail.sync_receipt import (
     summarize_account_errors,
     evaluate_sync_receipt,
 )
-from lite_agent.integrations.mail.sync_service import drain_quality_events, sync_and_consume
-from lite_agent.skills import ops_billing, ops_todo
+from lite_agent.features.billing.sync_service import drain_quality_events, sync_and_consume
+from lite_agent.skills import ops_billing
 from dev.tests.integration.test_mail_quality import parser_repo
 
 
 @pytest.fixture(autouse=True)
 def isolate_default_stores(tmp_path, monkeypatch):
-    monkeypatch.setattr(ops_todo, 'DB_PATH', str(tmp_path / 'default-todos.db'))
-    monkeypatch.setattr(ops_todo, 'MD_PATH', str(tmp_path / 'personal.md'))
-    monkeypatch.setattr('lite_agent.integrations.mail.sync_service.config_loader.load_config', lambda: {})
+    default_todo = str(tmp_path / 'default-todos.db')
+    monkeypatch.setattr(
+        'lite_agent.features.billing.sync_service.config_loader.load_config',
+        lambda: {'billing': {'todo_db_path': default_todo, 'repayment_todo': {'enabled': False}}}
+    )
 
 
 # ============================================================================
@@ -155,7 +157,7 @@ def test_drain_quality_events_aborts_on_write_failure(tmp_path):
     client.quality_events.return_value = [
         {"event_id": "e1", "case_key": "k1", "event_type": "quality_detected", "revision": 1, "cycle_id": 1, "diagnostics": []}
     ]
-    with patch("lite_agent.integrations.mail.quality_todo.upsert_source_todo", side_effect=OSError("disk read-only")):
+    with patch("lite_agent.features.billing.quality_todo.upsert_source_todo", side_effect=OSError("disk read-only")):
         stats = drain_quality_events(client, todo_db_path=str(tmp_path / "todo.db"), max_batches=3)
     assert stats["batches"] == 1
     assert stats["failed"] == 1
@@ -421,7 +423,7 @@ def test_ops_billing_fetch_output_formatting(tmp_path, monkeypatch):
         "partial": False
     }
 
-    with patch("lite_agent.integrations.mail.sync_service.sync_and_consume", return_value=mock_res):
+    with patch("lite_agent.features.billing.sync_service.sync_and_consume", return_value=mock_res):
         text = ops_billing.billing_fetch(months=1)
 
     assert "✅ 账单邮箱同步完成 (1 个账户)" in text
@@ -532,7 +534,7 @@ def test_write_failure_does_not_retry_fetch(tmp_path, parser_repo):
     cli = MailCLI(str(root), db_path=statement_db)
 
     # 模拟 Todo 数据库写入出错
-    with patch("lite_agent.integrations.mail.quality_todo.upsert_source_todo", side_effect=OSError("database locked")):
+    with patch("lite_agent.features.billing.quality_todo.upsert_source_todo", side_effect=OSError("database locked")):
         res = sync_and_consume(
             script_dir=str(root),
             statement_db_path=statement_db,

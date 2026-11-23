@@ -116,3 +116,4 @@ def test_sync_receipt_accepts_identity_counters():
     }
     --- JSON_SUMMARY_END ---"""
     assert parse_json_summary(invalid_payload) is None
+

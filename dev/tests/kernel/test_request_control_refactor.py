@@ -3,7 +3,7 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from lite_agent.core.execution import ExecutionResult
+from lite_agent.contracts.execution import ExecutionResult
 from lite_agent.core.model_invoker import GeminiInvoker, OpenAIInvoker
 from lite_agent.core.model_router import ModelRouter
 from lite_agent.core.model_policy import ExecutionPolicy, ModelSelector
@@ -390,3 +390,100 @@ def test_unavailable_primary_worker_uses_declared_fallback():
     assert [call.args[1] for call in orch._make_worker.call_args_list] == [
         "glm", "flash",
     ]
+
+
+def test_worker_outcome_with_tools_blocks_fallback_from_empty_subtask():
+    """T1: 验证从空 Subtask 起步，若 WorkerOutcome 包含工具调用结果，严禁自动调用 fallback"""
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    primary = MagicMock()
+    # 真实情况：Subtask 初始无 tool_results，Worker 内部产生工具结果后返回在 WorkerOutcome 中
+    primary.run.return_value = WorkerOutcome(
+        "model error after tool", status="failed", terminal_reason="model_error",
+        tool_results=[{"name": "write_file", "result": "done"}]
+    )
+    fallback = MagicMock()
+    orch._make_worker = MagicMock(side_effect=[primary, fallback])
+    orch._log_and_persist = MagicMock()
+    orch.direct_tool_execution = False
+    subtask = Subtask(
+        id="s1", name="mutation_task", assigned_model="glm",
+        fallback_models=["flash"],
+        tool_results=[]  # 初始为空！
+    )
+    results = {}
+
+    orch._run_single_subtask(
+        subtask, {}, results, threading.Lock(), parent_execution_id="parent"
+    )
+
+    assert results["s1"]["status"] == "failed"
+    # 确认仅创建了主 worker，备用 worker 未被创建/运行
+    assert [call.args[1] for call in orch._make_worker.call_args_list] == ["glm"]
+    log_messages = [call.args[0] for call in orch._log_and_persist.call_args_list]
+    assert any("具有副作用，终止自动回退重跑" in msg for msg in log_messages)
+
+
+def test_worker_exception_after_execution_blocks_fallback():
+    """T1: 验证当 Worker 执行期间（已走步骤）抛出异常时，严禁盲目回退重跑"""
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    primary = MagicMock()
+    def fake_run(subtask, *args, **kwargs):
+        subtask.steps_used = 1  # 模拟执行已经开始走步
+        raise RuntimeError("network dropped during tool execution")
+    primary.run.side_effect = fake_run
+    orch._make_worker = MagicMock(return_value=primary)
+    orch._log_and_persist = MagicMock()
+    orch.direct_tool_execution = False
+    subtask = Subtask(
+        id="s1", name="mutation_task", assigned_model="glm",
+        fallback_models=["flash"],
+        tool_results=[]
+    )
+    results = {}
+
+    orch._run_single_subtask(
+        subtask, {}, results, threading.Lock(), parent_execution_id="parent"
+    )
+
+    assert results["s1"]["status"] == "failed"
+    assert [call.args[1] for call in orch._make_worker.call_args_list] == ["glm"]
+    log_messages = [call.args[0] for call in orch._log_and_persist.call_args_list]
+    assert any("终止自动回退" in msg for msg in log_messages)
+
+
+def test_fallback_chain_stops_when_fallback_executes_tools():
+    """T1: 验证备用模型链中，若第一备用执行了工具但失败，严禁继续调用第二备用"""
+    orch = TaskOrchestrator.__new__(TaskOrchestrator)
+    primary = MagicMock()
+    # 主模型未执行工具直接报错（可安全回退到 fallback1）
+    primary.run.return_value = WorkerOutcome(
+        "primary connection error", status="failed", terminal_reason="model_error",
+        tool_results=[]
+    )
+    # 第一备用模型执行了工具后发生 model_error
+    fb1 = MagicMock()
+    fb1.run.return_value = WorkerOutcome(
+        "fb1 model error after tool", status="failed", terminal_reason="model_error",
+        tool_results=[{"name": "charge_card", "result": "ok"}]
+    )
+    fb2 = MagicMock()
+    fb2.run.return_value = WorkerOutcome("fb2 ok")
+    orch._make_worker = MagicMock(side_effect=[primary, fb1, fb2])
+    orch._log_and_persist = MagicMock()
+    orch.direct_tool_execution = False
+    subtask = Subtask(
+        id="s1", name="charge_task", assigned_model="glm",
+        fallback_models=["fb1", "fb2"],
+        tool_results=[]
+    )
+    results = {}
+
+    orch._run_single_subtask(
+        subtask, {}, results, threading.Lock(), parent_execution_id="parent"
+    )
+
+    assert results["s1"]["status"] == "failed"
+    # 关键断言：仅创建了 glm 与 fb1，fb2 坚决未被创建或执行！
+    assert [call.args[1] for call in orch._make_worker.call_args_list] == ["glm", "fb1"]
+    log_messages = [call.args[0] for call in orch._log_and_persist.call_args_list]
+    assert any("终止后续备用回退" in msg for msg in log_messages)

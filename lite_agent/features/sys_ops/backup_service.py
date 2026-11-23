@@ -153,25 +153,27 @@ def _create_meili_dump() -> Optional[str]:
     if not task_uid or task_uid == "invalid_api_key":
         return None
 
-    # 2. 轮询等待成功 (最大等待 60s)
+    # 2. 轮询等待成功 (最大等待 180s，适应 200MB+ 索引数据 dump 耗时)
     headers = _make_headers(key)
-    for _ in range(60):
+    dumps_dir = "/home/liteagent/meilisearch/meili_data/dumps"
+    for _ in range(180):
         req_status = urllib.request.Request(f"{url_base}/tasks/{task_uid}", headers=headers)
         try:
             with urllib.request.urlopen(req_status) as resp:
                 task_data = json.loads(resp.read().decode('utf-8'))
                 status = task_data.get("status")
                 if status == "succeeded":
-                    dumps_dir = "/home/liteagent/meilisearch/meili_data/dumps"
                     if os.path.exists(dumps_dir):
-                        dump_items = [f for f in os.listdir(dumps_dir)
-                                      if not f.startswith('.')]
-                        if dump_items:
-                            latest = max(
-                                dump_items,
-                                key=lambda f: os.path.getmtime(os.path.join(dumps_dir, f))
-                            )
-                            return os.path.join(dumps_dir, latest)
+                        # 严格按本次任务返回的 dumpUid 精准定位，坚决不使用 mtime 兜底防止误选并发或手工 dump
+                        dump_uid = (task_data.get("details") or {}).get("dumpUid")
+                        if dump_uid:
+                            exact_path = os.path.join(dumps_dir, f"{dump_uid}.dump")
+                            if os.path.isfile(exact_path):
+                                return exact_path
+                            print(f"Meilisearch dump task succeeded but dump file not found: {exact_path}")
+                            return None
+                        print(f"Meilisearch dump task succeeded but details.dumpUid is missing: {task_data}")
+                        return None
                     return None
                 elif status == "failed":
                     print(f"Meilisearch dump task failed: {task_data.get('error')}")
@@ -181,8 +183,20 @@ def _create_meili_dump() -> Optional[str]:
 
         time.sleep(1.0)
 
-    print("Meilisearch dump timed out")
+    print("Meilisearch dump timed out (180s)")
     return None
+
+
+def _clean_meili_dumps_after_archive(current_dump: str) -> None:
+    """ZIP 归档成功后清理：仅清理确认由本服务任务生成且已成功归档的当前 dump 文件。
+
+    坚决不扫描或误删目录中任何其他文件（包括人工通过 API 创建的 dump、未归档的恢复文件等）。
+    """
+    try:
+        if current_dump and os.path.isfile(current_dump):
+            os.remove(current_dump)
+    except Exception as e:
+        print(f"Failed to remove archived meili dump {current_dump}: {e}")
 
 
 _HEDGEDOC_COMPOSE = "/app/hedgedoc/docker-compose.yml"
@@ -386,25 +400,40 @@ def _bdpan_sync_dir(backup_dir: str) -> Tuple[bool, str]:
             remote_subdir = _BDPAN_REMOTE_DIR
 
         remote_path = f"{remote_subdir}/{fname}"
-        try:
-            result = subprocess.run(
-                [bdpan, "upload", fpath, remote_path],
-                capture_output=True, text=True, timeout=3600
-            )
-            if result.returncode == 0:
-                uploads.append(f"{remote_subdir}/{fname}")
-                print(f"  [bdpan] 上传 {fname} -> {remote_subdir}/: 成功")
-            else:
-                err = result.stderr or result.stdout or f"exit code {result.returncode}"
-                if "已存在" in err or "exist" in err.lower():
-                    skipped.append(fname)
+        max_retries = 2
+        file_uploaded = False
+        last_err = ""
+        for attempt in range(max_retries + 1):
+            try:
+                result = subprocess.run(
+                    [bdpan, "upload", fpath, remote_path],
+                    capture_output=True, text=True, timeout=3600
+                )
+                if result.returncode == 0:
+                    uploads.append(f"{remote_subdir}/{fname}")
+                    print(f"  [bdpan] 上传 {fname} -> {remote_subdir}/: 成功")
+                    file_uploaded = True
+                    break
                 else:
-                    failed.append((fname, err.strip()[:200]))
-                    print(f"  [bdpan] 上传 {fname} 失败: {err.strip()[:200]}")
-        except subprocess.TimeoutExpired:
-            failed.append((fname, "上传超时 (3600s)"))
-        except Exception as e:
-            failed.append((fname, str(e)))
+                    err = result.stderr or result.stdout or f"exit code {result.returncode}"
+                    if "已存在" in err or "exist" in err.lower():
+                        skipped.append(fname)
+                        file_uploaded = True
+                        break
+                    last_err = err.strip()[:200]
+                    print(f"  [bdpan] 上传 {fname} 失败 (尝试 {attempt + 1}/{max_retries + 1}): {last_err}")
+            except subprocess.TimeoutExpired:
+                last_err = "上传超时 (3600s)"
+                print(f"  [bdpan] 上传 {fname} 超时 (尝试 {attempt + 1}/{max_retries + 1})")
+            except Exception as e:
+                last_err = str(e)
+                print(f"  [bdpan] 上传 {fname} 异常 (尝试 {attempt + 1}/{max_retries + 1}): {e}")
+
+            if attempt < max_retries:
+                time.sleep(5)
+
+        if not file_uploaded:
+            failed.append((fname, last_err))
 
     try:
         os.makedirs(os.path.dirname(_BDPAN_SYNC_LOG), exist_ok=True)
@@ -645,11 +674,8 @@ def do_backup() -> str:
             total_size_mb += os.path.getsize(meili_zip) / (1024 * 1024)
             backup_files.append((meili_zip, "meilisearch"))
             checklist["meilisearch"] = "OK"
-            try:
-                if os.path.isfile(meili_dump):
-                    os.remove(meili_dump)
-            except Exception:
-                pass
+            # ZIP 归档成功并记录 OK 后，才清理本次归档文件并安全清理确认由系统生成的过期 dump
+            _clean_meili_dumps_after_archive(meili_dump)
     except Exception as e:
         print(f"Meilisearch dump backup failed: {e}")
 

@@ -63,13 +63,11 @@ def _ensure_schema(db_path: Optional[str] = None) -> None:
 
 
 def _ensure_schema_locked(target: str) -> None:
+    from lite_agent.core.sqlite_utils import connect_sqlite
     global _db_initialized, _initialized_path, _initialized_file_id
     os.makedirs(os.path.dirname(target), exist_ok=True)
-    conn = sqlite3.connect(target)
+    conn = connect_sqlite(target, foreign_keys=True)
     try:
-        conn.execute('PRAGMA journal_mode=WAL')
-        conn.execute('PRAGMA synchronous=NORMAL')
-        conn.execute('PRAGMA foreign_keys=ON')
         conn.execute('BEGIN IMMEDIATE')
 
         conn.execute("""
@@ -99,6 +97,7 @@ def _ensure_schema_locked(target: str) -> None:
               dispatch_target TEXT,
               dispatch_payload_json TEXT,
               dispatch_last_run_at TEXT,
+              priority INTEGER NOT NULL DEFAULT 1,
               FOREIGN KEY (recur_parent_id) REFERENCES todos(id) ON DELETE CASCADE
             )
         """)
@@ -109,6 +108,8 @@ def _ensure_schema_locked(target: str) -> None:
             ('notify_enabled', 'INTEGER NOT NULL DEFAULT 1 CHECK (notify_enabled IN (0, 1))'),
             ('source_key', 'TEXT'),
             ('source_metadata_json', "TEXT NOT NULL DEFAULT '{}'"),
+            ('priority', 'INTEGER NOT NULL DEFAULT 1'),
+            ('dispatch_target', 'TEXT'),
         ):
             if name not in existing:
                 conn.execute(f'ALTER TABLE todos ADD COLUMN {name} {declaration}')
@@ -143,11 +144,10 @@ def _ensure_schema_locked(target: str) -> None:
 
 def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
     """Return an active connection with foreign keys enabled, ensuring schema lazily."""
+    from lite_agent.core.sqlite_utils import connect_sqlite
     target = resolve_db_path(db_path)
     _ensure_schema(target)
-    conn = sqlite3.connect(target)
-    conn.execute('PRAGMA foreign_keys=ON')
-    return conn
+    return connect_sqlite(target, foreign_keys=True)
 
 
 def generate_todo_id(title: str, db_path: Optional[str] = None) -> str:
@@ -441,7 +441,9 @@ class TodoRepository:
         recur_cron: Optional[str] = None,
         remind_interval_mins: int = 0,
         remind_before_mins: int = 30,
-        notify_enabled: bool = True
+        notify_enabled: bool = True,
+        priority: int = 1,
+        dispatch_target: Optional[str] = None
     ) -> str:
         """Atomically insert a new manual Todo or recurring template."""
         conn = self.connect()
@@ -450,10 +452,11 @@ class TodoRepository:
             conn.execute('BEGIN IMMEDIATE')
             conn.execute("""
                 INSERT INTO todos (id, title, description, status, kind, project, created_at, updated_at,
-                                   due_at, recur_cron, remind_interval_mins, remind_before_mins, notify_enabled)
-                VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   due_at, recur_cron, remind_interval_mins, remind_before_mins, notify_enabled,
+                                   priority, dispatch_target)
+                VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (tid, title, description, kind, project, now, now, due_at, recur_cron,
-                  remind_interval_mins, remind_before_mins, notify_enabled))
+                  remind_interval_mins, remind_before_mins, notify_enabled, priority, dispatch_target))
             conn.commit()
             return tid
         except Exception:
@@ -648,8 +651,8 @@ class TodoRepository:
             if changed.rowcount != 1:
                 return False
             conn.execute("""
-                INSERT INTO todos (id, title, description, status, kind, project, created_at, updated_at, recur_parent_id, due_at, notify_enabled)
-                SELECT ?, ?, ?, 'pending', 'todo', ?, ?, ?, ?, ?, notify_enabled FROM todos WHERE id=?
+                INSERT INTO todos (id, title, description, status, kind, project, created_at, updated_at, recur_parent_id, due_at, notify_enabled, priority, dispatch_target)
+                SELECT ?, ?, ?, 'pending', 'todo', ?, ?, ?, ?, ?, notify_enabled, priority, dispatch_target FROM todos WHERE id=?
             """, (child_id, title, description, project, now, now, parent_id, due_time, parent_id))
             return True
 
@@ -661,7 +664,8 @@ class TodoRepository:
             conn.row_factory = sqlite3.Row
             rows = conn.execute("""
                 SELECT id, title, due_at, created_via, project, kind, description,
-                       remind_interval_mins, remind_before_mins, notified_due_at, recur_cron
+                       remind_interval_mins, remind_before_mins, notified_due_at, recur_cron,
+                       priority, dispatch_target
                 FROM todos
                 WHERE status IN ('pending', 'active') AND due_at IS NOT NULL AND notify_enabled=1
             """).fetchall()

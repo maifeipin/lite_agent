@@ -62,6 +62,8 @@ class ModelSelector:
     def __init__(self, config: dict):
         self.config = config
         self.llm_cfg = config.get("llm", {}) or {}
+        from lite_agent.core.model_endpoint import normalize_llm_config
+        self.endpoints, self.normalized_models, self.default_model = normalize_llm_config(self.llm_cfg)
         self.models = self.llm_cfg.get("models", {}) or {}
         self.routing = config.get("task_routing", {}) or {}
         self._aliases = self._build_aliases()
@@ -114,12 +116,39 @@ class ModelSelector:
     def route_tools(self, subtask_type: str) -> list[str]:
         return list(self._route_rule(subtask_type).get("tools") or [])
 
-    def fallback_models(self, model: str, subtask_type: str = "") -> tuple[str, ...]:
+    def _model_supports_streaming(self, model_name: str) -> bool:
+        """检查模型是否具备流式能力；Gemini 适配器目前未实现流式，显式排除。"""
+        # 1. 优先从归一化模型定义中查询真实端点与能力
+        m_def = self.normalized_models.get(model_name)
+        if m_def:
+            if m_def.capabilities.get("stream") is False or m_def.capabilities.get("streaming") is False:
+                return False
+            ep = self.endpoints.get(m_def.endpoint_ref)
+            if ep and ep.provider == "gemini_native":
+                return False
+            if m_def.capabilities.get("stream") is True or m_def.capabilities.get("streaming") is True:
+                return True
+
+        # 2. 回退到原始配置检查
+        cfg = self.models.get(model_name, {})
+        driver = (cfg or {}).get("driver", "")
+        if not driver and (cfg or {}).get("endpoint_ref"):
+            ep_raw = (self.llm_cfg.get("endpoints") or {}).get((cfg or {}).get("endpoint_ref"))
+            if ep_raw:
+                driver = ep_raw.get("provider", "")
+        if driver == "gemini_native":
+            return False
+        caps = (cfg or {}).get("capabilities", {})
+        if isinstance(caps, dict) and (caps.get("stream") is False or caps.get("streaming") is False):
+            return False
+        return True
+
+    def fallback_models(self, model: str, subtask_type: str = "", require_stream: bool = False) -> tuple[str, ...]:
         """Return configured fallbacks using the same rule boundary as select()."""
         rule = self._route_rule(subtask_type)
         allowed = rule.get("allowed_models")
         allowed_set = set(allowed) if isinstance(allowed, list) else None
-        return self._fallbacks(rule, model, allowed_set)
+        return self._fallbacks(rule, model, allowed_set, require_stream=require_stream)
 
     @staticmethod
     def _allowed(name: str, allowed: Optional[set[str]]) -> bool:
@@ -127,7 +156,8 @@ class ModelSelector:
 
     def select(self, role: str, *, subtask_type: str = "",
                policy: ExecutionPolicy = None,
-               preferred_model: str = "") -> ModelDecision:
+               preferred_model: str = "",
+               require_stream: bool = False) -> ModelDecision:
         policy = policy or ExecutionPolicy()
         rule = self._route_rule(subtask_type) if role == "worker" else {}
 
@@ -149,10 +179,10 @@ class ModelSelector:
         requested = ""
         if policy.requested_model:
             requested = self.resolve_name(policy.requested_model, required=True)
-            if not self._allowed(requested, allowed):
+            if not self._allowed(requested, allowed) or (require_stream and not self._model_supports_streaming(requested)):
                 if policy.model_lock == ModelLock.HARD:
                     raise ModelPolicyError(
-                        f"{subtask_type or role} 不允许模型 {requested!r}"
+                        f"{subtask_type or role} 不允许模型 {requested!r} 或该模型不支持流式"
                     )
                 requested = ""
         if requested and policy.model_lock == ModelLock.HARD:
@@ -164,12 +194,12 @@ class ModelSelector:
             )
 
         preferred = self.resolve_name(preferred_model) if preferred_model else ""
-        if self._allowed(preferred, allowed):
+        if self._allowed(preferred, allowed) and (not require_stream or self._model_supports_streaming(preferred)):
             return ModelDecision(
                 model=preferred,
                 role=role,
                 reason="node:preferred",
-                fallback_models=self._fallbacks(rule, preferred, allowed),
+                fallback_models=self._fallbacks(rule, preferred, allowed, require_stream=require_stream),
             )
 
         if requested and policy.model_lock == ModelLock.PREFERRED:
@@ -177,7 +207,7 @@ class ModelSelector:
                 model=requested,
                 role=role,
                 reason=f"{policy.lock_source}:preferred",
-                fallback_models=self._fallbacks(rule, requested, allowed),
+                fallback_models=self._fallbacks(rule, requested, allowed, require_stream=require_stream),
             )
 
         if role == "planner":
@@ -196,28 +226,38 @@ class ModelSelector:
             selected = self.llm_cfg.get("default")
             reason = "llm:default"
 
-        if not self._allowed(selected, allowed):
-            selected = next(
-                (name for name in (allowed_names or ()) if name in self.models), ""
-            )
-            reason = "allowed:first"
+        if not self._allowed(selected, allowed) or (require_stream and not self._model_supports_streaming(selected)):
+            if require_stream and (selected in self.models or allowed_names is not None):
+                candidate_pool = allowed_names if allowed_names is not None else list(self.models.keys())
+                selected = next(
+                    (name for name in candidate_pool if name in self.models and self._model_supports_streaming(name)), ""
+                )
+                reason = "allowed:stream_capable"
+            elif allowed_names is not None:
+                selected = next(
+                    (name for name in allowed_names if name in self.models), ""
+                )
+                reason = "allowed:first"
+            else:
+                selected = ""
         if not selected or selected not in self.models:
-            raise ModelPolicyError(f"{role} 没有可用的已配置模型")
+            raise ModelPolicyError(f"{role} 没有可用的已配置模型 (流式要求={require_stream})")
         return ModelDecision(
             model=selected,
             role=role,
             reason=reason,
-            fallback_models=self._fallbacks(rule, selected, allowed),
+            fallback_models=self._fallbacks(rule, selected, allowed, require_stream=require_stream),
         )
 
     def _fallbacks(self, rule: dict, selected: str,
-                   allowed: Optional[set[str]]) -> tuple[str, ...]:
+                   allowed: Optional[set[str]], require_stream: bool = False) -> tuple[str, ...]:
         fallback = str((rule or {}).get("fallback") or "")
         if (
             fallback
             and fallback != selected
             and fallback in self.models
             and self._allowed(fallback, allowed)
+            and (not require_stream or self._model_supports_streaming(fallback))
         ):
             return (fallback,)
         return ()

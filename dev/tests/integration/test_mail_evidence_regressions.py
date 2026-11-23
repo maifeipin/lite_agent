@@ -1,5 +1,4 @@
 import os
-import importlib
 import json
 import sqlite3
 from datetime import date, datetime, timezone
@@ -16,8 +15,8 @@ def mail_store(tmp_path, parser_repo, monkeypatch):
     assert os.environ.get("TESTING") == "1", "mail_store must run under testing isolation"
     assert "temp" in str(tmp_path).lower() or "tmp" in str(tmp_path).lower() or "var" in str(tmp_path).lower(), "mail_store must bind to temporary path"
     root, db_module, models = parser_repo
-    parser = importlib.import_module('statement_parser')
-    readmodel = importlib.import_module('billing_readmodel')
+    parser = parser_repo.parser
+    readmodel = parser_repo.readmodel
     db = str(tmp_path / 'statements.db')
     db_module.init_db(db)
     monkeypatch.setattr(parser, 'DB_PATH', db)
@@ -128,7 +127,7 @@ def test_summary_amount_and_advertisement_changes_are_not_structural_drift(mail_
 
 
 def test_zero_is_present_for_purpose_requirements(parser_repo):
-    quality=importlib.import_module('mail_quality')
+    quality=parser_repo.quality
     rule={'quality':{'required_fields_by_purpose':{'financial_summary':['total_due']}}}
     assert quality.missing_fields_by_purpose(rule,{'total_due':{'value':0,'source':'extracted'}})=={}
 
@@ -195,7 +194,7 @@ def test_invalid_original_amount_is_diagnosed_without_losing_settlement(mail_sto
 
 
 def test_purpose_isolation_keeps_confirmed_reminder_despite_detail_gap(parser_repo):
-    evidence=importlib.import_module('statement_evidence')
+    evidence=parser_repo.evidence
     _,_,models=parser_repo
     fields={f:{'value':v,'source':'extracted'} for f,v in
             [('due_date','2026-10-28'),('total_due','0'),('statement_month','2026-10')]}
@@ -316,7 +315,7 @@ def test_source_diagnostics_use_sanitized_fixtures_through_real_entry(mail_store
 
 def test_drift_creates_todo_through_real_cli_and_delivery_is_idempotent(mail_store,parser_repo,tmp_path):
     from lite_agent.integrations.mail.client import MailCLI
-    from lite_agent.integrations.mail.quality_todo import consume_quality_events
+    from lite_agent.features.billing.quality_todo import consume_quality_events
     indices=[i for i in range(len(HEADER)-1) if i!=1]
     parse_case(mail_store,[HEADER[i] for i in indices],[[r[i] for i in indices] for r in ROWS])
     db,_,_,_,_=mail_store
@@ -341,7 +340,7 @@ def test_semantic_reordering_is_not_drift_and_numeric_zero_is_valid(mail_store):
 def test_real_reparse_resolves_only_verified_field_and_closes_its_todo(mail_store,parser_repo,tmp_path):
     import copy
     from lite_agent.integrations.mail.client import MailCLI
-    from lite_agent.integrations.mail.quality_todo import consume_quality_events
+    from lite_agent.features.billing.quality_todo import consume_quality_events
     db,_,_,parser,_=mail_store
     root,_,_=parser_repo
     rules=copy.deepcopy(parser.load_rule_files())
@@ -363,10 +362,10 @@ def test_real_reparse_resolves_only_verified_field_and_closes_its_todo(mail_stor
         assert c.execute("SELECT COUNT(*) FROM todos WHERE status='pending'").fetchone()[0]>=1
 
 
-def test_reminder_cli_never_claims_no_due_when_all_records_are_unverified(mail_store,monkeypatch,capsys):
+def test_reminder_cli_never_claims_no_due_when_all_records_are_unverified(mail_store,parser_repo,monkeypatch,capsys):
     db,sd,models,_,_=mail_store
     sd.save_statement_with_transactions(db,stored_statement(models),[])
-    client=importlib.import_module('mail_client')
+    client=parser_repo.client
     monkeypatch.setattr(client,'DB_PATH',db)
     client.due_soon_bank_bills(months=6,days=365)
     output=capsys.readouterr().out

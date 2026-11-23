@@ -51,10 +51,15 @@ def get_socks5_db_path() -> str:
     return p
 
 
+def _connect_socks5_db(db_path: str) -> sqlite3.Connection:
+    from lite_agent.core.sqlite_utils import connect_sqlite
+    return connect_sqlite(db_path, row_factory=sqlite3.Row, close_on_exit=True)
+
+
 def _ensure_socks5_schema() -> None:
     """初始化 proxyserver 数据库表结构。"""
     db_path = get_socks5_db_path()
-    with sqlite3.connect(db_path) as conn:
+    with _connect_socks5_db(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS proxyserver (
@@ -92,8 +97,7 @@ def get_socks5_proxies(query: str = "") -> List[Dict[str, Any]]:
     """查询代理节点列表。"""
     _ensure_socks5_schema()
     db_path = get_socks5_db_path()
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with _connect_socks5_db(db_path) as conn:
         cursor = conn.cursor()
         if query:
             q = f"%{query.strip()}%"
@@ -114,8 +118,7 @@ def get_socks5_proxy_by_id(proxy_id: int) -> Optional[Dict[str, Any]]:
     """根据 ID 获取单个代理节点。"""
     _ensure_socks5_schema()
     db_path = get_socks5_db_path()
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with _connect_socks5_db(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM proxyserver WHERE ID = ?", (proxy_id,))
         row = cursor.fetchone()
@@ -126,8 +129,7 @@ def get_current_active_proxy() -> Optional[Dict[str, Any]]:
     """获取当前生效的 active 节点。"""
     _ensure_socks5_schema()
     db_path = get_socks5_db_path()
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with _connect_socks5_db(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM proxyserver WHERE is_active = 1 LIMIT 1")
         row = cursor.fetchone()
@@ -145,7 +147,7 @@ def add_socks5_proxy(
     """新增 Socks5 代理节点。"""
     _ensure_socks5_schema()
     db_path = get_socks5_db_path()
-    with sqlite3.connect(db_path) as conn:
+    with _connect_socks5_db(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO proxyserver (host, runcmd, servername, clientproxy, memo, priority)
@@ -178,7 +180,7 @@ def update_socks5_proxy(
     new_memo = memo.strip() if memo is not None else current["memo"]
     new_priority = int(priority) if priority is not None else current["priority"]
 
-    with sqlite3.connect(db_path) as conn:
+    with _connect_socks5_db(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE proxyserver
@@ -193,7 +195,7 @@ def delete_socks5_proxy(proxy_id: int) -> bool:
     """删除 Socks5 代理节点。"""
     _ensure_socks5_schema()
     db_path = get_socks5_db_path()
-    with sqlite3.connect(db_path) as conn:
+    with _connect_socks5_db(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM proxyserver WHERE ID = ?", (proxy_id,))
         conn.commit()
@@ -260,7 +262,7 @@ def parse_runcmd_to_naive_config(
 def _update_db_is_active(active_id: int):
     """更新数据库中 is_active 状态。"""
     db_path = get_socks5_db_path()
-    with sqlite3.connect(db_path) as conn:
+    with _connect_socks5_db(db_path) as conn:
         conn.execute("UPDATE proxyserver SET is_active = CASE WHEN ID = ? THEN 1 ELSE 0 END", (active_id,))
         conn.commit()
 

@@ -1,7 +1,7 @@
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from lite_agent.core.skill_engine import skill
-from lite_agent.core.command_registry import slash_command
+from lite_agent.services.commands import slash_command
 from lite_agent.features.sys_ops.llm_ops_service import (
     check_deepseek_balance as _check_deepseek_balance,
     llm_check_balance as _llm_check_balance,
@@ -11,13 +11,13 @@ from lite_agent.features.sys_ops.llm_ops_service import (
 check_deepseek_balance = _check_deepseek_balance
 
 slash_command('/balance', category='系统',
-              description='查询 DeepSeek 账户余额',
+              description='查询默认大模型账户余额或状态',
               show_in_dashboard=False, guest_ok=False)(
-    lambda agent, msg, args: check_deepseek_balance())
+    lambda agent, msg, args: _llm_check_balance())
 
 @skill(
     name='llm_check_balance',
-    description='查询当前 DeepSeek AI 大模型账户的剩余余额。当你想知道 API 费用消耗情况时使用此技能。'
+    description='查询当前配置的默认大模型账户剩余余额或状态。当你想知道 API 费用消耗情况时使用此技能。'
 )
 def llm_check_balance() -> str:
     return _llm_check_balance()

@@ -1,5 +1,4 @@
 """Independent regressions for event ordering, human ownership and real CLI delivery."""
-import importlib
 import json
 import os
 from pathlib import Path
@@ -9,8 +8,9 @@ from unittest.mock import Mock
 
 import pytest
 
+from dev.tests.support.parser_isolation import isolated_parser_context
 from lite_agent.integrations.mail.client import MailCLI, MailCLIError
-from lite_agent.integrations.mail.quality_todo import consume_quality_events
+from lite_agent.features.billing.quality_todo import consume_quality_events
 from lite_agent.skills import ops_todo as todo
 
 
@@ -103,7 +103,7 @@ def test_failed_todo_write_never_acknowledges_event(tmp_path,monkeypatch):
     client=Mock()
     client.quality_events.return_value=[{'event_id':'e','case_key':'k','event_type':'quality_detected',
         'revision':1,'cycle_id':1,'diagnostics':[]}]
-    monkeypatch.setattr('lite_agent.integrations.mail.quality_todo.upsert_source_todo',Mock(side_effect=OSError('disk full')))
+    monkeypatch.setattr('lite_agent.features.billing.quality_todo.upsert_source_todo',Mock(side_effect=OSError('disk full')))
     stats=consume_quality_events(client,str(tmp_path/'todo.db'))
     assert stats['failed']==1 and stats['acked']==0
     client.quality_ack.assert_not_called()
@@ -128,20 +128,12 @@ def test_fetch_failure_is_reported_as_failed(tmp_path):
 
 
 @pytest.fixture
-def parser_repo(tmp_path, monkeypatch):
-    assert os.environ.get("TESTING") == "1", "parser_repo fixture must run under testing isolation"
-    import tempfile
-    assert os.path.realpath(str(tmp_path)).startswith(os.path.realpath(tempfile.gettempdir())), "tmp_path must be in system temp"
-    candidate = os.environ.get('MAIL_STATEMENT_PARSER_DIR') or '/Users/lilee/Projects/dev/mail-statement-parser'
-    root = Path(candidate)
-    if not (root / 'mail_client.py').exists():
+def parser_repo(tmp_path):
+    try:
+        with isolated_parser_context(tmp_path) as harness:
+            yield harness
+    except FileNotFoundError:
         pytest.skip('Sibling mail parser checkout is needed for real CLI integration')
-    monkeypatch.syspath_prepend(str(root))
-    monkeypatch.setenv("MAIL_STATEMENT_DATA_ROOT", str(tmp_path))
-    monkeypatch.setenv("MAIL_STATEMENT_DB_PATH", str(tmp_path / "statements.db"))
-    monkeypatch.setenv("MAIL_STATEMENT_REPORT_DIR", str(tmp_path / "validation-reports"))
-    monkeypatch.setenv("MAIL_STATEMENT_DOWNLOAD_DIR", str(tmp_path / "email-downloads"))
-    return root, importlib.import_module('statement_db'), importlib.import_module('statement_models')
 
 
 def test_real_cli_delivery_resolution_relapse_and_no_bill_starvation(tmp_path,parser_repo):
@@ -180,7 +172,7 @@ def test_real_cli_delivery_resolution_relapse_and_no_bill_starvation(tmp_path,pa
 def test_real_cmb_case_is_repeat_safe_through_parser_cli_and_todo(tmp_path,parser_repo,monkeypatch):
     from email.message import EmailMessage
     root,sd,_=parser_repo
-    parser=importlib.import_module('statement_parser')
+    parser=parser_repo.parser
     db=str(tmp_path/'mail.db'); todos=str(tmp_path/'todos.db')
     sd.init_db(db)
     monkeypatch.setattr(parser,'DB_PATH',db)
@@ -251,7 +243,7 @@ def test_real_cli_concurrent_consumers_share_one_todo(tmp_path,parser_repo):
         diagnostics=[models.Diagnostic(code='CURRENCY_UNKNOWN',reason='unknown')]))
     code='''import sys,json
 from lite_agent.integrations.mail.client import MailCLI
-from lite_agent.integrations.mail.quality_todo import consume_quality_events
+from lite_agent.features.billing.quality_todo import consume_quality_events
 print(json.dumps(consume_quality_events(MailCLI(sys.argv[1],db_path=sys.argv[2]),sys.argv[3])))'''
     env={**os.environ,'PYTHONDONTWRITEBYTECODE':'1'}
     processes=[subprocess.Popen([sys.executable,'-c',code,str(root),db,todos],cwd=Path(__file__).parents[3],

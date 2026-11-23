@@ -335,14 +335,14 @@ class Distiller:
         merged = f"[周摘要 {time.strftime('%Y-W%W')}] 本周关键信息：\n"
         merged += "\n".join(f"- {r[0][:200]}" for r in rows)
 
-        self.store.conn.execute(
-            """INSERT INTO conversations
-               (speaker_id, speaker_nick, role, content, created_at,
-                importance, topic_tags, is_distillate, memory_type)
-               VALUES ('system','system','system',?,?,0.85,'["weekly_summary"]',1,'event')""",
-            (merged, time.time())
-        )
-        self.store.conn.commit()
+        with self.store.conn:
+            self.store.conn.execute(
+                """INSERT INTO conversations
+                   (speaker_id, speaker_nick, role, content, created_at,
+                    importance, topic_tags, is_distillate, memory_type)
+                   VALUES ('system','system','system',?,?,0.85,'["weekly_summary"]',1,'event')""",
+                (merged, time.time())
+            )
         return merged
 
     # ========== Level 3: 规则提取 ==========
@@ -413,14 +413,14 @@ class Distiller:
             'last_distilled': time.time(),
         }
 
-        self.store.conn.execute(
-            """UPDATE user_profiles SET profile_json = ?, preferred_topics = ?
-               WHERE speaker_id = ?""",
-            (json.dumps(profile, ensure_ascii=False),
-             json.dumps(preferred, ensure_ascii=False),
-             speaker_id)
-        )
-        self.store.conn.commit()
+        with self.store.conn:
+            self.store.conn.execute(
+                """UPDATE user_profiles SET profile_json = ?, preferred_topics = ?
+                   WHERE speaker_id = ?""",
+                (json.dumps(profile, ensure_ascii=False),
+                 json.dumps(preferred, ensure_ascii=False),
+                 speaker_id)
+            )
 
 
 # ========== 双触发器 ==========

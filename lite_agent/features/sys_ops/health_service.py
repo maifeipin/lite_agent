@@ -210,16 +210,19 @@ def ops_run_script(script_path: str, args: str = '') -> str:
 def _svc_name() -> str:
     try:
         from lite_agent.core import config_loader
-        return config_loader.load_config().get('service_name', 'feishu-bot')
+        return config_loader.load_config().get('service_name', 'lite-agent')
     except Exception:
-        return 'feishu-bot'
+        return 'lite-agent'
 
 
 def get_health_report() -> str:
     """生成系统全方位健康自检报告"""
-    report = ["🏥 **Lite Agent 系统全方位健康自检报告**\n"]
+    from lite_agent.core.version import get_build_sha
+    report = [f"🏥 **Lite Agent 系统全方位健康自检报告** (Build: `{get_build_sha()}`)\n"]
     from lite_agent.core.constants import PROJECT_ROOT
+    from lite_agent.core.sqlite_utils import connect_sqlite, safe_chromadb_sqlite_env
     base_dir = PROJECT_ROOT
+    svc = _svc_name()
 
     # 1. 核心服务进程 (Agent 本身)
     pid = os.getpid()
@@ -283,11 +286,17 @@ def get_health_report() -> str:
             report.append(f"📡 **启用的通讯通道**: ✅ {', '.join(channels) if channels else '无'}")
 
             try:
-                from lite_agent.features.sys_ops.llm_ops_service import check_deepseek_balance
-                balance_text = check_deepseek_balance()
-                report.append(f"💰 **大模型计费与余额**: \n{balance_text}")
+                from lite_agent.features.sys_ops.llm_ops_service import (
+                    llm_check_balance,
+                    get_today_usage_summary,
+                )
+                balance_text = llm_check_balance()
+                report.append(f"💰 **大模型状态与余量**: \n{balance_text}")
+                today_usage = get_today_usage_summary(config=cfg)
+                if today_usage:
+                    report.append(today_usage)
             except Exception as e:
-                report.append(f"💰 **大模型计费与余额**: ❌ 查询失败 ({e})")
+                report.append(f"💰 **大模型状态与余量**: ❌ 查询失败 ({e})")
         except Exception as e:
             report.append(f"🔑 **配置文件解析**: ❌ 失败 ({e})")
     else:
@@ -298,11 +307,10 @@ def get_health_report() -> str:
     if os.path.exists(db_path):
         size_kb = os.path.getsize(db_path) / 1024
         try:
-            conn = sqlite3.connect(db_path)
-            c = conn.cursor()
-            c.execute("SELECT COUNT(*) FROM sessions")
-            cnt = c.fetchone()[0]
-            conn.close()
+            with connect_sqlite(db_path, close_on_exit=True) as conn:
+                c = conn.cursor()
+                c.execute("SELECT COUNT(*) FROM sessions")
+                cnt = c.fetchone()[0]
             report.append(f"🗄️ **会话数据库 (SQLite)**: ✅ 读写正常 (大小: {size_kb:.1f} KB, 会话记录: {cnt}条)")
         except Exception as e:
             report.append(f"🗄️ **会话数据库 (SQLite)**: ❌ 读写异常 ({e})")
@@ -314,15 +322,9 @@ def get_health_report() -> str:
     memory_db = os.path.join(base_dir, 'data', 'memory.db')
 
     try:
-        try:
-            __import__('pysqlite3')
-            import sys
-            sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
-        except ImportError:
-            pass
-
-        import chromadb
-        chromadb_available = True
+        with safe_chromadb_sqlite_env():
+            import chromadb
+            chromadb_available = True
     except ImportError:
         chromadb_available = False
 
@@ -331,13 +333,12 @@ def get_health_report() -> str:
     sqlite_stats = None
     if os.path.exists(memory_db):
         try:
-            conn = sqlite3.connect(memory_db)
-            c = conn.cursor()
-            c.execute("SELECT COUNT(*) FROM memories")
-            total = c.fetchone()[0]
-            c.execute("SELECT type, COUNT(*) FROM memories GROUP BY type")
-            types = c.fetchall()
-            conn.close()
+            with connect_sqlite(memory_db, close_on_exit=True) as conn:
+                c = conn.cursor()
+                c.execute("SELECT COUNT(*) FROM memories")
+                total = c.fetchone()[0]
+                c.execute("SELECT type, COUNT(*) FROM memories GROUP BY type")
+                types = c.fetchall()
             type_str = ", ".join(f"{t}:{c}" for t, c in types)
             sqlite_stats = (total, type_str)
         except Exception:

@@ -268,7 +268,7 @@ for forbidden in ["features", "skills", "parser_paths", "integrations.mail", "me
         pass
 
 # 3. 导入核心运行架构模块并核对全量已加载模块来源
-import agent
+import lite_agent.agent as agent
 import lite_agent.app.bootstrap
 import lite_agent.core.agent_runtime
 import lite_agent.channels.api

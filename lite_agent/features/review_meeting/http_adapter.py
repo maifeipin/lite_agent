@@ -82,10 +82,15 @@ def review_admin(http_handler: Any) -> bool:
         return True
     if not 32 <= len(bearer) <= 128:
         return False
+    session_service = getattr(api, "session_service", None)
+    if session_service:
+        session, _ = session_service.verify_access_token(bearer, required_scope="user:general")
+        if session:
+            return True
     db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
     try:
-        with closing(sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)) as db:
-            db.row_factory = sqlite3.Row
+        from lite_agent.core.sqlite_utils import connect_sqlite
+        with closing(connect_sqlite(f'file:{db_path}?mode=ro', uri=True, row_factory=sqlite3.Row, wal=False)) as db:
             return access.is_host_session(db, bearer)
     except sqlite3.Error:
         return False
@@ -112,8 +117,8 @@ def review_operator(http_handler: Any, meeting_id: str, action: str = 'read') ->
         return None
     db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
     try:
-        with closing(sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)) as db:
-            db.row_factory = sqlite3.Row
+        from lite_agent.core.sqlite_utils import connect_sqlite
+        with closing(connect_sqlite(f'file:{db_path}?mode=ro', uri=True, row_factory=sqlite3.Row, wal=False)) as db:
             return access.cohost_actor(db, meeting_id, review_bearer(http_handler), action)
     except sqlite3.Error:
         return None
@@ -180,7 +185,8 @@ def review_long_wait(db_path: Path, meeting_id: str, since: int, wait: float, se
     try:
         deadline = time.monotonic() + wait
         uri = f'file:{db_path}?mode=ro'
-        with closing(sqlite3.connect(uri, uri=True, isolation_level=None, timeout=30)) as probe:
+        from lite_agent.core.sqlite_utils import connect_sqlite
+        with closing(connect_sqlite(uri, uri=True, isolation_level=None, timeout=30.0, wal=False)) as probe:
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -215,6 +221,8 @@ def review_enrich(result: dict, db, meeting_id: str, seat, is_admin: bool):
             p['metadata'] = json.loads(grant['metadata'])
             p['identity_source'] = 'self-reported'
     result['hint'] = review_hint(db, meeting_id, result, seat, is_admin)
+    row_seq = db.execute("SELECT COALESCE(MAX(seq), 0) FROM events WHERE meeting_id=?", (meeting_id,)).fetchone()
+    result['last_seq'] = row_seq[0] if row_seq else 0
 
 
 def handle_review_meeting_api(http_handler: Any, method: str, path: str, query: str) -> None:
@@ -273,26 +281,26 @@ def handle_review_meeting_api(http_handler: Any, method: str, path: str, query: 
         return
 
     try:
-        if ((method == 'POST' and action in (None, 'cohosts', 'revoke-cohost'))
+        if ((method in ('POST', 'PATCH') and action in (None, 'cohosts', 'revoke-cohost'))
                 and not review_admin(http_handler)):
-            raise access.ReviewAPIError('仅主持人可创建会议或授权共管', 403)
+            raise access.ReviewAPIError('仅主持人可创建会议、授权共管或执行裁决', 403)
         if ((method == 'POST' and action in ('invites', 'advance', 'waive', 'revoke-seat', 'request-approval'))
                 and not review_operator(http_handler, meeting_id, action)):
             raise access.ReviewAPIError('仅主持人可创建会议、更新邀请或推进轮次', 403)
-        payload = (review_body(http_handler) if method == 'POST' and action != 'leave'
+        payload = (review_body(http_handler) if method in ('POST', 'PATCH') and action != 'leave'
                    else {})
         db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
         with closing(room.connect(db_path)) as db:
             access.ensure_tables(db)
             with db:
-                if method == 'POST':
+                if method in ('POST', 'PATCH'):
                     db.execute('BEGIN IMMEDIATE')
                     if action in ('invites', 'advance', 'waive', 'revoke-seat', 'request-approval'):
                         actor = review_operator(http_handler, meeting_id, action)
                         if not actor:
                             raise access.ReviewAPIError('共管授权无效或已撤销', 403)
                         room.append(db, room.get(db, meeting_id), actor, 'management_action', {'action': action})
-                if method == 'POST' and meeting_id is None:
+                if method in ('POST', 'PATCH') and meeting_id is None:
                     owner_key_hash = payload.get('owner_key_hash')
                     if owner_key_hash is None:
                         owner_key_hash = review_default_owner_hash(db_path)
@@ -303,6 +311,63 @@ def handle_review_meeting_api(http_handler: Any, method: str, path: str, query: 
                         legacy=cfg.get('review_allow_legacy_invites') is True)
                     result['invite_url'] = review_invite_url(http_handler, result['id'], result.pop('invite_token'))
                     status = 201
+                elif method in ('POST', 'PATCH') and meeting_id is not None and action is None:
+                    decision = payload.get('decision')
+                    if not decision and payload.get('action') == 'decide':
+                        decision = payload.get('decision')
+                    if decision not in ('approve', 'reject', 'revise'):
+                        raise access.ReviewAPIError("decision 必须是 'approve'、'reject' 或 'revise'", 400)
+                    row = room.get(db, meeting_id)
+
+                    req_id = payload.get('request_id')
+                    existing_decision = None
+                    if req_id:
+                        req_id_str = str(req_id)[:64]
+                        cur = db.execute(
+                            "SELECT seq, body FROM events WHERE meeting_id=? AND kind='decision' ORDER BY seq DESC",
+                            (meeting_id,)
+                        )
+                        for ev_seq, ev_body_raw in cur.fetchall():
+                            try:
+                                ev_body = json.loads(ev_body_raw) if isinstance(ev_body_raw, str) else ev_body_raw
+                                if isinstance(ev_body, dict) and ev_body.get('request_id') == req_id_str:
+                                    existing_decision = (ev_seq, ev_body)
+                                    break
+                            except Exception:
+                                pass
+
+                    incoming_note = access._text(payload.get('note', '') or '', 'note') if payload.get('note') else ''
+                    if existing_decision is not None:
+                        # 校验幂等请求参数一致性：同键同参返回原结果，同键异参返回 409 冲突
+                        orig_seq, orig_body = existing_decision
+                        orig_decision = orig_body.get('decision')
+                        orig_note = orig_body.get('note', '') or ''
+                        if orig_decision != decision or orig_note != incoming_note:
+                            raise access.ReviewAPIError(
+                                f"幂等参数冲突：已存在相同 request_id 的裁决记录，但参数不一致 (已存 decision='{orig_decision}', 请求 decision='{decision}')",
+                                409
+                            )
+                        # 幂等返回已有裁决结果快照，不重复追加事件
+                        result = room.snapshot(db, meeting_id, full=True)
+                        review_enrich(result, db, meeting_id, None, True)
+                        status = 200
+                    else:
+                        if row['state'] != room.WAITING or row['archived_at'] is not None:
+                            raise access.ReviewAPIError('只有待审批议题可由人工作出裁决', 400)
+                        expected_version = payload.get('expected_version')
+                        if expected_version is not None:
+                            last_seq = db.execute("SELECT COALESCE(MAX(seq), 0) FROM events WHERE meeting_id=?", (meeting_id,)).fetchone()[0]
+                            if isinstance(expected_version, bool) or not isinstance(expected_version, int) or expected_version != last_seq:
+                                raise access.ReviewAPIError(f'版本冲突：当前议题最新序号为 {last_seq}，期望序号为 {expected_version}', 409)
+                        body = {'decision': decision, 'note': incoming_note}
+                        if req_id:
+                            body['request_id'] = str(req_id)[:64]
+                        room.append(db, row, 'human', 'decision', body)
+                        next_state = {'approve': 'approved', 'revise': 'changes_requested', 'reject': 'rejected'}[decision]
+                        db.execute('UPDATE meetings SET state=? WHERE id=?', (next_state, meeting_id))
+                        result = room.snapshot(db, meeting_id, full=True)
+                        review_enrich(result, db, meeting_id, None, True)
+                        status = 200
                 elif method == 'POST' and action == 'invites':
                     result = access.issue_seat_invite(
                         db, meeting_id, payload.get('label', 'agent'), payload.get('invite_ttl_seconds', access.INVITE_TTL_DEFAULT))
@@ -491,7 +556,39 @@ def handle_auth(http_handler: Any) -> None:
                         access.ensure_tables(db)
                         with db:
                             session = access.issue_host_session(db, username)
-                    review_json(http_handler, {'success': True, **session})
+
+                    # 签发通用用户会话（Access Token + 轮换 Refresh Token），实现统一多端凭证
+                    device_id = str(body.get('device_id') or secrets.token_hex(8))
+                    device_name = str(body.get('device_name') or 'mobile')
+                    remember_me = bool(body.get('remember_me', False))
+                    session_svc = getattr(api_srv, "user_session_service", None)
+                    if session_svc is None:
+                        from lite_agent.services.user_session import UserSessionService
+                        session_svc = UserSessionService(config=cfg)
+                    user_session = session_svc.create_session(
+                        username,
+                        device_id=device_id,
+                        device_name=device_name,
+                        remember_me=remember_me
+                    )
+
+                    resp_data = {
+                        'success': True,
+                        'username': username,
+                        'session_id': user_session.get('session_id'),
+                        'session_token': user_session.get('session_token'),
+                        'access_token': user_session.get('access_token'),
+                        'expires_at': user_session.get('expires_at'),
+                        'access_token_expires_at': user_session.get('access_token_expires_at'),
+                        'scopes': user_session.get('scopes'),
+                        'remember_me': remember_me,
+                        **session
+                    }
+                    if 'refresh_token' in user_session:
+                        resp_data['refresh_token'] = user_session.get('refresh_token')
+                        resp_data['refresh_expires_at'] = user_session.get('refresh_expires_at')
+
+                    review_json(http_handler, resp_data)
                     return
                 else:
                     review_json(http_handler, {'success': False, 'error': '账号或密码错误'}, 401)
@@ -501,6 +598,102 @@ def handle_auth(http_handler: Any) -> None:
         return
 
     review_json(http_handler, {'success': False, 'error': '账号或密码错误'}, 401)
+
+
+def handle_auth_refresh(http_handler: Any) -> None:
+    """使用 Refresh Token 续期 Access Token 并执行轮换。"""
+    length = int(http_handler.headers.get('Content-Length') or 0)
+    raw = http_handler.rfile.read(length) if length > 0 else b'{}'
+    try:
+        body = json.loads(raw.decode('utf-8'))
+        if not isinstance(body, dict):
+            raise ValueError("请求体必须是 JSON 对象")
+    except Exception as exc:
+        review_json(http_handler, {'success': False, 'error': str(exc)}, 400)
+        return
+
+    refresh_token = body.get('refresh_token')
+    if not isinstance(refresh_token, str) or not refresh_token.strip():
+        review_json(http_handler, {'success': False, 'error': 'refresh_token 不能为空'}, 400)
+        return
+    refresh_token = refresh_token.strip()
+
+    srv = getattr(http_handler, "server", None)
+    api_srv = getattr(srv, "api_server", None)
+    cfg = getattr(api_srv, "config", {}) if api_srv else {}
+    session_svc = getattr(api_srv, "user_session_service", None)
+    if session_svc is None:
+        from lite_agent.services.user_session import UserSessionService
+        session_svc = UserSessionService(config=cfg)
+
+    refreshed, err = session_svc.refresh_session(refresh_token)
+    if not refreshed:
+        err_msg = "检测到凭证重用，会话已吊销，请重新登录" if err == "reuse_detected" else "凭据无效或已过期，请重新登录"
+        review_json(http_handler, {'success': False, 'error': err_msg}, 401)
+        return
+
+    username = refreshed["username"]
+    db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
+    review_session = {}
+    try:
+        with closing(room.connect(db_path)) as db:
+            access.ensure_tables(db)
+            with db:
+                review_session = access.issue_host_session(db, username)
+    except Exception:
+        pass
+
+    review_json(http_handler, {
+        'success': True,
+        'username': username,
+        'session_id': refreshed.get('session_id'),
+        'session_token': refreshed.get('session_token'),
+        'access_token': refreshed.get('access_token'),
+        'expires_at': refreshed.get('expires_at'),
+        'access_token_expires_at': refreshed.get('access_token_expires_at'),
+        'refresh_token': refreshed.get('refresh_token'),
+        'refresh_expires_at': refreshed.get('refresh_expires_at'),
+        **review_session
+    })
+
+
+def handle_auth_logout(http_handler: Any) -> None:
+    """退出登录并撤销统一会话族与相关会审会话。"""
+    length = int(http_handler.headers.get('Content-Length') or 0)
+    raw = http_handler.rfile.read(length) if length > 0 else b'{}'
+    try:
+        body = json.loads(raw.decode('utf-8')) if raw else {}
+        if not isinstance(body, dict):
+            body = {}
+    except Exception:
+        body = {}
+
+    auth_header = http_handler.headers.get('Authorization') or ""
+    bearer_token = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
+    refresh_token = body.get('refresh_token')
+    access_token = body.get('session_token') or body.get('access_token') or bearer_token
+
+    srv = getattr(http_handler, "server", None)
+    api_srv = getattr(srv, "api_server", None)
+    session_svc = getattr(api_srv, "user_session_service", None)
+    if session_svc is None:
+        from lite_agent.services.user_session import UserSessionService
+        session_svc = UserSessionService(config=getattr(api_srv, "config", {}) if api_srv else {})
+
+    # 1. 撤销统一用户会话族
+    session_svc.revoke_session(token=access_token, refresh_token=refresh_token)
+
+    # 2. 撤销旧会审 Host 会话
+    review_token = body.get('review_token') or bearer_token
+    if isinstance(review_token, str) and review_token.strip():
+        try:
+            db_path = Path(os.environ.get('REVIEW_MEETING_DB', room.DEFAULT_DB))
+            with closing(room.connect(db_path)) as db:
+                access.revoke_host_session(db, review_token.strip())
+        except Exception:
+            pass
+
+    review_json(http_handler, {'success': True, 'message': '已安全登出'})
 
 
 def _verify_htpasswd(password: str, stored_hash: str) -> bool:

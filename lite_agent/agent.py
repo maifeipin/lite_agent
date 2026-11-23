@@ -24,7 +24,7 @@ from lite_agent.core.model_router import ModelRouter
 from lite_agent.core.model_event import ModelEventType
 from lite_agent.core.agent_runtime import AgentRuntime, RuntimeEventType
 from lite_agent.core.adaptive_budget import AdaptiveBudgetPolicy
-from lite_agent.core.execution import ExecutionContext, ActorType, ExecutionSource
+from lite_agent.contracts.execution import ExecutionContext, ActorType, ExecutionSource
 from lite_agent.core.execution_ledger import ExecutionLedger
 from lite_agent.core.runtime_recorder import RuntimeRecorder
 from lite_agent.core.llm_gateway import LLMGateway
@@ -37,9 +37,7 @@ _NON_RETRYABLE_EXCEPTIONS = (
     openai.NotFoundError,
     openai.PermissionDeniedError,
     openai.UnprocessableEntityError,
-    openai.RateLimitError,
 )
-from lite_agent.core.cron_engine import CronManager
 from lite_agent.core.skill_engine import SkillEngine
 from lite_agent.core.request_selector import (
     MissMarkStreamFilter,
@@ -47,8 +45,8 @@ from lite_agent.core.request_selector import (
     detect_miss,
     strip_miss_mark,
 )
-from lite_agent.core.command_registry import dispatch as _registry_dispatch
-from lite_agent.core.command_registry import _registry
+from lite_agent.services.commands import dispatch as _registry_dispatch
+from lite_agent.services.commands import default_command_registry as _registry
 
 # 仪表盘可见的系统指令
 _registry.register('/new', lambda a,m,args: None,
@@ -176,7 +174,8 @@ class Agent:
         from lite_agent.services.cron import default_cron_service
         self.command_registry = command_registry or default_command_registry
         self.workflow_registry = workflow_registry or default_workflow_registry
-        self.cron = cron or default_cron_service
+        # 显式注入始终优先 (含布尔值为假的合法替身); 仅 None 时兜底默认实例
+        self.cron = default_cron_service if cron is None else cron
 
         # 技能引擎
         self.skill_engine = skill_engine if skill_engine is not None else SkillEngine()
@@ -318,9 +317,6 @@ class Agent:
         reg.register('/memory_persona', _cmd_memory_persona,
                      category='记忆管理', description='查看/管理个人画像',
                      show_in_dashboard=False, guest_ok=False)
-
-        # 定时任务引擎
-        self.cron = CronManager()
 
         # 系统提示词
         self.system_prompt = self._build_system_prompt()
@@ -1040,7 +1036,7 @@ class Agent:
         return callback
 
     def _push_result(self, msg, result: str):
-        from lite_agent.core.task_result import TaskResult
+        from lite_agent.contracts.result import TaskResult
         task_result = result if isinstance(result, TaskResult) else None
         if task_result:
             result = task_result.content
@@ -1148,17 +1144,19 @@ class Agent:
         request_driver = self.model_driver
         request_max_tokens = self.max_tokens
         request_runtime = self.runtime
-        request_stream = not is_gemini_driver(request_driver)
         request_profile = {
             "timeout": 60.0,
             "max_retries": 1,
             "invoke_kwargs": {},
         }
+        default_key = self._config.get("llm", {}).get("default", "")
         if self._request_model_router is not None:
-            default_key = self._config.get("llm", {}).get("default", "")
+            request_stream = self._request_model_router.supports_streaming(default_key)
             request_profile = self._request_model_router.get_call_profile(
                 default_key, "tool_loop"
             )
+        else:
+            request_stream = not is_gemini_driver(request_driver)
         override = getattr(msg, "model_override", "") or None
         if not msg.is_guest:
             if override is None:
@@ -1186,7 +1184,7 @@ class Agent:
                 request_model = request_invoker.model_name
                 request_driver = router.get_driver(selected_model)
                 request_max_tokens = request_profile["max_tokens"]
-                request_stream = not is_gemini_driver(request_driver)
+                request_stream = router.supports_streaming(selected_model)
                 request_runtime = AgentRuntime(
                     model_invoker=request_invoker,
                     skill_engine=self.skill_engine,

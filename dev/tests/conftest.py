@@ -82,6 +82,7 @@ _ENV_KEYS = [
     "MAIL_STATEMENT_REPORT_DIR",
     "MAIL_STATEMENT_DOWNLOAD_DIR",
     "LITE_AGENT_SESSION_DB_PATH",
+    "USER_SESSION_DB",
     "LITE_AGENT_MEMORY_DB_PATH",
     "LITE_AGENT_LEDGER_DB_PATH",
     "LITE_AGENT_EDGE_DB_PATH",
@@ -102,6 +103,7 @@ os.environ["MAIL_STATEMENT_DB_PATH"] = os.path.join(_DATA_ROOT, "statements.db")
 os.environ["MAIL_STATEMENT_REPORT_DIR"] = os.path.join(_DATA_ROOT, "validation-reports")
 os.environ["MAIL_STATEMENT_DOWNLOAD_DIR"] = os.path.join(_DATA_ROOT, "email-downloads")
 os.environ["LITE_AGENT_SESSION_DB_PATH"] = os.path.join(_TEST_SESSION_DIR, "sessions.db")
+os.environ["USER_SESSION_DB"] = os.path.join(_TEST_SESSION_DIR, "user_sessions.db")
 os.environ["LITE_AGENT_MEMORY_DB_PATH"] = os.path.join(_TEST_SESSION_DIR, "memory.db")
 os.environ["LITE_AGENT_LEDGER_DB_PATH"] = os.path.join(_TEST_SESSION_DIR, "execution_ledger.db")
 os.environ["LITE_AGENT_EDGE_DB_PATH"] = os.path.join(_TEST_SESSION_DIR, "edge_tasks.db")

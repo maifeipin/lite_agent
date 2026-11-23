@@ -9,6 +9,7 @@ from typing import Optional, List, Dict, Any
 
 from lite_agent.core.config_loader import load_config
 from lite_agent.core.utils.masker import mask_secrets
+from lite_agent.integrations.mail.paths import get_parser_python_executable
 
 
 def get_billing_env(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -37,7 +38,8 @@ def run_billing_cmd(cmd_args: List[str], timeout: int = 60) -> str:
     if not os.path.exists(mail_client_py):
         return f"❌ 找不到账单脚本: {mail_client_py}，请确认账单解析程序是否在该目录。"
 
-    cmd = ["python3", mail_client_py] + cmd_args
+    py_bin = get_parser_python_executable(script_dir)
+    cmd = [py_bin, mail_client_py] + cmd_args
     try:
         r = subprocess.run(cmd, cwd=script_dir, capture_output=True, text=True, timeout=timeout)
         output = r.stdout.strip()
@@ -112,7 +114,7 @@ def get_snapshot(months: int = 1, detail_limit: int = 20) -> str:
 
 def fetch_and_consume(months: int = 1, account: str = '', cfg: Optional[Dict[str, Any]] = None) -> str:
     """拉取最新账单并入库，单次遍历流水线：下载归档 + 解析入库，并消费质量事件"""
-    from lite_agent.integrations.mail.sync_service import sync_and_consume
+    from lite_agent.features.billing.sync_service import sync_and_consume
     env = get_billing_env(cfg)
     res = sync_and_consume(
         script_dir=env["script_dir"],
@@ -271,3 +273,30 @@ def billing_fetch_cron() -> None:
     res = fetch_and_consume(months=1)
     print(f"[billing_fetch_cron] 自动同步账单结果: {res}")
     return None
+
+
+def export_expenses(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    months: Optional[int] = None,
+    year: Optional[Any] = None,
+    bank_code: Optional[str] = None,
+    upload_hedgedoc: bool = True,
+    public: bool = False,
+) -> str:
+    """导出指定时间范围的财务开支明细与汇总（生成 CSV 并上传至 HedgeDoc）"""
+    from lite_agent.features.billing.export_service import export_expense_report
+    env = get_billing_env()
+    db_path = env.get("stmt_db")
+    res = export_expense_report(
+        start_date=start_date,
+        end_date=end_date,
+        months=months,
+        year=year,
+        bank_code=bank_code,
+        upload_hedgedoc=upload_hedgedoc,
+        public=public,
+        db_path=db_path,
+    )
+    return res.get("summary_text") or ("✅ 导出成功" if res.get("success") else "❌ 导出失败")
+

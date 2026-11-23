@@ -109,19 +109,32 @@ class MacWorkerDaemon:
 
         return False, {"error": last_err or "请求中枢失败"}
 
+    def _device_payload(self) -> Dict[str, Any]:
+        """构造单设备状态上报载荷 (C03: 携带可诊断的离线原因)。
+
+        优先使用 check_online() 取得稳定错误码与原始原因；旧客户端无该方法时退化为
+        仅有 online/offline，仍保证字段存在，中枢与前端无需分支处理。
+        """
+        if hasattr(self.client, "check_online"):
+            is_online, error_code, offline_reason = self.client.check_online()
+        else:
+            is_online = self.client.is_online() if hasattr(self.client, "is_online") else True
+            error_code, offline_reason = ("", "") if is_online else ("unknown", "")
+
+        return {
+            "device_id": self.device_id,
+            "model": "OnePlus 9 (LE2110)",
+            "android_version": 14,
+            "status": "online" if is_online else "offline",
+            "validated": not self.fake_mode,
+            "test_mode": self.fake_mode,
+            "error_code": error_code,
+            "offline_reason": offline_reason,
+        }
+
     def handshake(self) -> bool:
         """向中枢握手注册设备能力。"""
-        is_online = self.client.is_online() if hasattr(self.client, "is_online") else True
-        devices = [
-            {
-                "device_id": self.device_id,
-                "model": "OnePlus 9 (LE2110)",
-                "android_version": 14,
-                "status": "online" if is_online else "offline",
-                "validated": not self.fake_mode,
-                "test_mode": self.fake_mode
-            }
-        ]
+        devices = [self._device_payload()]
 
         logger.info(f"正在向中枢 {self.hub_url} 发起握手鉴权 (WorkerID={self.worker_id}, Version={self.VERSION})...")
         ok, res = self._http_post("/api/v1/phone-app/worker/handshake", {
@@ -146,17 +159,7 @@ class MacWorkerDaemon:
         if not self.session_id:
             return False, {"error": "未建立有效会话"}
 
-        is_online = self.client.is_online() if hasattr(self.client, "is_online") else True
-        devices = [
-            {
-                "device_id": self.device_id,
-                "model": "OnePlus 9 (LE2110)",
-                "android_version": 14,
-                "status": "online" if is_online else "offline",
-                "validated": not self.fake_mode,
-                "test_mode": self.fake_mode
-            }
-        ]
+        devices = [self._device_payload()]
         return self._http_post("/api/v1/phone-app/worker/heartbeat", {
             "worker_id": self.worker_id,
             "session_id": self.session_id,

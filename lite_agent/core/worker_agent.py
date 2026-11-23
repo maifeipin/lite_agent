@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 from lite_agent.core.agent_runtime import AgentRuntime, RuntimeEvent, RuntimeEventType
 from lite_agent.core.adaptive_budget import AdaptiveBudgetPolicy
-from lite_agent.core.execution import ExecutionContext, ExecutionSource, ActorType
+from lite_agent.contracts.execution import ExecutionContext, ExecutionSource, ActorType
 from lite_agent.core.execution_ledger import ExecutionLedger
 from lite_agent.core.runtime_recorder import RuntimeRecorder
 from lite_agent.core.skill_engine import SkillEngine, _cap_tool_result
@@ -325,4 +325,4 @@ class WorkerAgent:
         )
 
     def _supports_vision(self) -> bool:
-        return supports_vision(self.model_cfg.get("tags", []))
+        return supports_vision(self.model_cfg)

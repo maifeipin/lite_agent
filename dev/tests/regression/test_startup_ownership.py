@@ -63,7 +63,8 @@ def test_public_http_import_does_not_load_disabled_business():
         "bad=[n for n in sys.modules if n in ('features', 'skills', 'lite_agent.features', 'lite_agent.skills') or n.startswith(('features.', 'skills.', 'lite_agent.features.', 'lite_agent.skills.'))]; "
         "assert not bad, bad"
     )
-    proc = subprocess.run([sys.executable, '-B', '-c', code], text=True, capture_output=True)
+    from dev.tests.support.repo_paths import REPO_ROOT
+    proc = subprocess.run([sys.executable, '-B', '-c', code], text=True, capture_output=True, cwd=REPO_ROOT)
     assert proc.returncode == 0, proc.stderr
 
 

@@ -9,7 +9,11 @@ from lite_agent.core import config_loader
 from lite_agent.core.utils.masker import mask_secrets
 
 
-from lite_agent.integrations.mail.paths import get_parser_script_dir, get_statement_db_path
+from lite_agent.integrations.mail.paths import (
+    get_parser_script_dir,
+    get_statement_db_path,
+    get_parser_python_executable,
+)
 
 
 class MailCLIError(RuntimeError):
@@ -91,7 +95,8 @@ class MailCLI:
             return sec_err
 
         cli_py = self._resolve_script_path()
-        cmd_args = [sys.executable, cli_py, command] + (args or [])
+        py_bin = get_parser_python_executable(self.script_dir)
+        cmd_args = [py_bin, cli_py, command] + (args or [])
         env = self._build_env()
         try:
             res = run_process(
@@ -441,7 +446,8 @@ class MailCLI:
             }
 
         cli_py = os.path.join(self.script_dir, "mail_client.py")
-        cmd_args = [sys.executable, cli_py, "sync3m", str(months)]
+        py_bin = get_parser_python_executable(self.script_dir)
+        cmd_args = [py_bin, cli_py, "sync3m", str(months)]
         if account:
             cmd_args.extend(["--account", account])
         elif provider:

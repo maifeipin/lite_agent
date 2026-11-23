@@ -4,17 +4,19 @@ Features Billing 业务模块 (features.billing)。
 实现受控插件 register(context) 契约。
 """
 
+import re
 from typing import Any
 from lite_agent.features.billing.workflow import BillingWorkflow
 from lite_agent.contracts.message import AgentResponse
 
 BILLING_DOMAIN_SPEC = {
-    "pattern": r"([账帐]单|外币|原币|汇率|bill|invoice|还款|信用卡|交易|流水|对账|大额)",
+    "pattern": r"([账帐]单|开支|支出|消费|花费|记账|财务明细|外币|原币|汇率|bill|invoice|还款|信用卡|交易|流水|对账|大额)",
     "default_tools": [
         "billing_report", "billing_due_soon", "billing_unpaid",
         "billing_reconcile", "billing_recent",
         "billing_snapshot",
         "billing_txns_over", "billing_parse_health",
+        "billing_export_expenses",
     ],
     "explicit_intent_tools": [
         "billing_mark_paid", "billing_fetch",
@@ -46,6 +48,15 @@ def _handle_cmd(agent: Any, msg: Any, args: list) -> AgentResponse:
             from lite_agent.features.mail_ops import reader_service
             months = int(args[1]) if len(args) > 1 else 1
             result = reader_service.mail_fetch_summaries(months=months)
+        elif args[0] in ("export", "export_expenses"):
+            arg1 = args[1] if len(args) > 1 else "6"
+            arg1_clean = str(arg1).strip()
+            if re.fullmatch(r"^(?:19|20)\d{2}$", arg1_clean):
+                result = billing_service.export_expenses(year=arg1_clean)
+            elif arg1_clean.isdigit() and int(arg1_clean) < 1000:
+                result = billing_service.export_expenses(months=int(arg1_clean))
+            else:
+                result = billing_service.export_expenses(year=arg1_clean)
         else:
             result = billing_service.run_billing_cmd(args)
         return AgentResponse(result, title=f"执行结果: {args[0]}", color="blue")
@@ -81,7 +92,7 @@ def register(context: Any) -> None:
     billing_tools = [
         "billing_report", "billing_due_soon", "billing_unpaid", "billing_mark_paid",
         "billing_reconcile", "billing_recent", "billing_snapshot", "billing_fetch",
-        "billing_txns_over", "billing_parse_health"
+        "billing_txns_over", "billing_parse_health", "billing_export_expenses",
     ]
     for t_name in billing_tools:
         if t_name in _skill_registry:

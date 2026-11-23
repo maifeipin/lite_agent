@@ -11,8 +11,13 @@ from __future__ import annotations
 import time
 import logging
 import threading
-from typing import Dict, Any, Optional, List
-from lite_agent.integrations.phone_app.worker.drivers.handsets import HandsetsDriver, BaseDeviceDriver
+from typing import Dict, Any, Optional, List, Tuple
+from lite_agent.integrations.phone_app.worker.drivers.handsets import (
+    HandsetsDriver,
+    BaseDeviceDriver,
+    classify_ready_error,
+    format_ready_reason,
+)
 from lite_agent.integrations.phone_app.worker.adapters.jd import JdAdapter
 from lite_agent.integrations.phone_app.worker.dsl_executor import DslExecutor
 
@@ -32,9 +37,19 @@ class MacWorkerClient:
         self.jd_adapter = JdAdapter(self.driver)
         self.dsl_executor = DslExecutor(self.driver)
 
+    def check_online(self) -> Tuple[bool, str, str]:
+        """返回 (是否就绪, 稳定错误码, 压缩后的原始原因)。
+
+        C03: 离线原因必须可追溯到具体环节 (hs 缺失 / adb 未识别 / adb 未授权 /
+        hs 守护进程未绑定 / 驱动启动失败)，不得只上报一个 offline。
+        """
+        ok, reason = self.driver.ensure_ready()
+        if ok:
+            return True, "", ""
+        return False, classify_ready_error(reason), format_ready_reason(reason)
+
     def is_online(self) -> bool:
-        ok, _ = self.driver.ensure_ready()
-        return ok
+        return self.check_online()[0]
 
     def execute_task(
         self,
@@ -294,6 +309,12 @@ class FakeWorkerClient:
         ]
         self._status = status
         self._reset_status = reset_status
+
+    def check_online(self) -> Tuple[bool, str, str]:
+        """Fake 模式同样披露离线原因，保持与真机同构的上报契约。"""
+        if self._is_online:
+            return True, "", ""
+        return False, "unknown", format_ready_reason("Fake: 设备离线")
 
     def is_online(self) -> bool:
         return self._is_online

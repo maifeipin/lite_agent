@@ -50,6 +50,92 @@ def test_lite_agent_negative_counterexamples(path, source):
     assert visitor.findings, (path, source)
 
 
+@pytest.mark.parametrize('path,source,expected_rule,expected_target', [
+    ('lite_agent/features/example.py', 'import lite_agent.integrations.mail.quality_todo', 'RULE_NO_LEGACY_MAIL_COMPAT_IMPORT', 'lite_agent.integrations.mail.quality_todo'),
+    ('lite_agent/features/example.py', 'import lite_agent.integrations.mail.sync_service', 'RULE_NO_LEGACY_MAIL_COMPAT_IMPORT', 'lite_agent.integrations.mail.sync_service'),
+    ('lite_agent/features/example.py', 'from lite_agent.integrations.mail import quality_todo', 'RULE_NO_LEGACY_MAIL_COMPAT_IMPORT', 'lite_agent.integrations.mail.quality_todo'),
+    ('lite_agent/features/example.py', 'from lite_agent.integrations.mail import sync_service', 'RULE_NO_LEGACY_MAIL_COMPAT_IMPORT', 'lite_agent.integrations.mail.sync_service'),
+    ('lite_agent/features/example.py', 'from lite_agent.integrations.mail.quality_todo import consume_quality_events', 'RULE_NO_LEGACY_MAIL_COMPAT_IMPORT', 'lite_agent.integrations.mail.quality_todo'),
+    ('lite_agent/features/example.py', 'from lite_agent.integrations.mail.sync_service import sync_and_consume', 'RULE_NO_LEGACY_MAIL_COMPAT_IMPORT', 'lite_agent.integrations.mail.sync_service'),
+    ('lite_agent/features/example.py', 'import importlib; importlib.import_module("lite_agent.integrations.mail.quality_todo")', 'RULE_NO_LEGACY_MAIL_COMPAT_IMPORT', 'lite_agent.integrations.mail.quality_todo'),
+    ('lite_agent/features/example.py', 'import importlib; importlib.import_module("lite_agent.integrations.mail.sync_service")', 'RULE_NO_LEGACY_MAIL_COMPAT_IMPORT', 'lite_agent.integrations.mail.sync_service'),
+])
+def test_legacy_mail_compat_import_bypasses_rejected(path, source, expected_rule, expected_target):
+    """验证导入已废弃拆除的邮件兼容垫片（直接import、from父包、from子模块、动态导入）均被架构检查硬拦截。"""
+    visitor = ArchitectureVisitor(path)
+    visitor.visit(ast.parse(source))
+    matching = [f for f in visitor.findings if f['rule'] == expected_rule and f['target'] == expected_target]
+    assert matching, f"Expected finding {expected_rule} for {expected_target} in {source}"
+
+
+@pytest.mark.parametrize('path,source,expected_rule,expected_target', [
+    ('lite_agent/features/example.py', 'import lite_agent.core.cron_engine', 'RULE_NO_LEGACY_CRON_ENGINE_IMPORT', 'lite_agent.core.cron_engine'),
+    ('lite_agent/features/example.py', 'import core.cron_engine', 'RULE_NO_LEGACY_CRON_ENGINE_IMPORT', 'core.cron_engine'),
+    ('lite_agent/core/example.py', 'from lite_agent.core import cron_engine', 'RULE_NO_LEGACY_CRON_ENGINE_IMPORT', 'lite_agent.core.cron_engine'),
+    ('lite_agent/features/example.py', 'from lite_agent.core.cron_engine import CronManager', 'RULE_NO_LEGACY_CRON_ENGINE_IMPORT', 'lite_agent.core.cron_engine'),
+    ('lite_agent/features/example.py', 'import importlib; importlib.import_module("lite_agent.core.cron_engine")', 'RULE_NO_LEGACY_CRON_ENGINE_IMPORT', 'lite_agent.core.cron_engine'),
+    ('lite_agent/features/example.py', 'import importlib; importlib.import_module(".cron_engine", package="lite_agent.core")', 'RULE_NO_LEGACY_CRON_ENGINE_IMPORT', 'lite_agent.core.cron_engine'),
+])
+def test_legacy_cron_engine_import_bypasses_rejected(path, source, expected_rule, expected_target):
+    """验证导入已废弃拆除的 core.cron_engine 兼容包装（直接import、裸路径、from父包、from子模块、动态/相对动态导入）均被架构检查硬拦截。"""
+    visitor = ArchitectureVisitor(path)
+    visitor.visit(ast.parse(source))
+    matching = [f for f in visitor.findings if f['rule'] == expected_rule and f['target'] == expected_target]
+    assert matching, f"Expected finding {expected_rule} for {expected_target} in {source}"
+
+
+@pytest.mark.parametrize('source', [
+    'from lite_agent.core import config_loader',
+    'from lite_agent.services.cron import CronService, default_cron_service',
+    'import lite_agent.services.cron',
+    'import importlib; importlib.import_module("lite_agent.services.cron")',
+])
+def test_supported_cron_imports_are_not_rejected(source):
+    """规范路径 lite_agent.services.cron 及 core 包内其他模块的正常导入不得被误伤。"""
+    visitor = ArchitectureVisitor('lite_agent/features/example.py')
+    visitor.visit(ast.parse(source))
+    assert not visitor.findings
+
+
+@pytest.mark.parametrize('source,target', [
+    ('import importlib; importlib.import_module(".quality_todo", "lite_agent.integrations.mail")', 'lite_agent.integrations.mail.quality_todo'),
+    ('from importlib import import_module; import_module(".sync_service", package="lite_agent.integrations.mail")', 'lite_agent.integrations.mail.sync_service'),
+    ('import importlib as il; il.import_module(name=".quality_todo", package="lite_agent.integrations.mail")', 'lite_agent.integrations.mail.quality_todo'),
+    ('from importlib import import_module as load; alias = load; alias("..mail.sync_service", "lite_agent.integrations.mail")', 'lite_agent.integrations.mail.sync_service'),
+    ('import importlib; importlib.import_module(".sync_service.child", "lite_agent.integrations.mail")', 'lite_agent.integrations.mail.sync_service.child'),
+])
+def test_relative_legacy_mail_compat_import_rejected(source, target):
+    visitor = ArchitectureVisitor('lite_agent/features/example.py')
+    visitor.visit(ast.parse(source))
+    assert any(f['rule'] == 'RULE_NO_LEGACY_MAIL_COMPAT_IMPORT' and f['target'] == target
+               for f in visitor.findings)
+
+
+@pytest.mark.parametrize('source', [
+    'import importlib; importlib.import_module(".quality_todo", package_name)',
+    'import importlib; importlib.import_module(".sync_service", package=get_package())',
+    'import importlib; importlib.import_module(".quality_todo")',
+    'import importlib; importlib.import_module(".quality_todo", package=None)',
+    'import importlib; importlib.import_module("....quality_todo", "lite_agent")',
+])
+def test_unresolved_relative_import_requires_registration(source):
+    visitor = ArchitectureVisitor('lite_agent/features/example.py')
+    visitor.visit(ast.parse(source))
+    assert any(f['rule'] == 'RULE_DYNAMIC_IMPORT_REGISTERED' and f['target'] == '<dynamic_expression>'
+               for f in visitor.findings)
+
+
+@pytest.mark.parametrize('source', [
+    'import importlib; importlib.import_module(".client", "lite_agent.integrations.mail")',
+    'import importlib; importlib.import_module("lite_agent.integrations.mail.client", package_name)',
+    '__import__("lite_agent.integrations.mail.client", globals())',
+])
+def test_supported_mail_imports_are_not_rejected(source):
+    visitor = ArchitectureVisitor('lite_agent/features/example.py')
+    visitor.visit(ast.parse(source))
+    assert not visitor.findings
+
+
 @pytest.mark.parametrize('entries', [None, set(), frozenset()])
 def test_empty_plugin_allowlist_denies_before_import(entries):
     loader = PluginLoader(PluginContext(), entries)

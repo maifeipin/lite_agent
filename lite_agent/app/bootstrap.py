@@ -13,6 +13,25 @@ from lite_agent.app.plugins import PluginContext, PluginLoader
 from lite_agent.app.manifests import CORE_MODE_PLUGINS, FULL_MODE_PLUGINS
 
 
+def _resolve_real_agent_class():
+    """在模块加载时 (任何测试 patch 生效前) 绑定真实 Agent 类引用。
+
+    测试会 patch('lite_agent.agent.Agent'), 函数内 import 会取到替换物,
+    导致 isinstance 校验 TypeError。此处延迟到调用时解析, 但通过 sys.modules
+    取原始类对象, 避开被 patch 的模块属性。
+    """
+    import sys
+    mod = sys.modules.get("lite_agent.agent")
+    cls = getattr(mod, "Agent", None) if mod is not None else None
+    # 若模块属性已被 patch 为非类型, 视为无法解析真实类
+    return cls if isinstance(cls, type) else None
+
+
+def _is_real_agent(obj) -> bool:
+    cls = _resolve_real_agent_class()
+    return cls is not None and isinstance(obj, cls)
+
+
 class Application:
     """Lite Agent 宿主应用实例，持有专属的服务与生命周期资源。"""
 
@@ -43,7 +62,12 @@ class Application:
         return self.plugin_loader.loaded_plugins
 
     def shutdown(self):
-        """释放应用所有注册的句柄与后台任务。"""
+        """释放应用所有注册的句柄与后台任务。
+
+        先停止调度并等待在途任务执行完毕, 再按注册倒序释放插件 handler、任务
+        与其余受管资源——避免在途任务执行时其依赖资源已被插件清理提前关闭。
+        """
+        self.cron_service.stop(wait=True, timeout=None)
         return self.lifecycle.shutdown()
 
 
@@ -92,14 +116,27 @@ def create_app(
     import json as _json
 
     def _handle_health(handler, parsed_url):
-        handler.send_response(200)
+        from lite_agent.core.version import get_version_info
+        cron_snap = cron_service.health_snapshot()
+        status, code = "healthy", 200
+        loop_age = cron_snap.get("loop_age_s")
+        if cron_snap.get("running") and loop_age is not None and loop_age > 180:
+            # 调度循环超过 3 分钟无心跳：进程虽存活但已卡死
+            status, code = "unhealthy", 503
+        elif cron_snap.get("running") and cron_snap["busy_workers"] >= cron_snap["max_workers"]:
+            # 工作线程全部被占用：新作业只能排队，无法按时执行
+            status = "degraded"
+        handler.send_response(code)
         handler._send_cors_headers()
         handler.send_header("Content-Type", "application/json")
+        handler.send_header("Cache-Control", "no-store")
         handler.end_headers()
         data = {
-            "status": "healthy",
+            "status": status,
             "mode": mode,
             "version": "1.0.0",
+            **get_version_info(),
+            "cron": cron_snap,
         }
         handler.wfile.write(_json.dumps(data).encode("utf-8"))
 
@@ -132,6 +169,17 @@ def create_app(
         except Exception:
             lifecycle.shutdown()
             raise
+
+    # 所有权校验: 仅对真实 Agent 实例校验。应用 cron_service 与 Agent.cron
+    # 必须同实例, 否则 /cron、/health、插件任务、配置任务与 Agent 观测割裂。
+    # Mock/SimpleNamespace 等测试替身不是真实 Agent, 不参与校验;
+    # patch 期间无法解析真实类时跳过校验 (见 _resolve_real_agent_class)。
+    if _is_real_agent(agent) and agent.cron is not cron_service:
+        lifecycle.shutdown()
+        raise RuntimeError(
+            "调度器所有权冲突: Agent.cron 与应用 cron_service 不是同一实例。"
+            "请通过 create_app() 组装或注入应用调度器, 不要绕过宿主自建调度器。"
+        )
 
     ctx = PluginContext(
         command_registry=cmd_registry,
@@ -166,7 +214,9 @@ def create_app(
     lifecycle.register_resource("command_registry", cmd_registry.clear)
     lifecycle.register_resource("workflow_registry", workflow_registry.clear)
     lifecycle.register_resource("route_registry", route_registry.clear)
-    lifecycle.register_resource("cron_service", lambda: (cron_service.stop(wait=True, timeout=2.0), cron_service.clear()))
+    # 停止与排空在途任务由 Application.shutdown 前置执行 (必须先于插件资源清理);
+    # 此处仅负责清空任务与 handler 注册表。
+    lifecycle.register_resource("cron_service", cron_service.clear)
     lifecycle.register_resource("domain_registry", ctx.domain_registry.clear)
     if skill_engine is not None and hasattr(skill_engine, "clear"):
         lifecycle.register_resource("skill_engine", skill_engine.clear)

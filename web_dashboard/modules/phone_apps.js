@@ -128,15 +128,22 @@ window.PhoneAppUI = {
 
         const isFake = window.PHONE_APP_TEST_MODE === true || (this._cachedDevices || []).some(d => d.test_mode === true);
         const onlineDevCount = (this._cachedDevices || []).filter(d => d.status === 'online').length;
-        const devText = onlineDevCount > 0 ? `🟢 ${onlineDevCount} 台受控设备在线` : `🔴 暂无在线设备`;
+        // 离线时直接披露可定位的原因 (adb 未识别 / 未授权 / hs 守护进程未绑定等)，不再只说"暂无在线设备"
+        const offlineDev = (this._cachedDevices || []).find(d => d.status !== 'online' && d.status !== 'paused');
+        const offlineHint = offlineDev ? (offlineDev.offline_reason || offlineDev.status_text || '') : '';
+        const devText = onlineDevCount > 0
+            ? `🟢 ${onlineDevCount} 台受控设备在线`
+            : (offlineHint ? `🔴 离线：${offlineHint}` : `🔴 暂无在线设备`);
         const pausedDev = (this._cachedDevices || []).find(d => d.status === 'paused');
-        const resumeBtnHtml = pausedDev ? `<button class="modal-btn" style="font-size:12px; padding:5px 12px; background:#f59e0b; color:#fff; border:none; border-radius:4px; font-weight:bold; cursor:pointer;" onclick="window.PhoneAppUI.resumeDevice('${pausedDev.device_id}')">⚠️ 恢复设备 (${pausedDev.device_id})</button>` : '';
+        // 设备标识来自 Worker 上报，进入 HTML 前必须转义 (含属性上下文)
+        const pausedId = pausedDev ? h(pausedDev.device_id) : '';
+        const resumeBtnHtml = pausedDev ? `<button class="modal-btn" style="font-size:12px; padding:5px 12px; background:#f59e0b; color:#fff; border:none; border-radius:4px; font-weight:bold; cursor:pointer;" data-device-id="${pausedId}" onclick="window.PhoneAppUI.resumeDevice(this.dataset.deviceId)">⚠️ 恢复设备 (${pausedId})</button>` : '';
 
         bar.innerHTML = `
             <div style="display:flex; align-items:center; gap:12px;">
                 <span style="font-size:16px;">📱</span>
                 <strong>${isFake ? "FAKE 测试：不操作手机" : "Phone App 执行与真机筛选中枢"}</strong>
-                <span style="font-size:12px; color:#64748b; background:#fff; padding:2px 8px; border-radius:12px; border:1px solid #cbd5e1;">${devText}</span>
+                <span style="font-size:12px; color:#64748b; background:#fff; padding:2px 8px; border-radius:12px; border:1px solid #cbd5e1;">${h(devText)}</span>
             </div>
             <div style="display:flex; gap:8px;">
                 ${resumeBtnHtml}
@@ -202,9 +209,13 @@ window.PhoneAppUI = {
         const devices = this._cachedDevices || [];
         const apps = this._cachedApps || [];
 
-        const deviceOptions = devices.map(d =>
-            `<option value="${h(d.device_id)}">${h(d.model || d.device_id)} [${d.status === 'online' ? '🟢 在线已就绪' : '🔴 离线未连接'}]</option>`
-        ).join('') || '<option value="c68a3cf2">OnePlus 9 (LE2110) [c68a3cf2]</option>';
+        const deviceOptions = devices.map(d => {
+            const isOnline = d.status === 'online';
+            const hint = d.offline_reason ? `：${d.offline_reason}` : '';
+            const label = isOnline ? '🟢 在线已就绪' : `🔴 离线${hint}`;
+            const tip = d.status_text || label;
+            return `<option value="${h(d.device_id)}" title="${h(tip)}">${h(d.model || d.device_id)} [${h(label)}]</option>`;
+        }).join('') || '<option value="c68a3cf2">OnePlus 9 (LE2110) [c68a3cf2]</option>';
 
         const appCheckboxes = apps.map(a => {
             const isValidated = a.status === 'validated';

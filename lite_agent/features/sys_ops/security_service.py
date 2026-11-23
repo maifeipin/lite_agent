@@ -344,9 +344,10 @@ class Sentinel:
         self.state['log_states'] = log_states
 
     def scan_secret_leaks(self):
+        project_root = PROJECT_ROOT
         secret_files = ['.env', 'config.json', 'secrets.json']
         for s_file in secret_files:
-            file_path = os.path.join(PROJECT_ROOT, s_file)
+            file_path = os.path.join(project_root, s_file)
             if os.path.exists(file_path):
                 try:
                     st = os.stat(file_path)

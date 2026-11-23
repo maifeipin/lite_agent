@@ -11,7 +11,7 @@ import traceback
 from typing import Any, Dict, List, Optional
 
 from lite_agent.core.constants import PROJECT_ROOT
-from lite_agent.core.execution import ExecutionContext, ExecutionResult, ExecutionSource, SkillPolicy
+from lite_agent.contracts.execution import ExecutionContext, ExecutionResult, ExecutionSource, SkillPolicy
 
 AUDIT_LOG = os.path.join(PROJECT_ROOT, 'workspace', 'audit.log')
 

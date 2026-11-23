@@ -88,15 +88,15 @@ class FeedbackLoop:
     def apply_decay(self):
         """对长期未被检索的记忆进行质量衰减"""
         cutoff = time.time() - self.decay_days * 86400
-        self.store.conn.execute(
-            """UPDATE conversations
-               SET importance = MAX(0.1, importance - 0.1)
-               WHERE is_distillate = 0
-                 AND importance > 0.2
-                 AND created_at < ?""",
-            (cutoff,)
-        )
-        self.store.conn.commit()
+        with self.store.conn:
+            self.store.conn.execute(
+                """UPDATE conversations
+                   SET importance = MAX(0.1, importance - 0.1)
+                   WHERE is_distillate = 0
+                     AND importance > 0.2
+                     AND created_at < ?""",
+                (cutoff,)
+            )
 
     # ========== 统计 ==========
 

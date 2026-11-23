@@ -9,7 +9,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from lite_agent.core.skill_engine import skill
-from lite_agent.core.command_registry import slash_command
+from lite_agent.services.commands import slash_command
 from lite_agent.features.content_ops import meili_sync_service
 from lite_agent.features.content_ops.meili_sync_service import (
     sync_meili as _canonical_sync_meili,

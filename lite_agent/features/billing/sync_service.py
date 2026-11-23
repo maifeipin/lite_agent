@@ -28,7 +28,14 @@ def drain_quality_events(
     **kwargs
 ) -> Dict[str, Any]:
     """Bound work to 300 events; errors/no progress leave receipts for the next run."""
-    _consume_fn = consume_fn or consume_quality_events
+    if todo_db_path is None:
+        cfg = config_loader.load_config() or {}
+        todo_db_path = cfg.get('billing', {}).get('todo_db_path') or DEFAULT_DB_PATH
+
+    time_fn = kwargs.pop('time_fn', None)
+    _time_mod = time if time_fn is None else time_fn
+
+    _consume_fn = consume_quality_events if consume_fn is None else consume_fn
 
     event_limit = _bounded_int(event_limit, 'event_limit', 100)
     max_batches = _bounded_int(max_batches, 'max_batches', 3)
@@ -36,11 +43,20 @@ def drain_quality_events(
                           'resolved', 'skipped', 'acked', 'failed', 'failed_acks'), 0)
     stats.update(errors=[], backlog_hit=False, backlog=None,
                  stop_reason='empty', event_limit=event_limit, max_batches=max_batches)
-    deadline = time.monotonic() + 30
+    deadline = _time_mod.monotonic() + 30
     for batch_number in range(1, max_batches + 1):
         stats['batches'] = batch_number
         try:
-            batch = _consume_fn(client=client, db_path=todo_db_path, limit=event_limit, stop_on_error=True, deadline=deadline, **kwargs)
+            if consume_fn is None:
+                batch = _consume_fn(
+                    client=client, db_path=todo_db_path, limit=event_limit,
+                    stop_on_error=True, deadline=deadline, time_fn=time_fn, **kwargs
+                )
+            else:
+                batch = _consume_fn(
+                    client=client, db_path=todo_db_path, limit=event_limit,
+                    stop_on_error=True, deadline=deadline, **kwargs
+                )
         except Exception as exc:
             stats['errors'].append(mask_secrets(f'消费质量事件批次 {batch_number} 异常: {exc}'))
             stats['failed'] += 1
@@ -66,7 +82,7 @@ def drain_quality_events(
         if batch['total'] < event_limit or batch_number == max_batches:
             stats['stop_reason'] = 'limit' if batch_number == max_batches else 'short_batch'
             try:
-                budget = deadline - time.monotonic()
+                budget = deadline - _time_mod.monotonic()
                 if budget <= 0:
                     raise TimeoutError('质量待办消费预算耗尽')
                 remaining = client.quality_events(limit=1, timeout=budget)
@@ -135,7 +151,7 @@ def sync_and_consume(
             fetch_errors = [mask_secrets(f'sync3m: {type(exc).__name__}: {exc}')]
             fetch_log = fetch_errors[0]
 
-    _drain_fn = drain_fn or drain_quality_events
+    _drain_fn = drain_quality_events if drain_fn is None else drain_fn
     quality = _drain_fn(client, todo_database, event_limit, max_batches)
     repayment = {'enabled': False}
     settings = billing.get('repayment_todo') or {}

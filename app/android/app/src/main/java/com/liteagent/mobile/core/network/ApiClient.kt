@@ -1,0 +1,807 @@
+package com.liteagent.mobile.core.network
+
+import com.google.gson.Gson
+import com.liteagent.mobile.core.network.models.*
+import com.liteagent.mobile.core.security.SecureTokenStorage
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.OkHttpClient
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.logging.HttpLoggingInterceptor
+import retrofit2.Response
+import retrofit2.Retrofit
+import retrofit2.converter.gson.GsonConverterFactory
+import java.util.concurrent.TimeUnit
+
+open class AuthenticationException(message: String) : Exception(message)
+
+open class ApiClient(
+    val tokenStorage: SecureTokenStorage,
+    val onUnauthorized: (() -> Unit)? = null
+) {
+    private val gson = Gson()
+    private val refreshMutex = Mutex()
+
+    private val baseOkHttpClient: OkHttpClient by lazy {
+        val logging = HttpLoggingInterceptor().apply {
+            level = HttpLoggingInterceptor.Level.BASIC
+        }
+        OkHttpClient.Builder()
+            .addInterceptor(logging)
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
+            .build()
+    }
+
+    val okHttpClient: OkHttpClient by lazy {
+        baseOkHttpClient.newBuilder()
+            .addInterceptor(
+                AuthInterceptor(
+                    tokenStorage = tokenStorage,
+                    onUnauthorized = onUnauthorized,
+                    onUnauthorizedWithContext = { serverUrl, tokenUsed, sessionIdUsed ->
+                        // 异步并发合并刷新
+                        kotlinx.coroutines.runBlocking {
+                            handleUnauthorized(serverUrl, tokenUsed, sessionIdUsed)
+                        }
+                    }
+                )
+            )
+            .build()
+    }
+
+    private val authRetrofitLock = Any()
+    private var cachedAuthRetrofit: Retrofit? = null
+    private var cachedAuthBaseUrl: String? = null
+
+    /**
+     * 专属认证通道 Retrofit 实例：
+     * 不挂载 AuthInterceptor，专供 login / refresh / logout 调用，从根源杜绝递归 401 拦截与 refreshMutex 死锁！
+     */
+    open fun getAuthApiService(serverUrl: String): ApiService {
+        val normalized = ServerUrlNormalizer.normalize(serverUrl)
+        synchronized(authRetrofitLock) {
+            if (cachedAuthRetrofit == null || cachedAuthBaseUrl != normalized) {
+                val rawClient = baseOkHttpClient.newBuilder()
+                    .addInterceptor { chain ->
+                        val req = chain.request().newBuilder()
+                            .header(AuthInterceptor.HEADER_CONFIGURED_BASE_URL, normalized)
+                            .tag(ServerBaseUrlTag::class.java, ServerBaseUrlTag(normalized))
+                            .build()
+                        chain.proceed(req)
+                    }
+                    .build()
+
+                cachedAuthRetrofit = Retrofit.Builder()
+                    .baseUrl(if (normalized.endsWith("/")) normalized else "$normalized/")
+                    .client(rawClient)
+                    .addConverterFactory(GsonConverterFactory.create())
+                    .build()
+                cachedAuthBaseUrl = normalized
+            }
+            return cachedAuthRetrofit!!.create(ApiService::class.java)
+        }
+    }
+
+    private var currentBaseUrl: String = ""
+    private var cachedRetrofit: Retrofit? = null
+
+    open fun getRetrofit(baseUrl: String): Retrofit {
+        val normalized = ServerUrlNormalizer.normalize(baseUrl)
+        if (cachedRetrofit == null || currentBaseUrl != normalized) {
+            currentBaseUrl = normalized
+
+            val boundClient = baseOkHttpClient.newBuilder()
+                .addInterceptor { chain ->
+                    val req = chain.request().newBuilder()
+                        .header(AuthInterceptor.HEADER_CONFIGURED_BASE_URL, normalized)
+                        .tag(ServerBaseUrlTag::class.java, ServerBaseUrlTag(normalized))
+                        .build()
+                    chain.proceed(req)
+                }
+                .addInterceptor(
+                    AuthInterceptor(
+                        tokenStorage = tokenStorage,
+                        onUnauthorized = onUnauthorized,
+                        boundBaseUrl = normalized,
+                        onUnauthorizedWithContext = { sUrl, tUsed, sIdUsed ->
+                            kotlinx.coroutines.runBlocking {
+                                handleUnauthorized(sUrl, tUsed, sIdUsed)
+                            }
+                        }
+                    )
+                )
+                .build()
+
+            cachedRetrofit = Retrofit.Builder()
+                .baseUrl(if (normalized.endsWith("/")) normalized else "$normalized/")
+                .client(boundClient)
+                .addConverterFactory(GsonConverterFactory.create())
+                .build()
+        }
+        return cachedRetrofit!!
+    }
+
+    open suspend fun getApiService(serverUrl: String? = null): ApiService {
+        val url = serverUrl ?: tokenStorage.getActiveServerUrl()
+        return getRetrofit(url).create(ApiService::class.java)
+    }
+
+    /**
+     * 统一登录：调用 POST /agent/api/v1/auth，成功后保存会话凭据。
+     */
+    open suspend fun login(
+        serverUrl: String,
+        username: String,
+        password: String,
+        rememberMe: Boolean = true,
+        deviceName: String = "OnePlus 9"
+    ): Result<LoginResponse> {
+        val normalized = ServerUrlNormalizer.normalize(serverUrl)
+        return try {
+            val service = getAuthApiService(normalized)
+            val request = LoginRequest(
+                username = username.trim(),
+                password = password,
+                rememberMe = rememberMe,
+                deviceName = deviceName,
+                clientType = "android"
+            )
+            val response = service.login(request)
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                val body = response.body()!!
+                val token = body.effectiveSessionToken
+                val expiresAt = body.effectiveExpiresAt
+                val sessionId = body.sessionId ?: ""
+                val refreshToken = body.refreshToken
+                val refreshExp = body.refreshExpiresAt ?: 0L
+                val reviewToken = body.reviewToken
+                val reviewExp = body.reviewTokenExpiresAt
+
+                tokenStorage.saveSession(
+                    serverUrl = normalized,
+                    username = username.trim(),
+                    sessionId = sessionId,
+                    sessionToken = token,
+                    expiresAt = expiresAt,
+                    refreshToken = refreshToken,
+                    refreshExpiresAt = refreshExp,
+                    reviewToken = reviewToken,
+                    reviewExpiresAt = reviewExp,
+                    rememberMe = rememberMe
+                )
+                Result.success(body)
+            } else {
+                val errorMsg = try {
+                    val rawErr = response.errorBody()?.string()
+                    val parsed = rawErr?.let { gson.fromJson(it, Map::class.java) }
+                    parsed?.get("error")?.toString() ?: "登录失败 (${response.code()})"
+                } catch (_: Exception) {
+                    "登录失败 (${response.code()})"
+                }
+                Result.failure(Exception(errorMsg))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * 会话续期：调用 POST /agent/api/v1/auth/refresh，原子轮换保存新凭证。
+     * 全程绑定 expectedSessionId 快照，禁止在刷新后重新读取当前会话作为写回条件，杜绝跨会话串号。
+     */
+    open suspend fun refresh(
+        serverUrl: String,
+        refreshToken: String,
+        expectedSessionId: String? = null
+    ): Result<RefreshResponse> {
+        val normalized = ServerUrlNormalizer.normalize(serverUrl)
+        return try {
+            val targetSessionId = expectedSessionId?.takeIf { it.isNotBlank() }
+                ?: tokenStorage.getSession(normalized)?.sessionId
+            if (targetSessionId.isNullOrBlank()) {
+                return Result.failure(AuthenticationException("无法定位需续期的有效会话快照"))
+            }
+
+            val service = getAuthApiService(normalized)
+            val response = service.refresh(RefreshRequest(refreshToken.trim()))
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                val body = response.body()!!
+                val writeSuccess = tokenStorage.updateTokens(
+                    serverUrl = normalized,
+                    newSessionToken = body.effectiveSessionToken,
+                    newExpiresAt = body.effectiveExpiresAt,
+                    newRefreshToken = body.refreshToken,
+                    newRefreshExpiresAt = body.refreshExpiresAt ?: 0L,
+                    newReviewToken = body.reviewToken,
+                    newReviewExpiresAt = body.reviewTokenExpiresAt,
+                    matchingSessionId = targetSessionId
+                )
+                if (!writeSuccess) {
+                    // 写回失败说明该会话在刷新过程中已被用户注销或已被新会话替换，严禁视为刷新成功
+                    Result.failure(AuthenticationException("会话已退出或变更，放弃保存凭证"))
+                } else {
+                    Result.success(body)
+                }
+            } else {
+                val errorMsg = response.body()?.error ?: "续期失败 (${response.code()})"
+                // 明确区分认证拒绝与瞬态网络/服务端错误
+                if (response.code() == 401 || (response.code() == 400 && errorMsg.contains("refresh"))) {
+                    Result.failure(AuthenticationException(errorMsg))
+                } else {
+                    Result.failure(Exception(errorMsg))
+                }
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * 安全退出：撤销服务端统一会话并清理本地加密存储。
+     */
+    open suspend fun logout(serverUrl: String): Result<Unit> {
+        val normalized = ServerUrlNormalizer.normalize(serverUrl)
+        return try {
+            val session = tokenStorage.getSession(normalized)
+            try {
+                val service = getAuthApiService(normalized)
+                service.logout(
+                    LogoutRequest(
+                        refreshToken = session?.refreshToken,
+                        sessionToken = session?.sessionToken,
+                        reviewToken = session?.reviewToken
+                    )
+                )
+            } catch (_: Exception) {
+                // 忽略离线或网络异常，确保本地彻底清除
+            }
+            tokenStorage.clearSession(normalized, matchingSessionId = session?.sessionId)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * 并发安全的 401 自动续期合并处理。
+     * 严格按请求发起的会话 ID 校验一致性，杜绝跨账号重试；若刷新失败则仅在凭据明确失效时清理，网络故障保留凭据。
+     */
+    open suspend fun handleUnauthorized(
+        serverUrl: String,
+        tokenUsed: String,
+        sessionIdUsed: String = ""
+    ): Boolean {
+        return refreshMutex.withLock {
+            val currentSession = tokenStorage.getSession(serverUrl)
+
+            // 1. 会话一致性严格校验：
+            // 请求必须绑定有效的会话 ID，且必须与当前活跃会话 ID 严格一致。
+            // 若当前无活跃会话，或发起请求的会话 ID 缺失/与当前会话不符（如已退出或切换到账号 B），
+            // 说明该 401 是旧账号/旧会话的迟到响应，绝对禁止用新会话凭据重发旧请求，且严禁误清新会话！直接丢弃旧请求。
+            if (currentSession == null || currentSession.sessionId.isBlank()) {
+                return@withLock false
+            }
+            if (sessionIdUsed.isBlank() || currentSession.sessionId != sessionIdUsed) {
+                // 关键防御：会话已改变或未绑定有效会话（如 Alice -> Bob），丢弃旧请求，绝不重试，且严禁误清新账号会话！
+                return@withLock false
+            }
+
+            // 2. 属于同一会话族内：若当前 token 与触发 401 的 token 不一致，说明已被并发任务刷新过，直接放行重试
+            if (currentSession.sessionToken.isNotBlank() && currentSession.sessionToken != tokenUsed) {
+                return@withLock true
+            }
+
+            // 3. 属于同一会话族且尚未刷新：若存在有效可用的 refresh_token，尝试自动续期
+            if (currentSession.canRefresh) {
+                val refreshRes = refresh(
+                    serverUrl = serverUrl,
+                    refreshToken = currentSession.refreshToken!!,
+                    expectedSessionId = currentSession.sessionId
+                )
+                if (refreshRes.isSuccess) {
+                    return@withLock true
+                }
+                val failure = refreshRes.exceptionOrNull()
+                // 关键防御：若是网络超时、连接断开或服务端临时 5xx 故障，保留本地会话，绝不误登出！
+                if (failure !is AuthenticationException) {
+                    return@withLock false
+                }
+            }
+
+            // 4. 明确凭据失效（被服务端 401 拒绝或无刷新凭据）：在原子事务中精准清理
+            tokenStorage.clearSession(
+                serverUrl = serverUrl,
+                matchingToken = tokenUsed,
+                matchingSessionId = currentSession.sessionId
+            )
+            onUnauthorized?.invoke()
+            false
+        }
+    }
+
+    /**
+     * 临时探活测试
+     */
+    open suspend fun testConnectionDirect(baseUrl: String, token: String): Response<SessionsListResponse> {
+        val normalized = ServerUrlNormalizer.normalize(baseUrl)
+        val tempClient = OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .addInterceptor { chain ->
+                val req = chain.request().newBuilder()
+                    .header(AuthInterceptor.HEADER_CONFIGURED_BASE_URL, normalized)
+                    .tag(ServerBaseUrlTag::class.java, ServerBaseUrlTag(normalized))
+                if (token.isNotBlank()) {
+                    req.addHeader("Authorization", "Bearer ${token.trim()}")
+                }
+                chain.proceed(req.build())
+            }
+            .build()
+
+        val tempRetrofit = Retrofit.Builder()
+            .baseUrl(if (normalized.endsWith("/")) normalized else "$normalized/")
+            .client(tempClient)
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
+
+        val service = tempRetrofit.create(ApiService::class.java)
+        return service.getSessions()
+    }
+
+    // --- 待办事项 (Todos) API 封装 ---
+    open suspend fun getTodos(serverUrl: String? = null): Result<List<TodoItem>> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getTodos()
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                Result.success(response.body()!!.data ?: emptyList())
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "获取待办失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun createTodo(request: CreateTodoRequest, serverUrl: String? = null): Result<String> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.createTodo(request)
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                Result.success(response.body()!!.message ?: "创建成功")
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "创建待办失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun updateTodo(id: String, request: UpdateTodoRequest, serverUrl: String? = null): Result<String> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.updateTodo(id, request)
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                Result.success(response.body()!!.message ?: "更新成功")
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "更新待办失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun deleteTodo(id: String, serverUrl: String? = null): Result<Unit> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.deleteTodo(id)
+            if (response.isSuccessful) {
+                Result.success(Unit)
+            } else {
+                Result.failure(Exception("删除失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    // --- 会审决策中枢 (Review Meetings) API 封装 ---
+    open suspend fun getReviewMeetings(serverUrl: String? = null): Result<List<MeetingItem>> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getReviewMeetings()
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!.meetings)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "获取会审列表失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun getReviewMeetingDetail(id: String, since: Int = 0, serverUrl: String? = null): Result<MeetingDetail> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getReviewMeetingDetail(id, since)
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "获取会议详情失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun decideReviewMeeting(id: String, request: DecideMeetingRequest, serverUrl: String? = null): Result<MeetingDetail> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.decideReviewMeeting(id, request)
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!)
+            } else if (response.code() == 409) {
+                val errMsg = try {
+                    response.errorBody()?.string()?.let { gson.fromJson(it, Map::class.java) }?.get("error")?.toString()
+                } catch (_: Exception) { null } ?: "版本冲突：议题已被更新，请刷新后重试"
+                Result.failure(ConflictException(errMsg))
+            } else {
+                val errMsg = try {
+                    response.errorBody()?.string()?.let { gson.fromJson(it, Map::class.java) }?.get("error")?.toString()
+                } catch (_: Exception) { null } ?: "裁决失败 (${response.code()})"
+                Result.failure(Exception(errMsg))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun createReviewMeeting(
+        request: CreateMeetingRequest,
+        serverUrl: String? = null
+    ): Result<CreateMeetingResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.createReviewMeeting(request)
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!)
+            } else {
+                val errMsg = try {
+                    response.errorBody()?.string()?.let { gson.fromJson(it, Map::class.java) }?.get("error")?.toString()
+                } catch (_: Exception) { null } ?: "创建会审失败 (${response.code()})"
+                Result.failure(Exception(errMsg))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    // --- 发现中枢：邮件与账单 ---
+    open suspend fun getRecentEmails(limit: Int = 20, serverUrl: String? = null): Result<List<EmailSummaryItem>> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getRecentEmails(limit)
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                Result.success(response.body()!!.emails)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "获取邮件失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun getBillingSummary(serverUrl: String? = null): Result<BillingSummaryResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getBillingSummary()
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                Result.success(response.body()!!)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "获取账单概览失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    // --- 助理增强：OCR 上传、快捷指令与会话重命名 ---
+    open suspend fun uploadOcrImage(
+        imageBytes: ByteArray,
+        fileName: String = "capture.jpg",
+        mimeType: String = "image/jpeg",
+        serverUrl: String? = null
+    ): Result<String> {
+        return try {
+            val service = getApiService(serverUrl)
+            val mediaType = mimeType.toMediaTypeOrNull() ?: "image/jpeg".toMediaTypeOrNull()
+            val requestBody = imageBytes.toRequestBody(mediaType)
+            val part = okhttp3.MultipartBody.Part.createFormData("file", fileName, requestBody)
+            val response = service.uploadOcrImage(part)
+            val body = response.body()
+            val text = body?.extractedText
+            if (response.isSuccessful && !text.isNullOrBlank()) {
+                Result.success(text)
+            } else {
+                val errMsg = body?.detail ?: body?.error ?: "OCR 解析未返回文本 (${response.code()})"
+                Result.failure(Exception(errMsg))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun getDashboardCommands(serverUrl: String? = null): Result<List<DashboardCommandItem>> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getDashboardCommands()
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!)
+            } else {
+                Result.failure(Exception("获取快捷指令失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun renameSession(
+        sessionKey: String,
+        newTitle: String,
+        serverUrl: String? = null
+    ): Result<RenameSessionResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.renameSession(RenameSessionRequest(sessionKey = sessionKey, title = newTitle))
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!)
+            } else {
+                Result.failure(Exception("重命名会话失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    // --- Phone App 真机自动化执行中枢 ---
+    open suspend fun getPhoneDevices(serverUrl: String? = null): Result<List<PhoneDeviceItem>> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getPhoneDevices()
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!.devices)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "获取设备列表失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun getPhoneApps(serverUrl: String? = null): Result<List<PhoneCatalogAppItem>> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getPhoneApps()
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!.apps)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "获取应用目录失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun getPhoneBatches(serverUrl: String? = null): Result<List<PhoneBatchItem>> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getPhoneBatches()
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!.batches)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "获取筛选批次失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun getPhoneBatchDetail(batchId: String, serverUrl: String? = null): Result<PhoneBatchDetailResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getPhoneBatchDetail(batchId)
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "获取批次详情失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun createPhoneBatch(
+        request: CreatePhoneBatchRequest,
+        serverUrl: String? = null
+    ): Result<CreatePhoneBatchResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.createPhoneBatch(request)
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                Result.success(response.body()!!)
+            } else {
+                val errMsg = try {
+                    response.errorBody()?.string()?.let { gson.fromJson(it, Map::class.java) }?.get("error")?.toString()
+                } catch (_: Exception) { null } ?: response.body()?.error ?: "创建筛选批次失败 (${response.code()})"
+                Result.failure(Exception(errMsg))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun approvePhoneBatch(batchId: String, serverUrl: String? = null): Result<PhoneActionResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.approvePhoneBatch(batchId)
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                Result.success(response.body()!!)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "审核批准失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun executePhoneBatch(batchId: String, serverUrl: String? = null): Result<PhoneActionResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.executePhoneBatch(batchId)
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                Result.success(response.body()!!)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "派发执行失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun rejectPhoneBatch(batchId: String, reason: String, serverUrl: String? = null): Result<PhoneActionResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.rejectPhoneBatch(batchId, PhoneActionRequest(reason = reason))
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                Result.success(response.body()!!)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "驳回批次失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun cancelPhoneBatch(batchId: String, reason: String = "用户在移动端主动取消", serverUrl: String? = null): Result<PhoneActionResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.cancelPhoneBatch(batchId, PhoneActionRequest(reason = reason))
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                Result.success(response.body()!!)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "取消批次失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun resumePhoneDevice(deviceId: String, serverUrl: String? = null): Result<PhoneActionResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.resumePhoneDevice(PhoneActionRequest(deviceId = deviceId))
+            if (response.isSuccessful && response.body() != null && response.body()!!.success) {
+                Result.success(response.body()!!)
+            } else {
+                Result.failure(Exception(response.body()?.error ?: "恢复设备失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    // --- 发现中枢扩展：RSS 简报、复杂任务触发器、Socks5 节点 ---
+    open suspend fun getRssBrief(serverUrl: String? = null): Result<RssBriefResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getRssBrief()
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!)
+            } else {
+                Result.failure(Exception(response.body()?.detail ?: "获取今日简报失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun getTaskSpecs(serverUrl: String? = null): Result<List<TaskSpecItem>> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getTaskSpecs()
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!.data)
+            } else {
+                Result.failure(Exception("获取复杂任务失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun runTaskSpec(id: String, serverUrl: String? = null): Result<TaskSpecRunResponse> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.runTaskSpec(id)
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!)
+            } else {
+                val errMsg = try {
+                    response.errorBody()?.string()?.let { gson.fromJson(it, Map::class.java) }?.get("error")?.toString()
+                } catch (_: Exception) { null } ?: response.body()?.error ?: "触发任务失败 (${response.code()})"
+                Result.failure(Exception(errMsg))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun getSocks5Nodes(serverUrl: String? = null): Result<List<Socks5NodeItem>> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.getSocks5Nodes()
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!.data)
+            } else {
+                Result.failure(Exception("获取代理节点失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun testSocks5Node(id: Int, host: String? = null, serverUrl: String? = null): Result<Socks5TestResultDetail> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.testSocks5Node(id, host)
+            val result = response.body()?.result
+            if (response.isSuccessful && result != null) {
+                Result.success(result)
+            } else {
+                Result.failure(Exception("节点测速失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    open suspend fun setActiveSocks5Node(id: Int, serverUrl: String? = null): Result<String> {
+        return try {
+            val service = getApiService(serverUrl)
+            val response = service.setActiveSocks5Node(Socks5SetActiveRequest(id))
+            if (response.isSuccessful && response.body()?.success == true) {
+                Result.success(response.body()?.message ?: "已切换为主节点")
+            } else {
+                Result.failure(Exception(response.body()?.message ?: "切换主节点失败 (${response.code()})"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+}
+
+class ConflictException(message: String) : Exception(message)
+

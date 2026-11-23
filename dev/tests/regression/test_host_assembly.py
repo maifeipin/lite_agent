@@ -44,7 +44,9 @@ def test_enrich_tool_uses_host_notification_agent():
 def test_thin_meeting_cli_starts_outside_repository(tmp_path):
     env = dict(os.environ)
     env.pop('PYTHONPATH', None)
-    script = Path('scripts/review_meeting.py').resolve()
+    from dev.tests.support.repo_paths import REPO_ROOT
+    script = REPO_ROOT / 'scripts' / 'review_meeting.py'
+    assert script.is_file(), f"脚本缺失: {script}"
     proc = subprocess.run([sys.executable, '-B', str(script), '--help'], cwd=tmp_path,
                           env=env, text=True, capture_output=True)
     assert proc.returncode == 0, proc.stderr
@@ -107,7 +109,7 @@ PLUGIN_OWNED_TOOLS = {
     'lite_agent.features.billing': [
         'billing_report', 'billing_due_soon', 'billing_unpaid', 'billing_mark_paid',
         'billing_reconcile', 'billing_recent', 'billing_snapshot', 'billing_fetch',
-        'billing_txns_over', 'billing_parse_health',
+        'billing_txns_over', 'billing_parse_health', 'billing_export_expenses',
     ],
     'lite_agent.features.todo': [
         'todo_add', 'todo_list', 'todo_get', 'todo_start', 'todo_done',

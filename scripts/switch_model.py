@@ -109,29 +109,23 @@ def mask_secret(s):
 
 
 def prompt_api_key(target, models_dict, cli_key=None, yes=False):
-    if cli_key:
-        return cli_key.strip()
-    if yes or not sys.stdin.isatty():
-        return None
-    cur_key = models_dict.get(target, {}).get("api_key", "")
-    try:
-        ans = input(f"请输入 {target} 的新 API Key (当前: {mask_secret(cur_key)}，回车保持原样): ").strip()
-        return ans if ans else None
-    except (KeyboardInterrupt, EOFError):
-        print("\n已取消输入")
-        return None
+    return None
 
 
 def main():
     parser = argparse.ArgumentParser(description="切换主模型及路由模型；失败恢复原配置")
     parser.add_argument("target", nargs="?")
-    parser.add_argument("--api-key", help="为目标模型配置新的 API Key")
+    parser.add_argument("--api-key", help="[已禁用] API Key 属于环境变量凭据，命令行不再支持此参数")
     parser.add_argument("--yes", action="store_true", help="无需交互确认")
     parser.add_argument("--no-restart", action="store_true", help="仅更新配置，不重启")
     options = parser.parse_args()
-    def switch(target, new_key=None):
+
+    if options.api_key:
+        print("❌ 错误: switch_model 已禁用 --api-key 命令行选项。API Key 属于物理凭据，应在 .env 环境变量中配置，避免命令行历史泄露秘密。")
+        sys.exit(1)
+
+    def switch(target):
         if not apply_switch(target, llm_cfg, routing_cfg, specs_cfg, committee_cfg,
-                            new_api_key=new_key,
                             yes=options.yes, restart=not options.no_restart):
             raise SystemExit(1)
     if not os.path.exists(LLM_JSON):
@@ -184,17 +178,14 @@ def main():
                 return k
         return None
 
-    # 若指定了命令行参数，支持直接执行: ./switch_model.py flash [--api-key xxx]
+    # 若指定了命令行参数，支持直接执行: ./switch_model.py flash
     if options.target:
         target = resolve_model(options.target)
         if not target:
             print(f"❌ 模型 '{options.target}' 不在可用模型或别名列表中！")
             print(f"可用模型: {', '.join(model_keys)}")
             sys.exit(1)
-        new_key = options.api_key.strip() if options.api_key else None
-        if not new_key and not options.yes and sys.stdin.isatty():
-            new_key = prompt_api_key(target, models_dict, cli_key=None, yes=options.yes)
-        switch(target, new_key)
+        switch(target)
         return
 
     # 交互式选择菜单
@@ -215,8 +206,7 @@ def main():
             idx = int(choice) - 1
             if 0 <= idx < len(model_keys):
                 target = model_keys[idx]
-                new_key = prompt_api_key(target, models_dict, cli_key=options.api_key, yes=options.yes)
-                switch(target, new_key)
+                switch(target)
             else:
                 print("无效输入")
         except Exception as e:
@@ -273,8 +263,7 @@ def main():
         elif key == 'ENTER':
             target = model_keys[selected_idx]
             print(f"\n已选择模型: {target}")
-            new_key = prompt_api_key(target, models_dict, cli_key=options.api_key, yes=options.yes)
-            switch(target, new_key)
+            switch(target)
             break
         elif key in ('QUIT', 'ESC'):
             print("\n已取消切换。")
@@ -294,21 +283,20 @@ def restart_service():
 
 def apply_switch(target_model, llm_cfg, routing_cfg, specs_cfg, committee_cfg,
                  *, new_api_key=None, yes=False, restart=True):
+    if new_api_key:
+        print("❌ 错误: switch_model 绝不接收或写入明文 API Key，请在 .env 环境变量中配置。")
+        return False
     if target_model not in llm_cfg.get("models", {}):
         raise ValueError(f"未知模型: {target_model}")
     print(f"准备切换主模型及路由模型为 {target_model}；保留会审评委配置。")
-    if new_api_key:
-        print(f"将更新模型 {target_model} 的 API Key: {mask_secret(new_api_key)}")
     if not yes and input("确认应用？[Y/n]: ").strip().lower() not in ("", "y", "yes"):
         return False
     do_restart = restart and (yes or input("立即重启服务？[Y/n]: ").strip().lower() in ("", "y", "yes"))
     updates = {LLM_JSON: copy.deepcopy(llm_cfg)}
     updates[LLM_JSON]["default"] = target_model
-    if new_api_key:
-        if "models" in updates[LLM_JSON] and target_model in updates[LLM_JSON]["models"]:
-            updates[LLM_JSON]["models"][target_model]["api_key"] = new_api_key
-        if "api_key" in updates[LLM_JSON]:
-            updates[LLM_JSON]["api_key"] = new_api_key
+    # 核心安全规范：切模型仅更新角色指针与路由，绝不向 JSON 写入明文 Key，且彻底清除顶层平铺残留
+    if "api_key" in updates[LLM_JSON]:
+        del updates[LLM_JSON]["api_key"]
     if routing_cfg:
         routing = copy.deepcopy(routing_cfg)
         routing["planner_model"] = routing["classifier_model"] = target_model

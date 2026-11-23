@@ -51,11 +51,13 @@ class OpenAIInvoker(ModelInvoker):
 
     def __init__(self, client, model_name: str, temperature: float = 0.3,
                  max_tokens: int = 2048, timeout: float = 60.0,
-                 output_recovery: Optional[dict] = None, provider: str = 'openai'):
+                 output_recovery: Optional[dict] = None, provider: str = 'openai',
+                 infer_reasoning_from_name: bool = True):
         super().__init__(model_name, temperature, max_tokens, output_recovery)
         self.client = client
         self.timeout = timeout
         self.provider = provider
+        self.infer_reasoning_from_name = infer_reasoning_from_name
 
     # ---- 流式调用 ----
 
@@ -156,6 +158,7 @@ class OpenAIInvoker(ModelInvoker):
         if stream:
             call_kwargs["stream_options"] = {"include_usage": True}
 
+        has_reasoning_effort = "reasoning_effort" in kwargs
         has_requested_thinking = "thinking" in kwargs
         requested_thinking = kwargs.get("thinking")
         requested_extra_body = kwargs.get("extra_body") or {}
@@ -163,12 +166,20 @@ class OpenAIInvoker(ModelInvoker):
             requested_extra_body = dict(requested_extra_body)
             enabled = requested_extra_body.pop('enable_thinking')
             requested_extra_body.setdefault('thinking', {'type': 'enabled' if enabled else 'disabled'})
-        has_explicit_recovery = has_requested_thinking or bool(requested_extra_body)
-        is_pro = "pro" in self.model_name.lower() or "reasoner" in self.model_name.lower()
+        has_explicit_recovery = has_requested_thinking or bool(requested_extra_body) or has_reasoning_effort
+
+        # 仅当允许启发式推断且未显式指定配置时，才回退至名称猜测
+        is_pro = (
+            ("pro" in self.model_name.lower() or "reasoner" in self.model_name.lower())
+            if self.infer_reasoning_from_name
+            else False
+        )
         if has_explicit_recovery:
             call_kwargs["extra_body"] = dict(requested_extra_body)
             if has_requested_thinking:
                 call_kwargs["extra_body"]["thinking"] = requested_thinking
+            if has_reasoning_effort:
+                call_kwargs["reasoning_effort"] = kwargs["reasoning_effort"]
         elif is_pro:
             call_kwargs["reasoning_effort"] = "high"
             call_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
@@ -235,6 +246,7 @@ class GeminiInvoker(ModelInvoker):
             thinking_config=self._thinking_config(types, kwargs),
         )
 
+        # 受控重试：使用统一错误分类器，非可重试错误（如 401/403/配额耗尽）立即终止，纯频控限流进行受控短退避
         retry_count = max(0, int(kwargs.get("max_retries", 2)))
         max_attempts = retry_count + 1
         response = None
@@ -247,9 +259,11 @@ class GeminiInvoker(ModelInvoker):
                 )
                 break
             except Exception as e:
-                if "429" in str(e) and attempt < max_attempts - 1:
-                    print(f"  ⚠️ [Rate Limit] hit 429, sleeping 35s...")
-                    time.sleep(35)
+                from lite_agent.core.llm_error import classify_llm_error, is_retryable_error
+                cat = classify_llm_error(e)
+                if is_retryable_error(cat) and attempt < max_attempts - 1:
+                    backoff = min(0.5 * (2 ** attempt), 2.0)
+                    time.sleep(backoff)
                 else:
                     raise
 

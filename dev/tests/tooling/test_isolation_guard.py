@@ -31,7 +31,17 @@ def test_is_allowed_host():
     assert is_allowed_host("8.8.8.8") is False
 
 
-def test_is_allowed_sqlite_target_counterexamples(tmp_path):
+@pytest.fixture
+def non_temp_cwd(monkeypatch):
+    """
+    uri=False 时 "file:/outside/..." 是相对字面文件名，按当前工作目录解析。
+    若 pytest 从临时目录启动，它会合法落在临时根下而被放行。
+    固定 cwd 为 "/"（非临时、恒存在），使反例断言与调用目录无关。
+    """
+    monkeypatch.chdir("/")
+
+
+def test_is_allowed_sqlite_target_counterexamples(tmp_path, non_temp_cwd):
     # 1. 前缀伪装 (/tmp-evil) 必须拒绝
     assert is_allowed_sqlite_target("/tmp-evil/example.db") is False
 
@@ -72,7 +82,7 @@ def test_socket_connect_ex_guard_blocks_external_host():
         sock.close()
 
 
-def test_sqlite_connect_guard_blocks_all_bypasses():
+def test_sqlite_connect_guard_blocks_all_bypasses(non_temp_cwd):
     # 1. 拦截 PathLike
     with pytest.raises(RuntimeError, match="测试副作用守卫拦截"):
         sqlite3.connect(Path("/outside/example.db"))

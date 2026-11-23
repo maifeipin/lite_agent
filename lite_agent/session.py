@@ -176,9 +176,13 @@ class SessionManager:
                 pass
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=10.0, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")
-        return conn
+        from lite_agent.core.sqlite_utils import connect_sqlite
+        return connect_sqlite(
+            self.db_path,
+            timeout=10.0,
+            check_same_thread=False,
+            close_on_exit=True,
+        )
 
     # ------------------------------------------------------------------
     #  会话生命周期

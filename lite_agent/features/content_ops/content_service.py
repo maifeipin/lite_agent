@@ -218,9 +218,8 @@ def _normalize_url(url: str) -> str:
 
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(_CACHE_DB_PATH, timeout=10.0, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+    from lite_agent.core.sqlite_utils import connect_sqlite
+    return connect_sqlite(_CACHE_DB_PATH, timeout=10.0, check_same_thread=False, close_on_exit=True)
 
 
 def _cache_init():

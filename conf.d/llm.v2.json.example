@@ -1,0 +1,79 @@
+{
+    "schema_version": 2,
+    "default": "flash",
+    "endpoints": {
+        "deepseek-official": {
+            "provider": "deepseek",
+            "protocol": "openai_chat_completions",
+            "base_url": "https://api.deepseek.com/v1",
+            "credential_ref": "DEEPSEEK_API_KEY",
+            "management_ref": "deepseek-official-balance"
+        },
+        "volcengine-ark": {
+            "provider": "ark",
+            "protocol": "openai_chat_completions",
+            "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+            "credential_ref": "ARK_API_KEY"
+        },
+        "google-gemini": {
+            "provider": "gemini_native",
+            "protocol": "gemini_generate_content",
+            "credential_ref": "GEMINI_API_KEY",
+            "proxy": "socks5://127.0.0.1:1080"
+        }
+    },
+    "models": {
+        "flash": {
+            "endpoint_ref": "deepseek-official",
+            "model": "deepseek-chat",
+            "aliases": ["ds", "deepseek"],
+            "max_tokens": 8192,
+            "capabilities": {
+                "sync": true,
+                "stream": true,
+                "tools": true,
+                "json_object": true,
+                "vision": false
+            },
+            "profiles": {
+                "default": {
+                    "timeout": 60,
+                    "max_retries": 1
+                },
+                "structured_json": {
+                    "timeout": 120,
+                    "max_retries": 0,
+                    "invoke_kwargs": {
+                        "response_format": {"type": "json_object"}
+                    }
+                }
+            }
+        },
+        "doubao-pro": {
+            "endpoint_ref": "volcengine-ark",
+            "model": "doubao-seed-2.0-pro",
+            "aliases": ["doubao", "ark"],
+            "max_tokens": 4096,
+            "capabilities": {
+                "sync": true,
+                "stream": true,
+                "tools": true,
+                "json_object": true,
+                "vision": false
+            }
+        },
+        "gemini-flash": {
+            "endpoint_ref": "google-gemini",
+            "model": "gemini-2.5-flash",
+            "aliases": ["gemini"],
+            "max_tokens": 8192,
+            "capabilities": {
+                "sync": true,
+                "stream": false,
+                "tools": true,
+                "json_object": true,
+                "vision": true
+            }
+        }
+    }
+}

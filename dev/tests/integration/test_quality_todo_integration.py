@@ -12,7 +12,7 @@ from lite_agent.skills.ops_todo import (
     _ensure_schema,
     _render_markdown
 )
-from lite_agent.integrations.mail.quality_todo import consume_quality_events
+from lite_agent.features.billing.quality_todo import consume_quality_events
 
 
 @pytest.fixture

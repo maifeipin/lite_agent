@@ -20,6 +20,7 @@
 """
 
 import ast
+from importlib.util import resolve_name
 import json
 import os
 import subprocess
@@ -38,6 +39,18 @@ PARSER_MODULES = {
     "mail_connect",
     "mail_parse",
     "mail_llm",
+}
+
+DEPRECATED_MAIL_COMPAT_MODULES = {
+    "lite_agent.integrations.mail.quality_todo",
+    "lite_agent.integrations.mail.sync_service",
+    "integrations.mail.quality_todo",
+    "integrations.mail.sync_service",
+}
+
+DEPRECATED_CRON_ENGINE_MODULES = {
+    "lite_agent.core.cron_engine",
+    "core.cron_engine",
 }
 
 
@@ -245,6 +258,26 @@ class ArchitectureVisitor(ast.NodeVisitor):
                     "features/billing 必须通过 MailCLI 调用外部 Parser 读模型，禁止直接连接数据库",
                 )
 
+            # 规则 9: 禁止导入已废弃拆除的邮件兼容垫片模块
+            if mod_name in DEPRECATED_MAIL_COMPAT_MODULES or any(mod_name.startswith(p + ".") for p in DEPRECATED_MAIL_COMPAT_MODULES):
+                self._record_finding(
+                    "RULE_NO_LEGACY_MAIL_COMPAT_IMPORT",
+                    mod_name,
+                    node.lineno,
+                    f"导入已废弃拆除的邮件兼容垫片模块: {mod_name}",
+                    "已拆除的兼容垫片严禁重新引入，质量待办与账单同步请改用 features.billing",
+                )
+
+            # 规则 10: 禁止导入已废弃拆除的 core.cron_engine 兼容包装
+            if mod_name in DEPRECATED_CRON_ENGINE_MODULES or any(mod_name.startswith(p + ".") for p in DEPRECATED_CRON_ENGINE_MODULES):
+                self._record_finding(
+                    "RULE_NO_LEGACY_CRON_ENGINE_IMPORT",
+                    mod_name,
+                    node.lineno,
+                    f"导入已废弃拆除的 cron_engine 兼容包装模块: {mod_name}",
+                    "已拆除的兼容包装严禁重新引入，定时调度请直接使用 lite_agent.services.cron",
+                )
+
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom):
@@ -268,6 +301,48 @@ class ArchitectureVisitor(ast.NodeVisitor):
                 node.lineno,
                 f"from {resolved_mod} import ...",
                 "改用 MailCLI 或 integrations 适配器进行跨仓调用",
+            )
+
+        # 规则 9: 禁止从父包或直接导入已废弃拆除的邮件兼容垫片模块
+        if resolved_mod in ("lite_agent.integrations.mail", "integrations.mail"):
+            for alias in node.names:
+                if alias.name in ("quality_todo", "sync_service"):
+                    full_mod = f"{resolved_mod}.{alias.name}"
+                    self._record_finding(
+                        "RULE_NO_LEGACY_MAIL_COMPAT_IMPORT",
+                        full_mod,
+                        node.lineno,
+                        f"从父包导入已废弃拆除的邮件兼容垫片模块: {full_mod}",
+                        "已拆除的兼容垫片严禁重新引入，质量待办与账单同步请改用 features.billing",
+                    )
+        elif resolved_mod in DEPRECATED_MAIL_COMPAT_MODULES or any(resolved_mod.startswith(p + ".") for p in DEPRECATED_MAIL_COMPAT_MODULES):
+            self._record_finding(
+                "RULE_NO_LEGACY_MAIL_COMPAT_IMPORT",
+                resolved_mod,
+                node.lineno,
+                f"从已废弃拆除的邮件兼容垫片模块导入: {resolved_mod}",
+                "已拆除的兼容垫片严禁重新引入，质量待办与账单同步请改用 features.billing",
+            )
+
+        # 规则 10: 禁止从父包或直接导入已废弃拆除的 core.cron_engine 兼容包装
+        if resolved_mod in ("lite_agent.core", "core"):
+            for alias in node.names:
+                if alias.name == "cron_engine":
+                    full_mod = f"{resolved_mod}.{alias.name}"
+                    self._record_finding(
+                        "RULE_NO_LEGACY_CRON_ENGINE_IMPORT",
+                        full_mod,
+                        node.lineno,
+                        f"从父包导入已废弃拆除的 cron_engine 兼容包装模块: {full_mod}",
+                        "已拆除的兼容包装严禁重新引入，定时调度请直接使用 lite_agent.services.cron",
+                    )
+        elif resolved_mod in DEPRECATED_CRON_ENGINE_MODULES or any(resolved_mod.startswith(p + ".") for p in DEPRECATED_CRON_ENGINE_MODULES):
+            self._record_finding(
+                "RULE_NO_LEGACY_CRON_ENGINE_IMPORT",
+                resolved_mod,
+                node.lineno,
+                f"从已废弃拆除的 cron_engine 兼容包装模块导入: {resolved_mod}",
+                "已拆除的兼容包装严禁重新引入，定时调度请直接使用 lite_agent.services.cron",
             )
 
         # 规则 2: 基础内核代码与公共 channels 严禁导入业务特性、技能与脚本 (支持绝对与相对导入解析)
@@ -392,12 +467,15 @@ class ArchitectureVisitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call):
         func = node.func
         is_dynamic = False
+        is_import_module = False
 
         # 检查是否调用动态导入（支持别名跟踪）
         if isinstance(func, ast.Name):
+            is_import_module = func.id in self.import_module_aliases
             if func.id in self.import_module_aliases or func.id in self.dunder_import_aliases:
                 is_dynamic = True
         elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            is_import_module = func.attr == "import_module" and func.value.id in self.importlib_aliases
             is_dynamic = (
                 (func.attr == "import_module" and func.value.id in self.importlib_aliases)
                 or (func.attr == "__import__" and func.value.id in self.builtins_aliases)
@@ -415,6 +493,20 @@ class ArchitectureVisitor(ast.NodeVisitor):
             else:
                 target_name = "<no_args>"
 
+            # import_module 的相对名称取决于 package；先静态解析再执行所有边界检查。
+            # __import__ 的第二个参数是 globals，不能按 package 处理。
+            if is_import_module and target_name.startswith("."):
+                package_arg = node.args[1] if len(node.args) > 1 else next(
+                    (kw.value for kw in node.keywords if kw.arg == "package"), None
+                )
+                if isinstance(package_arg, ast.Constant) and isinstance(package_arg.value, str) and package_arg.value:
+                    try:
+                        target_name = resolve_name(target_name, package_arg.value)
+                    except (ImportError, ValueError):
+                        target_name = "<dynamic_expression>"
+                else:
+                    target_name = "<dynamic_expression>"
+
             if target_name == "<dynamic_expression>":
                 self._record_finding(
                     "RULE_DYNAMIC_IMPORT_REGISTERED",
@@ -424,6 +516,22 @@ class ArchitectureVisitor(ast.NodeVisitor):
                     "动态导入未知变量/表达式必须在 architecture_rules.json 中显式登记",
                 )
             else:
+                if target_name in DEPRECATED_MAIL_COMPAT_MODULES or any(target_name.startswith(p + ".") for p in DEPRECATED_MAIL_COMPAT_MODULES):
+                    self._record_finding(
+                        "RULE_NO_LEGACY_MAIL_COMPAT_IMPORT",
+                        target_name,
+                        node.lineno,
+                        f"动态导入已废弃拆除的邮件兼容垫片模块: {target_name}",
+                        "已拆除的兼容垫片严禁重新引入，质量待办与账单同步请改用 features.billing",
+                    )
+                if target_name in DEPRECATED_CRON_ENGINE_MODULES or any(target_name.startswith(p + ".") for p in DEPRECATED_CRON_ENGINE_MODULES):
+                    self._record_finding(
+                        "RULE_NO_LEGACY_CRON_ENGINE_IMPORT",
+                        target_name,
+                        node.lineno,
+                        f"动态导入已废弃拆除的 cron_engine 兼容包装模块: {target_name}",
+                        "已拆除的兼容包装严禁重新引入，定时调度请直接使用 lite_agent.services.cron",
+                    )
                 root_mod = target_name.split(".")[0]
                 if (root_mod in PARSER_MODULES
                         or ((self.is_kernel or self.is_channels) and root_mod in ("features", "skills", "scripts"))
@@ -547,6 +655,11 @@ def verify_exception_requirements(
                     return False, "动态加载前缺少无条件 entry_name not in self.allowed_entries 拒绝门禁"
         if not guarded:
             return False, "缺少无条件的白名单拒绝门禁"
+
+    # 3. 对负向测试例外 (已拆除模块)，验证必须在测试函数内部且不能在模块顶层
+    if rule in ("RULE_NO_LEGACY_MAIL_COMPAT_IMPORT", "RULE_NO_LEGACY_CRON_ENGINE_IMPORT"):
+        if scope == "<module>":
+            return False, "已拆除模块的负向反例导入必须在测试函数内部，严禁出现在顶层"
 
     return True, ""
 

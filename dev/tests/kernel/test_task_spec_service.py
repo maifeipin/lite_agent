@@ -213,8 +213,8 @@ def test_author_call_profile_is_configurable_per_model_and_role(tmp_path):
 
     kwargs = invoker.invoke_sync.call_args.kwargs
     assert kwargs["max_tokens"] == 6000
-    assert kwargs["timeout"] == 45
-    assert kwargs["max_retries"] == 1
+    assert kwargs["timeout"] == pytest.approx(45, abs=0.05)
+    assert kwargs["max_retries"] == 0  # Gateway owns the configured retry.
     assert kwargs["response_format"] == {"type": "json_object"}
     assert kwargs["thinking"] == {"type": "disabled"}
 
@@ -241,7 +241,7 @@ def test_task_spec_reuses_generic_structured_json_profile(tmp_path):
         "pro", "structured_json"
     )
     assert kwargs["max_tokens"] == 7000
-    assert kwargs["timeout"] == 75.0
+    assert kwargs["timeout"] == pytest.approx(75.0, abs=0.05)
     assert kwargs["response_format"] == {"type": "json_object"}
     assert kwargs["thinking"] == {"type": "disabled"}
 
@@ -307,8 +307,8 @@ def test_task_spec_profile_merges_model_default_and_role_overrides(tmp_path):
 
     kwargs = invoker.invoke_sync.call_args.kwargs
     assert kwargs["max_tokens"] == 7000
-    assert kwargs["timeout"] == 45
-    assert kwargs["max_retries"] == 1
+    assert kwargs["timeout"] == pytest.approx(45, abs=0.05)
+    assert kwargs["max_retries"] == 0  # Gateway owns the configured retry.
     assert kwargs["response_format"] == {"type": "json_object"}
     assert kwargs["thinking"] == {"type": "auto"}
     assert kwargs["temperature_hint"] == "stable"

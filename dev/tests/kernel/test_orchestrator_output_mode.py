@@ -2,7 +2,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 from lite_agent.core.task_orchestrator import TaskOrchestrator
-from lite_agent.core.task_result import TaskResult
+from lite_agent.contracts.result import TaskResult
 from lite_agent.features.billing.workflow import BillingWorkflow
 from lite_agent.services.workflows import default_workflow_registry
 

@@ -21,6 +21,59 @@ from typing import Dict, Any, List, Optional, Tuple, Union
 logger = logging.getLogger("integrations.phone_app.worker.drivers.handsets")
 
 
+# 设备就绪失败的稳定错误码 (C03: 离线原因必须可诊断)。
+# 供 Worker 上报、中枢透传与前端展示使用，避免前端解析中文句子。
+DEVICE_ERROR_CODES: Dict[str, str] = {
+    "hs_missing": "Mac 未安装或未找到 handsets CLI",
+    "adb_missing": "Mac 未安装或未找到 adb",
+    "adb_no_device": "ADB 未识别到设备 (未插线或手机未连接)",
+    "adb_unauthorized": "手机未授权 USB 调试",
+    "adb_error": "ADB 检测异常",
+    "hs_daemon_unbound": "hs 守护进程未绑定该设备 (需先执行 hs use)",
+    "hs_driver_error": "handsets 驱动启动失败",
+    "timeout": "设备检测超时",
+    "unknown": "设备离线 (原因未知)",
+}
+
+
+def classify_ready_error(reason: Optional[str]) -> str:
+    """把 ensure_ready() 的失败原因归并为稳定错误码。
+
+    归类顺序即诊断顺序: hs 可执行文件 → adb 设备/授权 → hs 守护进程 → 兜底。
+    """
+    if not reason:
+        return "unknown"
+    text = str(reason)
+    lowered = text.lower()
+    if "TIMEOUT" in text or "超时" in text or "timed out" in lowered:
+        return "timeout"
+    if "未找到 handsets 可执行文件" in text:
+        return "hs_missing"
+    if "未找到 adb 可执行文件" in text:
+        return "adb_missing"
+    if "未处于 ADB 在线状态" in text:
+        return "adb_unauthorized" if "unauthorized" in lowered else "adb_no_device"
+    if "ADB 检测异常" in text:
+        if "No such file" in text or "not found" in lowered:
+            return "adb_missing"
+        return "adb_error"
+    if "no forwarded daemon" in text:
+        return "hs_daemon_unbound"
+    if "handsets 驱动启动失败" in text:
+        return "hs_driver_error"
+    return "unknown"
+
+
+def format_ready_reason(reason: Optional[str], limit: int = 160) -> str:
+    """压缩失败原因: 折叠换行与多余空白并截断 (hs 的报错常附带整段 usage 帮助)。"""
+    if not reason:
+        return ""
+    collapsed = " ".join(str(reason).split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[:limit] + "…"
+
+
 class BaseDeviceDriver:
     """设备驱动抽象协议。"""
 
@@ -132,21 +185,34 @@ class HandsetsDriver(BaseDeviceDriver):
             return False, f"未找到 handsets 可执行文件: '{self.hs_bin or 'hs'}'，请安装 handsets CLI 或设置 HANDSETS_BIN_PATH"
 
         # 检查 ADB 设备在线状态
+        adb_t = 3.0
+        if deadline is not None:
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                return False, "TIMEOUT: 已超出指定截止时限"
+            adb_t = min(adb_t, rem)
         try:
-            adb_t = 3.0
-            if deadline is not None:
-                rem = deadline - time.monotonic()
-                if rem <= 0:
-                    return False, "TIMEOUT: 已超出指定截止时限"
-                adb_t = min(adb_t, rem)
             adb_res = subprocess.run(
                 ["adb", "-s", self.device_id, "get-state"],
                 shell=False, capture_output=True, text=True, timeout=adb_t
             )
-            if adb_res.returncode != 0 or adb_res.stdout.strip() != "device":
-                return False, f"设备 '{self.device_id}' 未处于 ADB 在线状态 ({adb_res.stdout.strip()})"
+        except subprocess.TimeoutExpired:
+            # ADB 自身超时独立归类，避免被当成未连接或普通异常 (真实诊断源)
+            return False, f"ADB 检测超时: adb get-state 未在 {adb_t}s 内返回"
+        except FileNotFoundError as e:
+            return False, f"ADB 检测异常: 未找到 adb 可执行文件 ({e})"
         except Exception as e:
             return False, f"ADB 检测异常: {e}"
+
+        if adb_res.returncode != 0 or adb_res.stdout.strip() != "device":
+            # ADB 未授权等错误常写入 stderr，必须与 stdout 一并保留，否则误报为"未连接"
+            detail = " | ".join(
+                part for part in (
+                    (adb_res.stdout or "").strip(),
+                    (adb_res.stderr or "").strip(),
+                ) if part
+            ) or "无输出"
+            return False, f"设备 '{self.device_id}' 未处于 ADB 在线状态 ({detail})"
 
         code, out, err = self._run_cmd(["use"], timeout=timeout or 6.0, deadline=deadline)
         code_ping, _, _ = self._run_cmd(["dev", "ping"], timeout=3.0, deadline=deadline)

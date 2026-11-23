@@ -110,7 +110,9 @@ def test_source_owner_policy_is_generic_and_owner_mismatch_does_not_close(tmp_pa
 
 
 def test_platform_boundary_has_no_http_or_billing_rules_in_todo():
-    todo_dir = Path('lite_agent/features/todo') if Path('lite_agent/features/todo').exists() else Path('features/todo')
+    from dev.tests.support.repo_paths import REPO_ROOT
+    todo_dir = REPO_ROOT / 'lite_agent' / 'features' / 'todo'
+    assert (todo_dir / 'service.py').is_file(), f"todo service 缺失: {todo_dir}"
     source=(todo_dir / 'service.py').read_text();tree=ast.parse(source)
     imports=[node.module or '' for node in ast.walk(tree) if isinstance(node,ast.ImportFrom)]
     imports += [a.name for node in ast.walk(tree) if isinstance(node,ast.Import) for a in node.names]

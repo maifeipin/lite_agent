@@ -59,12 +59,12 @@ def register(context: Any) -> None:
         description="运行系统全面健康自检",
         admin_only=True,
     )
-    from lite_agent.features.sys_ops.llm_ops_service import check_deepseek_balance
+    from lite_agent.features.sys_ops.llm_ops_service import llm_check_balance
     context.register_command(
         "/balance",
-        lambda agent, msg, args: check_deepseek_balance(),
+        lambda agent, msg, args: llm_check_balance(),
         category="系统",
-        description="查询 DeepSeek 账户余额",
+        description="查询默认大模型账户余额或状态",
         show_in_dashboard=False,
         guest_ok=False,
     )

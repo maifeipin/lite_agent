@@ -195,19 +195,19 @@ def sync_meili() -> str:
     email_count = 0
     if os.path.exists(_DB_PATH):
         try:
-            conn = sqlite3.connect(_DB_PATH)
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
+            from lite_agent.core.sqlite_utils import connect_sqlite
+            with connect_sqlite(_DB_PATH, row_factory=sqlite3.Row, close_on_exit=True) as conn:
+                cursor = conn.cursor()
 
-            cursor.execute(
-                "SELECT eb.account_name, eb.uid, eb.plain_text, eb.fetched_at, "
-                "es.subject, es.sender, es.email_date, es.category, es.importance, es.summary, es.processed_at "
-                "FROM email_bodies eb "
-                "JOIN email_summaries es ON eb.account_name=es.account_name AND eb.uid=es.uid "
-                "WHERE eb.fetched_at > ? OR es.processed_at > ? ORDER BY MAX(eb.fetched_at, COALESCE(es.processed_at, '1970-01-01')) ASC",
-                (state["last_email_sync"], state["last_email_sync"])
-            )
-            rows = cursor.fetchall()
+                cursor.execute(
+                    "SELECT eb.account_name, eb.uid, eb.plain_text, eb.fetched_at, "
+                    "es.subject, es.sender, es.email_date, es.category, es.importance, es.summary, es.processed_at "
+                    "FROM email_bodies eb "
+                    "JOIN email_summaries es ON eb.account_name=es.account_name AND eb.uid=es.uid "
+                    "WHERE eb.fetched_at > ? OR es.processed_at > ? ORDER BY MAX(eb.fetched_at, COALESCE(es.processed_at, '1970-01-01')) ASC",
+                    (state["last_email_sync"], state["last_email_sync"])
+                )
+                rows = cursor.fetchall()
 
             if rows:
                 docs = []
@@ -244,7 +244,6 @@ def sync_meili() -> str:
                         last_rec = batch[-1]
                         last_time = max(last_rec.get("fetched_at") or "", last_rec.get("processed_at") or "")
                         state["last_email_sync"] = max(state.get("last_email_sync", ""), last_time)
-            conn.close()
         except Exception as e:
             print(f"Error syncing emails: {e}")
 

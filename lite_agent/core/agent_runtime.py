@@ -30,7 +30,7 @@ from lite_agent.core.adaptive_budget import (
     BudgetAction,
     compact_messages,
 )
-from lite_agent.core.execution import ExecutionContext, ExecutionResult, ExecutionSource, ActorType
+from lite_agent.contracts.execution import ExecutionContext, ExecutionResult, ExecutionSource, ActorType
 from lite_agent.core.loop_detector import LoopDetector
 from lite_agent.core.model_event import ModelEvent, ModelEventType
 from lite_agent.core.model_invoker import ModelInvoker
@@ -72,7 +72,7 @@ class RuntimeEvent:
                 f"RuntimeEvent.type 必须是 RuntimeEventType 枚举，"
                 f"收到 {self.type!r}"
             )
-        from lite_agent.core.execution import _deep_freeze
+        from lite_agent.contracts.execution import _deep_freeze
         object.__setattr__(self, 'data', _deep_freeze(self.data))
         if not isinstance(self.meta, MappingProxyType):
             object.__setattr__(self, 'meta', _deep_freeze(self.meta) if isinstance(self.meta, dict) else MappingProxyType({}))
@@ -282,7 +282,7 @@ class AgentRuntime:
                     yield from self._consume_sync(
                         state, call_tools, step_usage, tool_calls_acc,
                         call_max_tokens, call_overrides=recovery_kwargs,
-                        input_messages=model_messages,
+                        input_messages=model_messages, timeout=timeout,
                     )
             except BudgetAdmissionError as e:
                 yield RuntimeEvent(type=RuntimeEventType.TOKEN_BUDGET_EXCEEDED,
@@ -529,6 +529,8 @@ class AgentRuntime:
           - USAGE 事件延迟到流成功结束后才发射，避免重试时重复计费
         """
         last_exception: Exception = None
+        deadline = time.monotonic() + timeout
+        invocation_id = uuid.uuid4().hex
         for attempt in range(self.max_retries + 1):
             # 本次尝试的局部累积器：仅在成功后合并到全局累积器
             attempt_tool_calls: dict = {}
@@ -536,12 +538,19 @@ class AgentRuntime:
             has_output = False  # 是否已产出 TEXT/REASONING/TOOL_CALL_DELTA
 
             try:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("LLM stream invocation deadline exceeded")
                 invocation_kwargs = dict(self.call_kwargs)
                 invocation_kwargs.update(call_overrides or {})
+                yield RuntimeEvent(type=RuntimeEventType.BUDGET_DECISION, data={
+                    'action': 'model_attempt', 'invocation_id': invocation_id,
+                    'attempt': attempt + 1, 'status': 'started',
+                })
                 for event in self.gateway.invoke_stream(
                     input_messages or state.messages, tools,
                     invoker=self.model_invoker,
-                    timeout=timeout, max_tokens=max_tokens,
+                    timeout=remaining, max_tokens=max_tokens,
                     **invocation_kwargs,
                 ):
                     if event.type == ModelEventType.TEXT:
@@ -582,19 +591,39 @@ class AgentRuntime:
                 # 延迟发射 USAGE，避免重试时重复计费
                 if attempt_usage:
                     yield RuntimeEvent(type=RuntimeEventType.USAGE, data=dict(step_usage))
+                yield RuntimeEvent(type=RuntimeEventType.BUDGET_DECISION, data={
+                    'action': 'model_attempt', 'invocation_id': invocation_id,
+                    'attempt': attempt + 1, 'status': 'succeeded',
+                })
                 return
             except Exception as e:
                 last_exception = e
+                from lite_agent.core.llm_error import classify_llm_error, is_retryable_error
+                err_category = classify_llm_error(e)
+                yield RuntimeEvent(type=RuntimeEventType.BUDGET_DECISION, data={
+                    'action': 'model_attempt', 'invocation_id': invocation_id,
+                    'attempt': attempt + 1, 'status': 'failed',
+                    'category': err_category.value,
+                    'usage_unknown': not bool(attempt_usage),
+                    'observed_usage': dict(attempt_usage),
+                })
                 # 已向调用方产出内容 -> 不可重试（流已部分发送）
                 if has_output:
                     raise
-                # 不可重试的异常类型（4xx 鉴权/限流等）
+                # 跨协议统一错误分类检查：401/403/额度耗尽/400等非重试类型绝对不重试
+                if not is_retryable_error(err_category):
+                    raise
+                # 不可重试的异常类型（调用方特定配置）
                 if isinstance(e, self.non_retryable_exceptions):
                     raise
                 # 已用完重试次数
                 if attempt >= self.max_retries:
                     raise
-                # 可以重试：重置 finish_reason，进入下一次尝试
+                # 可以重试：受控退避后进入下一次尝试
+                delay = LLMGateway._retry_delay(e, attempt)
+                if time.monotonic() + delay >= deadline:
+                    raise
+                time.sleep(delay)
                 state.finish_reason = "stop"
                 continue
         # 不应到达此处
@@ -605,10 +634,13 @@ class AgentRuntime:
                       step_usage: dict, tool_calls_acc: dict,
                       max_tokens: int,
                       call_overrides: dict = None,
-                      input_messages: list = None) -> Iterator[RuntimeEvent]:
+                      input_messages: list = None,
+                      timeout: float = 60.0) -> Iterator[RuntimeEvent]:
         """同步消费 invoke_sync 返回的 dict，转换为 RuntimeEvent。"""
         invocation_kwargs = dict(self.call_kwargs)
         invocation_kwargs.update(call_overrides or {})
+        invocation_kwargs.setdefault('max_retries', self.max_retries)
+        invocation_kwargs.setdefault('timeout', timeout)
         result = self.gateway.invoke_sync(
             input_messages or state.messages, tools,
             invoker=self.model_invoker, max_tokens=max_tokens,

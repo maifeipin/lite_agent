@@ -44,22 +44,38 @@ def is_gemini_driver(driver: str) -> bool:
     return driver == DRIVER_GEMINI
 
 
-def supports_vision(tags) -> bool:
-    """统一的能力判断：是否支持图片输入。"""
-    tags = set(tags or [])
+def supports_vision(tags_or_cfg) -> bool:
+    """统一的能力判断：是否支持图片输入。
+    兼容 tags 列表或包含 tags / capabilities 的模型配置字典。
+    """
+    if isinstance(tags_or_cfg, dict):
+        caps = tags_or_cfg.get("capabilities") or {}
+        if caps.get("vision") or caps.get("multimodal"):
+            return True
+        tags = set(tags_or_cfg.get("tags") or [])
+    elif isinstance(tags_or_cfg, (list, tuple, set)):
+        tags = set(tags_or_cfg)
+    else:
+        tags = set()
     return CAP_VISION in tags or CAP_MULTIMODAL in tags
 
 
-def validate_model_config(config: dict) -> list[tuple[str, str]]:
+def validate_model_config(config: dict, require_credentials: bool = True) -> list[tuple[str, str]]:
     """校验模型相关配置，返回 [(level, message)]。level 为 error 或 warning。
 
-    error 级：缺 driver、非法 driver、引用不存在的模型、主/回退越界。
+    error 级：缺 driver、非法 driver、引用不存在的模型、主/回退越界、凭据格式非法、协议不匹配。
     warning 级：未知能力标签（不阻断启动，但提示拼写错误）。
     """
     issues: list[tuple[str, str]] = []
     llm = config.get("llm", {}) or {}
     models = llm.get("models", {}) or {}
     routing = config.get("task_routing", {}) or {}
+
+    schema_version = llm.get("schema_version", 1)
+    if type(schema_version) is not int or schema_version not in (1, 2):
+        return [("error", "llm.schema_version 必须为受支持的整数版本 1 或 2")]
+    if schema_version == 2 and not isinstance(llm.get("endpoints"), dict):
+        return [("error", "Schema v2 必须配置 endpoints 对象")]
 
     if not models:
         issues.append(("error", "llm.models 为空，未配置任何模型"))
@@ -70,6 +86,15 @@ def validate_model_config(config: dict) -> list[tuple[str, str]]:
 
     def _warning(msg: str):
         issues.append(("warning", msg))
+
+    from lite_agent.core.model_endpoint import (
+        PROTOCOL_GEMINI,
+        PROTOCOL_OPENAI,
+        SUPPORTED_PROTOCOLS,
+        extract_env_var_name,
+        is_valid_credential_ref,
+        resolve_credential,
+    )
 
     # 模型规范名和自然语言别名必须一一对应，避免用户锁定模型时歧义。
     from lite_agent.core.model_policy import normalize_model_alias
@@ -96,23 +121,79 @@ def validate_model_config(config: dict) -> list[tuple[str, str]]:
     # 先收集缺失项，再按凭据域聚合报错，避免为同一个缺失密钥重复输出。
     missing_api_keys: dict[tuple[str, str], list[str]] = {}
 
-    # 1. 每个模型的 driver 与必需字段
+    endpoints = llm.get("endpoints", {}) or {}
+    schema_version = llm.get("schema_version", 1)
+    if schema_version >= 2 and endpoints:
+        for ep_name, ep_cfg in endpoints.items():
+            if not isinstance(ep_cfg, dict):
+                _error(f"端点 {ep_name!r} 的配置不是对象")
+                continue
+            prov = ep_cfg.get("provider", "")
+            if not prov or prov not in DRIVERS:
+                _error(f"端点 {ep_name!r} 缺少有效 provider（可选: {', '.join(DRIVERS)}）")
+
+            # protocol 强校验
+            proto = ep_cfg.get("protocol")
+            if not proto:
+                _error(f"端点 {ep_name!r} 缺少 protocol 协议声明")
+            elif proto not in SUPPORTED_PROTOCOLS:
+                _error(f"端点 {ep_name!r} 使用了不支持的协议 {proto!r}（可选: {', '.join(sorted(SUPPORTED_PROTOCOLS))}）")
+            else:
+                if is_gemini_driver(prov) and proto != PROTOCOL_GEMINI:
+                    _error(f"端点 {ep_name!r} 的 provider {prov!r} 与 protocol {proto!r} 不兼容，Gemini 需使用 {PROTOCOL_GEMINI!r}")
+                elif not is_gemini_driver(prov) and proto != PROTOCOL_OPENAI:
+                    _error(f"端点 {ep_name!r} 的 provider {prov!r} 与 protocol {proto!r} 不兼容，应使用 {PROTOCOL_OPENAI!r}")
+
+            if not is_gemini_driver(prov) and not ep_cfg.get("base_url"):
+                _error(f"端点 {ep_name!r} 缺少 base_url")
+
+            # v2 严禁明文 api_key
+            if "api_key" in ep_cfg:
+                _error(f"端点 {ep_name!r} (Schema v2) 禁止直接配置明文 api_key，必须使用 credential_ref 环境变量引用")
+            if (ep_cfg.get("extra") or {}).get("legacy_key"):
+                _error(f"端点 {ep_name!r} (Schema v2) 禁止 legacy_key 凭据兜底")
+            management = ep_cfg.get("management_ref")
+            if management and (management != "deepseek-official-balance" or prov != DRIVER_DEEPSEEK):
+                _error(f"端点 {ep_name!r} 的 management_ref 与 provider 不匹配或尚不支持")
+
+            cred_ref = ep_cfg.get("credential_ref")
+            if not cred_ref:
+                _error(f"端点 {ep_name!r} 缺少 credential_ref 凭据引用")
+            elif not is_valid_credential_ref(cred_ref):
+                _error(f"端点 {ep_name!r} 的 credential_ref 格式非法，必须为合法环境变量名")
+            elif require_credentials:
+                var_name = extract_env_var_name(cred_ref)
+                if not resolve_credential(var_name):
+                    _error(f"端点 {ep_name!r} 引用的凭据环境变量 {var_name!r} 未配置或为空")
+
+    # 1. 每个模型的 driver/endpoint 与必需字段
     for name, cfg in models.items():
         if not isinstance(cfg, dict):
             _error(f"模型 {name!r} 的配置不是对象")
             continue
-        driver = cfg.get("driver", "")
-        if not driver:
-            _error(f"模型 {name!r} 缺少显式 driver 字段（可选: {', '.join(DRIVERS)}）")
-        elif driver not in DRIVERS:
-            _error(f"模型 {name!r} 的 driver {driver!r} 非法（可选: {', '.join(DRIVERS)}）")
+        ep_ref = cfg.get("endpoint_ref")
+        if ep_ref:
+            if ep_ref not in endpoints:
+                _error(f"模型 {name!r} 引用了未配置的 endpoint: {ep_ref!r}")
+            # V1: 杜绝 v2 混合配置冲突
+            conflicting_keys = [k for k in ("driver", "base_url", "api_key", "proxy") if k in cfg]
+            if conflicting_keys:
+                _error(f"模型 {name!r} 既配置了 endpoint_ref 又声明了内联字段 ({', '.join(conflicting_keys)})，二者冲突")
+        else:
+            if schema_version == 2:
+                _error(f"模型 {name!r} (Schema v2) 必须使用 endpoint_ref")
+            driver = cfg.get("driver", "")
+            if not driver:
+                _error(f"模型 {name!r} 缺少显式 driver 或 endpoint_ref 字段（可选: {', '.join(DRIVERS)}）")
+            elif driver not in DRIVERS:
+                _error(f"模型 {name!r} 的 driver {driver!r} 非法（可选: {', '.join(DRIVERS)}）")
+            if not cfg.get("api_key"):
+                credential_scope = (driver, cfg.get("base_url", ""))
+                missing_api_keys.setdefault(credential_scope, []).append(name)
+            if driver and not is_gemini_driver(driver) and not cfg.get("base_url"):
+                _error(f"模型 {name!r} 缺少 base_url（OpenAI-compatible 必需）")
         if not cfg.get("model"):
             _error(f"模型 {name!r} 缺少 model 字段（实际 API model 名）")
-        if not cfg.get("api_key"):
-            credential_scope = (driver, cfg.get("base_url", ""))
-            missing_api_keys.setdefault(credential_scope, []).append(name)
-        if driver and not is_gemini_driver(driver) and not cfg.get("base_url"):
-            _error(f"模型 {name!r} 缺少 base_url（OpenAI-compatible 必需）")
         for tag in (cfg.get("tags") or []):
             if tag not in KNOWN_CAPABILITIES:
                 _warning(f"模型 {name!r} 含未知能力标签 {tag!r}")

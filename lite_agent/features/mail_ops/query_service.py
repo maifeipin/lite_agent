@@ -9,7 +9,11 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 
 from lite_agent.core.utils.hedgedoc import upload_to_hedgedoc
-from lite_agent.integrations.mail.paths import get_statement_db_path, get_parser_script_dir
+from lite_agent.integrations.mail.paths import (
+    get_statement_db_path,
+    get_parser_script_dir,
+    get_parser_python_executable,
+)
 from lite_agent.integrations.mail.client import MailCLI, MailCLIError
 
 
@@ -24,7 +28,8 @@ def mail_list(limit: int = 10, account_name: Optional[str] = None) -> str:
     if not os.path.exists(mail_client_py):
         return "❌ 找不到邮件脚本。"
 
-    cmd = [sys.executable, mail_client_py, "read", str(limit)]
+    py_bin = get_parser_python_executable(script_dir)
+    cmd = [py_bin, mail_client_py, "read", str(limit)]
     if account_name:
         cmd.append(account_name)
 
@@ -207,8 +212,9 @@ def mail_reprocess() -> str:
         env["LLM_MODEL"] = llm.get("model", "gpt-4o-mini")
     env.update(build_llm_pool_env(cfg))
 
+    py_bin = get_parser_python_executable(script_dir)
     r = subprocess.run(
-        [sys.executable, mail_client_py, "reprocess_failed"],
+        [py_bin, mail_client_py, "reprocess_failed"],
         capture_output=True, text=True, timeout=300,
         cwd=script_dir, env=env
     )

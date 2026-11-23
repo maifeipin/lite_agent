@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 import socket
 import time
 import pytest
+from dev.tests.support.repo_paths import REPO_ROOT
 from lite_agent.app.bootstrap import create_app
 from lite_agent.app.plugins import PluginContext, PluginLoader
 from lite_agent.core.skill_engine import SkillEngine
@@ -49,7 +50,7 @@ assert threading.active_count() == initial_threads, f"Threads leaked on import o
 print("OK")
 """,
     ]
-    res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=10, cwd=REPO_ROOT)
     assert res.returncode == 0, f"Plugin {plugin_entry} import failed: {res.stderr}"
     assert "OK" in res.stdout
 
@@ -101,7 +102,7 @@ def test_physical_absence_of_features_and_skills_core_smoke(tmp_path):
     core_pkg_dir = core_root / "lite_agent"
     core_pkg_dir.mkdir(parents=True, exist_ok=True)
 
-    src_lite_agent = Path("lite_agent")
+    src_lite_agent = REPO_ROOT / "lite_agent"
     essential_dirs = ["app", "contracts", "services", "core", "channels", "integrations", "memory_engine"]
     for d in essential_dirs:
         src_d = src_lite_agent / d
@@ -110,13 +111,13 @@ def test_physical_absence_of_features_and_skills_core_smoke(tmp_path):
 
     for f in ["__init__.py", "cli.py", "agent.py", "session.py", "security.py"]:
         src_f = src_lite_agent / f
-        if src_f.exists():
-            shutil.copy2(src_f, core_pkg_dir / f)
+        assert src_f.is_file(), f"core 必需包文件缺失: {src_f}"
+        shutil.copy2(src_f, core_pkg_dir / f)
 
-    essential_files = ["main.py", "agent.py", "session.py", "security.py"]
-    for f in essential_files:
-        if Path(f).exists():
-            shutil.copy2(f, core_root / f)
+    # 根目录垫片 agent.py / session.py / security.py 已移除，仅保留 main.py 入口
+    src_main = REPO_ROOT / "main.py"
+    assert src_main.is_file(), f"core 入口缺失: {src_main}"
+    shutil.copy2(src_main, core_root / "main.py")
 
     # 物理断言：确保 features、skills 和 Parser 绝对缺席
     assert not (core_root / "lite_agent" / "features").exists()

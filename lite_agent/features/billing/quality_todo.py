@@ -125,11 +125,11 @@ def consume_quality_events(
     time_fn: Optional[Any] = None
 ) -> Dict[str, Any]:
     """拉取未确认的质量事件，幂等写入 Todo 数据库，并在成功后执行 ack。"""
-    _time_mod = time_fn or time
-    _upsert_fn = upsert_fn or upsert_source_todo
-    _resolve_fn = resolve_fn or resolve_source_todo
+    _time_mod = time if time_fn is None else time_fn
+    _upsert_fn = upsert_source_todo if upsert_fn is None else upsert_fn
+    _resolve_fn = resolve_source_todo if resolve_fn is None else resolve_fn
 
-    cli = client or MailCLI()
+    cli = MailCLI() if client is None else client
     stats = {
         "total": 0,
         "created": 0,
