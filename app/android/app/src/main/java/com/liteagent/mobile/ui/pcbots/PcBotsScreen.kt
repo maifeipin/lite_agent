@@ -3,6 +3,7 @@ package com.liteagent.mobile.ui.pcbots
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.graphics.Bitmap
+import android.view.ViewGroup
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -238,6 +239,10 @@ fun PcBotsScreen(
                     modifier = Modifier.fillMaxSize(),
                     factory = { ctx ->
                         WebView(ctx).apply {
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
                             setBackgroundColor(android.graphics.Color.parseColor("#0B1120"))
                             settings.apply {
                                 javaScriptEnabled = true
@@ -248,7 +253,7 @@ fun PcBotsScreen(
                                 allowContentAccess = false
                                 loadsImagesAutomatically = true
                                 useWideViewPort = true
-                                loadWithOverviewMode = true
+                                loadWithOverviewMode = false
                             }
                             webChromeClient = object : WebChromeClient() {
                                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
