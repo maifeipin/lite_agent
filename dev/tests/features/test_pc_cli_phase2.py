@@ -14,7 +14,7 @@ from lite_agent.features.pc_cli.hub import PcCliHub
 from lite_agent.features.pc_cli.notifier import PcCliNotifier
 from lite_agent.features.pc_cli.repository import PcCliRepository
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[3]
 MOBILE_DIR = REPO_ROOT / "web_dashboard" / "mobile"
 
 
