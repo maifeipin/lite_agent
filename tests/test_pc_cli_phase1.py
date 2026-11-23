@@ -22,7 +22,7 @@ import pytest
 from lite_agent.app.bootstrap import create_app
 from lite_agent.features.pc_cli.contracts import ApprovalType, BotStatus, NodeStatus, TurnStatus
 from lite_agent.features.pc_cli.daemon._ws_client import StdlibWsClient
-from lite_agent.features.pc_cli.daemon.adapters.agy_adapter import AgyCliAdapter, parse_agy_json_line
+from lite_agent.features.pc_cli.daemon.adapters.agy_adapter import AgyCliAdapter, parse_agy_json_line, unwrap_agy_event
 from lite_agent.features.pc_cli.daemon.adapters.base import BaseCliAdapter, EventCallback, TurnResult
 from lite_agent.features.pc_cli.daemon.adapters.codex_adapter import (
     CodexCliAdapter,
@@ -157,17 +157,29 @@ def test_codex_and_agy_parsers_and_args():
     codex = CodexCliAdapter(executable="codex", env={})
     c_new = codex.build_args(native_session_id=None, approval_mode="auto", model="o3")
     exec_idx = c_new.index("exec")
-    assert c_new[exec_idx:exec_idx + 4] == ["exec", "--json", "--skip-git-repo-check", "--full-auto"]
+    assert c_new[exec_idx:exec_idx + 7] == [
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "-c",
+        'approval_policy="never"',
+        "-c",
+        'sandbox_mode="workspace-write"',
+    ]
+    assert "--full-auto" not in c_new
     assert c_new[-3:] == ["-m", "o3", "-"]
     c_res = codex.build_args(native_session_id="th_1", approval_mode="ask", model=None)
     res_idx = c_res.index("exec")
     assert c_res[res_idx:res_idx + 5] == ["exec", "resume", "--json", "--skip-git-repo-check", "--all"]
     assert c_res[-2:] == ["th_1", "-"]
+    c_res_auto = codex.build_args(native_session_id="th_1", approval_mode="auto", model=None)
+    assert 'approval_policy="never"' in c_res_auto and 'sandbox_mode="workspace-write"' in c_res_auto
 
     parsed = parse_codex_json_line('{"type":"thread.started","thread_id":"th_abc"}\n')
     assert parsed and parsed["thread_id"] == "th_abc"
     tool = extract_codex_tool_payload({"type": "command_execution", "id": "c1", "command": "ls", "exit_code": 0, "output": "a\nb"})
     assert tool and tool["tool_name"] == "command_execution" and tool["is_error"] is False
+    assert extract_codex_tool_payload({"type": "error", "id": "item_0", "message": "deprecated config"}) is None
 
     agy = AgyCliAdapter(executable="agy", env={})
     conv_uuid = "12345678-1234-5678-1234-567812345678"
@@ -177,6 +189,10 @@ def test_codex_and_agy_parsers_and_args():
     assert "--add-dir" in agy_args and "/tmp/proj" in agy_args
     assert "--dangerously-skip-permissions" in agy_args and "--model" in agy_args
     assert parse_agy_json_line('{"conversation_id":"c1","text_delta":"hi"}')["text_delta"] == "hi"
+    env_step = unwrap_agy_event({"event": "step_update", "step_update": {"text_delta": "hello", "step_index": 1}})
+    assert env_step["text_delta"] == "hello"
+    env_res = unwrap_agy_event({"event": "result", "result": {"finished_reason": "stop", "response": "done"}})
+    assert env_res["response"] == "done"
 
 
 def test_env_probe_path_safety():

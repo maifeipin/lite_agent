@@ -51,6 +51,17 @@ def parse_agy_json_line(line: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def unwrap_agy_event(ev: Dict[str, Any]) -> Dict[str, Any]:
+    """兼容 agy 1.5+ 外层信封格式: {"event":"step_update","step_update":{...}} / {"event":"result","result":{...}} / {"event":"init","init":{...}}。"""
+    inner_event = str(ev.get("event") or "")
+    if inner_event and isinstance(ev.get(inner_event), dict):
+        return ev[inner_event]
+    for key in ("step_update", "result", "init"):
+        if isinstance(ev.get(key), dict):
+            return ev[key]
+    return ev
+
+
 class AgyCliAdapter(BaseCliAdapter):
     """AGY CLI Phase 1 流式 JSONL 适配器。"""
 
@@ -347,21 +358,23 @@ class AgyCliAdapter(BaseCliAdapter):
                     ev = parse_agy_json_line(raw.decode("utf-8", errors="replace"))
                     if not ev:
                         continue
-                    if ev.get("conversation_id"):
-                        conv_id = str(ev["conversation_id"])
+                    body = unwrap_agy_event(ev)
 
-                    step_type = str(ev.get("step_type") or "")
-                    state = str(ev.get("state") or "")
+                    if body.get("conversation_id") or ev.get("conversation_id"):
+                        conv_id = str(body.get("conversation_id") or ev.get("conversation_id"))
 
-                    if ev.get("text_delta"):
-                        delta = str(ev["text_delta"])
+                    step_type = str(body.get("step_type") or "")
+                    state = str(body.get("state") or "")
+
+                    if body.get("text_delta"):
+                        delta = str(body["text_delta"])
                         streamed_parts.append(delta)
                         await on_event("text_delta", {"delta": delta})
 
-                    if ev.get("tool_name") or isinstance(ev.get("tool_info"), dict):
-                        tinfo = ev.get("tool_info") if isinstance(ev.get("tool_info"), dict) else {}
-                        tname = str(ev.get("tool_name") or tinfo.get("name") or "tool")
-                        tid = str(ev.get("step_index") or "")
+                    if body.get("tool_name") or isinstance(body.get("tool_info"), dict):
+                        tinfo = body.get("tool_info") if isinstance(body.get("tool_info"), dict) else {}
+                        tname = str(body.get("tool_name") or tinfo.get("name") or "tool")
+                        tid = str(body.get("step_index") or "")
                         if state == "ACTIVE":
                             await on_event("tool_start", {
                                 "tool_id": tid,
@@ -376,16 +389,16 @@ class AgyCliAdapter(BaseCliAdapter):
                                 "is_error": state == "ERROR" or bool(tinfo.get("error")),
                             })
 
-                    if step_type == "thinking" and ev.get("text"):
-                        await on_event("thinking", {"text": truncate_text(ev["text"])})
+                    if step_type == "thinking" and body.get("text"):
+                        await on_event("thinking", {"text": truncate_text(body["text"])})
 
                     # 终态回执校验（借鉴 tarobird：优先以 finished_reason 为准）
-                    if "finished_reason" in ev or "response" in ev:
-                        if ev.get("finished_reason") == "error":
-                            finished_error = truncate_text(ev.get("error") or "AGY returned error", 1000)
+                    if "finished_reason" in body or "response" in body:
+                        if body.get("finished_reason") == "error":
+                            finished_error = truncate_text(body.get("error") or "AGY returned error", 1000)
                             await on_event("error", {"message": finished_error})
-                        if isinstance(ev.get("response"), str) and ev["response"].strip():
-                            final_response = ev["response"]
+                        if isinstance(body.get("response"), str) and body["response"].strip():
+                            final_response = body["response"]
 
                 rc_inner = await proc.wait()
                 try:

@@ -53,7 +53,7 @@ def parse_codex_json_line(line: str) -> Optional[Dict[str, Any]]:
 
 def extract_codex_tool_payload(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     itype = str(item.get("type") or "")
-    if itype in ("agent_message", "reasoning", "user_message", ""):
+    if itype in ("agent_message", "reasoning", "user_message", "error", ""):
         return None
     tool_id = str(item.get("id") or "")
     if itype == "command_execution":
@@ -111,10 +111,13 @@ class CodexCliAdapter(BaseCliAdapter):
         approval_mode: str,
         model: Optional[str],
     ) -> List[str]:
-        """借鉴 tarobird process-adapter.ts：加 --skip-git-repo-check，prompt 走 stdin (`-`)。"""
+        """借鉴 tarobird process-adapter.ts：加 --skip-git-repo-check，prompt 走 stdin (`-`)。
+        codex-cli 0.171+ 已移除 `--full-auto`，统一使用 `-c approval_policy="never" -c sandbox_mode="workspace-write"`
+        以同时兼容 `codex exec` 与 `codex exec resume`。
+        """
         flags: List[str] = []
         if approval_mode == "auto":
-            flags.append("--full-auto")
+            flags.extend(["-c", 'approval_policy="never"', "-c", 'sandbox_mode="workspace-write"'])
         if model:
             flags.extend(["-m", model])
         if native_session_id:
@@ -224,6 +227,10 @@ class CodexCliAdapter(BaseCliAdapter):
                 elif itype == "agent_message" and item.get("text"):
                     last_message = str(item["text"])
                     await on_event("assistant_message", {"text": truncate_text(last_message)})
+                elif itype == "error":
+                    msg = str(item.get("message") or item.get("text") or "").strip()
+                    if msg:
+                        await on_event("error", {"message": truncate_text(msg, 2000), "non_fatal": True})
                 else:
                     tool_payload = extract_codex_tool_payload(item)
                     if tool_payload:
@@ -413,6 +420,10 @@ class CodexCliAdapter(BaseCliAdapter):
                         elif itype == "agent_message" and item.get("text"):
                             last_message = str(item["text"])
                             await on_event("assistant_message", {"text": truncate_text(last_message)})
+                        elif itype == "error":
+                            msg = str(item.get("message") or item.get("text") or "").strip()
+                            if msg:
+                                await on_event("error", {"message": truncate_text(msg, 2000), "non_fatal": True})
                         else:
                             tool_payload = extract_codex_tool_payload(item)
                             if tool_payload:
