@@ -244,7 +244,7 @@ def create_sanitized_snapshots(agent_root: str, parser_root: str) -> Tuple[str, 
                         should_copy = True
                     elif d == 'conf.d' and f.endswith('.json.example'):
                         should_copy = True
-                    elif d == 'web_dashboard' and any(f.endswith(ext) for ext in ('.html', '.css', '.js')):
+                    elif d == 'web_dashboard' and (any(f.endswith(ext) for ext in ('.html', '.css', '.js')) or f == 'manifest.json'):
                         should_copy = True
 
                     if should_copy:
