@@ -1,0 +1,11 @@
+{
+  "name": "Lite Agent PC CLI",
+  "short_name": "PC Bots",
+  "description": "多 PC (Win/Mac) Codex & AGY CLI 手机管理中枢",
+  "start_url": "/mobile/",
+  "scope": "/mobile/",
+  "display": "standalone",
+  "background_color": "#0a0b10",
+  "theme_color": "#0a0b10",
+  "orientation": "portrait"
+}

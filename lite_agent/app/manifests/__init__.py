@@ -58,4 +58,10 @@ FULL_MODE_PLUGINS: List[Dict[str, Any]] = [
         "description": "Phone App 执行层、审核工作流与真机调度中枢",
         "dependencies": [],
     },
+    {
+        "name": "pc_cli",
+        "entry": "lite_agent.features.pc_cli",
+        "description": "多 PC CLI (Codex/AGY) 手机管理中枢、守护进程与异步事件流",
+        "dependencies": [],
+    },
 ]

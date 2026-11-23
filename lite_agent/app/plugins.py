@@ -148,6 +148,7 @@ class PluginContext:
             "content_ops": ["rss", "content"],
             "billing": ["billing"],
             "phone_app": ["phone_app", "database"],
+            "pc_cli": ["pc_cli", "llm", "task_routing"],
         }
         for k in plugin_extra_keys.get(name, []):
             if k in self._raw_config:
