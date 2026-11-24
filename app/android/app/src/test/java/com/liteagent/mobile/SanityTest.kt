@@ -79,6 +79,7 @@ class SanityTest {
     @Test
     fun navigation_tabs_complete() {
         assertEquals(5, NavigationTab.values().size)
+        assertEquals(NavigationTab.PC_BOTS, NavigationTab.values().first())
         val tabNames = NavigationTab.values().map { it.name }
         assertTrue(tabNames.contains("CHAT"))
         assertTrue(tabNames.contains("TODOS"))

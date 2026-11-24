@@ -193,10 +193,10 @@ class MainActivity : ComponentActivity() {
 }
 
 enum class NavigationTab(val label: String, val shortLabel: String, val icon: ImageVector) {
+    PC_BOTS("PC 终端 (Bots)", "PC Bots", Icons.Default.Terminal),
     CHAT("AI 助理", "助理", Icons.Default.Chat),
     TODOS("待办日程 (GTD)", "待办", Icons.Default.CheckCircle),
     MEETINGS("会审与执行", "会审&执行", Icons.Default.Groups),
-    PC_BOTS("PC 终端 (Bots)", "PC Bots", Icons.Default.Terminal),
     DISCOVER("发现与概览", "发现", Icons.Default.Explore)
 }
 
@@ -218,7 +218,7 @@ fun MainAppScaffold(
     updateController: UpdateController,
     onLogout: () -> Unit = {}
 ) {
-    var selectedTab by remember { mutableStateOf(NavigationTab.CHAT) }
+    var selectedTab by remember { mutableStateOf(NavigationTab.PC_BOTS) }
     var selectedSubTab by remember { mutableStateOf(MeetingsExecSubTab.MEETINGS) }
     var showServerConfig by remember { mutableStateOf(false) }
     var showQuickSwitchBar by remember { mutableStateOf(false) }
@@ -362,7 +362,18 @@ fun MainAppScaffold(
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
                     )
 
-                    // 2. 五大工作台一级直达导航项
+                    // 2. 五大工作台一级直达导航项（PC Bots 置顶默认展示）
+                    NavigationDrawerItem(
+                        icon = { Icon(Icons.Default.Terminal, contentDescription = null) },
+                        label = { Text("PC 终端 (Bots)", fontWeight = FontWeight.Medium) },
+                        selected = selectedTab == NavigationTab.PC_BOTS,
+                        onClick = {
+                            selectedTab = NavigationTab.PC_BOTS
+                            coroutineScope.launch { drawerState.close() }
+                        },
+                        modifier = Modifier.padding(vertical = 2.dp)
+                    )
+
                     NavigationDrawerItem(
                         icon = { Icon(Icons.Default.Chat, contentDescription = null) },
                         label = { Text("AI 助理", fontWeight = FontWeight.Medium) },
@@ -452,17 +463,6 @@ fun MainAppScaffold(
                         onClick = {
                             selectedTab = NavigationTab.MEETINGS
                             selectedSubTab = MeetingsExecSubTab.PHONE_APPS
-                            coroutineScope.launch { drawerState.close() }
-                        },
-                        modifier = Modifier.padding(vertical = 2.dp)
-                    )
-
-                    NavigationDrawerItem(
-                        icon = { Icon(Icons.Default.Terminal, contentDescription = null) },
-                        label = { Text("PC 终端 (Bots)", fontWeight = FontWeight.Medium) },
-                        selected = selectedTab == NavigationTab.PC_BOTS,
-                        onClick = {
-                            selectedTab = NavigationTab.PC_BOTS
                             coroutineScope.launch { drawerState.close() }
                         },
                         modifier = Modifier.padding(vertical = 2.dp)
@@ -617,6 +617,14 @@ fun MainAppScaffold(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             FilterChip(
+                                selected = selectedTab == NavigationTab.PC_BOTS,
+                                onClick = {
+                                    selectedTab = NavigationTab.PC_BOTS
+                                    showQuickSwitchBar = false
+                                },
+                                label = { Text("💻 PC Bots", fontSize = 12.sp) }
+                            )
+                            FilterChip(
                                 selected = selectedTab == NavigationTab.CHAT,
                                 onClick = {
                                     selectedTab = NavigationTab.CHAT
@@ -664,14 +672,6 @@ fun MainAppScaffold(
                                         fontSize = 12.sp
                                     )
                                 }
-                            )
-                            FilterChip(
-                                selected = selectedTab == NavigationTab.PC_BOTS,
-                                onClick = {
-                                    selectedTab = NavigationTab.PC_BOTS
-                                    showQuickSwitchBar = false
-                                },
-                                label = { Text("💻 PC Bots", fontSize = 12.sp) }
                             )
                             FilterChip(
                                 selected = selectedTab == NavigationTab.DISCOVER,
