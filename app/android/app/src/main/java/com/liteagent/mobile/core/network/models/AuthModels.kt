@@ -2,12 +2,23 @@ package com.liteagent.mobile.core.network.models
 
 import com.google.gson.annotations.SerializedName
 
+internal fun defaultAndroidDeviceName(): String {
+    val brand = runCatching { android.os.Build.BRAND.orEmpty().trim() }.getOrDefault("")
+    val model = runCatching { android.os.Build.MODEL.orEmpty().trim() }.getOrDefault("")
+    val combined = when {
+        model.isBlank() -> brand
+        brand.isBlank() || model.startsWith(brand, ignoreCase = true) -> model
+        else -> "$brand $model"
+    }.trim()
+    return combined.ifBlank { "Android" }
+}
+
 data class LoginRequest(
     @SerializedName("username") val username: String,
     @SerializedName("password") val password: String,
     @SerializedName("remember_me") val rememberMe: Boolean = true,
     @SerializedName("client_type") val clientType: String = "android",
-    @SerializedName("device_name") val deviceName: String = "OnePlus 9",
+    @SerializedName("device_name") val deviceName: String = defaultAndroidDeviceName(),
     @SerializedName("device_id") val deviceId: String = ""
 )
 

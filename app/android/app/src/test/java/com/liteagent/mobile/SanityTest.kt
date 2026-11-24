@@ -1669,4 +1669,52 @@ class SanityTest {
         val testRes = apiClient.testSocks5Node(1, serverUrl = serverUrl).getOrNull()
         assertEquals(true, testRes?.success)
     }
+
+    @Test
+    fun testShouldProactivelyRefreshSession() {
+        val now = 1_700_000_000L
+        assertFalse(com.liteagent.mobile.core.network.shouldProactivelyRefreshSession(null, now))
+
+        // 静态 Token (expiresAt == 0L) 不应触发主动续期
+        val staticSess = UserSession(
+            serverUrl = "https://mail.maifeipin.com",
+            username = "admin",
+            sessionId = "",
+            sessionToken = "static_tok",
+            expiresAt = 0L
+        )
+        assertFalse(com.liteagent.mobile.core.network.shouldProactivelyRefreshSession(staticSess, now))
+
+        // 剩余 20 分钟 (> 5 分钟 leeway) 不触发续期
+        val freshSess = UserSession(
+            serverUrl = "https://mail.maifeipin.com",
+            username = "admin",
+            sessionId = "sid_1",
+            sessionToken = "tok_1",
+            expiresAt = now + 1200L,
+            refreshToken = "rt_1",
+            refreshExpiresAt = now + 86400L
+        )
+        assertFalse(com.liteagent.mobile.core.network.shouldProactivelyRefreshSession(freshSess, now))
+
+        // 剩余 2 分钟 (<= 5 分钟 leeway) 触发主动续期
+        val nearExpirySess = freshSess.copy(expiresAt = now + 120L)
+        assertTrue(com.liteagent.mobile.core.network.shouldProactivelyRefreshSession(nearExpirySess, now))
+
+        // 已过期 3 小时触发主动续期
+        val expiredSess = freshSess.copy(expiresAt = now - 10800L)
+        assertTrue(com.liteagent.mobile.core.network.shouldProactivelyRefreshSession(expiredSess, now))
+
+        // sessionToken 未过期但 reviewToken 即将过期时，同样触发主动续期
+        val reviewNearExpirySess = freshSess.copy(
+            reviewToken = "rev_tok_1",
+            reviewExpiresAt = now + 60L
+        )
+        assertTrue(com.liteagent.mobile.core.network.shouldProactivelyRefreshSession(reviewNearExpirySess, now))
+
+        // 设备型号默认值不再硬编码为 OnePlus 9
+        val devName = com.liteagent.mobile.core.network.models.defaultAndroidDeviceName()
+        assertTrue(devName.isNotBlank())
+        assertFalse(devName == "OnePlus 9")
+    }
 }

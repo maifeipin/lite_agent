@@ -38,6 +38,9 @@ let _reconnectTimer = null;
 let _reconnectDelay = 1000;
 let _toastTimer = null;
 let _subscribeWaiter = null; // { botId, resolve, timer }
+let _nativeAuthRefreshPending = false;
+let _nativeAuthFallbackTimer = null;
+let _lastRejectedNativeToken = '';
 
 export function showToast(msg, durationMs = 2600) {
   store.toastMsg = msg;
@@ -314,6 +317,12 @@ export function connectWs() {
     try { msg = JSON.parse(evt.data); } catch (_) { return; }
 
     if (msg.type === 'auth.ok') {
+      _nativeAuthRefreshPending = false;
+      _lastRejectedNativeToken = '';
+      if (_nativeAuthFallbackTimer) {
+        clearTimeout(_nativeAuthFallbackTimer);
+        _nativeAuthFallbackTimer = null;
+      }
       store.wsState = 'connected';
       _reconnectDelay = 1000;
       if (store.activeBotId) {
@@ -337,6 +346,28 @@ export function connectWs() {
     }
 
     if (msg.type === 'auth.error') {
+      const canAskNative =
+        typeof window !== 'undefined' &&
+        window.AndroidPcCliVoiceChannel &&
+        typeof window.AndroidPcCliVoiceChannel.postMessage === 'function';
+      if (canAskNative && !_nativeAuthRefreshPending && store.token !== _lastRejectedNativeToken) {
+        _nativeAuthRefreshPending = true;
+        _lastRejectedNativeToken = store.token;
+        ws.close();
+        try {
+          window.AndroidPcCliVoiceChannel.postMessage(JSON.stringify({ action: 'refreshAuth' }));
+        } catch (_) {}
+        if (_nativeAuthFallbackTimer) clearTimeout(_nativeAuthFallbackTimer);
+        _nativeAuthFallbackTimer = setTimeout(() => {
+          if (_nativeAuthRefreshPending) {
+            _nativeAuthRefreshPending = false;
+            store.wsState = 'auth_required';
+            showToast('WebSocket 鉴权失败，请更新 Token');
+          }
+        }, 4500);
+        return;
+      }
+      _nativeAuthRefreshPending = false;
       store.wsState = 'auth_required';
       showToast('WebSocket 鉴权失败，请更新 Token');
       ws.close();
@@ -387,13 +418,52 @@ export function connectWs() {
   ws.onclose = () => {
     if (_ws !== ws) return;
     _ws = null;
-    if (store.wsState === 'auth_required') return;
+    if (store.wsState === 'auth_required' || _nativeAuthRefreshPending) return;
     store.wsState = 'disconnected';
     _reconnectTimer = setTimeout(() => {
       _reconnectDelay = Math.min(_reconnectDelay * 2, 15000);
       connectWs();
     }, _reconnectDelay);
   };
+}
+
+export function applyNativeToken(newToken, refreshedOk = true) {
+  const cleaned = String(newToken || '').trim();
+  if (_nativeAuthFallbackTimer) {
+    clearTimeout(_nativeAuthFallbackTimer);
+    _nativeAuthFallbackTimer = null;
+  }
+  const wasWaitingRefresh = _nativeAuthRefreshPending;
+  _nativeAuthRefreshPending = false;
+
+  if (!cleaned) {
+    saveToken('');
+    store.wsState = 'auth_required';
+    return;
+  }
+
+  const changed = cleaned !== store.token;
+  if (changed) {
+    saveToken(cleaned);
+  }
+
+  if (wasWaitingRefresh) {
+    if (!refreshedOk && !changed) {
+      store.wsState = 'auth_required';
+      showToast('WebSocket 鉴权失败，请重新登录或更新 Token');
+      return;
+    }
+    connectWs();
+    return;
+  }
+
+  if (changed && store.wsState !== 'connected') {
+    connectWs();
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.__onPcCliNativeToken = applyNativeToken;
 }
 
 // 手机锁屏/切后台恢复后自动增量补齐进度

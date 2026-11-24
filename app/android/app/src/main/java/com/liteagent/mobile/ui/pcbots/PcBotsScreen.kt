@@ -40,6 +40,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.google.gson.Gson
+import com.liteagent.mobile.core.network.ApiClient
 import com.liteagent.mobile.core.network.ServerUrlNormalizer
 import com.liteagent.mobile.core.security.SecureTokenStorage
 import com.liteagent.mobile.core.voice.OfflineAsrEngine
@@ -104,12 +105,17 @@ internal fun resolveTokenForUrl(url: String?, snapshot: PcBotsAuthSnapshot?): St
     return if (isSameOrigin(url, snapshot.targetUrl)) snapshot.token else null
 }
 
-internal fun buildTokenInjectionScript(token: String): String {
+internal fun buildTokenInjectionScript(token: String, refreshedOk: Boolean = true): String {
     val quoted = pcBotsGson.toJson(token)
+    val okLiteral = if (refreshedOk) "true" else "false"
     return """
         (function() {
           try {
             var tok = $quoted;
+            if (typeof window.__onPcCliNativeToken === 'function') {
+              window.__onPcCliNativeToken(tok, $okLiteral);
+              return;
+            }
             var key = 'pc_cli_client_token';
             var prev = window.localStorage.getItem(key) || '';
             if (tok) {
@@ -154,6 +160,7 @@ internal fun buildVoiceResultDispatchScript(
 @Composable
 fun PcBotsScreen(
     tokenStorage: SecureTokenStorage,
+    apiClient: ApiClient? = null,
     onOpenDrawer: () -> Unit = {},
     onToggleQuickBar: () -> Unit = {},
     onOpenSettings: () -> Unit = {},
@@ -186,24 +193,43 @@ fun PcBotsScreen(
     // 将服务器地址、目标 URL 与对应 Token 绑定为原子快照：切换服务器时立即清空，严禁把旧服 Token 注入新服
     var readySnapshot by remember { mutableStateOf<PcBotsAuthSnapshot?>(null) }
 
-    LaunchedEffect(activeServer, session) {
-        if (readySnapshot?.serverUrl != activeServer) {
+    suspend fun syncAuthSnapshot(serverUrl: String, forceRefresh: Boolean = false): PcBotsAuthSnapshot {
+        if (readySnapshot?.serverUrl != serverUrl) {
             readySnapshot = null
         }
-        val targetForServer = buildMobilePwaUrl(activeServer)
+        try {
+            apiClient?.ensureFreshSession(serverUrl, force = forceRefresh)
+        } catch (_: Exception) {
+        }
+        val targetForServer = buildMobilePwaUrl(serverUrl)
         val loadedToken = try {
-            tokenStorage.getGeneralToken(activeServer)
+            tokenStorage.getGeneralToken(serverUrl)
         } catch (_: Exception) {
             ""
         }
-        readySnapshot = PcBotsAuthSnapshot(
-            serverUrl = activeServer,
+        val snap = PcBotsAuthSnapshot(
+            serverUrl = serverUrl,
             targetUrl = targetForServer,
             token = loadedToken
         )
+        readySnapshot = snap
+        return snap
+    }
+
+    LaunchedEffect(activeServer, session?.sessionId, session?.sessionToken) {
+        syncAuthSnapshot(activeServer)
+    }
+
+    // 长时间停留在 PC Bots 页面（>1 小时）时，每 15 分钟静默预检续期并在页面内热更新 Token（不触发整页 reload）
+    LaunchedEffect(activeServer) {
+        while (true) {
+            kotlinx.coroutines.delay(15 * 60_000L)
+            syncAuthSnapshot(activeServer)
+        }
     }
 
     val currentSnapshotState = rememberUpdatedState(readySnapshot)
+    val currentServerState = rememberUpdatedState(activeServer)
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var registeredOriginRule by remember { mutableStateOf<String?>(null) }
@@ -385,14 +411,29 @@ fun PcBotsScreen(
                     )
                     "cancel" -> cancelActiveVoiceSession()
                     "openModels" -> showVoiceModelSheet = true
+                    "refreshAuth" -> {
+                        scope.launch {
+                            val targetSrv = currentServerState.value
+                            var refreshedOk = false
+                            try {
+                                refreshedOk = apiClient?.ensureFreshSession(targetSrv, force = true) ?: false
+                            } catch (_: Exception) {
+                            }
+                            val snap = syncAuthSnapshot(targetSrv, forceRefresh = false)
+                            val tok = resolveTokenForUrl(view.url, snap)
+                            if (tok != null) {
+                                view.evaluateJavascript(buildTokenInjectionScript(tok, refreshedOk = refreshedOk), null)
+                            }
+                        }
+                    }
                 }
             }
         }
         registeredOriginRule = originRule
     }
 
-    // 退到后台时自动取消录音并在锁保护下释放 Native 模型内存，防止国产 ROM 杀后台且避免推理中崩溃
-    DisposableEffect(lifecycleOwner) {
+    // 退到后台时自动取消录音并在锁保护下释放 Native 模型内存；回到前台时主动检查并续期即将过期的会话 Token
+    DisposableEffect(lifecycleOwner, activeServer) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_STOP) {
                 if (asrEngine.isRecording) {
@@ -400,6 +441,10 @@ fun PcBotsScreen(
                 }
                 scope.launch {
                     asrEngine.releaseModel()
+                }
+            } else if (event == Lifecycle.Event.ON_RESUME) {
+                scope.launch {
+                    syncAuthSnapshot(activeServer)
                 }
             }
         }
@@ -501,14 +546,25 @@ fun PcBotsScreen(
                         }
                         IconButton(
                             onClick = {
-                                val snap = currentSnapshotState.value ?: return@IconButton
-                                errorMessage = null
-                                webViewRef?.let { wv ->
-                                    if (wv.url.isNullOrBlank() || !isSameOrigin(wv.url, snap.targetUrl)) {
-                                        lastLoadedTargetUrl = snap.targetUrl
-                                        wv.loadUrl(snap.targetUrl)
-                                    } else {
-                                        wv.reload()
+                                scope.launch {
+                                    val snap = syncAuthSnapshot(activeServer, forceRefresh = false)
+                                    errorMessage = null
+                                    webViewRef?.let { wv ->
+                                        if (wv.url.isNullOrBlank() || !isSameOrigin(wv.url, snap.targetUrl)) {
+                                            lastLoadedTargetUrl = snap.targetUrl
+                                            wv.loadUrl(snap.targetUrl)
+                                        } else {
+                                            val tok = resolveTokenForUrl(wv.url, snap)
+                                            if (tok != null) {
+                                                val quoted = pcBotsGson.toJson(tok)
+                                                val syncOnlyScript = "(function(){try{var t=$quoted;if(t){window.localStorage.setItem('pc_cli_client_token',t);}else{window.localStorage.removeItem('pc_cli_client_token');}}catch(e){}})();"
+                                                wv.evaluateJavascript(syncOnlyScript) {
+                                                    wv.reload()
+                                                }
+                                            } else {
+                                                wv.reload()
+                                            }
+                                        }
                                     }
                                 }
                             }

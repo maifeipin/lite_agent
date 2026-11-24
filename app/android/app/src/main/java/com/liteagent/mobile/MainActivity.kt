@@ -75,7 +75,9 @@ class MainActivity : ComponentActivity() {
 
         tokenStorage = SecureTokenStorage(applicationContext)
         apiClient = ApiClient(tokenStorage)
-        sseStreamManager = SseStreamManager(tokenStorage)
+        sseStreamManager = SseStreamManager(tokenStorage) { serverUrl ->
+            apiClient.ensureFreshSession(serverUrl)
+        }
 
         val chatFactory = ChatViewModelFactory(tokenStorage, apiClient, sseStreamManager)
         chatViewModel = ViewModelProvider(this, chatFactory)[ChatViewModel::class.java]
@@ -108,10 +110,27 @@ class MainActivity : ComponentActivity() {
                 var isCheckingSession by remember { mutableStateOf(true) }
                 var isLoggedIn by remember { mutableStateOf(false) }
 
-                LaunchedEffect(activeServer, session) {
+                LaunchedEffect(activeServer, session?.sessionId, session == null) {
                     val valid = tokenStorage.hasValidSession(activeServer)
                     isLoggedIn = valid
                     isCheckingSession = false
+                    if (valid) {
+                        try {
+                            apiClient.ensureFreshSession(activeServer)
+                        } catch (_: Exception) {
+                        }
+                    }
+                }
+
+                LaunchedEffect(activeServer, isLoggedIn) {
+                    if (!isLoggedIn) return@LaunchedEffect
+                    while (true) {
+                        kotlinx.coroutines.delay(20 * 60_000L)
+                        try {
+                            apiClient.ensureFreshSession(activeServer)
+                        } catch (_: Exception) {
+                        }
+                    }
                 }
 
                 if (isCheckingSession) {
@@ -160,6 +179,15 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         if (::updateController.isInitialized) {
             updateController.onResume()
+        }
+        if (::apiClient.isInitialized && ::tokenStorage.isInitialized) {
+            lifecycleScope.launch {
+                try {
+                    val serverUrl = tokenStorage.getActiveServerUrl()
+                    apiClient.ensureFreshSession(serverUrl)
+                } catch (_: Exception) {
+                }
+            }
         }
     }
 }
@@ -766,6 +794,7 @@ fun MainAppScaffold(
                         }
                         NavigationTab.PC_BOTS -> PcBotsScreen(
                             tokenStorage = tokenStorage,
+                            apiClient = apiClient,
                             onOpenDrawer = openDrawer,
                             onToggleQuickBar = toggleQuickBar,
                             onOpenSettings = { showServerConfig = true }

@@ -21,7 +21,7 @@ import {
   store,
   submitApproval,
   subscribeBotOnWs,
-} from './store.js?v=2';
+} from './store.js?v=3';
 
 function escapeHtml(raw) {
   return String(raw || '')
@@ -538,7 +538,16 @@ const app = createApp({
       (val) => {
         if (val === 'auth_required') {
           showTokenModal.value = true;
+        } else if (val === 'connected') {
+          showTokenModal.value = false;
         }
+      }
+    );
+
+    watch(
+      () => store.token,
+      (val) => {
+        tokenInput.value = val;
       }
     );
 

@@ -12,6 +12,7 @@ class AuthInterceptor(
     private val tokenStorage: SecureTokenStorage,
     private val onUnauthorized: (() -> Unit)? = null,
     private val boundBaseUrl: String? = null,
+    private val onProactiveRefresh: ((serverUrl: String) -> Boolean)? = null,
     private val onUnauthorizedWithContext: ((serverUrl: String, tokenUsed: String, sessionIdUsed: String) -> Boolean)? = null
 ) : Interceptor {
 
@@ -43,7 +44,18 @@ class AuthInterceptor(
         // 移除内部专用的私有 Base URL 头，避免发送给远端服务器
         val requestBuilder = original.newBuilder().removeHeader(HEADER_CONFIGURED_BASE_URL)
 
-        val session = runBlocking { tokenStorage.getSession(targetServerUrl) }
+        var session = runBlocking { tokenStorage.getSession(targetServerUrl) }
+        // 若非认证端点且本地短期 sessionToken 已过期/临期（例如反代覆盖 Authorization 导致不会返回 401），提前主动静默续期
+        if (!isAuthPath(original.url.encodedPath) && onProactiveRefresh != null && shouldProactivelyRefreshSession(session)) {
+            val refreshedAhead = try {
+                onProactiveRefresh.invoke(targetServerUrl)
+            } catch (_: Exception) {
+                false
+            }
+            if (refreshedAhead) {
+                session = runBlocking { tokenStorage.getSession(targetServerUrl) }
+            }
+        }
         val token = session?.sessionToken?.ifBlank { null }
             ?: runBlocking { tokenStorage.getGeneralToken(targetServerUrl) }
         val currentSessionId = session?.sessionId ?: ""

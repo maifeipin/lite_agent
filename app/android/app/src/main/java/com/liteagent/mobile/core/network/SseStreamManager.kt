@@ -12,7 +12,8 @@ import okhttp3.sse.EventSources
 import java.util.concurrent.TimeUnit
 
 open class SseStreamManager(
-    private val tokenStorage: SecureTokenStorage
+    private val tokenStorage: SecureTokenStorage,
+    private val onEnsureFreshSession: (suspend (String) -> Unit)? = null
 ) {
     companion object {
         val TERMINAL_STATES = setOf(
@@ -41,6 +42,10 @@ open class SseStreamManager(
 
         // 显式使用传入的目标服务器 URL，严禁暗中依赖当前活动服务器
         val normalizedServer = ServerUrlNormalizer.normalize(serverUrl)
+        try {
+            onEnsureFreshSession?.invoke(normalizedServer)
+        } catch (_: Exception) {
+        }
         val token = tokenStorage.getGeneralToken(normalizedServer)
         val cleanSessionId = sessionId.removePrefix("api:")
         val streamUrl = "$normalizedServer/agent/api/v1/task/stream?task_id=$taskId&session_id=$cleanSessionId"

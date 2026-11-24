@@ -3,6 +3,7 @@ package com.liteagent.mobile.core.network
 import com.google.gson.Gson
 import com.liteagent.mobile.core.network.models.*
 import com.liteagent.mobile.core.security.SecureTokenStorage
+import com.liteagent.mobile.core.security.UserSession
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -15,6 +16,20 @@ import retrofit2.converter.gson.GsonConverterFactory
 import java.util.concurrent.TimeUnit
 
 open class AuthenticationException(message: String) : Exception(message)
+
+internal fun shouldProactivelyRefreshSession(
+    session: UserSession?,
+    nowEpochSec: Long = System.currentTimeMillis() / 1000L,
+    leewaySec: Long = 300L
+): Boolean {
+    if (session == null) return false
+    if (session.sessionToken.isBlank()) return session.canRefresh
+    val accessExpiring = session.expiresAt > 0L && session.expiresAt <= nowEpochSec + leewaySec
+    val reviewExpiring = !session.reviewToken.isNullOrBlank() &&
+        session.reviewExpiresAt > 0L &&
+        session.reviewExpiresAt <= nowEpochSec + leewaySec
+    return accessExpiring || reviewExpiring
+}
 
 open class ApiClient(
     val tokenStorage: SecureTokenStorage,
@@ -41,6 +56,11 @@ open class ApiClient(
                 AuthInterceptor(
                     tokenStorage = tokenStorage,
                     onUnauthorized = onUnauthorized,
+                    onProactiveRefresh = { serverUrl ->
+                        kotlinx.coroutines.runBlocking {
+                            ensureFreshSession(serverUrl)
+                        }
+                    },
                     onUnauthorizedWithContext = { serverUrl, tokenUsed, sessionIdUsed ->
                         // 异步并发合并刷新
                         kotlinx.coroutines.runBlocking {
@@ -106,6 +126,11 @@ open class ApiClient(
                         tokenStorage = tokenStorage,
                         onUnauthorized = onUnauthorized,
                         boundBaseUrl = normalized,
+                        onProactiveRefresh = { sUrl ->
+                            kotlinx.coroutines.runBlocking {
+                                ensureFreshSession(sUrl)
+                            }
+                        },
                         onUnauthorizedWithContext = { sUrl, tUsed, sIdUsed ->
                             kotlinx.coroutines.runBlocking {
                                 handleUnauthorized(sUrl, tUsed, sIdUsed)
@@ -137,7 +162,7 @@ open class ApiClient(
         username: String,
         password: String,
         rememberMe: Boolean = true,
-        deviceName: String = "OnePlus 9"
+        deviceName: String = defaultAndroidDeviceName()
     ): Result<LoginResponse> {
         val normalized = ServerUrlNormalizer.normalize(serverUrl)
         return try {
@@ -262,6 +287,34 @@ open class ApiClient(
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)
+        }
+    }
+
+    /**
+     * 主动检查并续期即将过期或已过期的会话（受 refreshMutex 保护，避免并发轮换触发重用检测）。
+     * 主要用于 WebView/WebSocket 等不会经过 OkHttp 401 拦截器的场景。
+     */
+    open suspend fun ensureFreshSession(
+        serverUrl: String,
+        leewaySec: Long = 300L,
+        force: Boolean = false
+    ): Boolean {
+        return refreshMutex.withLock {
+            val currentSession = tokenStorage.getSession(serverUrl) ?: return@withLock false
+            val nowSec = System.currentTimeMillis() / 1000L
+            val needsRefresh = force || shouldProactivelyRefreshSession(currentSession, nowSec, leewaySec)
+            if (!needsRefresh) {
+                return@withLock true
+            }
+            if (!currentSession.canRefresh || currentSession.sessionId.isBlank()) {
+                return@withLock currentSession.isSessionValid
+            }
+            val refreshRes = refresh(
+                serverUrl = serverUrl,
+                refreshToken = currentSession.refreshToken!!,
+                expectedSessionId = currentSession.sessionId
+            )
+            refreshRes.isSuccess
         }
     }
 
