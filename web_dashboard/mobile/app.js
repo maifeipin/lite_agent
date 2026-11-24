@@ -21,7 +21,7 @@ import {
   store,
   submitApproval,
   subscribeBotOnWs,
-} from './store.js?v=3';
+} from './store.js?v=4';
 
 function escapeHtml(raw) {
   return String(raw || '')
@@ -463,12 +463,13 @@ const app = createApp({
     async function handleSendManager() {
       const text = managerInput.value.trim();
       if (!text || managerSending.value) return;
-      // 先采集已有历史再把本次输入推入 UI，避免后端收到重复的当前用户消息
+      // 先采集已有历史再把本次输入推入 UI，并过滤掉发送失败的旧消息避免污染上下文
       const priorHistory = store.managerMessages
-        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        .filter((m) => (m.role === 'user' || m.role === 'assistant') && !m.failed)
         .slice(-12)
         .map((m) => ({ role: m.role, content: m.text || '' }));
-      store.managerMessages.push({ key: `u-${Date.now()}`, role: 'user', text });
+      const userEntry = { key: `u-${Date.now()}`, role: 'user', text, failed: false };
+      store.managerMessages.push(userEntry);
       managerInput.value = '';
       managerSending.value = true;
       nextTick(() => {
@@ -490,6 +491,7 @@ const app = createApp({
         }
         await fetchBots().catch(() => {});
       } catch (e) {
+        userEntry.failed = true;
         store.managerMessages.push({
           key: `e-${Date.now()}`,
           role: 'error',

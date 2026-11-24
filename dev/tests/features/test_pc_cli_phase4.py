@@ -91,7 +91,15 @@ def test_manager_create_bot_and_authorized_delete_flow():
     repo = PcCliRepository(":memory:")
     hub = PcCliHub(repo=repo)
     try:
-        hub.handle_daemon_hello("c1", lambda _: None, {"node_id": "mac1", "engines": ["codex", "agy"], "workspace_roots": ["/w"]})
+        def _daemon_send(msg):
+            if msg.get("type") == "dir.list_request":
+                hub.handle_daemon_dir_list_result(
+                    {"req_id": msg["req_id"], "entries": []},
+                    sender_node_id="mac1",
+                    conn_id="c1",
+                )
+
+        hub.handle_daemon_hello("c1", _daemon_send, {"node_id": "mac1", "engines": ["codex", "agy"], "workspace_roots": ["/w"]})
 
         # 第 1 轮：LLM 调 create_bot；第 2 轮：回复创建完成
         gw_create = _ScriptedGateway([

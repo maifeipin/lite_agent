@@ -418,3 +418,82 @@ def test_manager_normalizes_flat_tool_calls_to_openai_wire_format_for_round2(tmp
         assert payload_g["reply"] == "Gemini 第二轮完成"
     finally:
         hub.close()
+
+
+def test_manager_list_node_dirs_tool_and_failed_history_filter(tmp_path):
+    """回归：AI 总管支持 list_node_dirs 浏览真实目录；前端过滤发送失败的 managerMessages 不污染后续历史。"""
+    from pathlib import Path
+    from lite_agent.features.pc_cli.hub import PcCliHub
+    from lite_agent.features.pc_cli.manager import MANAGER_TOOLS_SCHEMA, PcCliManager
+    from lite_agent.features.pc_cli.repository import PcCliRepository
+
+    tool_names = [t["function"]["name"] for t in MANAGER_TOOLS_SCHEMA]
+    assert "list_node_dirs" in tool_names
+
+    repo = PcCliRepository(db_path=str(tmp_path / "pc_cli_dirs.db"))
+    hub = PcCliHub(repo=repo)
+    try:
+        captured = {}
+
+        def _fake_list_node_dirs(node_id, path="", timeout=5.0):
+            captured["args"] = (node_id, path)
+            if path == "/Users/lilee/nonexistent-bill-query":
+                return False, {"error": f"目录不存在: {path}"}
+            many = [{"name": f"proj_{i:03d}_{'x' * 120}", "path": f"/Users/lilee/Projects/proj_{i:03d}_{'x' * 120}"} for i in range(90)]
+            return True, {"node_id": node_id, "path": path, "entries": many}
+
+        hub.list_node_dirs = _fake_list_node_dirs  # type: ignore[method-assign]
+        hub.handle_daemon_hello("c_m", lambda _: None, {"node_id": "mac-mini", "engines": ["codex", "agy"], "workspace_roots": ["/Users/lilee"]})
+        mgr = PcCliManager(hub=hub, config={}, gateway=None)
+
+        # 1. 按条目裁剪目录列表且 _serialize_tool_output 始终保持合法 JSON
+        from lite_agent.features.pc_cli.manager import _serialize_tool_output
+        import json
+
+        res = mgr.execute_tool("list_node_dirs", {"node_id": "mac-mini", "path": "/Users/lilee/Projects", "limit": 60}, [])
+        assert res["ok"] is True
+        assert captured["args"] == ("mac-mini", "/Users/lilee/Projects")
+        assert len(res["entries"]) == 60
+        assert res["total_entries"] == 90
+        assert res["truncated"] is True
+        serialized = _serialize_tool_output(res, max_chars=2000)
+        assert len(serialized) <= 2000
+        parsed_back = json.loads(serialized)
+        assert parsed_back["truncated"] is True
+        assert isinstance(parsed_back["entries"], list) and len(parsed_back["entries"]) < 60
+
+        # 1b. 兜底 preview 分支：含大量引号/反斜杠/控制字符的非列表大对象，二次 JSON 转义后仍严格 <= max_chars 且为合法 JSON
+        heavy_escape_out = {"ok": False, "error": ('"\\\n\t\x01' * 3000)}
+        fallback_ser = _serialize_tool_output(heavy_escape_out, max_chars=8000)
+        assert len(fallback_ser) <= 8000
+        fallback_parsed = json.loads(fallback_ser)
+        assert fallback_parsed["ok"] is False
+        assert fallback_parsed["truncated"] is True
+        assert len(fallback_parsed["preview"]) > 0
+
+        # 2. [P2] 创建 Bot 前强制校验目标节点目录真实存在：不存在时拒绝入库
+        bad_create = mgr.execute_tool(
+            "create_bot",
+            {"name": "bad-bot", "node_id": "mac-mini", "engine": "codex", "cwd": "/Users/lilee/nonexistent-bill-query"},
+            [],
+        )
+        assert bad_create["ok"] is False
+        assert "目录不存在" in bad_create["error"]
+        assert hub.list_bots() == []
+
+        ok_create = mgr.execute_tool(
+            "create_bot",
+            {"name": "good-bot", "node_id": "mac-mini", "engine": "codex", "cwd": "/Users/lilee/Projects"},
+            [],
+        )
+        assert ok_create["ok"] is True
+        assert len(hub.list_bots()) == 1
+    finally:
+        hub.close()
+
+    root = Path(__file__).resolve().parents[3]
+    app_js = (root / "web_dashboard" / "mobile" / "app.js").read_text(encoding="utf-8")
+    store_js = (root / "web_dashboard" / "mobile" / "store.js").read_text(encoding="utf-8")
+    assert "userEntry.failed = true" in app_js
+    assert "!m.failed" in app_js
+    assert "!m.failed" in store_js

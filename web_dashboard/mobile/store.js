@@ -248,7 +248,7 @@ export async function sendManagerChat(message, modelName = '', priorHistory = nu
   const history = Array.isArray(priorHistory)
     ? priorHistory
     : store.managerMessages
-        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        .filter((m) => (m.role === 'user' || m.role === 'assistant') && !m.failed)
         .slice(-12)
         .map((m) => ({ role: m.role, content: m.text || '' }));
   return apiFetch('/manager/chat', {

@@ -23,11 +23,13 @@ logger = logging.getLogger("features.pc_cli.manager")
 _SYSTEM_PROMPT = (
     "你是 Lite Agent 多 PC CLI (Codex / AGY) 手机总管助理。\n"
     "职责：帮助用户查看在线 PC 节点、创建或调度 Bot、汇总执行进度与统计看板。\n"
-    "安全铁律：\n"
+    "安全与工作流铁律：\n"
     "1. 你没有直接删除 Bot 或强杀回合的权限；若用户要求删除 Bot 或中止任务，"
     "必须调用 request_delete_bot 或 request_cancel_turn 发起授权单，并提醒用户在手机确认。\n"
-    "2. 创建 Bot 前请先调用 list_nodes 核对目标节点在线状态、可用引擎与白名单目录。\n"
-    "3. 回复简洁清晰，使用中文。"
+    "2. 创建 Bot 前必须先调用 list_nodes 与 list_node_dirs 核对目标节点在线状态、可用引擎与真实存在的目录；"
+    "严禁凭空编造不存在的子目录路径（如找不到合适子目录，直接使用白名单根目录或先向用户确认）。\n"
+    "3. 若用户的建 Bot 指令缺少关键上下文（目标任务、数据来源或工作目录不明确），先用 1~2 句简洁追问确认，再调用 create_bot。\n"
+    "4. 回复简洁清晰，使用中文。"
 )
 
 MANAGER_TOOLS_SCHEMA: List[Dict[str, Any]] = [
@@ -37,6 +39,22 @@ MANAGER_TOOLS_SCHEMA: List[Dict[str, Any]] = [
             "name": "list_nodes",
             "description": "获取所有 PC 节点（Windows/macOS）在线状态、可用引擎及白名单工作根目录。",
             "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_node_dirs",
+            "description": "浏览指定在线 PC 节点白名单内的真实存在子目录列表，创建 Bot 前用于核实工作目录存在性。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "node_id": {"type": "string", "description": "目标 PC 节点 ID"},
+                    "path": {"type": "string", "description": "可选：要展开浏览的白名单目录绝对路径，留空则返回白名单根目录列表"},
+                    "limit": {"type": "integer", "description": "返回目录条目上限，默认 50，最大 80"},
+                },
+                "required": ["node_id"],
+            },
         },
     },
     {
@@ -149,6 +167,43 @@ MANAGER_TOOLS_SCHEMA: List[Dict[str, Any]] = [
 ]
 
 
+def _serialize_tool_output(out: Dict[str, Any], max_chars: int = 8000) -> str:
+    """按条目优雅裁剪过大的工具返回结果，确保回传给模型的 content 始终是合法 JSON。"""
+    raw = json.dumps(out, ensure_ascii=False)
+    if len(raw) <= max_chars:
+        return raw
+
+    trimmed = dict(out)
+    for list_key in ("entries", "recent_events", "bots", "nodes"):
+        items = trimmed.get(list_key)
+        if isinstance(items, list) and items:
+            cur = list(items)
+            trimmed["total_count"] = trimmed.get("total_entries", len(cur))
+            trimmed["truncated"] = True
+            while cur and len(json.dumps({**trimmed, list_key: cur}, ensure_ascii=False)) > max_chars:
+                cur = cur[: max(0, len(cur) // 2 if len(cur) > 1 else 0)]
+            trimmed[list_key] = cur
+            candidate = json.dumps(trimmed, ensure_ascii=False)
+            if len(candidate) <= max_chars:
+                return candidate
+
+    base_obj = {"ok": bool(out.get("ok", True)), "truncated": True, "preview": ""}
+    best = json.dumps(base_obj, ensure_ascii=False)
+    if len(best) > max_chars:
+        return "{}"[:max_chars]
+
+    lo, hi = 0, min(len(raw), max_chars)
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        cand = json.dumps({**base_obj, "preview": raw[:mid]}, ensure_ascii=False)
+        if len(cand) <= max_chars:
+            best = cand
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best
+
+
 class PcCliManager:
     """复用 conf.d/llm.json 模型切换与受控三权分立工具集的 AI 总管。"""
 
@@ -186,6 +241,26 @@ class PcCliManager:
         if name == "list_nodes":
             return {"nodes": self.hub.list_nodes()}
 
+        if name == "list_node_dirs":
+            node_id = str(args.get("node_id") or "").strip()
+            path = str(args.get("path") or "").strip()
+            try:
+                limit = max(1, min(int(args.get("limit") or 50), 80))
+            except (TypeError, ValueError):
+                limit = 50
+            ok, res = self.hub.list_node_dirs(node_id=node_id, path=path)
+            if not ok:
+                return {"ok": False, **res}
+            entries = list(res.get("entries") or [])
+            return {
+                "ok": True,
+                "node_id": res.get("node_id", node_id),
+                "path": res.get("path", path),
+                "entries": entries[:limit],
+                "total_entries": len(entries),
+                "truncated": len(entries) > limit,
+            }
+
         if name == "list_bots":
             return {"bots": self.hub.list_bots(include_archived=bool(args.get("include_archived", False)))}
 
@@ -204,13 +279,23 @@ class PcCliManager:
 
         if name == "create_bot":
             node_id = str(args.get("node_id") or "").strip()
+            cwd = str(args.get("cwd") or "").strip()
             if not self.hub.is_node_online(node_id):
                 return {"ok": False, "error": f"目标 PC 节点 '{node_id}' 当前不在线，无法创建 Bot"}
+            if not cwd:
+                return {"ok": False, "error": "工作目录 cwd 不能为空"}
+            dir_ok, dir_res = self.hub.list_node_dirs(node_id=node_id, path=cwd)
+            if not dir_ok:
+                reason = str(dir_res.get("error") or "目录不可访问")
+                return {
+                    "ok": False,
+                    "error": f"目标节点目录校验未通过 ({reason})，请先调用 list_node_dirs 选择真实存在的目录后再创建 Bot",
+                }
             ok, res = self.hub.create_bot(
                 name=str(args.get("name") or ""),
                 node_id=node_id,
                 engine=str(args.get("engine") or ""),
-                cwd=str(args.get("cwd") or ""),
+                cwd=cwd,
                 approval_mode=str(args.get("approval_mode") or "auto"),
                 model=args.get("model"),
             )
@@ -397,7 +482,7 @@ class PcCliManager:
                     "role": "tool",
                     "tool_call_id": tc_id,
                     "name": tname,
-                    "content": json.dumps(out, ensure_ascii=False)[:8000],
+                    "content": _serialize_tool_output(out, max_chars=8000),
                 })
         else:
             final_reply = "已执行完受控工具轮次，请查看上方工具执行记录与待审批卡片。"
