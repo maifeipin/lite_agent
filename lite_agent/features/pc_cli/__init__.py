@@ -56,8 +56,24 @@ def register(context: Any) -> None:
     hub = PcCliHub(repo=repo, notifier=notifier.notify_async)
     agent = getattr(context, "agent", None)
     gateway = getattr(agent, "llm", None) or getattr(agent, "gateway", None)
-    default_model = str(pc_cfg.get("manager_model") or (cfg.get("llm", {}).get("default") if isinstance(cfg, dict) else "") or "")
-    manager = PcCliManager(hub=hub, config=cfg, gateway=gateway, default_model=default_model)
+    router = None
+    if agent is not None:
+        get_router = getattr(agent, "_get_request_model_router", None)
+        if callable(get_router):
+            try:
+                router = get_router()
+            except Exception as e:
+                logger.warning(f"从宿主获取 _get_request_model_router 失败: {e}")
+        if router is None:
+            router = getattr(agent, "_request_model_router", None) or getattr(agent, "router", None)
+    if router is None:
+        router = getattr(gateway, "router", None)
+    default_model = (
+        str(pc_cfg.get("manager_model") or "")
+        or str(getattr(router, "default_model", "") or "")
+        or str((cfg.get("llm", {}).get("default") if isinstance(cfg, dict) else "") or "")
+    )
+    manager = PcCliManager(hub=hub, config=cfg, gateway=gateway, router=router, default_model=default_model)
     ws_server: Optional[PcCliWsServer] = None
 
     if pc_cfg.get("start_ws_server", True):

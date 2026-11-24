@@ -185,3 +185,163 @@ def test_mobile_pwa_assets_security_and_pagination_guards():
     assert "activeBot && activeBot.engine === 'codex'" in html
     assert "subscribe.ok" in store_js
     assert "await subscribeBotOnWs(botId)" in app_js
+
+
+def test_manager_resolves_invoker_and_provider_from_router_when_gateway_has_no_router(tmp_path):
+    """回归：真实宿主 LLMGateway.router 为 None 时，需从宿主 router 解析 invoker 与 provider 传入 invoke_sync。"""
+    from lite_agent.features.pc_cli.hub import PcCliHub
+    from lite_agent.features.pc_cli.manager import PcCliManager
+    from lite_agent.features.pc_cli.repository import PcCliRepository
+
+    repo = PcCliRepository(db_path=str(tmp_path / "pc_cli.db"))
+    hub = PcCliHub(repo=repo)
+    try:
+        captured = {}
+
+        class _FakeInvoker:
+            provider = "gemini"
+
+        class _FakeRouter:
+            def get_invoker(self, model_name, timeout=None):
+                captured["router_model"] = model_name
+                captured["router_timeout"] = timeout
+                return _FakeInvoker()
+
+            def get_driver(self, model_name):
+                return "gemini"
+
+        class _FakeGateway:
+            router = None
+
+            def invoke_sync(self, messages, **kwargs):
+                if kwargs.get("invoker") is None:
+                    raise ValueError("model or invoker is required")
+                captured["invoke_kwargs"] = kwargs
+                return {"content": "好的，已为您规划账单查询 Bot。", "tool_calls": [], "usage_total": 42}
+
+        cfg = {"llm": {"default": "flash", "models": {"flash": {"driver": "gemini", "model": "gemini-2.5-flash"}}}}
+        mgr = PcCliManager(hub=hub, config=cfg, gateway=_FakeGateway(), router=_FakeRouter(), default_model="flash")
+        ok, payload = mgr.chat("创建一个查询账单的Bot。", model_name="flash")
+        assert ok is True
+        assert "账单" in payload["reply"]
+        assert captured["router_model"] == "flash"
+        assert captured["invoke_kwargs"]["provider"] == "gemini"
+        assert captured["invoke_kwargs"]["invoker"] is not None
+    finally:
+        hub.close()
+
+
+def test_plugin_register_binds_host_request_model_router_and_manager_handles_router_errors(tmp_path):
+    """回归：[P1] register() 从真实宿主取得路由且默认模型保持配置别名；[P2] get_invoker 异常返回结构化错误；[P3] 通过真实注册路由验证端到端接线。"""
+    import io
+    import json
+    from urllib.parse import urlparse
+    from lite_agent.features.pc_cli import register as register_pc_cli
+
+    routes = {}
+
+    class _FakeInvoker:
+        provider = "gemini"
+
+    class _FakeHostRouter:
+        default_model = "flash"
+
+        def __init__(self):
+            self.fail_next = False
+            self.requested_models = []
+
+        def get_invoker(self, model_name, timeout=None):
+            self.requested_models.append(model_name)
+            if self.fail_next:
+                raise RuntimeError("missing GEMINI_API_KEY")
+            return _FakeInvoker()
+
+        def get_driver(self, model_name):
+            return "gemini"
+
+    class _FakeHostGateway:
+        router = None
+
+        def invoke_sync(self, messages, **kwargs):
+            if kwargs.get("invoker") is None:
+                raise ValueError("model or invoker is required")
+            return {"content": "宿主路由绑定成功", "tool_calls": [], "usage_total": 18}
+
+    host_router = _FakeHostRouter()
+
+    class _FakeHostAgent:
+        # 模拟真实 LiteAgent：.model 为底层 SDK 模型名（非配置别名），无公开 .router 属性
+        model = "gemini-2.5-flash"
+        llm = _FakeHostGateway()
+        _request_model_router = None
+
+        def _get_request_model_router(self):
+            return host_router
+
+    class _FakeContext:
+        agent = _FakeHostAgent()
+        config = {
+            "pc_cli": {
+                "enabled": True,
+                "db_path": str(tmp_path / "pc_cli_reg.db"),
+                "start_ws_server": False,
+            },
+            "llm": {
+                "default": "flash",
+                "models": {"flash": {"driver": "gemini", "model": "gemini-2.5-flash"}},
+            },
+        }
+
+        def register_route(self, method, path, handler, **kwargs):
+            routes[(method, path)] = handler
+
+        def register_cleanup(self, name, fn=None):
+            self._cleanup = fn if callable(fn) else name
+
+    def _call_route(method, path, payload=None):
+        raw = json.dumps(payload).encode("utf-8") if payload is not None else b""
+
+        class _FakeHandler:
+            command = method
+            headers = {"Content-Length": str(len(raw))}
+            rfile = io.BytesIO(raw)
+            wfile = io.BytesIO()
+            status = None
+
+            def send_response(self, code):
+                self.status = code
+
+            def send_header(self, k, v):
+                pass
+
+            def end_headers(self):
+                pass
+
+        h = _FakeHandler()
+        routes[(method, path)](h, urlparse(path))
+        return h.status, json.loads(h.wfile.getvalue().decode("utf-8"))
+
+    ctx = _FakeContext()
+    register_pc_cli(ctx)
+    try:
+        # 1. 验证 GET /api/v1/pc-cli/models 默认模型保持配置别名 'flash'（而非 agent.model 的 'gemini-2.5-flash'）
+        st_m, models_body = _call_route("GET", "/api/v1/pc-cli/models")
+        assert st_m == 200
+        assert models_body["default_model"] == "flash"
+
+        # 2. 不传 model_name，验证默认别名 'flash' 正常命中宿主路由并调用成功
+        st1, res1 = _call_route("POST", "/api/v1/pc-cli/manager/chat", {"message": "你好"})
+        assert st1 == 200
+        assert res1["success"] is True
+        assert res1["reply"] == "宿主路由绑定成功"
+        assert host_router.requested_models == ["flash"]
+
+        # 3. 验证 get_invoker 抛异常时返回 400 结构化错误而非未捕获 500
+        host_router.fail_next = True
+        st2, res2 = _call_route("POST", "/api/v1/pc-cli/manager/chat", {"message": "再来一次"})
+        assert st2 == 400
+        assert res2["success"] is False
+        assert "missing GEMINI_API_KEY" in res2["error"]
+    finally:
+        if hasattr(ctx, "_cleanup"):
+            ctx._cleanup()

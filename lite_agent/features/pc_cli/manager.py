@@ -158,19 +158,23 @@ class PcCliManager:
         hub: PcCliHub,
         config: Dict[str, Any],
         gateway: Optional[Any] = None,
+        router: Optional[Any] = None,
         default_model: str = "",
     ):
         self.hub = hub
         self.config = config or {}
         self.gateway = gateway
+        self.router = router or getattr(gateway, "router", None)
         self.default_model = default_model
 
     def list_models(self) -> Dict[str, Any]:
         """返回 conf.d/llm.json 脱敏模型目录快照（只读，不含 API Key）。"""
         snap = build_model_snapshot(self.config)
         models = snap.get("models") or []
+        available_names = {m["name"] for m in models}
         defaults = snap.get("defaults") or {}
-        default_name = self.default_model or defaults.get("default_model") or (models[0]["name"] if models else "")
+        configured_default = self.default_model if (not available_names or self.default_model in available_names) else ""
+        default_name = configured_default or defaults.get("default_model") or (models[0]["name"] if models else "")
         return {
             "models": models,
             "default_model": default_name,
@@ -298,14 +302,43 @@ class PcCliManager:
         total_tokens = 0
         final_reply = ""
 
+        # 宿主模型网关规范 (D03): 真实 Agent 的 LLMGateway.router 为 None，
+        # 需显式从宿主 Router（或真实 LLMGateway 缺少 router 时基于配置构建的 ModelRouter）解析 invoker 与 provider，并纳入统一异常捕获
+        try:
+            invoker = None
+            provider = ""
+            router = self.router or getattr(self.gateway, "router", None)
+            if router is None and self.config and type(self.gateway).__name__ == "LLMGateway":
+                from lite_agent.core.model_router import ModelRouter
+
+                router = ModelRouter(self.config)
+                self.router = router
+            if router is not None:
+                if hasattr(router, "get_invoker"):
+                    try:
+                        invoker = router.get_invoker(selected_model, timeout=60.0)
+                    except TypeError:
+                        invoker = router.get_invoker(selected_model)
+                if hasattr(router, "get_driver"):
+                    provider = router.get_driver(selected_model) or ""
+                elif invoker is not None and hasattr(invoker, "provider"):
+                    provider = getattr(invoker, "provider", "") or ""
+        except Exception as e:
+            return False, {"error": f"调用模型 '{selected_model}' 失败: {e}"}
+
+        invoke_kwargs: Dict[str, Any] = {
+            "tools": MANAGER_TOOLS_SCHEMA,
+            "model": selected_model,
+            "role": "pc_cli_manager",
+        }
+        if invoker is not None:
+            invoke_kwargs["invoker"] = invoker
+        if provider:
+            invoke_kwargs["provider"] = provider
+
         for _ in range(max(1, min(max_tool_rounds, 6))):
             try:
-                res = self.gateway.invoke_sync(
-                    messages,
-                    tools=MANAGER_TOOLS_SCHEMA,
-                    model=selected_model,
-                    role="pc_cli_manager",
-                )
+                res = self.gateway.invoke_sync(messages, **invoke_kwargs)
             except Exception as e:
                 return False, {"error": f"调用模型 '{selected_model}' 失败: {e}"}
 
