@@ -1,7 +1,9 @@
 package com.liteagent.mobile.ui.pcbots
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.view.ViewGroup
 import android.webkit.PermissionRequest
@@ -12,26 +14,46 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import com.google.gson.Gson
 import com.liteagent.mobile.core.network.ServerUrlNormalizer
 import com.liteagent.mobile.core.security.SecureTokenStorage
+import com.liteagent.mobile.core.voice.OfflineAsrEngine
+import com.liteagent.mobile.core.voice.OfflineVoiceModelManager
+import com.liteagent.mobile.core.voice.OfflineVoiceResult
 import com.liteagent.mobile.ui.theme.PrimaryIndigo
+import com.liteagent.mobile.ui.theme.SurfaceElevated
 import com.liteagent.mobile.ui.theme.TextSecondary
+import kotlinx.coroutines.launch
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import java.util.Locale
 
 private val pcBotsGson = Gson()
+private const val VOICE_WEB_MESSAGE_CHANNEL = "AndroidPcCliVoiceChannel"
 
 internal data class PcBotsAuthSnapshot(
     val serverUrl: String,
@@ -39,11 +61,33 @@ internal data class PcBotsAuthSnapshot(
     val token: String
 )
 
+private data class VoiceBridgeRequest(
+    val action: String? = null,
+    val reqId: String? = null,
+    val target: String? = null,
+    val botId: String? = null
+)
+
+private data class ActiveVoiceSession(
+    val reqId: String,
+    val target: String, // prompt | manager | offline
+    val botId: String
+)
+
 internal fun buildMobilePwaUrl(serverUrl: String): String {
     val base = ServerUrlNormalizer.normalize(serverUrl).ifBlank {
         ServerUrlNormalizer.normalize(SecureTokenStorage.DEFAULT_SERVER_URL)
     }
     return "$base/mobile/"
+}
+
+internal fun extractOriginRule(targetUrl: String): String? {
+    val u = targetUrl.toHttpUrlOrNull() ?: return null
+    val scheme = u.scheme.lowercase()
+    val host = u.host.lowercase()
+    val defaultPort = if (scheme == "https") 443 else 80
+    val hostPart = if (host.contains(":")) "[$host]" else host
+    return if (u.port == defaultPort) "$scheme://$hostPart" else "$scheme://$hostPart:${u.port}"
 }
 
 internal fun isSameOrigin(url: String?, targetUrl: String): Boolean {
@@ -82,6 +126,29 @@ internal fun buildTokenInjectionScript(token: String): String {
     """.trimIndent()
 }
 
+internal fun buildVoiceStateDispatchScript(reqId: String, state: String, target: String, message: String): String {
+    val r = pcBotsGson.toJson(reqId)
+    val s = pcBotsGson.toJson(state)
+    val t = pcBotsGson.toJson(target)
+    val m = pcBotsGson.toJson(message)
+    return "if (window.__onPcCliVoiceState) { window.__onPcCliVoiceState($r, $s, $t, $m); }"
+}
+
+internal fun buildVoiceResultDispatchScript(
+    reqId: String,
+    target: String,
+    botId: String,
+    text: String,
+    meta: String
+): String {
+    val r = pcBotsGson.toJson(reqId)
+    val t = pcBotsGson.toJson(target)
+    val b = pcBotsGson.toJson(botId)
+    val txt = pcBotsGson.toJson(text)
+    val m = pcBotsGson.toJson(meta)
+    return "if (window.__onPcCliVoiceResult) { window.__onPcCliVoiceResult($r, $t, $b, $txt, $m); }"
+}
+
 @SuppressLint("SetJavaScriptEnabled")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -93,9 +160,28 @@ fun PcBotsScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val clipboardManager = LocalClipboardManager.current
+    val scope = rememberCoroutineScope()
+
     val activeServer by tokenStorage.activeServerUrlFlow.collectAsState(initial = SecureTokenStorage.DEFAULT_SERVER_URL)
     val session by tokenStorage.sessionFlow.collectAsState(initial = null)
     val displayTargetUrl = remember(activeServer) { buildMobilePwaUrl(activeServer) }
+
+    // 离线语音模型管理器与 Sherpa-ONNX 引擎
+    val modelManager = remember(context.applicationContext) { OfflineVoiceModelManager(context.applicationContext) }
+    val asrEngine = remember(modelManager) { OfflineAsrEngine(modelManager) }
+    val selectedVoiceModel by modelManager.selectedModel.collectAsState()
+    var showVoiceModelSheet by remember { mutableStateOf(false) }
+    var lastVoiceResult by remember { mutableStateOf<OfflineVoiceResult?>(null) }
+    var activeVoiceSession by remember { mutableStateOf<ActiveVoiceSession?>(null) }
+    var pendingPermissionSession by remember { mutableStateOf<ActiveVoiceSession?>(null) }
+
+    // 飞行模式离线兜底草稿箱状态
+    var offlineDraftText by remember { mutableStateOf("") }
+    var offlineVoiceStatus by remember { mutableStateOf("") }
+    var offlineRecording by remember { mutableStateOf(false) }
+    var offlineTranscribing by remember { mutableStateOf(false) }
 
     // 将服务器地址、目标 URL 与对应 Token 绑定为原子快照：切换服务器时立即清空，严禁把旧服 Token 注入新服
     var readySnapshot by remember { mutableStateOf<PcBotsAuthSnapshot?>(null) }
@@ -120,20 +206,218 @@ fun PcBotsScreen(
     val currentSnapshotState = rememberUpdatedState(readySnapshot)
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    var registeredOriginRule by remember { mutableStateOf<String?>(null) }
     var loadProgress by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
     var canGoBack by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var lastLoadedTargetUrl by remember { mutableStateOf("") }
 
+    fun dispatchVoiceState(sess: ActiveVoiceSession, state: String, message: String = "") {
+        if (sess.target == "offline") {
+            offlineRecording = (state == "recording")
+            offlineTranscribing = (state == "transcribing")
+            if (message.isNotBlank()) offlineVoiceStatus = message
+            return
+        }
+        val wv = webViewRef ?: return
+        wv.post {
+            val snap = currentSnapshotState.value
+            if (snap != null && isSameOrigin(wv.url, snap.targetUrl)) {
+                wv.evaluateJavascript(
+                    buildVoiceStateDispatchScript(sess.reqId, state, sess.target, message),
+                    null
+                )
+            }
+        }
+    }
+
+    fun dispatchVoiceResult(sess: ActiveVoiceSession, text: String, meta: String) {
+        if (sess.target == "offline") {
+            offlineDraftText = if (offlineDraftText.isBlank()) text else "${offlineDraftText.trim()} $text"
+            offlineVoiceStatus = "识别完成 ($meta)"
+            return
+        }
+        val wv = webViewRef ?: return
+        wv.post {
+            val snap = currentSnapshotState.value
+            if (snap != null && isSameOrigin(wv.url, snap.targetUrl)) {
+                wv.evaluateJavascript(
+                    buildVoiceResultDispatchScript(sess.reqId, sess.target, sess.botId, text, meta),
+                    null
+                )
+            }
+        }
+    }
+
+    fun stopAndRunTranscription(sess: ActiveVoiceSession) {
+        val spec = modelManager.selectedModel.value
+        dispatchVoiceState(sess, "transcribing", "本地识别中 (${spec.displayName.substringBefore("（")})...")
+        scope.launch {
+            val res = asrEngine.stopAndTranscribe(spec)
+            res.onSuccess { vr ->
+                lastVoiceResult = vr
+                val meta = String.format(
+                    Locale.US,
+                    "%s · %.2fs (RTF %.2f)",
+                    vr.modelId.displayName.substringBefore("（"),
+                    vr.inferenceSec,
+                    vr.rtf
+                )
+                if (activeVoiceSession?.reqId == sess.reqId) {
+                    if (vr.text.isBlank()) {
+                        dispatchVoiceState(sess, "idle", "未识别到有效语音内容")
+                    } else {
+                        dispatchVoiceResult(sess, vr.text, meta)
+                        dispatchVoiceState(sess, "idle", "")
+                    }
+                    activeVoiceSession = null
+                }
+            }.onFailure { err ->
+                if (activeVoiceSession?.reqId == sess.reqId) {
+                    dispatchVoiceState(sess, "idle", err.message ?: "离线语音识别失败")
+                    activeVoiceSession = null
+                }
+            }
+        }
+    }
+
+    fun beginRecording(sess: ActiveVoiceSession) {
+        val spec = modelManager.selectedModel.value
+        if (!modelManager.isInstalled(spec)) {
+            showVoiceModelSheet = true
+            dispatchVoiceState(sess, "idle", "请先下载离线语音模型")
+            return
+        }
+        activeVoiceSession = sess
+        val startRes = asrEngine.startRecording(
+            onAutoStop = {
+                stopAndRunTranscription(sess)
+            }
+        )
+        startRes.onSuccess {
+            dispatchVoiceState(sess, "recording", "正在聆听（${spec.displayName.substringBefore("（")}）...")
+        }.onFailure { err ->
+            activeVoiceSession = null
+            dispatchVoiceState(sess, "idle", err.message ?: "启动录音失败")
+        }
+    }
+
+    val recordAudioPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val pending = pendingPermissionSession
+        pendingPermissionSession = null
+        if (granted && pending != null) {
+            beginRecording(pending)
+        } else if (pending != null) {
+            dispatchVoiceState(pending, "idle", "未授予麦克风权限，无法语音输入")
+        }
+    }
+
+    fun handleVoiceToggle(reqId: String, target: String, botId: String) {
+        val safeTarget = when (target) {
+            "manager", "offline" -> target
+            else -> "prompt"
+        }
+        val current = activeVoiceSession
+        if (asrEngine.isRecording && current != null) {
+            stopAndRunTranscription(current)
+            return
+        }
+        val nextSession = ActiveVoiceSession(
+            reqId = reqId.ifBlank { "native_${System.currentTimeMillis()}" },
+            target = safeTarget,
+            botId = botId
+        )
+        val granted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            pendingPermissionSession = nextSession
+            recordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
+        beginRecording(nextSession)
+    }
+
+    fun cancelActiveVoiceSession() {
+        val cur = activeVoiceSession
+        activeVoiceSession = null
+        asrEngine.cancelRecording()
+        if (cur != null) {
+            dispatchVoiceState(cur, "idle", "")
+        }
+    }
+
+    fun registerVoiceWebMessageListener(wv: WebView, targetUrl: String) {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+            return
+        }
+        val originRule = extractOriginRule(targetUrl) ?: return
+        if (registeredOriginRule == originRule) return
+        try {
+            WebViewCompat.removeWebMessageListener(wv, VOICE_WEB_MESSAGE_CHANNEL)
+        } catch (_: Exception) {
+        }
+        WebViewCompat.addWebMessageListener(
+            wv,
+            VOICE_WEB_MESSAGE_CHANNEL,
+            setOf(originRule)
+        ) { view, message, sourceOrigin, isMainFrame, _ ->
+            // 仅接受可信主 Frame + 严格同源调用，彻底阻断 iframe 滥用
+            if (!isMainFrame) return@addWebMessageListener
+            val snap = currentSnapshotState.value ?: return@addWebMessageListener
+            if (!isSameOrigin(sourceOrigin.toString(), snap.targetUrl)) return@addWebMessageListener
+            val raw = message.data ?: return@addWebMessageListener
+            val req = try {
+                pcBotsGson.fromJson(raw, VoiceBridgeRequest::class.java)
+            } catch (_: Exception) {
+                null
+            } ?: return@addWebMessageListener
+            view.post {
+                when (req.action) {
+                    "toggle" -> handleVoiceToggle(
+                        reqId = req.reqId.orEmpty(),
+                        target = req.target.orEmpty(),
+                        botId = req.botId.orEmpty()
+                    )
+                    "cancel" -> cancelActiveVoiceSession()
+                    "openModels" -> showVoiceModelSheet = true
+                }
+            }
+        }
+        registeredOriginRule = originRule
+    }
+
+    // 退到后台时自动取消录音并在锁保护下释放 Native 模型内存，防止国产 ROM 杀后台且避免推理中崩溃
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                if (asrEngine.isRecording) {
+                    cancelActiveVoiceSession()
+                }
+                scope.launch {
+                    asrEngine.releaseModel()
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
     BackHandler(enabled = canGoBack) {
         webViewRef?.goBack()
     }
 
-    // 仅在当前服务器的原子快照就绪后，才加载目标页面或向同源页面同步最新 Token
+    // 仅在当前服务器的原子快照就绪后，才绑定同源消息通道、加载目标页面或同步最新 Token
     LaunchedEffect(readySnapshot) {
         val snap = readySnapshot ?: return@LaunchedEffect
         val wv = webViewRef ?: return@LaunchedEffect
+        registerVoiceWebMessageListener(wv, snap.targetUrl)
         if (lastLoadedTargetUrl != snap.targetUrl) {
             errorMessage = null
             lastLoadedTargetUrl = snap.targetUrl
@@ -148,12 +432,32 @@ fun PcBotsScreen(
 
     DisposableEffect(Unit) {
         onDispose {
+            modelManager.cancelDownload()
+            asrEngine.destroy()
             webViewRef?.let { wv ->
+                if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+                    try {
+                        WebViewCompat.removeWebMessageListener(wv, VOICE_WEB_MESSAGE_CHANNEL)
+                    } catch (_: Exception) {
+                    }
+                }
                 wv.stopLoading()
                 wv.destroy()
             }
             webViewRef = null
+            registeredOriginRule = null
         }
+    }
+
+    if (showVoiceModelSheet) {
+        VoiceModelSheet(
+            modelManager = modelManager,
+            lastResult = lastVoiceResult,
+            onModelDeleted = { deletedSpec ->
+                asrEngine.releaseIfMatches(deletedSpec)
+            },
+            onDismiss = { showVoiceModelSheet = false }
+        )
     }
 
     Scaffold(
@@ -188,6 +492,9 @@ fun PcBotsScreen(
                         }
                     },
                     actions = {
+                        IconButton(onClick = { showVoiceModelSheet = true }) {
+                            Icon(Icons.Default.Mic, contentDescription = "离线语音模型设置", tint = TextSecondary)
+                        }
                         IconButton(onClick = onToggleQuickBar) {
                             Icon(Icons.Default.Apps, contentDescription = "快捷切换栏", tint = TextSecondary)
                         }
@@ -255,6 +562,9 @@ fun PcBotsScreen(
                                 useWideViewPort = true
                                 loadWithOverviewMode = false
                             }
+
+                            registerVoiceWebMessageListener(this, activeSnap.targetUrl)
+
                             webChromeClient = object : WebChromeClient() {
                                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
                                     loadProgress = newProgress
@@ -346,40 +656,131 @@ fun PcBotsScreen(
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(24.dp),
+                            .verticalScroll(rememberScrollState())
+                            .padding(20.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
+                        Spacer(modifier = Modifier.height(8.dp))
                         Icon(
                             imageVector = Icons.Default.CloudOff,
                             contentDescription = null,
                             tint = TextSecondary,
-                            modifier = Modifier.size(48.dp)
+                            modifier = Modifier.size(40.dp)
                         )
-                        Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            text = "无法连接到 PC Bots 面板",
+                            text = "当前处于离线状态，无法连接 PC Bots",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
-                        Spacer(modifier = Modifier.height(6.dp))
                         Text(
                             text = errorMessage ?: "",
                             style = MaterialTheme.typography.bodySmall,
                             color = TextSecondary
                         )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Button(
-                            onClick = {
-                                val snap = currentSnapshotState.value ?: return@Button
-                                errorMessage = null
-                                lastLoadedTargetUrl = snap.targetUrl
-                                webViewRef?.loadUrl(snap.targetUrl)
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Button(
+                                onClick = {
+                                    val snap = currentSnapshotState.value ?: return@Button
+                                    errorMessage = null
+                                    lastLoadedTargetUrl = snap.targetUrl
+                                    webViewRef?.loadUrl(snap.targetUrl)
+                                }
+                            ) {
+                                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("重试联网")
                             }
+                            OutlinedButton(onClick = { showVoiceModelSheet = true }) {
+                                Icon(Icons.Default.Tune, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("管理语音模型")
+                            }
+                        }
+
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                        // 飞行模式冷启动兜底：无需联网即可测试/使用本地离线语音识别草稿箱
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = SurfaceElevated),
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("重试加载")
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Text(
+                                    text = "离线语音草稿箱（飞行模式可用）",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "当前模型：${selectedVoiceModel.displayName}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = TextSecondary
+                                )
+                                if (offlineVoiceStatus.isNotBlank()) {
+                                    Text(
+                                        text = offlineVoiceStatus,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = PrimaryIndigo
+                                    )
+                                }
+                                OutlinedTextField(
+                                    value = offlineDraftText,
+                                    onValueChange = { offlineDraftText = it },
+                                    placeholder = { Text("点击下方按钮说话，识别结果会离线填入此处...") },
+                                    minLines = 3,
+                                    maxLines = 6,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Button(
+                                        onClick = {
+                                            handleVoiceToggle(
+                                                reqId = "offline_${System.currentTimeMillis()}",
+                                                target = "offline",
+                                                botId = ""
+                                            )
+                                        },
+                                        enabled = !offlineTranscribing,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Icon(
+                                            imageVector = if (offlineRecording) Icons.Default.Stop else Icons.Default.Mic,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            when {
+                                                offlineTranscribing -> "本地识别中..."
+                                                offlineRecording -> "停止并识别"
+                                                else -> "开始离线语音"
+                                            }
+                                        )
+                                    }
+                                    OutlinedButton(
+                                        onClick = {
+                                            if (offlineDraftText.isNotBlank()) {
+                                                clipboardManager.setText(AnnotatedString(offlineDraftText))
+                                                offlineVoiceStatus = "已复制到剪贴板"
+                                            }
+                                        },
+                                        enabled = offlineDraftText.isNotBlank()
+                                    ) {
+                                        Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("复制")
+                                    }
+                                }
+                            }
                         }
                     }
                 }

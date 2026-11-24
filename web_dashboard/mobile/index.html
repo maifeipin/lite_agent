@@ -173,7 +173,15 @@
             placeholder="对 AI 总管说话（如：汇总进度 / 创建或申请删除 Bot）..."
             @keydown.ctrl.enter.prevent="handleSendManager"
           ></textarea>
-          <button class="btn btn-icon" disabled title="语音输入预留槽位（后续启用）">🎙</button>
+          <button
+            class="btn btn-icon"
+            :class="{ 'btn-voice-recording': voiceState === 'recording' && voiceTarget === 'manager', 'btn-voice-busy': voiceState === 'transcribing' && voiceTarget === 'manager' }"
+            :disabled="!hasNativeVoice || voiceState === 'transcribing'"
+            :title="hasNativeVoice ? (voiceState === 'recording' && voiceTarget === 'manager' ? '点击结束离线语音输入' : '点击开始离线语音输入') : '请在 Lite Agent Android App 中使用离线语音'"
+            @click="handleVoiceToggle('manager')"
+          >
+            {{ voiceState === 'transcribing' && voiceTarget === 'manager' ? '⏳' : (voiceState === 'recording' && voiceTarget === 'manager' ? '⏹' : '🎙') }}
+          </button>
           <button class="btn btn-primary" :disabled="managerSending || !managerInput.trim()" @click="handleSendManager">
             {{ managerSending ? '...' : '发送' }}
           </button>
@@ -298,11 +306,13 @@
         ></textarea>
         <button
           class="btn btn-icon"
-          disabled
-          title="语音输入预留槽位（后续启用）"
-          aria-label="语音输入预留"
+          :class="{ 'btn-voice-recording': voiceState === 'recording' && voiceTarget === 'prompt', 'btn-voice-busy': voiceState === 'transcribing' && voiceTarget === 'prompt' }"
+          :disabled="!hasNativeVoice || voiceState === 'transcribing'"
+          :title="hasNativeVoice ? (voiceState === 'recording' && voiceTarget === 'prompt' ? '点击结束离线语音输入' : '点击开始离线语音输入') : '请在 Lite Agent Android App 中使用离线语音'"
+          aria-label="离线语音输入"
+          @click="handleVoiceToggle('prompt')"
         >
-          🎙
+          {{ voiceState === 'transcribing' && voiceTarget === 'prompt' ? '⏳' : (voiceState === 'recording' && voiceTarget === 'prompt' ? '⏹' : '🎙') }}
         </button>
         <button class="btn btn-primary" :disabled="sending || !promptInput.trim()" @click="handleSendPrompt">
           发送
@@ -387,6 +397,6 @@
     </div>
   </div>
 
-  <script type="module" src="./app.js?v=2"></script>
+  <script type="module" src="./app.js?v=3"></script>
 </body>
 </html>

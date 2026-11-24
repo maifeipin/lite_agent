@@ -19,11 +19,19 @@ import com.liteagent.mobile.core.network.ApiService
 import com.liteagent.mobile.core.network.AuthenticationException
 import com.liteagent.mobile.core.network.models.*
 import com.liteagent.mobile.core.storage.TodoDatabaseHelper
+import com.liteagent.mobile.core.voice.OfflineVoiceModelId
+import com.liteagent.mobile.core.voice.extractTarBz2AndComputeSha256
+import com.liteagent.mobile.core.voice.isModelDirectoryComplete
+import com.liteagent.mobile.core.voice.resolveSafeTarEntryFile
+import com.liteagent.mobile.core.voice.writeVerifiedManifest
 import com.liteagent.mobile.ui.discover.DiscoverViewModel
 import com.liteagent.mobile.ui.meetings.MeetingsViewModel
 import com.liteagent.mobile.ui.pcbots.PcBotsAuthSnapshot
 import com.liteagent.mobile.ui.pcbots.buildMobilePwaUrl
 import com.liteagent.mobile.ui.pcbots.buildTokenInjectionScript
+import com.liteagent.mobile.ui.pcbots.buildVoiceResultDispatchScript
+import com.liteagent.mobile.ui.pcbots.buildVoiceStateDispatchScript
+import com.liteagent.mobile.ui.pcbots.extractOriginRule
 import com.liteagent.mobile.ui.pcbots.isSameOrigin
 import com.liteagent.mobile.ui.pcbots.resolveTokenForUrl
 import com.liteagent.mobile.ui.phoneapp.PhoneAppViewModel
@@ -94,6 +102,74 @@ class SanityTest {
         assertEquals("tok_a", resolveTokenForUrl("https://a.example.com/mobile/?bot=1", snapA))
         assertNull(resolveTokenForUrl("https://b.example.com/mobile/", snapA))
         assertNull(resolveTokenForUrl("https://a.example.com/mobile/", null))
+    }
+
+    @Test
+    fun offline_voice_models_tar_safety_and_js_dispatch() {
+        assertEquals(3, OfflineVoiceModelId.values().size)
+        assertEquals(OfflineVoiceModelId.QWEN3_ASR_06B, OfflineVoiceModelId.fromId("unknown"))
+        assertEquals(OfflineVoiceModelId.FUNASR_NANO, OfflineVoiceModelId.fromId("funasr_nano"))
+        assertEquals(OfflineVoiceModelId.SENSE_VOICE_SMALL, OfflineVoiceModelId.fromId("sense_voice_small"))
+        assertEquals("https://mail.maifeipin.com", extractOriginRule("https://mail.maifeipin.com/mobile/"))
+        assertEquals("http://127.0.0.1:8887", extractOriginRule("http://127.0.0.1:8887/mobile/"))
+
+        val tmpRoot = java.nio.file.Files.createTempDirectory("voice_test_").toFile()
+        try {
+            assertNotNull(resolveSafeTarEntryFile(tmpRoot, "sherpa/model.int8.onnx"))
+            assertNull(resolveSafeTarEntryFile(tmpRoot, "../evil.sh"))
+            assertNull(resolveSafeTarEntryFile(tmpRoot, "a/../../evil.sh"))
+
+            val spec = OfflineVoiceModelId.SENSE_VOICE_SMALL
+            val modelDir = java.io.File(tmpRoot, spec.archiveDirName)
+            modelDir.mkdirs()
+            // 空文件或极小文件不得判定为完整
+            java.io.File(modelDir, "model.int8.onnx").writeText("tiny")
+            java.io.File(modelDir, "tokens.txt").writeText("tiny")
+            assertFalse(isModelDirectoryComplete(modelDir, spec))
+
+            // 尺寸达标但缺少校验清单或校验值不匹配不得判定为完整
+            java.io.File(modelDir, "model.int8.onnx").writeBytes(ByteArray(1024 * 1024 + 16))
+            java.io.File(modelDir, "tokens.txt").writeBytes(ByteArray(2048))
+            assertFalse(isModelDirectoryComplete(modelDir, spec))
+            writeVerifiedManifest(modelDir, spec, "0000000000000000000000000000000000000000000000000000000000000000")
+            assertFalse(isModelDirectoryComplete(modelDir, spec))
+
+            // 尺寸达标 + 官方 SHA-256 清单匹配才通过
+            writeVerifiedManifest(modelDir, spec, spec.expectedArchiveSha256)
+            assertTrue(isModelDirectoryComplete(modelDir, spec))
+
+            // 真实 tar.bz2 流式解压 + 完整 SHA-256 校验（不得在关闭内层解压流后报 Stream closed）
+            val payloadBytes = "hello offline voice model".toByteArray(Charsets.UTF_8)
+            val baos = java.io.ByteArrayOutputStream()
+            org.apache.commons.compress.compressors.bzip2.BZip2CompressorOutputStream(baos).use { bzOut ->
+                org.apache.commons.compress.archivers.tar.TarArchiveOutputStream(bzOut).use { tarOut ->
+                    val entry = org.apache.commons.compress.archivers.tar.TarArchiveEntry("demo/tokens.txt")
+                    entry.size = payloadBytes.size.toLong()
+                    tarOut.putArchiveEntry(entry)
+                    tarOut.write(payloadBytes)
+                    tarOut.closeArchiveEntry()
+                }
+            }
+            val archiveBytes = baos.toByteArray()
+            val expectedSha = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(archiveBytes)
+                .joinToString("") { "%02x".format(it) }
+            val extractDir = java.io.File(tmpRoot, "extracted")
+            extractDir.mkdirs()
+            val actualSha = extractTarBz2AndComputeSha256(java.io.ByteArrayInputStream(archiveBytes), extractDir)
+            assertEquals(expectedSha, actualSha)
+            assertEquals("hello offline voice model", java.io.File(extractDir, "demo/tokens.txt").readText(Charsets.UTF_8))
+        } finally {
+            tmpRoot.deleteRecursively()
+        }
+
+        val stateJs = buildVoiceStateDispatchScript("v_1", "recording", "prompt", "正在聆听")
+        assertTrue(stateJs.contains("__onPcCliVoiceState"))
+        assertTrue(stateJs.contains("\"v_1\""))
+        val resJs = buildVoiceResultDispatchScript("v_1", "prompt", "bot_a", "帮我运行 \"pytest\"", "Qwen3-ASR · 0.90s")
+        assertTrue(resJs.contains("__onPcCliVoiceResult"))
+        assertTrue(resJs.contains("\"bot_a\""))
+        assertTrue(resJs.contains("\\\"pytest\\\""))
     }
 
     @Test

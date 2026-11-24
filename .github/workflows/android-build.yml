@@ -46,6 +46,17 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
 
+      - name: Download Sherpa-ONNX Prebuilt AAR (v2.0.3)
+        run: |
+          mkdir -p app/android/app/libs
+          AAR_FILE="app/android/app/libs/sherpa-onnx-static-link-onnxruntime-2.0.3.aar"
+          EXPECTED_SHA256="7744a3a8f08f017d59c2d8ed8d9b700345561f5abe9f4e06dc6eaef3a0b977b4"
+          if [ ! -f "$AAR_FILE" ]; then
+            curl -fsSL -o "$AAR_FILE" "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.3/sherpa-onnx-static-link-onnxruntime-2.0.3.aar"
+          fi
+          echo "${EXPECTED_SHA256}  ${AAR_FILE}" | sha256sum -c -
+          ls -lh "$AAR_FILE"
+
       - name: Run Unit Tests and Build Debug APK
         working-directory: app/android
         run: ./gradlew testDebugUnitTest assembleDebug --no-daemon --stacktrace

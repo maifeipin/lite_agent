@@ -78,6 +78,19 @@ const app = createApp({
     const managerSending = ref(false);
     const managerStreamEl = ref(null);
 
+    // Android 离线语音输入（WebViewCompat.addWebMessageListener 安全消息通道）
+    const hasNativeVoice = ref(
+      typeof window !== 'undefined' &&
+      typeof window.AndroidPcCliVoiceChannel !== 'undefined' &&
+      typeof window.AndroidPcCliVoiceChannel.postMessage === 'function'
+    );
+    const voiceState = ref('idle'); // idle | recording | transcribing
+    const voiceTarget = ref(''); // prompt | manager | ''
+    const promptInputSource = ref('text');
+    let voiceReqSeq = 0;
+    let activeVoiceReqId = '';
+    let activeVoiceBotId = '';
+
     // 新建 Bot 表单
     const form = ref({
       node_id: '',
@@ -174,11 +187,11 @@ const app = createApp({
             status: p.status || '',
             error: p.error || '',
           });
-        } else if (ev.event_type === 'error') {
+        } else if (ev.event_type === 'error' || ev.event_type === 'warning') {
           items.push({
             key: `e-${ev.seq_id}`,
             kind: 'status',
-            status: 'error',
+            status: ev.event_type === 'warning' || p.non_fatal ? 'warning' : 'error',
             error: p.message || '执行异常',
           });
         }
@@ -208,7 +221,24 @@ const app = createApp({
       });
     }
 
+    function cancelActiveVoice() {
+      const hadActive = Boolean(activeVoiceReqId || voiceState.value !== 'idle');
+      activeVoiceReqId = '';
+      activeVoiceBotId = '';
+      voiceState.value = 'idle';
+      voiceTarget.value = '';
+      if (hadActive && window.AndroidPcCliVoiceChannel && typeof window.AndroidPcCliVoiceChannel.postMessage === 'function') {
+        try {
+          window.AndroidPcCliVoiceChannel.postMessage(JSON.stringify({ action: 'cancel' }));
+        } catch (_) {}
+      }
+    }
+
     async function openBot(botId) {
+      if (store.activeBotId !== botId) {
+        cancelActiveVoice();
+        promptInputSource.value = 'text';
+      }
       store.activeBotId = botId;
       window.location.hash = `#bot/${botId}`;
       await subscribeBotOnWs(botId);
@@ -222,6 +252,7 @@ const app = createApp({
     }
 
     function backToList() {
+      cancelActiveVoice();
       store.activeBotId = null;
       window.location.hash = '';
       subscribeBotOnWs(null);
@@ -307,9 +338,11 @@ const app = createApp({
       const text = promptInput.value.trim();
       if (!text || !store.activeBotId || sending.value) return;
       sending.value = true;
+      const src = promptInputSource.value === 'voice' ? 'voice' : 'text';
       try {
-        await sendTurn(store.activeBotId, text, 'text');
+        await sendTurn(store.activeBotId, text, src);
         promptInput.value = '';
+        promptInputSource.value = 'text';
         scrollToBottom();
       } catch (e) {
         showToast(e.message);
@@ -317,6 +350,66 @@ const app = createApp({
         sending.value = false;
       }
     }
+
+    function handleVoiceToggle(target) {
+      if (!window.AndroidPcCliVoiceChannel || typeof window.AndroidPcCliVoiceChannel.postMessage !== 'function') {
+        showToast('请在 Lite Agent Android App 中使用离线语音');
+        return;
+      }
+      const safeTarget = target === 'manager' ? 'manager' : 'prompt';
+      if (voiceState.value === 'recording' && activeVoiceReqId) {
+        window.AndroidPcCliVoiceChannel.postMessage(JSON.stringify({
+          action: 'toggle',
+          reqId: activeVoiceReqId,
+          target: voiceTarget.value || safeTarget,
+          botId: activeVoiceBotId,
+        }));
+        return;
+      }
+      const nextReqId = `v_${++voiceReqSeq}_${Date.now()}`;
+      const boundBotId = safeTarget === 'prompt' ? String(store.activeBotId || '') : '';
+      activeVoiceReqId = nextReqId;
+      activeVoiceBotId = boundBotId;
+      window.AndroidPcCliVoiceChannel.postMessage(JSON.stringify({
+        action: 'toggle',
+        reqId: nextReqId,
+        target: safeTarget,
+        botId: boundBotId,
+      }));
+    }
+
+    window.__onPcCliVoiceState = (reqId, state, target, message) => {
+      if (reqId && activeVoiceReqId && reqId !== activeVoiceReqId) {
+        return;
+      }
+      voiceState.value = state || 'idle';
+      voiceTarget.value = state === 'idle' ? '' : (target || '');
+      if (state === 'idle') {
+        activeVoiceReqId = '';
+        activeVoiceBotId = '';
+      }
+      if (message) {
+        showToast(message, state === 'recording' ? 2200 : 3200);
+      }
+    };
+
+    window.__onPcCliVoiceResult = (reqId, target, botId, text, meta) => {
+      if (!reqId || reqId !== activeVoiceReqId) {
+        return;
+      }
+      if (target === 'prompt' && String(botId || '') !== String(store.activeBotId || '')) {
+        return;
+      }
+      const clean = String(text || '').trim();
+      if (!clean) return;
+      if (target === 'manager') {
+        managerInput.value = managerInput.value.trim() ? `${managerInput.value.trim()} ${clean}` : clean;
+      } else {
+        promptInput.value = promptInput.value.trim() ? `${promptInput.value.trim()} ${clean}` : clean;
+        promptInputSource.value = 'voice';
+      }
+      showToast(meta ? `识别完成 (${meta})` : '离线语音识别完成', 3500);
+    };
 
     async function handleCancel() {
       if (!store.activeBotId) return;
@@ -354,6 +447,9 @@ const app = createApp({
     }
 
     async function switchTab(tab) {
+      if (store.activeTab !== tab) {
+        cancelActiveVoice();
+      }
       store.activeTab = tab;
       if (tab === 'dashboard') {
         await fetchStats().catch((e) => showToast(e.message));
@@ -488,6 +584,10 @@ const app = createApp({
       onNodeChange,
       handleCreateBot,
       handleSendPrompt,
+      handleVoiceToggle,
+      hasNativeVoice,
+      voiceState,
+      voiceTarget,
       handleCancel,
       handleApproval,
       handleDeleteBot,

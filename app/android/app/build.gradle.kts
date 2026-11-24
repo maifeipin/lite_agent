@@ -11,8 +11,8 @@ android {
         applicationId = "com.liteagent.mobile"
         minSdk = 26
         targetSdk = 34
-        versionCode = providers.gradleProperty("appVersionCode").orElse("8").get().toInt()
-        versionName = providers.gradleProperty("appVersionName").orElse("1.4.1").get()
+        versionCode = providers.gradleProperty("appVersionCode").orElse("9").get().toInt()
+        versionName = providers.gradleProperty("appVersionName").orElse("1.5.0").get()
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -101,6 +101,11 @@ dependencies {
     // 协程与图片
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.coil.compose)
+
+    // 离线端侧语音识别 (Sherpa-ONNX 预编译 AAR + tar.bz2 流式解压 + WebView 安全消息通道)
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
+    implementation("org.apache.commons:commons-compress:1.26.1")
+    implementation("androidx.webkit:webkit:1.11.0")
 
     debugImplementation(libs.androidx.ui.tooling)
 }
