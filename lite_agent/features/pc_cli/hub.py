@@ -473,7 +473,7 @@ class PcCliHub:
         node = self.repo.get_node(node_id)
         if not node:
             return False, {"error": f"节点 '{node_id}' 不存在，请先启动该 PC 的守护进程"}
-        if node.get("engines") and engine not in node["engines"]:
+        if engine not in (node.get("engines") or []):
             return False, {"error": f"节点 '{node_id}' 未检测到引擎 '{engine}' (可用: {node['engines']})"}
         roots = node.get("workspace_roots") or []
         if roots and not self._is_cwd_in_roots(cwd, roots, platform=str(node.get("platform") or "")):

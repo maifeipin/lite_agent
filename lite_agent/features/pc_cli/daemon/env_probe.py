@@ -22,13 +22,37 @@ _MACOS_COMMON_BINS = (
     os.path.expanduser("~/.npm-global/bin"),
 )
 
+# Desktop 通过这些进程局部变量把其子进程绑定到应用运行时/通信管道。
+# Daemon 启动的是独立 CLI，不能沿用父桌面会话的服务端点；否则 Windows
+# 会因端点不可用而拒绝 helper fallback，即使本机的原生沙箱可以正常执行。
+# 保留 CODEX_HOME、认证、代理与权限配置等用户设置。
+_CODEX_DESKTOP_SESSION_ENV = (
+    "CODEX_APP_RUNTIME_CLI_PATH",
+    "CODEX_APP_TOOLS_PIPE_PATH",
+    "CODEX_WINDOWS_REGISTERED_CORE",
+    "CODEX_WINDOWS_SANDBOX_PACKAGE_FAMILY",
+    "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+)
+
 
 def build_engine_env(extra_path: Optional[List[str]] = None) -> Dict[str, str]:
     env = dict(os.environ)
+    for name in _CODEX_DESKTOP_SESSION_ENV:
+        env.pop(name, None)
     paths = [p for p in env.get("PATH", "").split(os.pathsep) if p]
     candidates = list(extra_path or [])
     if sys.platform == "darwin":
         candidates.extend(_MACOS_COMMON_BINS)
+    elif sys.platform == "win32":
+        # 后台进程不执行 PowerShell profile；使用 fnm 的持久 default alias，
+        # 不依赖某个终端的临时 fnm_multishells 目录。
+        fnm_roots = [env.get("FNM_DIR", "")]
+        for key in ("APPDATA", "LOCALAPPDATA"):
+            if env.get(key):
+                fnm_roots.append(os.path.join(env[key], "fnm"))
+        candidates.extend(os.path.join(root, "aliases", "default") for root in fnm_roots if root)
+        if env.get("APPDATA"):
+            candidates.append(os.path.join(env["APPDATA"], "npm"))
     for p in candidates:
         expanded = os.path.expanduser(p)
         if expanded and expanded not in paths and os.path.isdir(expanded):
@@ -72,7 +96,8 @@ def build_spawn_argv(command: str, args: List[str], env: Dict[str, str], platfor
     lower = resolved.lower()
     if lower.endswith(".cmd") or lower.endswith(".bat"):
         js_entry = _unwrap_npm_cmd_shim(resolved)
-        node_bin = resolve_executable("node", env)
+        sibling_node = os.path.join(os.path.dirname(resolved), "node.exe")
+        node_bin = sibling_node if os.path.isfile(sibling_node) else resolve_executable("node", env)
         if js_entry and node_bin:
             return [node_bin, js_entry, *args]
         raise ValueError(f"拒绝通过命令解释器执行无法拆包的脚本: {resolved}")
@@ -83,10 +108,13 @@ def build_spawn_argv(command: str, args: List[str], env: Dict[str, str], platfor
 
 def detect_available_engines(codex_bin: str, agy_bin: str, env: Dict[str, str]) -> List[str]:
     engines: List[str] = []
-    if resolve_executable(codex_bin, env):
-        engines.append("codex")
-    if resolve_executable(agy_bin, env):
-        engines.append("agy")
+    for name, command in (("codex", codex_bin), ("agy", agy_bin)):
+        if resolve_executable(command, env):
+            try:
+                build_spawn_argv(command, [], env)
+            except ValueError:
+                continue
+            engines.append(name)
     return engines
 
 

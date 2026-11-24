@@ -23,6 +23,15 @@ _CODEX_APPROVAL_METHODS = frozenset({
 })
 
 
+def is_model_resume_notice(message: str) -> bool:
+    """Codex 将恢复模型差异也编码为 error 事件；仅降级这一种已知提示。"""
+    return (
+        message.startswith("This session was recorded with model ")
+        and " but is resuming with " in message
+        and "Consider switching back to " in message
+    )
+
+
 def map_decision_to_codex(decision: str) -> str:
     if decision == "allow_once":
         return "accept"
@@ -224,7 +233,7 @@ class CodexCliAdapter(BaseCliAdapter):
                 itype = str(item.get("type") or "")
                 if itype == "reasoning" and item.get("text"):
                     await on_event("thinking", {"text": truncate_text(item["text"])})
-                elif itype == "agent_message" and item.get("text"):
+                elif itype in ("agent_message", "agentMessage") and item.get("text"):
                     last_message = str(item["text"])
                     await on_event("assistant_message", {"text": truncate_text(last_message)})
                 elif itype == "error":
@@ -254,7 +263,11 @@ class CodexCliAdapter(BaseCliAdapter):
                 turn_done.set()
             elif method in ("turn/failed", "error"):
                 err = params.get("error") or params
-                turn_error = str(err.get("message") if isinstance(err, dict) else err) or "Codex app-server error"
+                message = str(err.get("message") if isinstance(err, dict) else err) or "Codex app-server error"
+                if method == "error" and (is_model_resume_notice(message) or params.get("willRetry") is True):
+                    await on_event("warning", {"message": message, "non_fatal": True})
+                    return
+                turn_error = message
                 turn_status = "failed"
                 await on_event("error", {"message": turn_error})
                 turn_done.set()
@@ -294,13 +307,19 @@ class CodexCliAdapter(BaseCliAdapter):
 
                 policy = "on-request" if approval_mode == "ask" else "never"
                 if thread_id:
+                    resume_params: Dict[str, Any] = {
+                        "threadId": thread_id, "cwd": cwd, "approvalPolicy": policy,
+                        "sandbox": "workspace-write",
+                    }
+                    if model:
+                        resume_params["model"] = model
                     th_res = await rpc.call(
                         "thread/resume",
-                        {"threadId": thread_id, "cwd": cwd, "approvalPolicy": policy},
+                        resume_params,
                         timeout=30.0,
                     )
                 else:
-                    start_params: Dict[str, Any] = {"cwd": cwd, "approvalPolicy": policy}
+                    start_params: Dict[str, Any] = {"cwd": cwd, "approvalPolicy": policy, "sandbox": "workspace-write"}
                     if model:
                         start_params["model"] = model
                     th_res = await rpc.call("thread/start", start_params, timeout=30.0)
@@ -379,6 +398,7 @@ class CodexCliAdapter(BaseCliAdapter):
         thread_id = native_session_id
         last_message = ""
         last_error: Optional[str] = None
+        turn_completed = False
         stderr_chunks: List[str] = []
 
         async def _drain_stderr() -> None:
@@ -395,7 +415,7 @@ class CodexCliAdapter(BaseCliAdapter):
 
         try:
             async def _execute_full_turn() -> int:
-                nonlocal thread_id, last_message, last_error
+                nonlocal thread_id, last_message, last_error, turn_completed
                 if proc.stdin:
                     proc.stdin.write((prompt + "\n").encode("utf-8"))
                     await proc.stdin.drain()
@@ -438,8 +458,14 @@ class CodexCliAdapter(BaseCliAdapter):
                         last_error = str(err.get("message") if isinstance(err, dict) else err) or "Codex turn failed"
                         await on_event("error", {"message": last_error})
                     elif etype == "error":
-                        last_error = str(ev.get("message") or "Codex error")
-                        await on_event("error", {"message": last_error})
+                        message = str(ev.get("message") or "Codex error")
+                        if is_model_resume_notice(message):
+                            await on_event("warning", {"message": message, "non_fatal": True})
+                        else:
+                            last_error = message
+                            await on_event("error", {"message": last_error})
+                    elif etype == "turn.completed":
+                        turn_completed = True
 
                 rc_inner = await proc.wait()
                 try:
@@ -462,6 +488,9 @@ class CodexCliAdapter(BaseCliAdapter):
                     final_text=last_message,
                     error=f"codex 退出码 {rc}" + (f": {diag}" if diag else ""),
                 )
+            if not turn_completed:
+                return TurnResult(status="failed", native_session_id=thread_id, final_text=last_message,
+                                  error="Codex 进程已退出，但未收到 turn.completed 完成事件")
             return TurnResult(status="completed", native_session_id=thread_id, final_text=last_message)
         except asyncio.TimeoutError:
             await kill_process_tree(proc)
@@ -471,3 +500,4 @@ class CodexCliAdapter(BaseCliAdapter):
             self._cancelled.discard(key)
             if not stderr_task.done():
                 stderr_task.cancel()
+            await kill_process_tree(proc)
