@@ -67,6 +67,71 @@ function renderMarkdownSafe(text) {
   return escaped.replace(/\n/g, '<br>');
 }
 
+function formatApprovalField(val) {
+  if (val === null || val === undefined) return '';
+  if (typeof val === 'string') return val.trim();
+  if (Array.isArray(val)) {
+    if (!val.length) return '';
+    if (val.every((x) => typeof x === 'string')) {
+      return val
+        .map((x) => (/^[A-Za-z0-9_./:@=-]+$/.test(x) ? x : JSON.stringify(x)))
+        .join(' ');
+    }
+    return JSON.stringify(val, null, 2);
+  }
+  if (typeof val === 'object') {
+    return Object.keys(val).length ? JSON.stringify(val, null, 2) : '';
+  }
+  return String(val).trim();
+}
+
+function formatApprovalFullDetail(appr) {
+  if (!appr || typeof appr !== 'object') return '';
+  const raw = appr.raw_request && typeof appr.raw_request === 'object' ? appr.raw_request : {};
+  const tc = raw.toolCall && typeof raw.toolCall === 'object' ? raw.toolCall : {};
+  const sections = [];
+
+  const fullTitle = formatApprovalField(tc.title) || String(appr.tool_name || '').trim();
+  const rawCmd =
+    formatApprovalField(raw.command) ||
+    formatApprovalField(tc.rawInput) ||
+    formatApprovalField(raw.parsedCmd) ||
+    formatApprovalField(raw.changes);
+  const summary = String(appr.summary || '').trim();
+  const summaryPrefix = summary.replace(/\s*\.\.\.\s*\[(?:truncated|已截断)[^\]]*\]\s*$/i, '').replace(/…$/, '');
+
+  if (fullTitle && fullTitle !== rawCmd) {
+    sections.push(fullTitle);
+  }
+  if (rawCmd) {
+    sections.push(rawCmd);
+  } else if (summary && summary !== fullTitle && (!summaryPrefix || !fullTitle.startsWith(summaryPrefix))) {
+    sections.push(summary);
+  }
+
+  const scopeFields = [
+    ['执行目录', raw.cwd],
+    ['网络目标', raw.networkApprovalContext || raw.network_approval_context],
+    ['附加权限', raw.additionalPermissions || raw.additional_permissions],
+    ['申请权限', raw.permissions],
+    ['授权根目录', raw.grantRoot || raw.writableRoots],
+  ];
+  for (const [label, val] of scopeFields) {
+    const formatted = formatApprovalField(val);
+    if (formatted) {
+      sections.push(`${label}: ${formatted}`);
+    }
+  }
+
+  if (typeof raw.reason === 'string' && raw.reason.trim() && !sections.some((s) => s.includes(raw.reason.trim()))) {
+    sections.push(`原因: ${raw.reason.trim()}`);
+  }
+  if (!sections.length && summary) {
+    sections.push(summary);
+  }
+  return sections.join('\n\n');
+}
+
 const app = createApp({
   setup() {
     const showCreateDrawer = ref(false);
@@ -626,6 +691,7 @@ const app = createApp({
       voiceTarget,
       handleCancel,
       handleApproval,
+      formatApprovalFullDetail,
       updatingApprovalMode,
       handleToggleApprovalMode,
       handleDeleteBot,

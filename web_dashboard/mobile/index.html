@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#0a0b10">
   <title>PC Bots | Lite Agent</title>
   <link rel="manifest" href="./manifest.json?v=1">
-  <link rel="stylesheet" href="./style.css?v=4">
+  <link rel="stylesheet" href="./style.css?v=5">
   <script src="./vendor/marked.min.js?v=1"></script>
 </head>
 <body>
@@ -126,7 +126,10 @@
                 <div class="bot-name">{{ appr.approval_type === 'bot_delete' ? '🗑 删除 Bot 授权' : (appr.approval_type === 'turn_cancel' ? '■ 中止回合授权' : '⚠️ CLI 工具审批') }}</div>
                 <span class="tag">{{ appr.requested_by }}</span>
               </div>
-              <div class="approval-summary">{{ appr.summary }}</div>
+              <details class="approval-details">
+                <summary class="approval-preview">{{ appr.summary || appr.tool_name }}</summary>
+                <div class="approval-full">{{ formatApprovalFullDetail(appr) }}</div>
+              </details>
               <div class="approval-actions">
                 <button class="btn btn-ok" @click="handleApproval(appr.approval_id, 'allow_once')">确认批准</button>
                 <button class="btn btn-danger" @click="handleApproval(appr.approval_id, 'deny')">拒绝</button>
@@ -156,7 +159,10 @@
               <div v-html="m.html"></div>
               <div class="approval-bar" v-for="appr in (m.approvals || [])" :key="appr.approval_id" style="margin-top:10px;border-radius:10px;">
                 <div class="approval-title">⚠️ 需要你确认授权 · {{ appr.tool_name }}</div>
-                <div class="approval-summary">{{ appr.summary }}</div>
+                <details class="approval-details">
+                  <summary class="approval-preview">{{ appr.summary || appr.tool_name }}</summary>
+                  <div class="approval-full">{{ formatApprovalFullDetail(appr) }}</div>
+                </details>
                 <div class="approval-actions" v-if="!appr.resolved">
                   <button class="btn btn-ok" @click="handleApproval(appr.approval_id, 'allow_once')">确认执行</button>
                   <button class="btn btn-danger" @click="handleApproval(appr.approval_id, 'deny')">拒绝</button>
@@ -290,20 +296,25 @@
         </template>
       </section>
 
-      <!-- 内联权限审批条 -->
-      <div class="approval-bar" v-for="appr in activeBotApprovals" :key="appr.approval_id">
-        <div class="approval-title">⚠️ 等待权限审批 · {{ appr.tool_name }}</div>
-        <div class="approval-summary">{{ appr.summary }}</div>
-        <div class="approval-actions">
-          <button class="btn btn-ok" @click="handleApproval(appr.approval_id, 'allow_once')">允许本次</button>
-          <button
-            v-if="activeBot && activeBot.engine === 'codex'"
-            class="btn btn-primary"
-            @click="handleApproval(appr.approval_id, 'allow_session')"
-          >
-            本会话允许
-          </button>
-          <button class="btn btn-danger" @click="handleApproval(appr.approval_id, 'deny')">拒绝</button>
+      <!-- 内联权限审批栈（整体高度受限可滚 + 单卡长命令折叠，确保多张卡时按钮与输入框也不被挤出视口） -->
+      <div class="approval-stack" v-if="activeBotApprovals.length">
+        <div class="approval-bar" v-for="appr in activeBotApprovals" :key="appr.approval_id">
+          <div class="approval-title">⚠️ 等待权限审批 · {{ appr.tool_name }}</div>
+          <details class="approval-details">
+            <summary class="approval-preview">{{ appr.summary || appr.tool_name }}</summary>
+            <div class="approval-full">{{ formatApprovalFullDetail(appr) }}</div>
+          </details>
+          <div class="approval-actions">
+            <button class="btn btn-ok" @click="handleApproval(appr.approval_id, 'allow_once')">允许本次</button>
+            <button
+              v-if="activeBot && activeBot.engine === 'codex'"
+              class="btn btn-primary"
+              @click="handleApproval(appr.approval_id, 'allow_session')"
+            >
+              本会话允许
+            </button>
+            <button class="btn btn-danger" @click="handleApproval(appr.approval_id, 'deny')">拒绝</button>
+          </div>
         </div>
       </div>
 
@@ -408,6 +419,6 @@
     </div>
   </div>
 
-  <script type="module" src="./app.js?v=7"></script>
+  <script type="module" src="./app.js?v=8"></script>
 </body>
 </html>

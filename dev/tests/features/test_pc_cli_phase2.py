@@ -504,3 +504,11 @@ def test_manager_list_node_dirs_tool_and_failed_history_filter(tmp_path):
     assert "sending.value || updatingApprovalMode.value" in app_js
     assert "sending || updatingApprovalMode || !promptInput.trim()" in index_html
     assert "handleToggleApprovalMode(activeBot)" in index_html
+    style_css = (root / "web_dashboard" / "mobile" / "style.css").read_text(encoding="utf-8")
+    assert 'class="approval-stack"' in index_html
+    assert 'class="approval-details"' in index_html
+    assert "formatApprovalFullDetail(appr)" in index_html
+    assert "function formatApprovalFullDetail(appr)" in app_js
+    assert "networkApprovalContext" in app_js
+    assert "additionalPermissions" in app_js
+    assert "min-height: 0;" in style_css

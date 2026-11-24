@@ -384,18 +384,85 @@ html, body, #app {
 }
 .turn-banner.error { color: #fca5a5; }
 
-/* Inline approval bar */
+/* Inline approval stack & bar */
+.approval-stack {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  max-height: 48vh;
+  max-height: 48dvh;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+  border-top: 1px solid rgba(245, 158, 11, 0.45);
+}
+.approval-stack > .approval-bar:first-child {
+  border-top: none;
+}
 .approval-bar {
   background: rgba(245, 158, 11, 0.12);
   border-top: 1px solid rgba(245, 158, 11, 0.45);
   padding: 10px 14px;
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  max-height: 44vh;
+  max-height: 44dvh;
+  overflow: hidden;
 }
 .approval-title {
   font-size: 13px;
   font-weight: 600;
   color: #fcd34d;
-  margin-bottom: 4px;
+  margin-bottom: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+}
+.approval-details {
+  margin-bottom: 8px;
+  background: rgba(15, 18, 28, 0.55);
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  border-radius: 8px;
+  padding: 6px 9px;
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+}
+.approval-preview {
+  cursor: pointer;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-all;
+  list-style: none;
+}
+.approval-preview::-webkit-details-marker { display: none; }
+.approval-preview::before {
+  content: "▸ 展开详情：";
+  color: #fcd34d;
+  font-family: var(--sans);
+  font-weight: 600;
+}
+.approval-details[open] .approval-preview::before {
+  content: "▾ 收起详情：";
+}
+.approval-full {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(245, 158, 11, 0.2);
+  font-size: 12px;
+  font-family: var(--mono);
+  color: #e2e8f0;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 .approval-summary {
   font-size: 12px;
@@ -403,10 +470,14 @@ html, body, #app {
   color: var(--text);
   margin-bottom: 8px;
   word-break: break-all;
+  white-space: pre-wrap;
+  max-height: 120px;
+  overflow-y: auto;
 }
 .approval-actions {
   display: flex;
   gap: 8px;
+  flex-shrink: 0;
 }
 .approval-actions .btn { flex: 1; }
 
