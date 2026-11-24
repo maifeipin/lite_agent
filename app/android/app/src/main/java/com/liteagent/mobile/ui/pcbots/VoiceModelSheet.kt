@@ -30,6 +30,7 @@ import java.util.Locale
 @Composable
 fun VoiceModelSheet(
     modelManager: OfflineVoiceModelManager,
+    mirrorBaseUrl: String?,
     lastResult: OfflineVoiceResult?,
     onModelDeleted: suspend (OfflineVoiceModelId) -> Unit,
     onDismiss: () -> Unit
@@ -193,15 +194,15 @@ fun VoiceModelSheet(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Text(
-                                        text = when {
-                                            prog?.phase == "extracting" -> "正在校验与整理模型文件..."
-                                            totMb > 0 -> "流式下载并解压中：$pct% ($dlMb / $totMb MB)"
-                                            else -> "流式下载并解压中：已接收 $dlMb MB"
-                                        },
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = TextSecondary
-                                    )
+                                        Text(
+                                            text = when {
+                                                prog?.phase == "extracting" -> "正在校验 SHA-256 与解压模型..."
+                                                totMb > 0 -> "断点续传下载中：$pct% ($dlMb / $totMb MB)"
+                                                else -> "断点续传下载中：已接收 $dlMb MB"
+                                            },
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = TextSecondary
+                                        )
                                     TextButton(onClick = { modelManager.cancelDownload() }) {
                                         Text("取消", fontSize = 12.sp)
                                     }
@@ -218,9 +219,9 @@ fun VoiceModelSheet(
                                         onClick = {
                                             statusMessage = null
                                             scope.launch {
-                                                val res = modelManager.downloadAndExtractModel(spec)
+                                                val res = modelManager.downloadAndExtractModel(spec, mirrorBaseUrl = mirrorBaseUrl)
                                                 res.onFailure { err ->
-                                                    statusMessage = err.message ?: "下载失败，请稍后重试"
+                                                    statusMessage = err.message ?: "下载失败，已保留断点，点击可继续"
                                                 }
                                             }
                                         },

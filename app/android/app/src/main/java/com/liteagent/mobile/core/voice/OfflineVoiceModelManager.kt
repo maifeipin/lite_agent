@@ -3,6 +3,7 @@ package com.liteagent.mobile.core.voice
 import android.content.Context
 import com.google.gson.Gson
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -14,12 +15,15 @@ import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
 import java.io.BufferedInputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.FilterInputStream
+import java.io.IOException
 import java.io.InputStream
 import java.security.DigestInputStream
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 data class RequiredModelFile(
@@ -98,6 +102,9 @@ enum class OfflineVoiceModelId(
         )
     );
 
+    val archiveFileName: String
+        get() = "$archiveDirName.tar.bz2"
+
     companion object {
         fun fromId(raw: String?): OfflineVoiceModelId {
             return values().firstOrNull { it.id == raw } ?: QWEN3_ASR_06B
@@ -113,6 +120,16 @@ data class VoiceDownloadProgress(
 ) {
     val percent: Int
         get() = if (totalBytes > 0L) ((downloadedBytes * 100L) / totalBytes).toInt().coerceIn(0, 100) else -1
+}
+
+internal fun buildCandidateDownloadUrls(spec: OfflineVoiceModelId, mirrorBaseUrl: String?): List<String> {
+    val urls = ArrayList<String>(2)
+    val cleanBase = mirrorBaseUrl?.trim()?.trimEnd('/')
+    if (!cleanBase.isNullOrBlank() && (cleanBase.startsWith("https://") || cleanBase.startsWith("http://"))) {
+        urls.add("$cleanBase/voice-models/${spec.archiveFileName}")
+    }
+    urls.add(spec.downloadUrl)
+    return urls
 }
 
 internal fun hasAllRequiredFiles(dir: File, spec: OfflineVoiceModelId): Boolean {
@@ -203,7 +220,6 @@ internal fun extractTarBz2AndComputeSha256(rawStream: InputStream, stagingRoot: 
                 }
             }
         }
-        // 在 bufIn 仍打开时排空归档尾部可能残留的字节，确保 SHA-256 覆盖完整归档流且不会触发 Stream closed
         val drainBuf = ByteArray(4096)
         while (bufIn.read(drainBuf) > 0) {
             // draining
@@ -217,10 +233,12 @@ class OfflineVoiceModelManager(private val context: Context) {
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val modelsRootDir: File = File(context.filesDir, "voice_models").apply { mkdirs() }
     private val activeCallRef = AtomicReference<Call?>(null)
+    private val cancelledRef = AtomicBoolean(false)
 
     private val downloadClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(5, TimeUnit.MINUTES)
+        .readTimeout(2, TimeUnit.MINUTES)
+        .retryOnConnectionFailure(true)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
@@ -239,10 +257,15 @@ class OfflineVoiceModelManager(private val context: Context) {
     companion object {
         private const val PREFS_NAME = "pc_cli_offline_voice_prefs"
         private const val KEY_SELECTED_MODEL = "selected_voice_model_id"
+        private const val MAX_RESUME_ATTEMPTS = 6
     }
 
     fun getModelDir(spec: OfflineVoiceModelId): File {
         return File(modelsRootDir, spec.archiveDirName)
+    }
+
+    private fun getPartFile(spec: OfflineVoiceModelId): File {
+        return File(modelsRootDir, ".part_${spec.id}.tar.bz2")
     }
 
     fun isInstalled(spec: OfflineVoiceModelId): Boolean {
@@ -273,20 +296,97 @@ class OfflineVoiceModelManager(private val context: Context) {
     }
 
     fun cancelDownload() {
+        cancelledRef.set(true)
         activeCallRef.getAndSet(null)?.cancel()
     }
 
     suspend fun deleteModel(spec: OfflineVoiceModelId): Boolean = withContext(Dispatchers.IO) {
         val dir = getModelDir(spec)
+        val part = getPartFile(spec)
+        if (part.exists()) part.delete()
         val ok = if (dir.exists()) dir.deleteRecursively() else true
         refreshInstalled()
         ok
     }
 
+    private suspend fun downloadWithRangeResume(spec: OfflineVoiceModelId, url: String, partFile: File) {
+        var lastError: Exception? = null
+        for (attempt in 1..MAX_RESUME_ATTEMPTS) {
+            if (cancelledRef.get()) throw IOException("已取消下载")
+            val existing = if (partFile.exists()) partFile.length() else 0L
+            val reqBuilder = Request.Builder()
+                .url(url)
+                .header("User-Agent", "LiteAgent-Android/1.5")
+            if (existing > 0L) {
+                reqBuilder.header("Range", "bytes=$existing-")
+            }
+            val call = downloadClient.newCall(reqBuilder.build())
+            activeCallRef.set(call)
+            try {
+                call.execute().use { response ->
+                    if (response.code == 416) {
+                        // 已下载长度达到或超过远端大小：若无法确认则重置分片重试
+                        if (existing > 0L) {
+                            return
+                        }
+                    }
+                    if (!response.isSuccessful && response.code != 206) {
+                        throw IOException("HTTP ${response.code}")
+                    }
+                    val body = response.body ?: throw IOException("下载响应体为空")
+                    val appendMode = (response.code == 206 && existing > 0L)
+                    val baseOffset = if (appendMode) existing else 0L
+                    val contentLen = body.contentLength()
+                    val totalBytes = if (contentLen > 0L) baseOffset + contentLen else -1L
+                    var downloaded = baseOffset
+                    var lastEmitMs = 0L
+
+                    _downloadProgress.value = VoiceDownloadProgress(spec, downloaded, totalBytes, "downloading")
+                    FileOutputStream(partFile, appendMode).use { fos ->
+                        val buf = ByteArray(64 * 1024)
+                        val input = body.byteStream()
+                        while (true) {
+                            if (cancelledRef.get()) throw IOException("已取消下载")
+                            val read = input.read(buf)
+                            if (read <= 0) break
+                            fos.write(buf, 0, read)
+                            downloaded += read.toLong()
+                            val now = System.currentTimeMillis()
+                            if (now - lastEmitMs >= 250L || (totalBytes > 0 && downloaded >= totalBytes)) {
+                                lastEmitMs = now
+                                _downloadProgress.value = VoiceDownloadProgress(spec, downloaded, totalBytes, "downloading")
+                            }
+                        }
+                        fos.flush()
+                    }
+                    if (totalBytes > 0L && downloaded < totalBytes) {
+                        throw IOException("连接提前中断 ($downloaded / $totalBytes)")
+                    }
+                    return
+                }
+            } catch (e: Exception) {
+                lastError = e
+                if (cancelledRef.get()) throw e
+                // 404/403 直接放弃当前源，交由调用方切换备用源
+                if (e.message?.contains("HTTP 404") == true || e.message?.contains("HTTP 403") == true) {
+                    throw e
+                }
+                if (attempt < MAX_RESUME_ATTEMPTS) {
+                    delay(1500L * attempt)
+                }
+            }
+        }
+        throw lastError ?: IOException("下载失败，请稍后重试")
+    }
+
     /**
-     * 流式下载并边下边解压 .tar.bz2，同步计算整个归档流的 SHA-256，校验通过且所有权重/词表文件尺寸达标后原子启用。
+     * 优先尝试自建服务器镜像源，失败自动回退 GitHub；全程支持 HTTP Range 断点续传与多轮自动重试；
+     * 下载完成后校验官方 SHA-256 并解压，校验通过后立刻删除临时分片文件。
      */
-    suspend fun downloadAndExtractModel(spec: OfflineVoiceModelId): Result<File> = withContext(Dispatchers.IO) {
+    suspend fun downloadAndExtractModel(
+        spec: OfflineVoiceModelId,
+        mirrorBaseUrl: String? = null
+    ): Result<File> = withContext(Dispatchers.IO) {
         if (isInstalled(spec)) {
             refreshInstalled()
             return@withContext Result.success(getModelDir(spec))
@@ -295,52 +395,48 @@ class OfflineVoiceModelManager(private val context: Context) {
             return@withContext Result.failure(IllegalStateException("已有模型正在下载中，请稍候"))
         }
 
+        cancelledRef.set(false)
+        val partFile = getPartFile(spec)
         val stagingRoot = File(modelsRootDir, ".staging_${spec.id}_${System.currentTimeMillis()}")
         stagingRoot.mkdirs()
-
-        val request = Request.Builder()
-            .url(spec.downloadUrl)
-            .header("User-Agent", "LiteAgent-Android/1.5")
-            .build()
-
-        val call = downloadClient.newCall(request)
-        activeCallRef.set(call)
-        _downloadProgress.value = VoiceDownloadProgress(spec, 0L, -1L, "downloading")
+        _downloadProgress.value = VoiceDownloadProgress(spec, if (partFile.exists()) partFile.length() else 0L, -1L, "downloading")
 
         try {
-            val actualSha256 = call.execute().use { response ->
-                if (!response.isSuccessful) {
-                    throw IllegalStateException("模型下载失败 (HTTP ${response.code})")
+            val urls = buildCandidateDownloadUrls(spec, mirrorBaseUrl)
+            var downloadedOk = false
+            var lastErr: Exception? = null
+            for (u in urls) {
+                try {
+                    downloadWithRangeResume(spec, u, partFile)
+                    downloadedOk = true
+                    break
+                } catch (e: Exception) {
+                    lastErr = e
+                    if (cancelledRef.get()) throw e
                 }
-                val body = response.body ?: throw IllegalStateException("下载响应体为空")
-                val totalBytes = body.contentLength()
-                var lastEmitMs = 0L
-
-                val countingStream = ProgressCountingInputStream(body.byteStream()) { bytesRead ->
-                    val now = System.currentTimeMillis()
-                    if (now - lastEmitMs >= 250L || (totalBytes > 0 && bytesRead >= totalBytes)) {
-                        lastEmitMs = now
-                        _downloadProgress.value = VoiceDownloadProgress(
-                            modelId = spec,
-                            downloadedBytes = bytesRead,
-                            totalBytes = totalBytes,
-                            phase = "downloading"
-                        )
-                    }
-                }
-                extractTarBz2AndComputeSha256(countingStream, stagingRoot)
+            }
+            if (!downloadedOk) {
+                throw lastErr ?: IOException("所有下载源均失败，请检查网络后重试（已保留断点）")
             }
 
             _downloadProgress.value = VoiceDownloadProgress(spec, 100L, 100L, "extracting")
+            val actualSha256 = FileInputStream(partFile).use { fis ->
+                extractTarBz2AndComputeSha256(fis, stagingRoot)
+            }
             if (!actualSha256.equals(spec.expectedArchiveSha256, ignoreCase = true)) {
-                throw IllegalStateException("模型归档 SHA-256 校验失败，文件可能已损坏，请重试")
+                // 分片已损坏，删除分片以便下次干净重下
+                partFile.delete()
+                throw IllegalStateException("模型归档 SHA-256 校验失败，已清理损坏分片，请重试")
             }
 
             val extractedSubDir = File(stagingRoot, spec.archiveDirName)
             val sourceDir = when {
                 hasAllRequiredFiles(extractedSubDir, spec) -> extractedSubDir
                 hasAllRequiredFiles(stagingRoot, spec) -> stagingRoot
-                else -> throw IllegalStateException("解压后的模型权重或词表文件不完整，请重试下载")
+                else -> {
+                    partFile.delete()
+                    throw IllegalStateException("解压后的模型权重或词表文件不完整，请重试下载")
+                }
             }
             writeVerifiedManifest(sourceDir, spec, actualSha256)
 
@@ -356,6 +452,7 @@ class OfflineVoiceModelManager(private val context: Context) {
                 throw IllegalStateException("模型目录完整性校验失败")
             }
 
+            partFile.delete()
             selectModel(spec)
             refreshInstalled()
             Result.success(finalDir)
@@ -365,31 +462,6 @@ class OfflineVoiceModelManager(private val context: Context) {
             activeCallRef.set(null)
             _downloadProgress.value = null
             stagingRoot.deleteRecursively()
-        }
-    }
-
-    private class ProgressCountingInputStream(
-        input: InputStream,
-        private val onProgress: (Long) -> Unit
-    ) : FilterInputStream(input) {
-        private var count = 0L
-
-        override fun read(): Int {
-            val b = super.read()
-            if (b != -1) {
-                count += 1L
-                onProgress(count)
-            }
-            return b
-        }
-
-        override fun read(b: ByteArray, off: Int, len: Int): Int {
-            val n = super.read(b, off, len)
-            if (n > 0) {
-                count += n.toLong()
-                onProgress(count)
-            }
-            return n
         }
     }
 }

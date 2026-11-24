@@ -11,8 +11,8 @@ android {
         applicationId = "com.liteagent.mobile"
         minSdk = 26
         targetSdk = 34
-        versionCode = providers.gradleProperty("appVersionCode").orElse("9").get().toInt()
-        versionName = providers.gradleProperty("appVersionName").orElse("1.5.0").get()
+        versionCode = providers.gradleProperty("appVersionCode").orElse("10").get().toInt()
+        versionName = providers.gradleProperty("appVersionName").orElse("1.5.1").get()
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

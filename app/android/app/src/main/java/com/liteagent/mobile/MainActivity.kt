@@ -242,7 +242,8 @@ fun MainAppScaffold(
 
     ModalNavigationDrawer(
         drawerState = drawerState,
-        gesturesEnabled = true,
+        // 在 PC Bots WebView 页面关闭侧滑呼出抽屉（保留点左上角菜单键打开、打开后支持左滑关闭），避免与 WebView 上下滑动抢手势
+        gesturesEnabled = selectedTab != NavigationTab.PC_BOTS || drawerState.isOpen,
         drawerContent = {
             ModalDrawerSheet(
                 drawerContainerColor = MaterialTheme.colorScheme.surface,

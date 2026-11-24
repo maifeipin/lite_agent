@@ -20,6 +20,7 @@ import com.liteagent.mobile.core.network.AuthenticationException
 import com.liteagent.mobile.core.network.models.*
 import com.liteagent.mobile.core.storage.TodoDatabaseHelper
 import com.liteagent.mobile.core.voice.OfflineVoiceModelId
+import com.liteagent.mobile.core.voice.buildCandidateDownloadUrls
 import com.liteagent.mobile.core.voice.extractTarBz2AndComputeSha256
 import com.liteagent.mobile.core.voice.isModelDirectoryComplete
 import com.liteagent.mobile.core.voice.resolveSafeTarEntryFile
@@ -112,6 +113,13 @@ class SanityTest {
         assertEquals(OfflineVoiceModelId.SENSE_VOICE_SMALL, OfflineVoiceModelId.fromId("sense_voice_small"))
         assertEquals("https://mail.maifeipin.com", extractOriginRule("https://mail.maifeipin.com/mobile/"))
         assertEquals("http://127.0.0.1:8887", extractOriginRule("http://127.0.0.1:8887/mobile/"))
+        val urls = buildCandidateDownloadUrls(OfflineVoiceModelId.QWEN3_ASR_06B, "https://mail.maifeipin.com/")
+        assertEquals(2, urls.size)
+        assertEquals(
+            "https://mail.maifeipin.com/voice-models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2",
+            urls[0]
+        )
+        assertEquals(OfflineVoiceModelId.QWEN3_ASR_06B.downloadUrl, urls[1])
 
         val tmpRoot = java.nio.file.Files.createTempDirectory("voice_test_").toFile()
         try {

@@ -49,10 +49,8 @@ html, body, #app {
   justify-content: space-between;
   gap: 8px;
   padding: 12px 14px;
-  background: rgba(19, 22, 34, 0.92);
+  background: var(--panel);
   border-bottom: 1px solid var(--border);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
   flex-shrink: 0;
 }
 
@@ -277,6 +275,8 @@ html, body, #app {
   flex: 1;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+  touch-action: pan-y;
   padding: 12px 14px;
   display: flex;
   flex-direction: column;

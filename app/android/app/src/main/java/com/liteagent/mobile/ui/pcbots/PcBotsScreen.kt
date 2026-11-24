@@ -452,6 +452,7 @@ fun PcBotsScreen(
     if (showVoiceModelSheet) {
         VoiceModelSheet(
             modelManager = modelManager,
+            mirrorBaseUrl = ServerUrlNormalizer.normalize(activeServer),
             lastResult = lastVoiceResult,
             onModelDeleted = { deletedSpec ->
                 asrEngine.releaseIfMatches(deletedSpec)
@@ -550,6 +551,21 @@ fun PcBotsScreen(
                                 ViewGroup.LayoutParams.MATCH_PARENT,
                                 ViewGroup.LayoutParams.MATCH_PARENT
                             )
+                            isVerticalScrollBarEnabled = true
+                            overScrollMode = android.view.View.OVER_SCROLL_IF_CONTENT_SCROLLS
+                            setOnTouchListener { v, event ->
+                                when (event.actionMasked) {
+                                    android.view.MotionEvent.ACTION_DOWN,
+                                    android.view.MotionEvent.ACTION_MOVE -> {
+                                        v.parent?.requestDisallowInterceptTouchEvent(true)
+                                    }
+                                    android.view.MotionEvent.ACTION_UP,
+                                    android.view.MotionEvent.ACTION_CANCEL -> {
+                                        v.parent?.requestDisallowInterceptTouchEvent(false)
+                                    }
+                                }
+                                false
+                            }
                             setBackgroundColor(android.graphics.Color.parseColor("#0B1120"))
                             settings.apply {
                                 javaScriptEnabled = true
