@@ -118,6 +118,23 @@ export async function createBot(payload) {
   return data.bot;
 }
 
+export async function updateBot(botId, payload) {
+  const data = await apiFetch(`/bots/${encodeURIComponent(botId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+  if (data.bot) {
+    const idx = store.bots.findIndex((b) => b.bot_id === botId);
+    if (idx >= 0) {
+      store.bots.splice(idx, 1, data.bot);
+    } else {
+      store.bots.push(data.bot);
+    }
+    sortBotsInPlace();
+  }
+  return data.bot;
+}
+
 export async function deleteBot(botId) {
   await apiFetch(`/bots/${encodeURIComponent(botId)}`, { method: 'DELETE' });
   store.bots = store.bots.filter((b) => b.bot_id !== botId);

@@ -494,6 +494,13 @@ def test_manager_list_node_dirs_tool_and_failed_history_filter(tmp_path):
     root = Path(__file__).resolve().parents[3]
     app_js = (root / "web_dashboard" / "mobile" / "app.js").read_text(encoding="utf-8")
     store_js = (root / "web_dashboard" / "mobile" / "store.js").read_text(encoding="utf-8")
+    index_html = (root / "web_dashboard" / "mobile" / "index.html").read_text(encoding="utf-8")
     assert "userEntry.failed = true" in app_js
     assert "!m.failed" in app_js
     assert "!m.failed" in store_js
+    assert "export async function updateBot(" in store_js
+    assert "method: 'PATCH'" in store_js
+    assert "handleToggleApprovalMode" in app_js
+    assert "sending.value || updatingApprovalMode.value" in app_js
+    assert "sending || updatingApprovalMode || !promptInput.trim()" in index_html
+    assert "handleToggleApprovalMode(activeBot)" in index_html

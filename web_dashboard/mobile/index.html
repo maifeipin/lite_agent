@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#0a0b10">
   <title>PC Bots | Lite Agent</title>
   <link rel="manifest" href="./manifest.json?v=1">
-  <link rel="stylesheet" href="./style.css?v=3">
+  <link rel="stylesheet" href="./style.css?v=4">
   <script src="./vendor/marked.min.js?v=1"></script>
 </head>
 <body>
@@ -238,7 +238,18 @@
 
       <div class="detail-subbar" v-if="activeBot">
         <span class="detail-cwd">{{ activeBot.node_display_name || activeBot.node_id }} · {{ activeBot.cwd }}</span>
-        <span class="status-badge" :class="activeBot.status">{{ statusLabel(activeBot.status) }}</span>
+        <div class="detail-badges">
+          <button
+            class="mode-badge"
+            :class="activeBot.approval_mode === 'ask' ? 'ask' : 'auto'"
+            :disabled="updatingApprovalMode || sending || activeBot.status === 'running' || activeBot.status === 'waiting_approval'"
+            @click="handleToggleApprovalMode(activeBot)"
+            title="点击切换审批模式 (auto / ask)"
+          >
+            {{ activeBot.approval_mode === 'ask' ? '🛡 需审批' : '⚡ 自动' }}
+          </button>
+          <span class="status-badge" :class="activeBot.status">{{ statusLabel(activeBot.status) }}</span>
+        </div>
       </div>
 
       <section class="event-stream" ref="streamEl">
@@ -314,7 +325,7 @@
         >
           {{ voiceState === 'transcribing' && voiceTarget === 'prompt' ? '⏳' : (voiceState === 'recording' && voiceTarget === 'prompt' ? '⏹' : '🎙') }}
         </button>
-        <button class="btn btn-primary" :disabled="sending || !promptInput.trim()" @click="handleSendPrompt">
+        <button class="btn btn-primary" :disabled="sending || updatingApprovalMode || !promptInput.trim()" @click="handleSendPrompt">
           发送
         </button>
       </footer>
@@ -397,6 +408,6 @@
     </div>
   </div>
 
-  <script type="module" src="./app.js?v=6"></script>
+  <script type="module" src="./app.js?v=7"></script>
 </body>
 </html>

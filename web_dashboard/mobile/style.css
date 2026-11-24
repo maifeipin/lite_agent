@@ -269,6 +269,33 @@ html, body, #app {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.detail-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.mode-badge {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  background: rgba(99, 102, 241, 0.14);
+  color: #c7d2fe;
+}
+.mode-badge.ask {
+  background: rgba(245, 158, 11, 0.18);
+  border-color: rgba(245, 158, 11, 0.4);
+  color: #fcd34d;
+}
+.mode-badge:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .event-stream {

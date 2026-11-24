@@ -21,7 +21,8 @@ import {
   store,
   submitApproval,
   subscribeBotOnWs,
-} from './store.js?v=4';
+  updateBot,
+} from './store.js?v=5';
 
 function escapeHtml(raw) {
   return String(raw || '')
@@ -73,6 +74,7 @@ const app = createApp({
     const tokenInput = ref(store.token);
     const promptInput = ref('');
     const sending = ref(false);
+    const updatingApprovalMode = ref(false);
     const streamEl = ref(null);
     const managerInput = ref('');
     const managerSending = ref(false);
@@ -336,7 +338,12 @@ const app = createApp({
 
     async function handleSendPrompt() {
       const text = promptInput.value.trim();
-      if (!text || !store.activeBotId || sending.value) return;
+      if (!text || !store.activeBotId || sending.value || updatingApprovalMode.value) {
+        if (updatingApprovalMode.value) {
+          showToast('正在切换审批模式，请稍候再发送');
+        }
+        return;
+      }
       sending.value = true;
       const src = promptInputSource.value === 'voice' ? 'voice' : 'text';
       try {
@@ -505,6 +512,24 @@ const app = createApp({
       }
     }
 
+    async function handleToggleApprovalMode(bot) {
+      if (!bot || updatingApprovalMode.value || sending.value) return;
+      if (bot.status === 'running' || bot.status === 'waiting_approval') {
+        showToast('当前回合运行中，请待结束或中止后再切换审批模式');
+        return;
+      }
+      const nextMode = bot.approval_mode === 'ask' ? 'auto' : 'ask';
+      updatingApprovalMode.value = true;
+      try {
+        await updateBot(bot.bot_id, { approval_mode: nextMode });
+        showToast(nextMode === 'ask' ? '已切换为需审批 (ask)' : '已切换为自动 (auto)');
+      } catch (e) {
+        showToast(e.message || '切换审批模式失败');
+      } finally {
+        updatingApprovalMode.value = false;
+      }
+    }
+
     async function handleDeleteBot(bot) {
       if (!window.confirm(`确认删除 Bot "${bot.name}" 及其全部历史日志？`)) return;
       try {
@@ -601,6 +626,8 @@ const app = createApp({
       voiceTarget,
       handleCancel,
       handleApproval,
+      updatingApprovalMode,
+      handleToggleApprovalMode,
       handleDeleteBot,
       handleSaveToken,
       refreshAll,
