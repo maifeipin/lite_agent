@@ -345,3 +345,76 @@ def test_plugin_register_binds_host_request_model_router_and_manager_handles_rou
     finally:
         if hasattr(ctx, "_cleanup"):
             ctx._cleanup()
+
+
+def test_manager_normalizes_flat_tool_calls_to_openai_wire_format_for_round2(tmp_path):
+    """回归：model_invoker 返回扁平 tool_calls ({id, name, arguments})，第 2 轮回传 messages 时必须规范化为含 type='function' 的 OpenAI 结构。"""
+    from lite_agent.features.pc_cli.hub import PcCliHub
+    from lite_agent.features.pc_cli.manager import PcCliManager
+    from lite_agent.features.pc_cli.repository import PcCliRepository
+
+    repo = PcCliRepository(db_path=str(tmp_path / "pc_cli_tc.db"))
+    hub = PcCliHub(repo=repo)
+    try:
+        seen_rounds = []
+
+        class _StrictOpenAIGateway:
+            def invoke_sync(self, messages, **kwargs):
+                seen_rounds.append([dict(m) for m in messages])
+                if len(seen_rounds) == 1:
+                    # 模拟 OpenAIInvoker.invoke_sync 返回的扁平结构（无 type / function）
+                    return {
+                        "content": "",
+                        "tool_calls": [{"id": "call_nodes_1", "name": "list_nodes", "arguments": "{}"}],
+                        "usage_total": 30,
+                    }
+                # 第 2 轮严格校验 OpenAI 反序列化契约：assistant.tool_calls 必须含 type='function' 与 function 对象
+                asst_msg = [m for m in messages if m.get("role") == "assistant"][-1]
+                tcs = asst_msg.get("tool_calls") or []
+                assert len(tcs) == 1
+                assert tcs[0]["type"] == "function"
+                assert tcs[0]["id"] == "call_nodes_1"
+                assert tcs[0]["function"]["name"] == "list_nodes"
+                assert tcs[0]["function"]["arguments"] == "{}"
+                return {"content": "已查询到在线节点。", "tool_calls": [], "usage_total": 25}
+
+        cfg = {"llm": {"default": "flash", "models": {"flash": {"driver": "openai", "model": "flash"}}}}
+        mgr = PcCliManager(hub=hub, config=cfg, gateway=_StrictOpenAIGateway(), default_model="flash")
+        ok, payload = mgr.chat("查一下在线节点", model_name="flash")
+        assert ok is True
+        assert payload["reply"] == "已查询到在线节点。"
+        assert len(seen_rounds) == 2
+
+        # 同时验证 Gemini 工具调用的 provider_metadata (如 thought_signature) 在第 2 轮被完整保留，且空 metadata 不污染 OpenAI 请求
+        assert "provider_metadata" not in seen_rounds[1][2]["tool_calls"][0]
+
+        seen_gemini_rounds = []
+
+        class _StrictGeminiGateway:
+            def invoke_sync(self, messages, **kwargs):
+                seen_gemini_rounds.append([dict(m) for m in messages])
+                if len(seen_gemini_rounds) == 1:
+                    return {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_gem_1",
+                                "name": "list_nodes",
+                                "arguments": "{}",
+                                "provider_metadata": {"thought_signature": b"sig_xyz"},
+                            }
+                        ],
+                        "usage_total": 20,
+                    }
+                asst_msg = [m for m in messages if m.get("role") == "assistant"][-1]
+                tc0 = asst_msg["tool_calls"][0]
+                assert tc0["type"] == "function"
+                assert tc0["provider_metadata"] == {"thought_signature": b"sig_xyz"}
+                return {"content": "Gemini 第二轮完成", "tool_calls": [], "usage_total": 15}
+
+        mgr_gem = PcCliManager(hub=hub, config=cfg, gateway=_StrictGeminiGateway(), default_model="flash")
+        ok_g, payload_g = mgr_gem.chat("Gemini 查节点", model_name="flash")
+        assert ok_g is True
+        assert payload_g["reply"] == "Gemini 第二轮完成"
+    finally:
+        hub.close()

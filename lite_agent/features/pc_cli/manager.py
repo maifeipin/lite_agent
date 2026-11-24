@@ -350,31 +350,52 @@ class PcCliManager:
                 final_reply = content
                 break
 
-            messages.append({
-                "role": "assistant",
-                "content": content,
-                "tool_calls": tool_calls,
-            })
-
-            for tc in tool_calls:
+            normalized_tool_calls: List[Dict[str, Any]] = []
+            parsed_calls: List[Tuple[str, str, Dict[str, Any]]] = []
+            for idx, tc in enumerate(tool_calls):
                 fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
                 tname = str(fn.get("name") or tc.get("name") or "")
+                tc_id = str(tc.get("id") or f"call_{idx}_{tname}")
                 raw_args = fn.get("arguments") if "arguments" in fn else tc.get("arguments")
                 if isinstance(raw_args, str):
+                    args_str = raw_args
                     try:
                         parsed_args = json.loads(raw_args) if raw_args.strip() else {}
                     except Exception:
                         parsed_args = {}
                 elif isinstance(raw_args, dict):
                     parsed_args = raw_args
+                    args_str = json.dumps(raw_args, ensure_ascii=False)
                 else:
                     parsed_args = {}
+                    args_str = "{}"
 
+                norm_tc: Dict[str, Any] = {
+                    "id": tc_id,
+                    "type": "function",
+                    "function": {
+                        "name": tname,
+                        "arguments": args_str,
+                    },
+                }
+                provider_metadata = tc.get("provider_metadata")
+                if isinstance(provider_metadata, dict) and provider_metadata:
+                    norm_tc["provider_metadata"] = dict(provider_metadata)
+                normalized_tool_calls.append(norm_tc)
+                parsed_calls.append((tc_id, tname, parsed_args))
+
+            messages.append({
+                "role": "assistant",
+                "content": content,
+                "tool_calls": normalized_tool_calls,
+            })
+
+            for tc_id, tname, parsed_args in parsed_calls:
                 out = self.execute_tool(tname, parsed_args, created_approvals)
                 tool_trace.append({"tool": tname, "args": parsed_args, "result": out})
                 messages.append({
                     "role": "tool",
-                    "tool_call_id": str(tc.get("id") or tname),
+                    "tool_call_id": tc_id,
                     "name": tname,
                     "content": json.dumps(out, ensure_ascii=False)[:8000],
                 })
