@@ -194,7 +194,9 @@ fun PcBotsScreen(
     var readySnapshot by remember { mutableStateOf<PcBotsAuthSnapshot?>(null) }
 
     suspend fun syncAuthSnapshot(serverUrl: String, forceRefresh: Boolean = false): PcBotsAuthSnapshot {
-        if (readySnapshot?.serverUrl != serverUrl) {
+        val normNew = ServerUrlNormalizer.normalize(serverUrl)
+        val normPrev = readySnapshot?.serverUrl?.let { ServerUrlNormalizer.normalize(it) }
+        if (normPrev != null && normPrev != normNew) {
             readySnapshot = null
         }
         try {
@@ -232,7 +234,7 @@ fun PcBotsScreen(
     val currentServerState = rememberUpdatedState(activeServer)
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
-    var registeredOriginRule by remember { mutableStateOf<String?>(null) }
+    var registeredChannelTarget by remember { mutableStateOf<Pair<WebView, String>?>(null) }
     var loadProgress by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
     var canGoBack by remember { mutableStateOf(false) }
@@ -382,7 +384,7 @@ fun PcBotsScreen(
             return
         }
         val originRule = extractOriginRule(targetUrl) ?: return
-        if (registeredOriginRule == originRule) return
+        if (registeredChannelTarget?.first === wv && registeredChannelTarget?.second == originRule) return
         try {
             WebViewCompat.removeWebMessageListener(wv, VOICE_WEB_MESSAGE_CHANNEL)
         } catch (_: Exception) {
@@ -429,7 +431,7 @@ fun PcBotsScreen(
                 }
             }
         }
-        registeredOriginRule = originRule
+        registeredChannelTarget = wv to originRule
     }
 
     // 退到后台时自动取消录音并在锁保护下释放 Native 模型内存；回到前台时主动检查并续期即将过期的会话 Token
@@ -490,7 +492,7 @@ fun PcBotsScreen(
                 wv.destroy()
             }
             webViewRef = null
-            registeredOriginRule = null
+            registeredChannelTarget = null
         }
     }
 
@@ -707,6 +709,12 @@ fun PcBotsScreen(
                                         errorMessage = error?.description?.toString()
                                             ?: "页面加载失败，请检查网络连接"
                                     }
+                                }
+                            }
+                            webViewRef?.let { oldWv ->
+                                if (oldWv !== this) {
+                                    oldWv.stopLoading()
+                                    oldWv.destroy()
                                 }
                             }
                             webViewRef = this
