@@ -17,7 +17,13 @@ from .adapters.agy_adapter import AgyCliAdapter
 from .adapters.base import BaseCliAdapter
 from .adapters.codex_adapter import CodexCliAdapter
 from .config import DaemonConfig
-from .env_probe import build_engine_env, detect_available_engines, is_path_within_roots, list_safe_dirs
+from .env_probe import (
+    build_engine_env,
+    detect_available_engines,
+    discover_engine_models,
+    is_path_within_roots,
+    list_safe_dirs,
+)
 
 logger = logging.getLogger("pc_cli.daemon")
 
@@ -96,12 +102,18 @@ class PcCliDaemon:
                 if self._custom_adapters
                 else detect_available_engines(self.config.codex_bin, self.config.agy_bin, self.env)
             )
+            engine_models = (
+                {}
+                if self._custom_adapters
+                else discover_engine_models(engines, self.env)
+            )
             await ws.send_json({
                 "type": "node.hello",
                 "node_id": self.config.node_id,
                 "display_name": self.config.display_name,
                 "platform": sys.platform,
                 "engines": engines,
+                "engine_models": engine_models,
                 "workspace_roots": self.config.workspace_roots,
                 "active_turns": list(self._active_turns.values()),
             })
@@ -213,6 +225,8 @@ class PcCliDaemon:
         prompt = str(msg.get("prompt") or "")
         native_session_id = msg.get("native_session_id")
         approval_mode = str(msg.get("approval_mode") or "auto")
+        execution_mode = str(msg.get("execution_mode") or "agent")
+        reasoning_effort = str(msg.get("reasoning_effort") or "")
         model = msg.get("model")
 
         if engine not in self.adapters:
@@ -286,6 +300,8 @@ class PcCliDaemon:
                     model=str(model) if model else None,
                     on_event=_on_event,
                     on_approval=_on_approval,
+                    execution_mode=execution_mode,
+                    reasoning_effort=reasoning_effort,
                 )
                 await ws.send_json({
                     "type": "turn.finished",

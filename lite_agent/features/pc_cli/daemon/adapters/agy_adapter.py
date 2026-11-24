@@ -13,7 +13,15 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..env_probe import build_spawn_argv
 from ..process_tree import build_subprocess_kwargs, kill_process_tree
 from ._jsonrpc import StdioJsonRpcClient
-from .base import ApprovalCallback, BaseCliAdapter, EventCallback, TurnResult, truncate_text
+from .base import (
+    ApprovalCallback,
+    BaseCliAdapter,
+    EventCallback,
+    TurnResult,
+    apply_execution_mode_prompt,
+    normalize_execution_mode,
+    truncate_text,
+)
 
 _AGY_CONV_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
 
@@ -83,9 +91,10 @@ class AgyCliAdapter(BaseCliAdapter):
         self._active_rpcs: Dict[Tuple[str, str], Tuple[StdioJsonRpcClient, Optional[str]]] = {}
         self._cancelled: set[Tuple[str, str]] = set()
 
-    def build_acp_args(self, *, cwd: str, approval_mode: str) -> List[str]:
+    def build_acp_args(self, *, cwd: str, approval_mode: str, execution_mode: str = "agent") -> List[str]:
+        mode = normalize_execution_mode(execution_mode)
         cli_args = ["acp"]
-        if approval_mode == "auto":
+        if approval_mode == "auto" and mode == "agent":
             cli_args.append("--dangerously-skip-permissions")
         if cwd:
             cli_args.extend(["--add-dir", cwd])
@@ -98,14 +107,17 @@ class AgyCliAdapter(BaseCliAdapter):
         native_session_id: Optional[str] = None,
         approval_mode: str = "auto",
         model: Optional[str] = None,
+        execution_mode: str = "agent",
     ) -> List[str]:
         """借鉴 tarobird antigravity-adapter.ts：
         - 使用 `--input-format text --output-format stream-json`，prompt 通过 stdin 传入，避免 Windows 参数长度与转义问题；
         - 会话续接参数为 `--conversation <uuid>`；
-        - 通过 `--add-dir <cwd>` 授权工作目录。
+        - 通过 `--add-dir <cwd>` 授权工作目录；
+        - plan / chat 模式下不附加 `--dangerously-skip-permissions`。
         """
+        mode = normalize_execution_mode(execution_mode)
         cli_args = ["--input-format", "text", "--output-format", "stream-json"]
-        if approval_mode == "auto":
+        if approval_mode == "auto" and mode == "agent":
             cli_args.append("--dangerously-skip-permissions")
         if model:
             cli_args.extend(["--model", model])
@@ -142,6 +154,8 @@ class AgyCliAdapter(BaseCliAdapter):
         model: Optional[str],
         on_event: EventCallback,
         on_approval: Optional[ApprovalCallback] = None,
+        execution_mode: str = "agent",
+        reasoning_effort: str = "",
     ) -> TurnResult:
         if approval_mode == "ask" or self.prefer_acp:
             return await self._run_acp_turn(
@@ -154,6 +168,8 @@ class AgyCliAdapter(BaseCliAdapter):
                 model=model,
                 on_event=on_event,
                 on_approval=on_approval,
+                execution_mode=execution_mode,
+                reasoning_effort=reasoning_effort,
             )
         return await self._run_stream_turn(
             bot_id=bot_id,
@@ -164,6 +180,8 @@ class AgyCliAdapter(BaseCliAdapter):
             approval_mode=approval_mode,
             model=model,
             on_event=on_event,
+            execution_mode=execution_mode,
+            reasoning_effort=reasoning_effort,
         )
 
     async def _run_acp_turn(
@@ -178,12 +196,20 @@ class AgyCliAdapter(BaseCliAdapter):
         model: Optional[str],
         on_event: EventCallback,
         on_approval: Optional[ApprovalCallback],
+        execution_mode: str = "agent",
+        reasoning_effort: str = "",
     ) -> TurnResult:
         """Phase 3: 基于 `agy acp` (ACP over stdio JSON-RPC)，支持交互式权限审批与优雅中断。"""
         key = (bot_id, turn_id)
         self._cancelled.discard(key)
+        mode = normalize_execution_mode(execution_mode)
+        prompt = apply_execution_mode_prompt(prompt, mode, reasoning_effort, include_effort_hint=True)
         try:
-            args = self.build_acp_args(cwd=cwd, approval_mode=approval_mode)
+            args = (
+                self.build_acp_args(cwd=cwd, approval_mode=approval_mode, execution_mode=mode)
+                if mode != "agent"
+                else self.build_acp_args(cwd=cwd, approval_mode=approval_mode)
+            )
         except Exception as e:
             return TurnResult(status="failed", native_session_id=native_session_id, error=str(e))
         kwargs = build_subprocess_kwargs(cwd=cwd, env=self.env)
@@ -308,14 +334,18 @@ class AgyCliAdapter(BaseCliAdapter):
         approval_mode: str,
         model: Optional[str],
         on_event: EventCallback,
+        execution_mode: str = "agent",
+        reasoning_effort: str = "",
     ) -> TurnResult:
         key = (bot_id, turn_id)
         self._cancelled.discard(key)
+        prompt = apply_execution_mode_prompt(prompt, execution_mode, reasoning_effort, include_effort_hint=True)
         args = self.build_args(
             cwd=cwd,
             native_session_id=native_session_id,
             approval_mode=approval_mode,
             model=model,
+            execution_mode=execution_mode,
         )
         kwargs = build_subprocess_kwargs(cwd=cwd, env=self.env)
         try:

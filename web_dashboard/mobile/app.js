@@ -164,6 +164,9 @@ const app = createApp({
       engine: 'codex',
       cwd: '',
       approval_mode: 'auto',
+      execution_mode: 'agent',
+      reasoning_effort: '',
+      model_select: '',
       model: '',
       name: '',
     });
@@ -271,6 +274,49 @@ const app = createApp({
       return node && node.engines && node.engines.length ? node.engines : ['codex', 'agy'];
     });
 
+    const selectedEngineModels = computed(() => {
+      const node = store.nodes.find((n) => n.node_id === form.value.node_id);
+      const map = node && node.engine_models && typeof node.engine_models === 'object' ? node.engine_models : {};
+      const list = map[form.value.engine];
+      return Array.isArray(list) ? list : [];
+    });
+
+    const availableReasoningEfforts = computed(() => {
+      const defaults = ['low', 'medium', 'high', 'xhigh'];
+      const picked = selectedEngineModels.value.find((m) => m.id === form.value.model_select);
+      if (picked && Array.isArray(picked.reasoning_efforts) && picked.reasoning_efforts.length) {
+        return picked.reasoning_efforts;
+      }
+      return defaults;
+    });
+
+    function executionModeLabel(mode) {
+      return {
+        agent: '🤖 Agent',
+        plan: '📋 Plan',
+        chat: '💬 Chat',
+      }[mode || 'agent'] || '🤖 Agent';
+    }
+
+    function reasoningEffortLabel(effort) {
+      return {
+        '': '🧠 默认',
+        low: '🧠 Low',
+        medium: '🧠 Med',
+        high: '🧠 High',
+        xhigh: '🧠 XHigh',
+      }[effort || ''] || `🧠 ${effort}`;
+    }
+
+    function reasoningEffortOptionLabel(effort) {
+      return {
+        low: 'Low (快速)',
+        medium: 'Medium (均衡)',
+        high: 'High (深度)',
+        xhigh: 'XHigh (极限)',
+      }[effort] || effort;
+    }
+
     function statusLabel(st) {
       return {
         idle: '空闲',
@@ -339,6 +385,10 @@ const app = createApp({
         form.value.node_id = firstOnline.node_id;
         form.value.engine = (firstOnline.engines && firstOnline.engines[0]) || 'codex';
         form.value.cwd = '';
+        form.value.model_select = '';
+        form.value.model = '';
+        form.value.execution_mode = 'agent';
+        form.value.reasoning_effort = '';
         await loadDirs(firstOnline.node_id, '');
       }
     }
@@ -366,11 +416,28 @@ const app = createApp({
 
     async function onNodeChange() {
       form.value.cwd = '';
+      form.value.model_select = '';
+      form.value.model = '';
       const engines = selectedNodeEngines.value;
       if (!engines.includes(form.value.engine)) {
         form.value.engine = engines[0] || 'codex';
       }
       await loadDirs(form.value.node_id, '');
+    }
+
+    function onEngineChange() {
+      form.value.model_select = '';
+      form.value.model = '';
+      form.value.reasoning_effort = '';
+    }
+
+    function onModelSelectChange() {
+      if (form.value.model_select !== '__custom__') {
+        form.value.model = '';
+      }
+      if (form.value.reasoning_effort && !availableReasoningEfforts.value.includes(form.value.reasoning_effort)) {
+        form.value.reasoning_effort = '';
+      }
     }
 
     async function handleCreateBot() {
@@ -379,6 +446,9 @@ const app = createApp({
         return;
       }
       const autoName = form.value.cwd.split(/[\\/]/).filter(Boolean).pop() || 'cli-bot';
+      const resolvedModel = form.value.model_select === '__custom__'
+        ? form.value.model.trim()
+        : form.value.model_select.trim();
       creating.value = true;
       try {
         const bot = await createBot({
@@ -387,11 +457,16 @@ const app = createApp({
           engine: form.value.engine,
           cwd: form.value.cwd.trim(),
           approval_mode: form.value.approval_mode,
-          model: form.value.model.trim() || null,
+          execution_mode: form.value.execution_mode || 'agent',
+          reasoning_effort: form.value.reasoning_effort || '',
+          model: resolvedModel || null,
         });
         showCreateDrawer.value = false;
         form.value.name = '';
+        form.value.model_select = '';
         form.value.model = '';
+        form.value.execution_mode = 'agent';
+        form.value.reasoning_effort = '';
         showToast(`已创建 Bot: ${bot.name}`);
         await openBot(bot.bot_id);
       } catch (e) {
@@ -595,6 +670,46 @@ const app = createApp({
       }
     }
 
+    async function handleCycleExecutionMode(bot) {
+      if (!bot || updatingApprovalMode.value || sending.value) return;
+      if (bot.status === 'running' || bot.status === 'waiting_approval') {
+        showToast('当前回合运行中，请待结束或中止后再切换工作模式');
+        return;
+      }
+      const order = ['agent', 'plan', 'chat'];
+      const idx = order.indexOf(bot.execution_mode || 'agent');
+      const nextMode = order[(idx + 1) % order.length];
+      updatingApprovalMode.value = true;
+      try {
+        await updateBot(bot.bot_id, { execution_mode: nextMode });
+        showToast(`已切换工作模式: ${executionModeLabel(nextMode)}`);
+      } catch (e) {
+        showToast(e.message || '切换工作模式失败');
+      } finally {
+        updatingApprovalMode.value = false;
+      }
+    }
+
+    async function handleCycleReasoningEffort(bot) {
+      if (!bot || updatingApprovalMode.value || sending.value) return;
+      if (bot.status === 'running' || bot.status === 'waiting_approval') {
+        showToast('当前回合运行中，请待结束或中止后再切换思考深度');
+        return;
+      }
+      const order = ['', 'low', 'medium', 'high', 'xhigh'];
+      const idx = order.indexOf(bot.reasoning_effort || '');
+      const nextEffort = order[(idx + 1) % order.length];
+      updatingApprovalMode.value = true;
+      try {
+        await updateBot(bot.bot_id, { reasoning_effort: nextEffort });
+        showToast(`已切换思考深度: ${reasoningEffortLabel(nextEffort)}`);
+      } catch (e) {
+        showToast(e.message || '切换思考深度失败');
+      } finally {
+        updatingApprovalMode.value = false;
+      }
+    }
+
     async function handleDeleteBot(bot) {
       if (!window.confirm(`确认删除 Bot "${bot.name}" 及其全部历史日志？`)) return;
       try {
@@ -675,6 +790,11 @@ const app = createApp({
       activeBotApprovals,
       activeTimeline,
       selectedNodeEngines,
+      selectedEngineModels,
+      availableReasoningEfforts,
+      executionModeLabel,
+      reasoningEffortLabel,
+      reasoningEffortOptionLabel,
       statusLabel,
       openBot,
       backToList,
@@ -683,6 +803,8 @@ const app = createApp({
       loadDirs,
       onPickDir,
       onNodeChange,
+      onEngineChange,
+      onModelSelectChange,
       handleCreateBot,
       handleSendPrompt,
       handleVoiceToggle,
@@ -694,6 +816,8 @@ const app = createApp({
       formatApprovalFullDetail,
       updatingApprovalMode,
       handleToggleApprovalMode,
+      handleCycleExecutionMode,
+      handleCycleReasoningEffort,
       handleDeleteBot,
       handleSaveToken,
       refreshAll,

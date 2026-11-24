@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#0a0b10">
   <title>PC Bots | Lite Agent</title>
   <link rel="manifest" href="./manifest.json?v=1">
-  <link rel="stylesheet" href="./style.css?v=5">
+  <link rel="stylesheet" href="./style.css?v=6">
   <script src="./vendor/marked.min.js?v=1"></script>
 </head>
 <body>
@@ -79,6 +79,9 @@
             </div>
             <div class="bot-meta">
               <span class="tag" :class="bot.engine">{{ bot.engine.toUpperCase() }}</span>
+              <span v-if="bot.execution_mode && bot.execution_mode !== 'agent'" class="tag">{{ executionModeLabel(bot.execution_mode) }}</span>
+              <span v-if="bot.reasoning_effort" class="tag">{{ reasoningEffortLabel(bot.reasoning_effort) }}</span>
+              <span v-if="bot.model" class="tag">{{ bot.model }}</span>
               <span>{{ bot.node_display_name || bot.node_id }}</span>
               <span>·</span>
               <span>{{ bot.node_status === 'online' ? '🟢 在线' : '⚪ 离线' }}</span>
@@ -243,8 +246,25 @@
       </header>
 
       <div class="detail-subbar" v-if="activeBot">
-        <span class="detail-cwd">{{ activeBot.node_display_name || activeBot.node_id }} · {{ activeBot.cwd }}</span>
+        <span class="detail-cwd">{{ activeBot.node_display_name || activeBot.node_id }} · {{ activeBot.cwd }}<template v-if="activeBot.model"> · {{ activeBot.model }}</template></span>
         <div class="detail-badges">
+          <button
+            class="mode-badge"
+            :class="activeBot.execution_mode || 'agent'"
+            :disabled="updatingApprovalMode || sending || activeBot.status === 'running' || activeBot.status === 'waiting_approval'"
+            @click="handleCycleExecutionMode(activeBot)"
+            title="点击切换工作模式 (agent / plan / chat)"
+          >
+            {{ executionModeLabel(activeBot.execution_mode) }}
+          </button>
+          <button
+            class="mode-badge effort"
+            :disabled="updatingApprovalMode || sending || activeBot.status === 'running' || activeBot.status === 'waiting_approval'"
+            @click="handleCycleReasoningEffort(activeBot)"
+            title="点击切换思考深度"
+          >
+            {{ reasoningEffortLabel(activeBot.reasoning_effort) }}
+          </button>
           <button
             class="mode-badge"
             :class="activeBot.approval_mode === 'ask' ? 'ask' : 'auto'"
@@ -362,7 +382,7 @@
 
         <div class="field">
           <label>CLI 引擎</label>
-          <select v-model="form.engine">
+          <select v-model="form.engine" @change="onEngineChange">
             <option v-for="eng in selectedNodeEngines" :key="eng" :value="eng">{{ eng }}</option>
           </select>
         </div>
@@ -392,9 +412,41 @@
           </select>
         </div>
 
+        <div class="field-row">
+          <div class="field">
+            <label>工作模式</label>
+            <select v-model="form.execution_mode">
+              <option value="agent">Agent (读写执行)</option>
+              <option value="plan">Plan (只读规划)</option>
+              <option value="chat">Chat (纯问答)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>思考深度</label>
+            <select v-model="form.reasoning_effort">
+              <option value="">CLI 默认</option>
+              <option v-for="lv in availableReasoningEfforts" :key="lv" :value="lv">
+                {{ reasoningEffortOptionLabel(lv) }}
+              </option>
+            </select>
+          </div>
+        </div>
+
         <div class="field">
-          <label>模型覆盖（可选，留空用 CLI 默认）</label>
-          <input v-model="form.model" placeholder="仅限字母数字及 . _ : / -" />
+          <label>模型选择（自动读取 PC 已发现模型，或手动覆盖）</label>
+          <select v-model="form.model_select" @change="onModelSelectChange">
+            <option value="">跟随 PC 默认</option>
+            <option v-for="m in selectedEngineModels" :key="m.id" :value="m.id">
+              {{ m.name }}{{ m.is_default ? ' (默认)' : '' }}
+            </option>
+            <option value="__custom__">自定义模型名...</option>
+          </select>
+          <input
+            v-if="form.model_select === '__custom__'"
+            v-model="form.model"
+            placeholder="仅限字母数字及 . _ : / -"
+            style="margin-top:6px;"
+          />
         </div>
 
         <button class="btn btn-primary" style="width:100%;padding:11px;" :disabled="creating || !onlineNodes.length" @click="handleCreateBot">
@@ -419,6 +471,6 @@
     </div>
   </div>
 
-  <script type="module" src="./app.js?v=8"></script>
+  <script type="module" src="./app.js?v=9"></script>
 </body>
 </html>

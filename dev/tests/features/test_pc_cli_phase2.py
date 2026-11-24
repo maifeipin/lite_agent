@@ -512,3 +512,124 @@ def test_manager_list_node_dirs_tool_and_failed_history_filter(tmp_path):
     assert "networkApprovalContext" in app_js
     assert "additionalPermissions" in app_js
     assert "min-height: 0;" in style_css
+
+
+def test_model_discovery_and_execution_mode_reasoning_effort(tmp_path):
+    """验证 Codex 本地模型发现、Hub 持久化/校验、Codex/AGY 适配器参数与移动端契约。"""
+    from lite_agent.features.pc_cli.daemon.adapters.agy_adapter import AgyCliAdapter
+    from lite_agent.features.pc_cli.daemon.adapters.base import apply_execution_mode_prompt
+    from lite_agent.features.pc_cli.daemon.adapters.codex_adapter import CodexCliAdapter
+    from lite_agent.features.pc_cli.daemon.env_probe import discover_codex_models
+
+    # 1. Codex 本地模型发现（过滤 hide、识别默认模型与 reasoning_efforts、拦截非法 slug）
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    (codex_dir / "config.toml").write_text('model = "gpt-6-luna"\n[projects."/a"]\nmodel = "ignored"\n', encoding="utf-8")
+    (codex_dir / "models_cache.json").write_text(
+        json.dumps({
+            "models": [
+                {
+                    "slug": "gpt-6-luna",
+                    "display_name": "GPT-6 Luna",
+                    "visibility": "list",
+                    "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}],
+                },
+                {"slug": "gpt-reserve", "display_name": "Hidden", "visibility": "hide"},
+                {"slug": "bad model;rm", "display_name": "Bad", "visibility": "list"},
+                {"slug": "gpt-6.1-sol", "display_name": "GPT-6.1 Sol", "visibility": "list"},
+            ]
+        }),
+        encoding="utf-8",
+    )
+    found = discover_codex_models(codex_home=str(codex_dir))
+    assert [m["id"] for m in found] == ["gpt-6-luna", "gpt-6.1-sol"]
+    assert found[0]["is_default"] is True
+    assert found[0]["reasoning_efforts"] == ["low", "high"]
+    assert found[1]["is_default"] is False
+    assert discover_codex_models(codex_home=str(tmp_path / "missing")) == []
+
+    # 2. Hub 持久化与 turn.start 透传 execution_mode / reasoning_effort / engine_models
+    sent_to_daemon: list[dict] = []
+    repo = PcCliRepository(":memory:")
+    hub = PcCliHub(repo=repo)
+    try:
+        node = hub.handle_daemon_hello(
+            "c1",
+            lambda msg: sent_to_daemon.append(msg),
+            {
+                "node_id": "win1",
+                "engines": ["codex", "agy"],
+                "engine_models": {"codex": found, "agy": [], "unknown": [{"id": "x"}]},
+                "workspace_roots": ["/w"],
+            },
+        )
+        assert "unknown" not in node["engine_models"]
+        assert [m["id"] for m in node["engine_models"]["codex"]] == ["gpt-6-luna", "gpt-6.1-sol"]
+
+        bad_em, _ = hub.create_bot(
+            name="b1", node_id="win1", engine="codex", cwd="/w", execution_mode="invalid"
+        )
+        assert bad_em is False
+        bad_re, _ = hub.create_bot(
+            name="b1", node_id="win1", engine="codex", cwd="/w", reasoning_effort="ultra"
+        )
+        assert bad_re is False
+
+        ok_b, b_res = hub.create_bot(
+            name="planner",
+            node_id="win1",
+            engine="codex",
+            cwd="/w",
+            execution_mode="plan",
+            reasoning_effort="high",
+            model="gpt-6-luna",
+        )
+        assert ok_b is True
+        bot = b_res["bot"]
+        assert bot["execution_mode"] == "plan"
+        assert bot["reasoning_effort"] == "high"
+        assert bot["model"] == "gpt-6-luna"
+
+        ok_u, u_res = hub.update_bot(bot["bot_id"], execution_mode="chat", reasoning_effort="medium")
+        assert ok_u is True
+        assert u_res["bot"]["execution_mode"] == "chat"
+        assert u_res["bot"]["reasoning_effort"] == "medium"
+
+        ok_t, _ = hub.start_turn(bot["bot_id"], "解释架构")
+        assert ok_t is True
+        assert sent_to_daemon[-1]["execution_mode"] == "chat"
+        assert sent_to_daemon[-1]["reasoning_effort"] == "medium"
+        assert sent_to_daemon[-1]["model"] == "gpt-6-luna"
+    finally:
+        hub.close()
+
+    # 3. 适配器参数与统一提示词抽象
+    codex = CodexCliAdapter(executable="codex", env={})
+    c_args = codex.build_args(
+        native_session_id=None, approval_mode="auto", model="gpt-6-luna",
+        execution_mode="plan", reasoning_effort="high",
+    )
+    assert 'sandbox_mode="read-only"' in c_args
+    assert 'model_reasoning_effort="high"' in c_args
+    assert 'sandbox_mode="workspace-write"' not in c_args
+    c_app_args = codex.build_app_server_args(reasoning_effort="xhigh")
+    assert 'model_reasoning_effort="xhigh"' in c_app_args
+
+    agy = AgyCliAdapter(executable="agy", env={})
+    a_agent = agy.build_args(cwd="/w", approval_mode="auto", execution_mode="agent")
+    a_plan = agy.build_args(cwd="/w", approval_mode="auto", execution_mode="plan")
+    assert "--dangerously-skip-permissions" in a_agent
+    assert "--dangerously-skip-permissions" not in a_plan
+
+    assert apply_execution_mode_prompt("hello", "agent", "") == "hello"
+    plan_p = apply_execution_mode_prompt("hello", "plan", "high", include_effort_hint=True)
+    assert "[模式: PLAN" in plan_p and "[思考深度: high" in plan_p and plan_p.endswith("hello")
+
+    # 4. 移动端前端契约
+    root = Path(__file__).resolve().parents[3]
+    app_js = (root / "web_dashboard" / "mobile" / "app.js").read_text(encoding="utf-8")
+    index_html = (root / "web_dashboard" / "mobile" / "index.html").read_text(encoding="utf-8")
+    assert "selectedEngineModels" in app_js and "selectedEngineModels" in index_html
+    assert "handleCycleExecutionMode" in app_js and "handleCycleExecutionMode(activeBot)" in index_html
+    assert "handleCycleReasoningEffort" in app_js and "handleCycleReasoningEffort(activeBot)" in index_html
+    assert "form.execution_mode" in index_html and "form.reasoning_effort" in index_html

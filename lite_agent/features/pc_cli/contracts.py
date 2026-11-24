@@ -61,6 +61,8 @@ class EventType(str, Enum):
 
 SUPPORTED_ENGINES: Tuple[str, ...] = ("codex", "agy")
 APPROVAL_MODES: Tuple[str, ...] = ("auto", "ask")
+EXECUTION_MODES: Tuple[str, ...] = ("agent", "plan", "chat")
+REASONING_EFFORTS: Tuple[str, ...] = ("", "low", "medium", "high", "xhigh")
 VALID_DECISIONS: Tuple[str, ...] = (
     ApprovalDecision.ALLOW_ONCE.value,
     ApprovalDecision.ALLOW_SESSION.value,

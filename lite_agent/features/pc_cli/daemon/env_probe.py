@@ -8,11 +8,15 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import sys
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+_SAFE_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._:/-]{1,128}$")
+_CODEX_TOML_MODEL_RE = re.compile(r'^\s*model\s*=\s*["\']([^"\']+)["\']')
 
 
 _MACOS_COMMON_BINS = (
@@ -116,6 +120,99 @@ def detect_available_engines(codex_bin: str, agy_bin: str, env: Dict[str, str]) 
                 continue
             engines.append(name)
     return engines
+
+
+def _read_codex_default_model(codex_home: str) -> str:
+    """从 ~/.codex/config.toml 顶层读取默认 model 配置（忽略子表中的 model 字段）。"""
+    cfg_path = os.path.join(codex_home, "config.toml")
+    try:
+        with open(cfg_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                if stripped.startswith("["):
+                    break
+                m = _CODEX_TOML_MODEL_RE.match(stripped)
+                if m:
+                    candidate = m.group(1).strip()
+                    if _SAFE_MODEL_ID_RE.match(candidate):
+                        return candidate
+    except OSError:
+        pass
+    return ""
+
+
+def discover_codex_models(
+    codex_home: Optional[str] = None,
+    env: Optional[Dict[str, str]] = None,
+    max_models: int = 50,
+) -> List[Dict[str, Any]]:
+    """读取本机 Codex CLI 缓存的可用模型列表（~/.codex/models_cache.json + config.toml）。"""
+    base_dir = (
+        codex_home
+        or (env or os.environ).get("CODEX_HOME")
+        or os.path.expanduser("~/.codex")
+    )
+    default_model = _read_codex_default_model(base_dir)
+    cache_path = os.path.join(base_dir, "models_cache.json")
+    models: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        raw_items = data.get("models") if isinstance(data, dict) else None
+        if isinstance(raw_items, list):
+            for item in raw_items:
+                if not isinstance(item, dict):
+                    continue
+                visibility = str(item.get("visibility") or "list").strip().lower()
+                if visibility and visibility != "list":
+                    continue
+                slug = str(item.get("slug") or item.get("id") or "").strip()
+                if not slug or not _SAFE_MODEL_ID_RE.match(slug) or slug in seen:
+                    continue
+                seen.add(slug)
+                display_name = str(item.get("display_name") or slug).strip()[:120]
+                efforts: List[str] = []
+                raw_levels = item.get("supported_reasoning_levels")
+                if isinstance(raw_levels, list):
+                    for lv in raw_levels:
+                        lv_name = str(lv.get("effort") if isinstance(lv, dict) else lv).strip().lower()
+                        if lv_name in ("low", "medium", "high", "xhigh") and lv_name not in efforts:
+                            efforts.append(lv_name)
+                entry: Dict[str, Any] = {
+                    "id": slug,
+                    "name": display_name,
+                    "is_default": slug == default_model,
+                }
+                if efforts:
+                    entry["reasoning_efforts"] = efforts
+                models.append(entry)
+                if len(models) >= max_models:
+                    break
+    except (OSError, ValueError, TypeError):
+        pass
+
+    if default_model and default_model not in seen:
+        models.insert(0, {"id": default_model, "name": default_model, "is_default": True})
+    return models
+
+
+def discover_engine_models(
+    engines: List[str],
+    env: Optional[Dict[str, str]] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """探测本机已启用引擎的可用模型清单。"""
+    result: Dict[str, List[Dict[str, Any]]] = {}
+    for eng in engines:
+        if eng == "codex":
+            result["codex"] = discover_codex_models(env=env)
+        elif eng == "agy":
+            # AGY CLI 当前无公开本地模型缓存文件，返回空列表由前端提供默认/自定义输入
+            result["agy"] = []
+    return result
 
 
 def is_path_within_roots(target_path: str, roots: List[str]) -> bool:

@@ -17,8 +17,10 @@ from lite_agent.features.pc_cli.contracts import (
     ApprovalDecision,
     ApprovalType,
     BotStatus,
+    EXECUTION_MODES,
     EventType,
     NodeStatus,
+    REASONING_EFFORTS,
     SUPPORTED_ENGINES,
     TurnStatus,
     VALID_DECISIONS,
@@ -124,6 +126,7 @@ class PcCliHub:
         platform = str(payload.get("platform") or "unknown").strip()
         engines = [str(e) for e in (payload.get("engines") or []) if str(e) in SUPPORTED_ENGINES]
         workspace_roots = [str(p) for p in (payload.get("workspace_roots") or []) if str(p).strip()]
+        engine_models = self._sanitize_engine_models(payload.get("engine_models"))
 
         with self._lock:
             self._daemons[node_id] = (conn_id, send_fn)
@@ -133,6 +136,7 @@ class PcCliHub:
             display_name=display_name,
             platform=platform,
             engines=engines,
+            engine_models=engine_models,
             workspace_roots=workspace_roots,
             status=NodeStatus.ONLINE.value,
         )
@@ -141,6 +145,45 @@ class PcCliHub:
         self._broadcast_clients({"type": "nodes.updated", "nodes": self.repo.list_nodes()})
         logger.info(f"PC 节点上线: {node_id} ({platform}, engines={engines})")
         return node
+
+    @staticmethod
+    def _sanitize_engine_models(raw: Any) -> Dict[str, List[Dict[str, Any]]]:
+        if not isinstance(raw, dict):
+            return {}
+        cleaned: Dict[str, List[Dict[str, Any]]] = {}
+        for eng, items in raw.items():
+            eng_name = str(eng or "").strip().lower()
+            if eng_name not in SUPPORTED_ENGINES or not isinstance(items, list):
+                continue
+            out: List[Dict[str, Any]] = []
+            seen: set[str] = set()
+            for item in items[:50]:
+                if isinstance(item, str):
+                    mid = item.strip()
+                    mname = mid
+                    is_def = False
+                    efforts: List[str] = []
+                elif isinstance(item, dict):
+                    mid = str(item.get("id") or item.get("slug") or "").strip()
+                    mname = str(item.get("name") or item.get("display_name") or mid).strip()[:120]
+                    is_def = bool(item.get("is_default"))
+                    raw_effs = item.get("reasoning_efforts")
+                    efforts = [
+                        str(e).strip().lower()
+                        for e in (raw_effs if isinstance(raw_effs, list) else [])
+                        if str(e).strip().lower() in REASONING_EFFORTS and str(e).strip()
+                    ]
+                else:
+                    continue
+                if not mid or mid in seen or not is_valid_model_name(mid):
+                    continue
+                seen.add(mid)
+                entry: Dict[str, Any] = {"id": mid, "name": mname or mid, "is_default": is_def}
+                if efforts:
+                    entry["reasoning_efforts"] = efforts
+                out.append(entry)
+            cleaned[eng_name] = out
+        return cleaned
 
     def _reconcile_node_active_turns(self, node_id: str, reported_active_turns: List[Any]) -> None:
         """Daemon 重连上线时对账活跃回合：若守护进程已重启，自动收尾孤儿 running 回合，避免 Bot 永久卡死。"""
@@ -450,6 +493,8 @@ class PcCliHub:
         engine: str,
         cwd: str,
         approval_mode: str = "auto",
+        execution_mode: str = "agent",
+        reasoning_effort: str = "",
         model: Optional[str] = None,
     ) -> Tuple[bool, Dict[str, Any]]:
         name = (name or "").strip()
@@ -457,6 +502,8 @@ class PcCliHub:
         engine = (engine or "").strip().lower()
         cwd = (cwd or "").strip()
         approval_mode = (approval_mode or "auto").strip().lower()
+        execution_mode = (execution_mode or "agent").strip().lower()
+        reasoning_effort = (reasoning_effort or "").strip().lower()
 
         if not name:
             return False, {"error": "Bot 名称不能为空"}
@@ -464,6 +511,10 @@ class PcCliHub:
             return False, {"error": f"不支持的引擎 '{engine}'，仅支持 {SUPPORTED_ENGINES}"}
         if approval_mode not in APPROVAL_MODES:
             return False, {"error": f"不支持的审批模式 '{approval_mode}'，仅支持 {APPROVAL_MODES}"}
+        if execution_mode not in EXECUTION_MODES:
+            return False, {"error": f"不支持的工作模式 '{execution_mode}'，仅支持 {EXECUTION_MODES}"}
+        if reasoning_effort not in REASONING_EFFORTS:
+            return False, {"error": f"不支持的思考深度 '{reasoning_effort}'，仅支持 {REASONING_EFFORTS}"}
         if not cwd:
             return False, {"error": "工作目录 cwd 不能为空"}
         clean_model = (model or "").strip() or None
@@ -485,6 +536,8 @@ class PcCliHub:
             engine=engine,
             cwd=cwd,
             approval_mode=approval_mode,
+            execution_mode=execution_mode,
+            reasoning_effort=reasoning_effort,
             model=clean_model,
         )
         self._emit_bot_summary(bot["bot_id"])
@@ -497,6 +550,16 @@ class PcCliHub:
         if "approval_mode" in kwargs and kwargs["approval_mode"] is not None:
             if kwargs["approval_mode"] not in APPROVAL_MODES:
                 return False, {"error": f"不支持的审批模式: {kwargs['approval_mode']}"}
+        if "execution_mode" in kwargs and kwargs["execution_mode"] is not None:
+            em = str(kwargs["execution_mode"]).strip().lower()
+            if em not in EXECUTION_MODES:
+                return False, {"error": f"不支持的工作模式: {kwargs['execution_mode']}"}
+            kwargs["execution_mode"] = em
+        if "reasoning_effort" in kwargs and kwargs["reasoning_effort"] is not None:
+            re_val = str(kwargs["reasoning_effort"]).strip().lower()
+            if re_val not in REASONING_EFFORTS:
+                return False, {"error": f"不支持的思考深度: {kwargs['reasoning_effort']}"}
+            kwargs["reasoning_effort"] = re_val
         if "model" in kwargs and kwargs["model"] is not None:
             clean_model = str(kwargs["model"]).strip()
             if not is_valid_model_name(clean_model):
@@ -564,6 +627,8 @@ class PcCliHub:
                 "prompt": prompt,
                 "native_session_id": bot.get("native_session_id"),
                 "approval_mode": bot["approval_mode"],
+                "execution_mode": bot.get("execution_mode") or "agent",
+                "reasoning_effort": bot.get("reasoning_effort") or "",
                 "model": bot.get("model"),
             },
         )

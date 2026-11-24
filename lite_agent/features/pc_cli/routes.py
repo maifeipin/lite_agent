@@ -81,6 +81,8 @@ def handle_post_bots(handler: Any, parsed_url: Any, hub: PcCliHub) -> None:
         engine=str(body.get("engine") or ""),
         cwd=str(body.get("cwd") or ""),
         approval_mode=str(body.get("approval_mode") or "auto"),
+        execution_mode=str(body.get("execution_mode") or "agent"),
+        reasoning_effort=str(body.get("reasoning_effort") or ""),
         model=body.get("model"),
     )
     _send_json(handler, 201 if ok else 400, {"success": ok, **res})
@@ -114,6 +116,8 @@ def handle_bots_sub_dispatch(handler: Any, parsed_url: Any, hub: PcCliHub) -> No
                 bot_id,
                 name=body.get("name"),
                 approval_mode=body.get("approval_mode"),
+                execution_mode=body.get("execution_mode"),
+                reasoning_effort=body.get("reasoning_effort"),
                 model=body.get("model"),
                 archived=body.get("archived"),
             )

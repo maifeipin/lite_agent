@@ -57,6 +57,8 @@ class _FakeCliAdapter(BaseCliAdapter):
         model: Optional[str],
         on_event: EventCallback,
         on_approval=None,
+        execution_mode: str = "agent",
+        reasoning_effort: str = "",
     ) -> TurnResult:
         key = (bot_id, turn_id)
         cancel_ev = asyncio.Event()

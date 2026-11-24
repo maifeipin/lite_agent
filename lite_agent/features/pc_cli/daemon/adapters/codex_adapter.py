@@ -12,7 +12,16 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..env_probe import build_spawn_argv
 from ..process_tree import build_subprocess_kwargs, kill_process_tree
 from ._jsonrpc import StdioJsonRpcClient
-from .base import ApprovalCallback, BaseCliAdapter, EventCallback, TurnResult, truncate_text
+from .base import (
+    ApprovalCallback,
+    BaseCliAdapter,
+    EventCallback,
+    TurnResult,
+    apply_execution_mode_prompt,
+    normalize_execution_mode,
+    normalize_reasoning_effort,
+    truncate_text,
+)
 
 _CODEX_APPROVAL_METHODS = frozenset({
     "item/commandExecution/requestApproval",
@@ -110,8 +119,13 @@ class CodexCliAdapter(BaseCliAdapter):
         self._active_rpcs: Dict[Tuple[str, str], Tuple[StdioJsonRpcClient, Optional[str], Optional[str]]] = {}
         self._cancelled: set[Tuple[str, str]] = set()
 
-    def build_app_server_args(self) -> List[str]:
-        return build_spawn_argv(self.executable, ["app-server"], self.env)
+    def build_app_server_args(self, *, reasoning_effort: str = "") -> List[str]:
+        effort = normalize_reasoning_effort(reasoning_effort)
+        cli_args: List[str] = []
+        if effort:
+            cli_args.extend(["-c", f'model_reasoning_effort="{effort}"'])
+        cli_args.append("app-server")
+        return build_spawn_argv(self.executable, cli_args, self.env)
 
     def build_args(
         self,
@@ -119,14 +133,23 @@ class CodexCliAdapter(BaseCliAdapter):
         native_session_id: Optional[str],
         approval_mode: str,
         model: Optional[str],
+        execution_mode: str = "agent",
+        reasoning_effort: str = "",
     ) -> List[str]:
         """借鉴 tarobird process-adapter.ts：加 --skip-git-repo-check，prompt 走 stdin (`-`)。
-        codex-cli 0.171+ 已移除 `--full-auto`，统一使用 `-c approval_policy="never" -c sandbox_mode="workspace-write"`
+        codex-cli 0.171+ 已移除 `--full-auto`，统一使用 `-c approval_policy="never" -c sandbox_mode="..."`
         以同时兼容 `codex exec` 与 `codex exec resume`。
         """
+        mode = normalize_execution_mode(execution_mode)
+        effort = normalize_reasoning_effort(reasoning_effort)
+        sandbox = "read-only" if mode in ("plan", "chat") else "workspace-write"
         flags: List[str] = []
         if approval_mode == "auto":
-            flags.extend(["-c", 'approval_policy="never"', "-c", 'sandbox_mode="workspace-write"'])
+            flags.extend(["-c", 'approval_policy="never"', "-c", f'sandbox_mode="{sandbox}"'])
+        elif mode in ("plan", "chat"):
+            flags.extend(["-c", f'sandbox_mode="{sandbox}"'])
+        if effort:
+            flags.extend(["-c", f'model_reasoning_effort="{effort}"'])
         if model:
             flags.extend(["-m", model])
         if native_session_id:
@@ -162,6 +185,8 @@ class CodexCliAdapter(BaseCliAdapter):
         model: Optional[str],
         on_event: EventCallback,
         on_approval: Optional[ApprovalCallback] = None,
+        execution_mode: str = "agent",
+        reasoning_effort: str = "",
     ) -> TurnResult:
         if approval_mode == "ask" or self.prefer_app_server:
             return await self._run_app_server_turn(
@@ -174,6 +199,8 @@ class CodexCliAdapter(BaseCliAdapter):
                 model=model,
                 on_event=on_event,
                 on_approval=on_approval,
+                execution_mode=execution_mode,
+                reasoning_effort=reasoning_effort,
             )
         return await self._run_exec_turn(
             bot_id=bot_id,
@@ -184,6 +211,8 @@ class CodexCliAdapter(BaseCliAdapter):
             approval_mode=approval_mode,
             model=model,
             on_event=on_event,
+            execution_mode=execution_mode,
+            reasoning_effort=reasoning_effort,
         )
 
     async def _run_app_server_turn(
@@ -198,12 +227,17 @@ class CodexCliAdapter(BaseCliAdapter):
         model: Optional[str],
         on_event: EventCallback,
         on_approval: Optional[ApprovalCallback],
+        execution_mode: str = "agent",
+        reasoning_effort: str = "",
     ) -> TurnResult:
         """Phase 3: 基于 `codex app-server` JSON-RPC 2.0，支持交互式权限审批与优雅中断。"""
         key = (bot_id, turn_id)
         self._cancelled.discard(key)
+        mode = normalize_execution_mode(execution_mode)
+        effort = normalize_reasoning_effort(reasoning_effort)
+        effective_prompt = apply_execution_mode_prompt(prompt, mode)
         try:
-            args = self.build_app_server_args()
+            args = self.build_app_server_args(reasoning_effort=effort) if effort else self.build_app_server_args()
         except Exception as e:
             return TurnResult(status="failed", native_session_id=native_session_id, error=str(e))
         kwargs = build_subprocess_kwargs(cwd=cwd, env=self.env)
@@ -306,10 +340,11 @@ class CodexCliAdapter(BaseCliAdapter):
                 await rpc.notify("initialized", {})
 
                 policy = "on-request" if approval_mode == "ask" else "never"
+                sandbox = "read-only" if mode in ("plan", "chat") else "workspace-write"
                 if thread_id:
                     resume_params: Dict[str, Any] = {
                         "threadId": thread_id, "cwd": cwd, "approvalPolicy": policy,
-                        "sandbox": "workspace-write",
+                        "sandbox": sandbox,
                     }
                     if model:
                         resume_params["model"] = model
@@ -319,7 +354,7 @@ class CodexCliAdapter(BaseCliAdapter):
                         timeout=30.0,
                     )
                 else:
-                    start_params: Dict[str, Any] = {"cwd": cwd, "approvalPolicy": policy, "sandbox": "workspace-write"}
+                    start_params: Dict[str, Any] = {"cwd": cwd, "approvalPolicy": policy, "sandbox": sandbox}
                     if model:
                         start_params["model"] = model
                     th_res = await rpc.call("thread/start", start_params, timeout=30.0)
@@ -332,7 +367,7 @@ class CodexCliAdapter(BaseCliAdapter):
                     "turn/start",
                     {
                         "threadId": thread_id,
-                        "input": [{"type": "text", "text": prompt}],
+                        "input": [{"type": "text", "text": effective_prompt}],
                     },
                     timeout=30.0,
                 )
@@ -380,13 +415,18 @@ class CodexCliAdapter(BaseCliAdapter):
         approval_mode: str,
         model: Optional[str],
         on_event: EventCallback,
+        execution_mode: str = "agent",
+        reasoning_effort: str = "",
     ) -> TurnResult:
         key = (bot_id, turn_id)
         self._cancelled.discard(key)
+        prompt = apply_execution_mode_prompt(prompt, execution_mode)
         args = self.build_args(
             native_session_id=native_session_id,
             approval_mode=approval_mode,
             model=model,
+            execution_mode=execution_mode,
+            reasoning_effort=reasoning_effort,
         )
         kwargs = build_subprocess_kwargs(cwd=cwd, env=self.env)
         try:

@@ -113,6 +113,8 @@ MANAGER_TOOLS_SCHEMA: List[Dict[str, Any]] = [
                     "engine": {"type": "string", "enum": ["codex", "agy"], "description": "CLI 引擎"},
                     "cwd": {"type": "string", "description": "目标 PC 工作目录绝对路径"},
                     "approval_mode": {"type": "string", "enum": ["auto", "ask"], "description": "权限模式，默认 auto"},
+                    "execution_mode": {"type": "string", "enum": ["agent", "plan", "chat"], "description": "工作模式：agent(读写执行)/plan(只读规划)/chat(纯问答)，默认 agent"},
+                    "reasoning_effort": {"type": "string", "enum": ["", "low", "medium", "high", "xhigh"], "description": "可选思考深度，留空跟随 CLI 默认"},
                     "model": {"type": "string", "description": "可选 CLI 模型覆盖"},
                 },
                 "required": ["name", "node_id", "engine", "cwd"],
@@ -297,6 +299,8 @@ class PcCliManager:
                 engine=str(args.get("engine") or ""),
                 cwd=cwd,
                 approval_mode=str(args.get("approval_mode") or "auto"),
+                execution_mode=str(args.get("execution_mode") or "agent"),
+                reasoning_effort=str(args.get("reasoning_effort") or ""),
                 model=args.get("model"),
             )
             return {"ok": ok, **res}

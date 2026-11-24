@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS pc_nodes (
     display_name TEXT NOT NULL,
     platform TEXT NOT NULL DEFAULT 'unknown',
     engines_json TEXT NOT NULL DEFAULT '[]',
+    engine_models_json TEXT NOT NULL DEFAULT '{}',
     workspace_roots_json TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL DEFAULT 'offline',
     last_seen_at INTEGER NOT NULL DEFAULT 0
@@ -40,6 +41,8 @@ CREATE TABLE IF NOT EXISTS cli_bots (
     engine TEXT NOT NULL,
     cwd TEXT NOT NULL,
     approval_mode TEXT NOT NULL DEFAULT 'auto',
+    execution_mode TEXT NOT NULL DEFAULT 'agent',
+    reasoning_effort TEXT NOT NULL DEFAULT '',
     model TEXT,
     native_session_id TEXT,
     status TEXT NOT NULL DEFAULT 'idle',
@@ -118,6 +121,9 @@ class PcCliRepository:
             self._conn.execute("PRAGMA journal_mode=WAL;")
             self._conn.execute("PRAGMA synchronous=NORMAL;")
             self._conn.executescript(_SCHEMA_SQL)
+            self._ensure_column("pc_nodes", "engine_models_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column("cli_bots", "execution_mode", "TEXT NOT NULL DEFAULT 'agent'")
+            self._ensure_column("cli_bots", "reasoning_effort", "TEXT NOT NULL DEFAULT ''")
             # 兼容旧库迁移：先将同一 Bot 多余的历史活跃回合收敛为 failed，再建部分唯一索引
             self._conn.execute(
                 """
@@ -142,6 +148,11 @@ class PcCliRepository:
             )
             self._conn.commit()
 
+    def _ensure_column(self, table: str, column: str, col_def: str) -> None:
+        cols = {row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in cols:
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}")
+
     def close(self) -> None:
         with self._lock:
             if self._conn is not None:
@@ -162,17 +173,22 @@ class PcCliRepository:
         engines: List[str],
         workspace_roots: List[str],
         status: str = NodeStatus.ONLINE.value,
+        engine_models: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         ts = now_ms()
         with self._lock:
             self._conn.execute(
                 """
-                INSERT INTO pc_nodes (node_id, display_name, platform, engines_json, workspace_roots_json, status, last_seen_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO pc_nodes (
+                    node_id, display_name, platform, engines_json, engine_models_json,
+                    workspace_roots_json, status, last_seen_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(node_id) DO UPDATE SET
                     display_name = excluded.display_name,
                     platform = excluded.platform,
                     engines_json = excluded.engines_json,
+                    engine_models_json = excluded.engine_models_json,
                     workspace_roots_json = excluded.workspace_roots_json,
                     status = excluded.status,
                     last_seen_at = excluded.last_seen_at
@@ -182,6 +198,7 @@ class PcCliRepository:
                     display_name or node_id,
                     platform or "unknown",
                     json.dumps(engines, ensure_ascii=False),
+                    json.dumps(engine_models or {}, ensure_ascii=False),
                     json.dumps(workspace_roots, ensure_ascii=False),
                     status,
                     ts,
@@ -218,6 +235,7 @@ class PcCliRepository:
             "display_name": row["display_name"],
             "platform": row["platform"],
             "engines": json.loads(row["engines_json"] or "[]"),
+            "engine_models": json.loads(row["engine_models_json"] or "{}"),
             "workspace_roots": json.loads(row["workspace_roots_json"] or "[]"),
             "status": row["status"],
             "last_seen_at": row["last_seen_at"],
@@ -246,6 +264,8 @@ class PcCliRepository:
         engine: str,
         cwd: str,
         approval_mode: str = "auto",
+        execution_mode: str = "agent",
+        reasoning_effort: str = "",
         model: Optional[str] = None,
         bot_id: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -255,12 +275,16 @@ class PcCliRepository:
             self._conn.execute(
                 """
                 INSERT INTO cli_bots (
-                    bot_id, name, node_id, engine, cwd, approval_mode, model,
+                    bot_id, name, node_id, engine, cwd, approval_mode, execution_mode, reasoning_effort, model,
                     native_session_id, status, last_summary, archived, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, '', 0, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '', 0, ?, ?)
                 """,
-                (bid, name, node_id, engine, cwd, approval_mode, model, BotStatus.IDLE.value, ts, ts),
+                (
+                    bid, name, node_id, engine, cwd, approval_mode,
+                    execution_mode or "agent", reasoning_effort or "", model,
+                    BotStatus.IDLE.value, ts, ts,
+                ),
             )
             self._conn.commit()
         return self.get_bot(bid) or {}
@@ -273,6 +297,8 @@ class PcCliRepository:
             "engine": row["engine"],
             "cwd": row["cwd"],
             "approval_mode": row["approval_mode"],
+            "execution_mode": row["execution_mode"] or "agent",
+            "reasoning_effort": row["reasoning_effort"] or "",
             "model": row["model"],
             "native_session_id": row["native_session_id"],
             "status": row["status"],
@@ -316,6 +342,8 @@ class PcCliRepository:
         *,
         name: Optional[str] = None,
         approval_mode: Optional[str] = None,
+        execution_mode: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
         model: Optional[str] = None,
         archived: Optional[bool] = None,
     ) -> Optional[Dict[str, Any]]:
@@ -327,6 +355,12 @@ class PcCliRepository:
         if approval_mode is not None:
             fields.append("approval_mode = ?")
             values.append(approval_mode)
+        if execution_mode is not None:
+            fields.append("execution_mode = ?")
+            values.append(execution_mode)
+        if reasoning_effort is not None:
+            fields.append("reasoning_effort = ?")
+            values.append(reasoning_effort)
         if model is not None:
             fields.append("model = ?")
             values.append(model or None)
