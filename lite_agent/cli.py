@@ -268,6 +268,52 @@ def _wait_for_exit_budget(budget_sec: float = 5.0) -> bool:
         time.sleep(0.1)
 
 
+def _graceful_exit(app, signum: int, total_budget_sec: float = 20.0) -> None:
+    """统一的信号停机路径：从收到 SIGTERM/SIGINT 起按总预算计时，同时保持 cron -> lifecycle 清理顺序。"""
+    budget = max(0.5, float(total_budget_sec))
+    deadline = time.monotonic() + budget
+
+    def _watchdog_exit() -> None:
+        try:
+            print(f"⚠️ 停机总预算 ({budget:.1f}s) 已耗尽，已刷盘并立即退出以守住停机窗口。")
+            sys.stdout.flush()
+            sys.stderr.flush()
+        finally:
+            os._exit(0)
+
+    watchdog = threading.Timer(budget, _watchdog_exit)
+    watchdog.daemon = True
+    watchdog.start()
+
+    try:
+        print(f"\n🛑 捕获信号 ({signum})，正在优雅停止 Lite Agent 宿主应用...")
+        cron_budget = max(0.2, (deadline - time.monotonic()) * 0.5)
+        try:
+            failures = app.shutdown(timeout=cron_budget)
+        except TypeError:
+            failures = app.shutdown()
+        if failures:
+            print(f"⚠️ 部分资源清理异常: {failures}")
+
+        drain_budget = max(0.0, min(5.0, deadline - time.monotonic()))
+        if _wait_for_exit_budget(drain_budget):
+            watchdog.cancel()
+            print("👋 Lite Agent 已安全退出。")
+            sys.exit(0)
+
+        watchdog.cancel()
+        print("⚠️ 部分在途线程池任务超出停机排空预算，已刷盘并立即退出以守住停机窗口。")
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
+    except SystemExit:
+        watchdog.cancel()
+        raise
+    except BaseException:
+        watchdog.cancel()
+        raise
+
+
 def main():
     args = parse_args()
 
@@ -440,21 +486,11 @@ def main():
         except (AttributeError, ValueError, RuntimeError):
             pass
 
-        # 保持主线程存活，收到终止信号后由主线程执行优雅退出
+        # 保持主线程存活，收到终止信号后由主线程按统一预算执行优雅退出
         while not received_signal:
             time.sleep(0.5)
 
-        print(f"\n🛑 捕获信号 ({received_signal})，正在优雅停止 Lite Agent 宿主应用...")
-        failures = app.shutdown()
-        if failures:
-            print(f"⚠️ 部分资源清理异常: {failures}")
-        if _wait_for_exit_budget(5.0):
-            print("👋 Lite Agent 已安全退出。")
-            sys.exit(0)
-        print("⚠️ 部分在途线程池任务超出停机排空预算，已刷盘并立即退出以守住停机窗口。")
-        sys.stdout.flush()
-        sys.stderr.flush()
-        os._exit(0)
+        _graceful_exit(app, received_signal, total_budget_sec=20.0)
     except KeyboardInterrupt:
         print("\n🛑 捕获 Ctrl+C，正在退出...")
         if 'app' in locals() and app is not None:

@@ -251,16 +251,21 @@ class CronService:
                 self._stopping = True
                 self.running = False
                 thread, executor = self._thread, self.executor
+            deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
             try:
                 if thread is not None and thread.is_alive():
-                    thread.join(timeout=timeout)
+                    rem = None if deadline is None else max(0.0, deadline - time.monotonic())
+                    thread.join(timeout=rem)
                 if executor is not None:
+                    # 有限 timeout 下不得阻塞在 executor.shutdown(wait=True)，改由 _wait_inflight 按剩余截止时间排空
+                    exec_wait = wait if timeout is None else False
                     try:
-                        executor.shutdown(wait=wait, cancel_futures=True)
+                        executor.shutdown(wait=exec_wait, cancel_futures=True)
                     except TypeError:
-                        executor.shutdown(wait=wait)
+                        executor.shutdown(wait=exec_wait)
                 if wait:
-                    self._wait_inflight(timeout)
+                    rem = None if deadline is None else max(0.0, deadline - time.monotonic())
+                    self._wait_inflight(rem)
             finally:
                 with self._lock:
                     if self.executor is executor:

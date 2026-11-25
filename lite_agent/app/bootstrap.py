@@ -61,13 +61,13 @@ class Application:
     def loaded_plugins(self):
         return self.plugin_loader.loaded_plugins
 
-    def shutdown(self):
+    def shutdown(self, timeout: Optional[float] = None):
         """释放应用所有注册的句柄与后台任务。
 
         先停止调度并等待在途任务执行完毕, 再按注册倒序释放插件 handler、任务
         与其余受管资源——避免在途任务执行时其依赖资源已被插件清理提前关闭。
         """
-        self.cron_service.stop(wait=True, timeout=None)
+        self.cron_service.stop(wait=True, timeout=timeout)
         return self.lifecycle.shutdown()
 
 
