@@ -243,6 +243,31 @@ def _register_configured_cron_jobs(app, agent, config: dict):
         raise RuntimeError(f"启动中止: 配置定时任务未全部注册, 缺失: {missing}")
 
 
+def _wait_for_exit_budget(budget_sec: float = 5.0) -> bool:
+    """在 app.shutdown() 完成后，给在途非 daemon 线程与 ThreadPoolExecutor 工作线程留出有界排空窗口。
+
+    返回 True 表示所有会阻塞 CPython 解释器退出的线程已排空，可安全执行 sys.exit(0)；
+    返回 False 表示仍有阻塞在途任务（如未返回的 OCR/外部 HTTP），调用方应刷盘后 os._exit(0) 以守住 systemd 停机窗口。
+    """
+    import concurrent.futures.thread as _cft
+
+    deadline = time.monotonic() + max(0.0, budget_sec)
+    while True:
+        main_t = threading.main_thread()
+        blocking = [
+            t for t in threading.enumerate()
+            if t is not main_t and t.is_alive() and not t.daemon
+        ]
+        for t in list(getattr(_cft, "_threads_queues", {}).keys()):
+            if t is not main_t and t.is_alive() and t not in blocking:
+                blocking.append(t)
+        if not blocking:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+
+
 def main():
     args = parse_args()
 
@@ -423,8 +448,13 @@ def main():
         failures = app.shutdown()
         if failures:
             print(f"⚠️ 部分资源清理异常: {failures}")
-        print("👋 Lite Agent 已安全退出。")
-        sys.exit(0)
+        if _wait_for_exit_budget(5.0):
+            print("👋 Lite Agent 已安全退出。")
+            sys.exit(0)
+        print("⚠️ 部分在途线程池任务超出停机排空预算，已刷盘并立即退出以守住停机窗口。")
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
     except KeyboardInterrupt:
         print("\n🛑 捕获 Ctrl+C，正在退出...")
         if 'app' in locals() and app is not None:

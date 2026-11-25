@@ -139,7 +139,7 @@ class TelegramChannel(BaseChannel):
 
             ocr_url = os.environ.get('OCR_ENDPOINT', 'http://127.0.0.1:8000/api/ocr')
             files = {'file': ('image.jpg', image_bytes, 'image/jpeg')}
-            res = requests.post(ocr_url, files=files, timeout=30)
+            res = requests.post(ocr_url, files=files, timeout=(5, 15))
 
             if res.status_code == 200:
                 data = res.json()
