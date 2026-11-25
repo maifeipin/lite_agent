@@ -272,14 +272,12 @@ def _graceful_exit(app, signum: int, total_budget_sec: float = 20.0) -> None:
     """统一的信号停机路径：从收到 SIGTERM/SIGINT 起按总预算计时，同时保持 cron -> lifecycle 清理顺序。"""
     budget = max(0.5, float(total_budget_sec))
     deadline = time.monotonic() + budget
+    core_cleanup_done = False
 
     def _watchdog_exit() -> None:
-        try:
-            print(f"⚠️ 停机总预算 ({budget:.1f}s) 已耗尽，已刷盘并立即退出以守住停机窗口。")
-            sys.stdout.flush()
-            sys.stderr.flush()
-        finally:
-            os._exit(0)
+        # 截止回调严禁执行任何可能阻塞在 stdout/stderr 管道上的 print/flush，直接退出：
+        # 核心清理已完成 -> 0；核心清理未完成即耗尽预算 -> 124（区分强制超时与优雅退出）。
+        os._exit(0 if core_cleanup_done else 124)
 
     watchdog = threading.Timer(budget, _watchdog_exit)
     watchdog.daemon = True
@@ -292,22 +290,23 @@ def _graceful_exit(app, signum: int, total_budget_sec: float = 20.0) -> None:
             failures = app.shutdown(timeout=cron_budget)
         except TypeError:
             failures = app.shutdown()
+        core_cleanup_done = True
         if failures:
             print(f"⚠️ 部分资源清理异常: {failures}")
 
         drain_budget = max(0.0, min(5.0, deadline - time.monotonic()))
         if _wait_for_exit_budget(drain_budget):
-            watchdog.cancel()
             print("👋 Lite Agent 已安全退出。")
+            sys.stdout.flush()
+            sys.stderr.flush()
             sys.exit(0)
 
-        watchdog.cancel()
+        # 保持 watchdog 在日志刷盘期间持续有效，避免管道满导致卡死
         print("⚠️ 部分在途线程池任务超出停机排空预算，已刷盘并立即退出以守住停机窗口。")
         sys.stdout.flush()
         sys.stderr.flush()
         os._exit(0)
     except SystemExit:
-        watchdog.cancel()
         raise
     except BaseException:
         watchdog.cancel()
