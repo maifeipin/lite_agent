@@ -633,3 +633,183 @@ def test_model_discovery_and_execution_mode_reasoning_effort(tmp_path):
     assert "handleCycleExecutionMode" in app_js and "handleCycleExecutionMode(activeBot)" in index_html
     assert "handleCycleReasoningEffort" in app_js and "handleCycleReasoningEffort(activeBot)" in index_html
     assert "form.execution_mode" in index_html and "form.reasoning_effort" in index_html
+
+
+def test_readonly_escalation_bounds_and_agy_acp_model(tmp_path):
+    """回归验证 3 项 P2：Codex 只读模式锁定 approvalPolicy=never + 拒绝提权、AGY 只读模式拒绝自动放行、AGY ACP 透传 session/set_model。"""
+    import asyncio
+    import os
+    import sys
+    from lite_agent.features.pc_cli.daemon.adapters.agy_adapter import AgyCliAdapter
+    from lite_agent.features.pc_cli.daemon.adapters.codex_adapter import CodexCliAdapter
+
+    # 1. Codex app-server: plan + ask -> 必须传 approvalPolicy="never" + sandbox="read-only"，且拒绝服务端提权请求
+    codex_script = tmp_path / "fake_codex_ro.py"
+    codex_script.write_text(
+        """import json, sys
+def send(obj):
+    print(json.dumps(obj), flush=True)
+for line in sys.stdin:
+    msg = json.loads(line)
+    if "method" in msg and "id" in msg:
+        method = msg["method"]
+        if method == "initialize":
+            send({"id": msg["id"], "result": {}})
+        elif method == "thread/start":
+            p = msg["params"]
+            assert p["sandbox"] == "read-only", f"bad sandbox: {p}"
+            assert p["approvalPolicy"] == "never", f"bad policy: {p}"
+            send({"id": msg["id"], "result": {"thread": {"id": "th-ro-1"}}})
+        elif method == "turn/start":
+            send({"id": msg["id"], "result": {"turn": {"id": "t-ro-1"}}})
+            send({"id": 99, "method": "item/fileChange/requestApproval", "params": {"reason": "write"}})
+    elif msg.get("id") == 99 and "result" in msg:
+        dec = msg["result"].get("decision")
+        send({"method": "item/completed", "params": {"item": {"type": "agentMessage", "text": f"DECISION:{dec}"}}})
+        send({"method": "turn/completed", "params": {"turn": {"status": "completed"}}})
+""",
+        encoding="utf-8",
+    )
+
+    class _FakeCodexRo(CodexCliAdapter):
+        def build_app_server_args(self, *, reasoning_effort: str = ""):
+            return [sys.executable, str(codex_script)]
+
+    approval_called = []
+
+    async def _never_call(_req):
+        approval_called.append(_req)
+        return "allow_once"
+
+    res_c = asyncio.run(
+        _FakeCodexRo(env=dict(os.environ), turn_timeout_sec=10).run_turn(
+            bot_id="b1",
+            turn_id="t1",
+            cwd=str(tmp_path),
+            prompt="plan refactor",
+            native_session_id=None,
+            approval_mode="ask",
+            model="gpt-6-luna",
+            execution_mode="plan",
+            reasoning_effort="high",
+            on_event=lambda *_: asyncio.sleep(0),
+            on_approval=_never_call,
+        )
+    )
+    assert res_c.status == "completed"
+    assert res_c.final_text == "DECISION:decline"
+    assert approval_called == []
+
+    # 2. AGY: plan + auto -> 走 ACP，透传 session/set_model，且对 session/request_permission 强制 reject_once
+    agy_script = tmp_path / "fake_agy_ro.py"
+    agy_script.write_text(
+        """import json, sys
+def send(obj):
+    print(json.dumps(obj), flush=True)
+seen_model = None
+pending_prompt_id = None
+for line in sys.stdin:
+    msg = json.loads(line)
+    if "method" in msg and "id" in msg:
+        method = msg["method"]
+        if method == "initialize":
+            send({"id": msg["id"], "result": {}})
+        elif method == "session/new":
+            send({"id": msg["id"], "result": {"sessionId": "11111111-2222-3333-4444-555555555555"}})
+        elif method == "session/set_model":
+            seen_model = msg["params"].get("modelId")
+            send({"id": msg["id"], "result": {}})
+        elif method == "session/prompt":
+            pending_prompt_id = msg["id"]
+            send({
+                "id": 77,
+                "method": "session/request_permission",
+                "params": {
+                    "toolCall": {"title": "write_file", "rawInput": "rm -rf"},
+                    "options": [
+                        {"kind": "allow_once", "optionId": "opt_allow"},
+                        {"kind": "reject_once", "optionId": "opt_reject"},
+                    ],
+                },
+            })
+    elif msg.get("id") == 77 and "result" in msg:
+        opt = msg["result"]["outcome"]["optionId"]
+        send({
+            "method": "session/update",
+            "params": {"update": {"sessionUpdate": "agent_message_chunk", "content": {"text": f"MODEL:{seen_model}|OPT:{opt}"}}},
+        })
+        send({"id": pending_prompt_id, "result": {"stopReason": "end_turn"}})
+""",
+        encoding="utf-8",
+    )
+
+    class _FakeAgyRo(AgyCliAdapter):
+        def build_acp_args(self, *, cwd: str, approval_mode: str, execution_mode: str = "agent"):
+            return [sys.executable, str(agy_script)]
+
+    res_a = asyncio.run(
+        _FakeAgyRo(env=dict(os.environ), turn_timeout_sec=10).run_turn(
+            bot_id="b2",
+            turn_id="t2",
+            cwd=str(tmp_path),
+            prompt="plan only",
+            native_session_id=None,
+            approval_mode="auto",
+            model="gemini-3-pro",
+            execution_mode="plan",
+            reasoning_effort="high",
+            on_event=lambda *_: asyncio.sleep(0),
+            on_approval=_never_call,
+        )
+    )
+    assert res_a.status == "completed"
+    assert res_a.final_text == "MODEL:gemini-3-pro|OPT:opt_reject"
+    assert approval_called == []
+
+    # 3. AGY ACP: session/set_model 返回错误时发出非致命 warning 事件而非静默忽略
+    agy_warn_script = tmp_path / "fake_agy_warn.py"
+    agy_warn_script.write_text(
+        """import json, sys
+def send(obj):
+    print(json.dumps(obj), flush=True)
+for line in sys.stdin:
+    msg = json.loads(line)
+    if "method" in msg and "id" in msg:
+        method = msg["method"]
+        if method == "initialize":
+            send({"id": msg["id"], "result": {}})
+        elif method == "session/new":
+            send({"id": msg["id"], "result": {"sessionId": "22222222-2222-3333-4444-555555555555"}})
+        elif method == "session/set_model":
+            send({"id": msg["id"], "error": {"code": -32601, "message": "Method not found"}})
+        elif method == "session/prompt":
+            send({"method": "session/update", "params": {"update": {"sessionUpdate": "agent_message_chunk", "content": {"text": "OK"}}}})
+            send({"id": msg["id"], "result": {"stopReason": "end_turn"}})
+""",
+        encoding="utf-8",
+    )
+
+    class _FakeAgyWarn(AgyCliAdapter):
+        def build_acp_args(self, *, cwd: str, approval_mode: str, execution_mode: str = "agent"):
+            return [sys.executable, str(agy_warn_script)]
+
+    captured_events = []
+
+    async def _capture(etype, payload):
+        captured_events.append((etype, payload))
+
+    res_w = asyncio.run(
+        _FakeAgyWarn(env=dict(os.environ), turn_timeout_sec=10, prefer_acp=True).run_turn(
+            bot_id="b3",
+            turn_id="t3",
+            cwd=str(tmp_path),
+            prompt="hi",
+            native_session_id=None,
+            approval_mode="auto",
+            model="custom-model",
+            execution_mode="agent",
+            on_event=_capture,
+        )
+    )
+    assert res_w.status == "completed"
+    assert any(et == "warning" and "custom-model" in str(p.get("message", "")) for et, p in captured_events)

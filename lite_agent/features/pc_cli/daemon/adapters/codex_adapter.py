@@ -142,12 +142,14 @@ class CodexCliAdapter(BaseCliAdapter):
         """
         mode = normalize_execution_mode(execution_mode)
         effort = normalize_reasoning_effort(reasoning_effort)
-        sandbox = "read-only" if mode in ("plan", "chat") else "workspace-write"
+        read_only = mode in ("plan", "chat")
+        sandbox = "read-only" if read_only else "workspace-write"
         flags: List[str] = []
-        if approval_mode == "auto":
+        if read_only:
+            # 只读规划 / 纯问答模式严禁提权审批，强制锁定 read-only + approval_policy="never"
+            flags.extend(["-c", 'approval_policy="never"', "-c", 'sandbox_mode="read-only"'])
+        elif approval_mode == "auto":
             flags.extend(["-c", 'approval_policy="never"', "-c", f'sandbox_mode="{sandbox}"'])
-        elif mode in ("plan", "chat"):
-            flags.extend(["-c", f'sandbox_mode="{sandbox}"'])
         if effort:
             flags.extend(["-c", f'model_reasoning_effort="{effort}"'])
         if model:
@@ -308,7 +310,10 @@ class CodexCliAdapter(BaseCliAdapter):
 
         async def _on_server_request(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
             if method in _CODEX_APPROVAL_METHODS:
-                if approval_mode != "ask" or on_approval is None:
+                if mode in ("plan", "chat"):
+                    # 只读模式禁止任何写入/提权审批（fail-closed）
+                    decision = "deny"
+                elif approval_mode != "ask" or on_approval is None:
                     # 缺省安全：未提供审批回调时绝不自动放行
                     decision = "allow_once" if approval_mode == "auto" else "deny"
                 else:
@@ -339,8 +344,9 @@ class CodexCliAdapter(BaseCliAdapter):
                 )
                 await rpc.notify("initialized", {})
 
-                policy = "on-request" if approval_mode == "ask" else "never"
-                sandbox = "read-only" if mode in ("plan", "chat") else "workspace-write"
+                read_only = mode in ("plan", "chat")
+                policy = "never" if read_only else ("on-request" if approval_mode == "ask" else "never")
+                sandbox = "read-only" if read_only else "workspace-write"
                 if thread_id:
                     resume_params: Dict[str, Any] = {
                         "threadId": thread_id, "cwd": cwd, "approvalPolicy": policy,

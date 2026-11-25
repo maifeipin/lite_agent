@@ -157,7 +157,8 @@ class AgyCliAdapter(BaseCliAdapter):
         execution_mode: str = "agent",
         reasoning_effort: str = "",
     ) -> TurnResult:
-        if approval_mode == "ask" or self.prefer_acp:
+        mode = normalize_execution_mode(execution_mode)
+        if approval_mode == "ask" or self.prefer_acp or mode in ("plan", "chat"):
             return await self._run_acp_turn(
                 bot_id=bot_id,
                 turn_id=turn_id,
@@ -168,7 +169,7 @@ class AgyCliAdapter(BaseCliAdapter):
                 model=model,
                 on_event=on_event,
                 on_approval=on_approval,
-                execution_mode=execution_mode,
+                execution_mode=mode,
                 reasoning_effort=reasoning_effort,
             )
         return await self._run_stream_turn(
@@ -257,7 +258,10 @@ class AgyCliAdapter(BaseCliAdapter):
         async def _on_server_request(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
             if method == "session/request_permission":
                 options = params.get("options") if isinstance(params.get("options"), list) else []
-                if approval_mode != "ask" or on_approval is None:
+                if mode in ("plan", "chat"):
+                    # 只读规划 / 纯问答模式严禁放行任何权限请求（fail-closed）
+                    decision = "deny"
+                elif approval_mode != "ask" or on_approval is None:
                     decision = "allow_once" if approval_mode == "auto" else "deny"
                 else:
                     tc = params.get("toolCall") if isinstance(params.get("toolCall"), dict) else {}
@@ -292,6 +296,22 @@ class AgyCliAdapter(BaseCliAdapter):
                     created = await rpc.call("session/new", {"cwd": cwd, "mcpServers": []}, timeout=30.0)
                     if isinstance(created, dict) and created.get("sessionId"):
                         session_id = str(created["sessionId"])
+
+                if model and session_id:
+                    try:
+                        await rpc.call(
+                            "session/set_model",
+                            {"sessionId": session_id, "modelId": model},
+                            timeout=15.0,
+                        )
+                    except Exception as e:
+                        await on_event(
+                            "warning",
+                            {
+                                "message": f"AGY ACP 未能切换至指定模型 '{model}' ({e})，继续使用当前会话默认模型",
+                                "non_fatal": True,
+                            },
+                        )
 
                 self._active_rpcs[key] = (rpc, session_id)
                 return await rpc.call(
