@@ -118,7 +118,11 @@ class TestOpenAIStream:
         assert done_events[0].data["finish_reason"] == "length"
 
     def test_stream_exception_yields_error(self, openai_invoker):
-        openai_invoker.client.chat.completions.create.side_effect = openai.APITimeoutError("timeout")
+        import httpx
+
+        openai_invoker.client.chat.completions.create.side_effect = openai.APITimeoutError(
+            request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        )
 
         events = list(openai_invoker.invoke_stream([{"role": "user", "content": "hi"}]))
 

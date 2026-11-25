@@ -484,11 +484,15 @@ def test_t13_non_retryable_exceptions():
 
 def test_t13_retry_condition_timeout_is_retryable():
     """APITimeoutError 不在不可重试列表中，应可重试。"""
+    import httpx
     import openai
     from lite_agent.agent import _NON_RETRYABLE_EXCEPTIONS
 
     is_non_retryable = isinstance(
-        openai.APITimeoutError("timeout"), _NON_RETRYABLE_EXCEPTIONS
+        openai.APITimeoutError(
+            request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        ),
+        _NON_RETRYABLE_EXCEPTIONS,
     )
     assert is_non_retryable is False
 
@@ -594,7 +598,11 @@ def test_t13_stream_retry_on_timeout():
     def fake_invoke_stream(messages, tools=None, **kwargs):
         call_count[0] += 1
         if call_count[0] == 1:
-            raise openai.APITimeoutError("timeout")
+            import httpx
+
+            raise openai.APITimeoutError(
+                request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+            )
         else:
             yield ModelEvent(type=ModelEventType.TEXT, data="hello world")
             yield ModelEvent(type=ModelEventType.DONE, data={"finish_reason": "stop"})
@@ -1651,7 +1659,11 @@ def test_e2e_stream_retry():
     def fake_invoke_stream(messages, tools=None, **kwargs):
         call_count[0] += 1
         if call_count[0] == 1:
-            raise openai.APITimeoutError("timeout")
+            import httpx
+
+            raise openai.APITimeoutError(
+                request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+            )
         # 第二次成功
         yield ModelEvent(type=ModelEventType.TEXT, data="recovered")
         yield ModelEvent(type=ModelEventType.USAGE, data={"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8})
@@ -1681,8 +1693,13 @@ def test_e2e_no_retry_after_output():
     agent = _make_e2e_agent()
 
     def fake_invoke_stream(messages, tools=None, **kwargs):
+        import httpx
+
         yield ModelEvent(type=ModelEventType.TEXT, data="partial")
-        raise openai.APIConnectionError("connection reset")
+        raise openai.APIConnectionError(
+            message="connection reset",
+            request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
+        )
 
     agent.model_invoker.invoke_stream = fake_invoke_stream
     msg = IncomingMessage(channel="test", user_id="u1", chat_id="c1",
