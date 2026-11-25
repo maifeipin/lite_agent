@@ -58,7 +58,10 @@ class FeishuChannel(BaseChannel):
 
     def stop(self):
         # 当前 SDK 的 WebSocket 客户端没有显式的停止方法
-        pass
+        try:
+            self.executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            self.executor.shutdown(wait=False)
     def _on_message(self, data):
         try:
             message = data.event.message

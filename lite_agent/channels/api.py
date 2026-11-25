@@ -1417,6 +1417,7 @@ class ApiServer:
             return
 
         self.server = ThreadingHTTPServer((self.host, self.port), ApiHandler)
+        self.server.daemon_threads = True
         self.server.api_server = self  # 给 Handler 注入引用
         self.port = self.server.server_address[1]
 
@@ -1431,6 +1432,21 @@ class ApiServer:
 
     def stop(self):
         if self.server:
-            # shutdown must be called from a different thread to avoid deadlock
-            threading.Thread(target=self.server.shutdown).start()
+            srv = self.server
+            self.server = None
+
+            def _shutdown_srv():
+                try:
+                    srv.shutdown()
+                finally:
+                    try:
+                        srv.server_close()
+                    except Exception:
+                        pass
+
+            # shutdown must be called from a different thread to avoid deadlock;
+            # daemon=True ensures active SSE/keep-alive sockets cannot hang interpreter exit.
+            t = threading.Thread(target=_shutdown_srv, daemon=True, name="ApiServerShutdown")
+            t.start()
+            t.join(timeout=2.0)
             print("  🛑 API Server 已停止")

@@ -164,6 +164,10 @@ class TelegramChannel(BaseChannel):
         self.running = False
         if self._owns_http_client:
             self._http.close()
+        try:
+            self.executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            self.executor.shutdown(wait=False)
 
     def _is_owner_message(self, message: dict) -> bool:
         # Old private-chat configurations remain valid: private chat ID == user ID.

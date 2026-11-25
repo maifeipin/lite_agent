@@ -27,6 +27,10 @@ class WeComChannel(BaseChannel):
     def stop(self):
         if self._httpd:
             self._httpd.shutdown()
+        try:
+            self.executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            self.executor.shutdown(wait=False)
 
     def send_response(self, message_id: str, response) -> bool:
         user_id = self._parse_user_id(message_id)
