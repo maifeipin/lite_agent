@@ -417,8 +417,8 @@
             <label>工作模式</label>
             <select v-model="form.execution_mode">
               <option value="agent">Agent (读写执行)</option>
-              <option value="plan">Plan (只读规划)</option>
-              <option value="chat">Chat (纯问答)</option>
+              <option value="plan">{{ form.engine === 'codex' ? 'Plan (只读规划)' : 'Plan (规划 · 拒绝提权)' }}</option>
+              <option value="chat">{{ form.engine === 'codex' ? 'Chat (只读问答)' : 'Chat (问答 · 拒绝提权)' }}</option>
             </select>
           </div>
           <div class="field">
