@@ -96,7 +96,9 @@ class WeChatChannel(BaseChannel):
         if self._running:
             return
         self._running = True
-        self.executor.submit(self._poll_loop)
+        # 长轮询循环放在 daemon 线程中，避免停机时阻塞 ThreadPoolExecutor 退出
+        self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True, name="WeChatPoll")
+        self._poll_thread.start()
 
     def stop(self) -> None:
         self._running = False
@@ -104,7 +106,10 @@ class WeChatChannel(BaseChannel):
             self.client.close()
         except Exception:
             pass
-        self.executor.shutdown(wait=False)
+        try:
+            self.executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            self.executor.shutdown(wait=False)
 
     def send_response(self, message_id: str, response: AgentResponse) -> bool:
         talker = self._parse_talker(message_id)

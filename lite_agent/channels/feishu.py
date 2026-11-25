@@ -54,7 +54,10 @@ class FeishuChannel(BaseChannel):
             )
         )
         print("🚀 飞书 WebSocket 通道已启动")
-        self.executor.submit(self.ws_client.start)
+        # lark.ws.Client.start() 为常驻循环且无显式 stop 接口，必须放在 daemon 线程而非 ThreadPoolExecutor，
+        # 否则 CPython 退出时的 _python_exit 会永久阻塞等待该线程池任务结束。
+        self._ws_thread = threading.Thread(target=self.ws_client.start, daemon=True, name="FeishuWS")
+        self._ws_thread.start()
 
     def stop(self):
         # 当前 SDK 的 WebSocket 客户端没有显式的停止方法

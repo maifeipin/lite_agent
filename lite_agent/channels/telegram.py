@@ -1,3 +1,4 @@
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlsplit
@@ -138,7 +139,7 @@ class TelegramChannel(BaseChannel):
 
             ocr_url = os.environ.get('OCR_ENDPOINT', 'http://127.0.0.1:8000/api/ocr')
             files = {'file': ('image.jpg', image_bytes, 'image/jpeg')}
-            res = requests.post(ocr_url, files=files)
+            res = requests.post(ocr_url, files=files, timeout=30)
 
             if res.status_code == 200:
                 data = res.json()
@@ -158,7 +159,9 @@ class TelegramChannel(BaseChannel):
             print('  ⚠️ Telegram token 未配置')
             return
         self.running = True
-        self.executor.submit(self._poll_loop)
+        # 长轮询循环放在 daemon 线程中，避免停机时阻塞 ThreadPoolExecutor 退出
+        self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True, name="TelegramPoll")
+        self._poll_thread.start()
 
     def stop(self):
         self.running = False

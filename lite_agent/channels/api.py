@@ -1417,7 +1417,6 @@ class ApiServer:
             return
 
         self.server = ThreadingHTTPServer((self.host, self.port), ApiHandler)
-        self.server.daemon_threads = True
         self.server.api_server = self  # 给 Handler 注入引用
         self.port = self.server.server_address[1]
 

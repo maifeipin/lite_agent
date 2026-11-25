@@ -397,14 +397,13 @@ def main():
 
         print("✨ Lite Agent 启动就绪！按 Ctrl+C 优雅停止")
 
-        # 10. 信号处理与优雅退出（信号处理器仅置位事件，由主线程执行 shutdown，避免信号帧重入死锁）
-        stop_event = threading.Event()
-        received_signal = [0]
+        # 10. 信号处理与优雅退出（信号处理器仅无锁记录信号编号，由主线程执行 shutdown，避免锁重入死锁）
+        received_signal = 0
 
         def handle_signal(signum, frame):
-            if not stop_event.is_set():
-                received_signal[0] = signum
-                stop_event.set()
+            nonlocal received_signal
+            if not received_signal:
+                received_signal = signum
 
         signal.signal(signal.SIGINT, handle_signal)
         signal.signal(signal.SIGTERM, handle_signal)
@@ -416,11 +415,11 @@ def main():
         except (AttributeError, ValueError, RuntimeError):
             pass
 
-        # 保持主线程存活，收到终止信号后立即唤醒执行优雅退出
-        while not stop_event.is_set():
-            stop_event.wait(timeout=1.0)
+        # 保持主线程存活，收到终止信号后由主线程执行优雅退出
+        while not received_signal:
+            time.sleep(0.5)
 
-        print(f"\n🛑 捕获信号 ({received_signal[0]})，正在优雅停止 Lite Agent 宿主应用...")
+        print(f"\n🛑 捕获信号 ({received_signal})，正在优雅停止 Lite Agent 宿主应用...")
         failures = app.shutdown()
         if failures:
             print(f"⚠️ 部分资源清理异常: {failures}")
