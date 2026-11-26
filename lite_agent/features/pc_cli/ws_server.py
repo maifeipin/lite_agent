@@ -97,6 +97,17 @@ class _WsConnection:
                 err.delivery_unknown = False  # type: ignore[attr-defined]
                 raise err
             return
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is self.loop:
+            if wait_timeout > 0:
+                err = RuntimeError("禁止在 WebSocket 事件循环线程内同步阻塞等待 send_json_threadsafe")
+                err.delivery_unknown = False  # type: ignore[attr-defined]
+                raise err
+            self.loop.create_task(self.send_json(data))
+            return
         send_state: Optional[Dict[str, Any]] = (
             {"lock": threading.Lock(), "phase": "queued"}
             if (wait_timeout > 0 and abort_on_timeout)
@@ -382,6 +393,7 @@ class PcCliWsServer:
     async def _serve_daemon(self, conn: _WsConnection) -> None:
         conn_id = f"dconn_{uuid.uuid4().hex[:10]}"
         node_id: Optional[str] = None
+        bg_tasks: set[asyncio.Task[Any]] = set()
         try:
             while True:
                 raw = await conn.recv_text()
@@ -409,6 +421,17 @@ class PcCliWsServer:
                     break
                 elif mtype == "node.heartbeat":
                     self.hub.handle_daemon_heartbeat(node_id, msg, conn_id=conn_id)
+                elif mtype == "turn.prepared":
+                    t = asyncio.create_task(
+                        asyncio.to_thread(
+                            self.hub.handle_daemon_turn_prepared,
+                            msg,
+                            sender_node_id=node_id,
+                            conn_id=conn_id,
+                        )
+                    )
+                    bg_tasks.add(t)
+                    t.add_done_callback(bg_tasks.discard)
                 elif mtype == "turn.event":
                     self.hub.handle_daemon_event(msg, sender_node_id=node_id, conn_id=conn_id)
                 elif mtype == "turn.approval_request":
@@ -420,6 +443,8 @@ class PcCliWsServer:
                 elif mtype == "dir.list_result":
                     self.hub.handle_daemon_dir_list_result(msg, sender_node_id=node_id, conn_id=conn_id)
         finally:
+            if bg_tasks:
+                await asyncio.gather(*list(bg_tasks), return_exceptions=True)
             if node_id:
                 self.hub.handle_daemon_disconnect(node_id, conn_id)
             await conn.close()

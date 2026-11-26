@@ -1282,20 +1282,23 @@ def test_stale_conn_turn_finished_after_reconnect_reconcile_and_reset_cannot_res
         assert repo.get_turn(h_tid)["status"] == "completed"
         assert repo.get_bot(bot_id)["native_session_id"] == "sess_c9_ok"
 
-        # 场景 I：WebSocket 发送超时导致投递结果未知 -> Hub 必须标记 delivery_unknown 并补发 turn.cancel，
-        # 且 Daemon 在 turn.start 刚调度尚未进锁时收到紧随的 turn.cancel 也不会启动 CLI 造成重复执行
+        # 场景 I：WebSocket 写入前中止、未知态补偿取消与两阶段显式授权（turn.start -> turn.prepared -> turn.commit）
         import asyncio
         from lite_agent.features.pc_cli.daemon.config import DaemonConfig
         from lite_agent.features.pc_cli.daemon.daemon import PcCliDaemon
         from lite_agent.features.pc_cli.ws_server import _WsConnection
 
-        # I-1: _WsConnection 在尚未抢到 _write_lock 前等待超时 -> abort_on_timeout 拦截，0 字节写出且 delivery_unknown=False
+        # I-1 & I-2: 在目标事件循环内安全创建 Event 并在退出前排空所有挂起协程，避免 Windows Proactor 停滞
         loop = asyncio.new_event_loop()
         loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
         loop_thread.start()
         try:
             written_frames: list[bytes] = []
-            drain_gate = asyncio.Event()
+
+            async def _make_gate():
+                return asyncio.Event()
+
+            drain_gate = asyncio.run_coroutine_threadsafe(_make_gate(), loop).result(timeout=2.0)
 
             class _SlowWriter:
                 def write(self, b: bytes):
@@ -1305,12 +1308,11 @@ def test_stale_conn_turn_finished_after_reconnect_reconcile_and_reset_cannot_res
                     await drain_gate.wait()
 
             ws_conn = _WsConnection(None, _SlowWriter(), loop)  # type: ignore[arg-type]
-            # 第一帧占住 _write_lock 阻塞在 drain()
             fut1 = asyncio.run_coroutine_threadsafe(ws_conn.send_json({"type": "first"}), loop)
             threading.Event().wait(0.05)
             assert len(written_frames) == 1
 
-            # 第二帧排队等待 _write_lock 时超时 -> 必须在写入前取消，delivery_unknown 为 False
+            # 排队等 _write_lock 时超时 -> 写入前中止，0 字节补写且 delivery_unknown=False
             caught_pre = None
             try:
                 ws_conn.send_json_threadsafe({"type": "turn.start", "turn_id": "t_pre"}, wait_timeout=0.05)
@@ -1319,13 +1321,12 @@ def test_stale_conn_turn_finished_after_reconnect_reconcile_and_reset_cannot_res
             assert caught_pre is not None
             assert getattr(caught_pre, "delivery_unknown", None) is False
 
-            # 放行 drain 后，确认被超时取消的第二帧绝不会被补写出去
             loop.call_soon_threadsafe(drain_gate.set)
             fut1.result(timeout=2.0)
-            threading.Event().wait(0.05)
+            threading.Event().wait(0.03)
             assert len(written_frames) == 1
 
-            # I-2: 第一帧自身阻塞在 drain() 时超时 -> 已开始写入，delivery_unknown 为 True
+            # 已开始写入阻塞在 drain() 时超时 -> delivery_unknown=True
             loop.call_soon_threadsafe(drain_gate.clear)
             caught_mid = None
             try:
@@ -1334,40 +1335,53 @@ def test_stale_conn_turn_finished_after_reconnect_reconcile_and_reset_cannot_res
                 caught_mid = exc
             assert caught_mid is not None
             assert getattr(caught_mid, "delivery_unknown", None) is True
-            loop.call_soon_threadsafe(drain_gate.set)
-            threading.Event().wait(0.05)
+
+            # 放行 drain 并等待事件循环内残余写入任务彻底收尾后再停 loop
+            async def _drain_pending():
+                drain_gate.set()
+                pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+
+            asyncio.run_coroutine_threadsafe(_drain_pending(), loop).result(timeout=2.0)
         finally:
             loop.call_soon_threadsafe(loop.stop)
             loop_thread.join(timeout=2.0)
             loop.close()
 
-        # I-3: Hub start_turn 遇到发送 TimeoutError（投递结果未知）时补发 turn.cancel，且 Daemon 预拦截防止执行
+        # I-3（P1 核心回归）：turn.start 到达后接收循环多次让出执行权（sleep），直到稍后收到 turn.cancel（或未收到 turn.commit），
+        # 两阶段守护进程在未获 Hub 显式 turn.commit 授权前绝不启动底层 CLI！
         c10_wire: list[dict] = []
 
-        def _c10_timeout_after_wire_enqueue(msg: dict):
+        def _c10_two_phase_timeout_on_start(msg: dict):
             c10_wire.append(msg)
             if msg.get("type") == "turn.start":
-                raise TimeoutError("ws drain timed out after enqueue")
+                raise TimeoutError("ws drain timed out on turn.start")
 
         hub.handle_daemon_hello(
             "c10",
-            _c10_timeout_after_wire_enqueue,
-            {"node_id": "mac1", "engines": ["codex"], "workspace_roots": ["/w"], "active_turns": []},
+            _c10_two_phase_timeout_on_start,
+            {
+                "node_id": "mac1",
+                "engines": ["codex"],
+                "workspace_roots": ["/w"],
+                "active_turns": [],
+                "capabilities": ["turn_two_phase"],
+            },
         )
-        ok_i, res_i = hub.start_turn(bot_id, "timeout-unknown-turn")
+        ok_i, res_i = hub.start_turn(bot_id, "two-phase-gated-turn")
         assert ok_i is False
-        assert res_i.get("delivery_unknown") is True
-        assert [m["type"] for m in c10_wire] == ["turn.start", "turn.cancel"]
+        assert c10_wire[0]["type"] == "turn.start" and c10_wire[0]["require_commit"] is True
+        assert c10_wire[1]["type"] == "turn.cancel"
         i_tid = c10_wire[0]["turn_id"]
         assert repo.get_turn(i_tid)["status"] == "failed"
 
-        # 将这两帧（turn.start 紧跟 turn.cancel）按序喂给真实 PcCliDaemon._dispatch，验证适配器 0 次执行
         adapter_calls: list[str] = []
 
         class _CountingAdapter:
             async def run_turn(self, **kw):
                 adapter_calls.append(kw["turn_id"])
-                raise AssertionError("should not run cancelled turn")
+                return type("R", (), {"status": "completed", "native_session_id": "s_ok", "error": None})()
 
             async def cancel_turn(self, bot_id: str, turn_id: str) -> None:
                 pass
@@ -1378,7 +1392,7 @@ def test_stale_conn_turn_finished_after_reconnect_reconcile_and_reset_cannot_res
             async def send_json(self, obj: dict):
                 daemon_out.append(obj)
 
-        async def _verify_daemon_pre_cancel():
+        async def _verify_daemon_yields_without_starting_cli():
             d_cfg = DaemonConfig(
                 hub_ws_url="ws://127.0.0.1:9/ws",
                 daemon_token="tok",
@@ -1390,14 +1404,102 @@ def test_stale_conn_turn_finished_after_reconnect_reconcile_and_reset_cannot_res
             fws = _FakeWs()
             start_frame = dict(c10_wire[0], cwd=str(MOBILE_DIR))
             cancel_frame = dict(c10_wire[1])
+
+            # 1) 先送达 turn.start，并故意多次 sleep 让出事件循环模拟下一帧延迟到达！
             await daemon._dispatch(fws, start_frame)  # type: ignore[arg-type]
+            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.05)
+            # 此时 Daemon 已发出 turn.prepared，但在收到 turn.commit 前严禁调用 adapter.run_turn
+            assert any(m.get("type") == "turn.prepared" for m in daemon_out)
+            assert adapter_calls == []
+
+            # 即使 Daemon 发出的 turn.prepared 迟到送达 Hub，Hub 因该回合已失败也会拒绝 commit 并回复 cancel
+            hub.handle_daemon_turn_prepared(
+                {"bot_id": bot_id, "turn_id": i_tid},
+                sender_node_id="mac1",
+                conn_id="c10",
+            )
             await daemon._dispatch(fws, cancel_frame)  # type: ignore[arg-type]
             task = daemon._active_tasks.get(bot_id)
             if task:
                 await asyncio.wait_for(task, timeout=2.0)
+            assert adapter_calls == []
+            assert any(m.get("type") == "turn.finished" and m.get("status") == "cancelled" for m in daemon_out)
 
-        asyncio.run(_verify_daemon_pre_cancel())
-        assert adapter_calls == []
-        assert any(m.get("type") == "turn.finished" and m.get("status") == "cancelled" for m in daemon_out)
+            # 2) 对照正例：正常收到 Hub 的 turn.commit 时才真正执行 CLI
+            daemon_out.clear()
+            ok_start_frame = dict(start_frame, turn_id="turn_authorized_ok")
+            await daemon._dispatch(fws, ok_start_frame)  # type: ignore[arg-type]
+            await asyncio.sleep(0.03)
+            assert adapter_calls == []
+            await daemon._dispatch(fws, {"type": "turn.commit", "bot_id": bot_id, "turn_id": "turn_authorized_ok"})  # type: ignore[arg-type]
+            task2 = daemon._active_tasks.get(bot_id)
+            if task2:
+                await asyncio.wait_for(task2, timeout=2.0)
+            assert adapter_calls == ["turn_authorized_ok"]
+
+        asyncio.run(_verify_daemon_yields_without_starting_cli())
+
+        # I-4（P2 回归）：未知投递叠加重连对账、以及补偿取消发送抛错时，统一提示先确认状态且如实反映取消发送结果
+        # 同时覆盖两阶段节点在收到 turn.prepared 后 turn.commit 写入超时（delivery_unknown=True）的分支
+        c10b_wire: list[dict] = []
+
+        def _c10b_prepared_then_commit_timeout(msg: dict):
+            c10b_wire.append(msg)
+            if msg.get("type") == "turn.start":
+                hub.handle_daemon_turn_prepared(
+                    {"bot_id": bot_id, "turn_id": msg["turn_id"]},
+                    sender_node_id="mac1",
+                    conn_id="c10b",
+                )
+            elif msg.get("type") == "turn.commit":
+                raise TimeoutError("ws drain timed out on turn.commit")
+
+        hub.handle_daemon_hello(
+            "c10b",
+            _c10b_prepared_then_commit_timeout,
+            {
+                "node_id": "mac1",
+                "engines": ["codex"],
+                "workspace_roots": ["/w"],
+                "active_turns": [],
+                "capabilities": ["turn_two_phase"],
+            },
+        )
+        ok_ic, res_ic = hub.start_turn(bot_id, "two-phase-commit-timeout")
+        assert ok_ic is False
+        assert [m["type"] for m in c10b_wire] == ["turn.start", "turn.commit", "turn.cancel"]
+        assert res_ic.get("delivery_unknown") is True
+        assert res_ic.get("cancel_attempted") is True
+        assert res_ic.get("cancel_dispatched") is True
+        assert res_ic.get("cancel_confirmed") is False
+        assert "请先确认执行状态" in res_ic["error"]
+        assert "尚未获守护进程确认" in res_ic["error"]
+
+        def _c11_unknown_plus_reconnect_and_cancel_fail(msg: dict):
+            if msg.get("type") == "turn.start":
+                hub.handle_daemon_hello(
+                    "c12",
+                    lambda _: None,
+                    {"node_id": "mac1", "engines": ["codex"], "workspace_roots": ["/w"], "active_turns": []},
+                )
+                raise TimeoutError("legacy drain timeout during reconnect")
+            if msg.get("type") == "turn.cancel":
+                raise ConnectionError("cancel socket broken")
+
+        hub.handle_daemon_hello(
+            "c11",
+            _c11_unknown_plus_reconnect_and_cancel_fail,
+            {"node_id": "mac1", "engines": ["codex"], "workspace_roots": ["/w"], "active_turns": []},
+        )
+        ok_p2, res_p2 = hub.start_turn(bot_id, "unknown-reconciled-turn")
+        assert ok_p2 is False
+        assert res_p2.get("delivery_unknown") is True
+        assert res_p2.get("cancel_attempted") is True
+        assert res_p2.get("cancel_dispatched") is False
+        assert res_p2.get("cancel_confirmed") is False
+        assert "请先确认执行状态" in res_p2["error"]
+        assert "尝试发送取消指令失败" in res_p2["error"]
+        assert not res_p2["error"].endswith("请重试")
     finally:
         hub.close()
