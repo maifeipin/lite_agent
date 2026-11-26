@@ -394,8 +394,10 @@ class PcCliHub:
             if inflight_info is not None and inflight_info.get("target_conn_id") == conn_id:
                 if inflight_info.get("reconciled_aborted"):
                     action = "cancel"
+                elif inflight_info.get("sync_committing"):
+                    return
                 else:
-                    # start_turn 仍在执行派发，标记已收到 prepared，由 start_turn 在锁外同步下发 turn.commit
+                    # start_turn 尚未进入派发后临界区，标记已收到 prepared，由 start_turn 在锁外同步下发 turn.commit
                     inflight_info["daemon_prepared"] = True
                     return
             else:
@@ -883,70 +885,108 @@ class PcCliHub:
                 # 两阶段节点：若 turn.start 发送失败/超时，Hub 绝不签发 turn.commit，守护进程必不启动 CLI（delivery_unknown=False）
                 sent = start_sent
                 delivery_unknown = False
-                if start_sent:
-                    need_sync_commit = False
-                    with self._lock:
-                        inflight_now = self._inflight_dispatches.get(turn_id) or {}
-                        cur_now = self.repo.get_turn(turn_id)
-                        if (
-                            inflight_now.get("daemon_prepared")
-                            and not inflight_now.get("reconciled_aborted")
-                            and not inflight_now.get("daemon_confirmed")
-                            and cur_now
-                            and cur_now["status"] in (TurnStatus.QUEUED.value, TurnStatus.RUNNING.value)
-                            and self._turn_conn_owners.get(turn_id) == target_conn_id
-                            and self._is_active_daemon_conn(bot["node_id"], target_conn_id)
-                        ):
-                            need_sync_commit = True
-                    if need_sync_commit:
-                        commit_sent, commit_fn, commit_unknown = self._send_to_daemon_with_fn(
-                            bot["node_id"],
-                            {"type": "turn.commit", "bot_id": bot_id, "turn_id": turn_id},
-                            expected_conn_id=target_conn_id,
-                        )
-                        sent = commit_sent
-                        delivery_unknown = commit_unknown
-                        if commit_fn is not None:
-                            used_send_fn = commit_fn
 
+            # 在同一临界区内原子判定 commit 归属：
+            # - 若此时已收到 daemon_prepared，标记 sync_committing=True 并释放锁由本函数发送 turn.commit，随后再收尾；
+            # - 若此时尚未收到 daemon_prepared，不释放锁直接弹出 _inflight_dispatches 并登记 _authorized_commits，
+            #   彻底消除两次加锁之间 turn.prepared 到达导致的漏发窗口。
+            need_sync_commit = False
             with self._lock:
-                inflight_info = self._inflight_dispatches.pop(turn_id, None) or {}
-                daemon_confirmed = bool(inflight_info.get("daemon_confirmed"))
-                daemon_prepared = bool(inflight_info.get("daemon_prepared"))
-                reconciled_aborted = bool(inflight_info.get("reconciled_aborted"))
-
-                cur_turn = self.repo.get_turn(turn_id)
-                turn_still_active = bool(
-                    cur_turn and cur_turn["status"] in (TurnStatus.QUEUED.value, TurnStatus.RUNNING.value)
-                )
-                current_owner = self._turn_conn_owners.get(turn_id)
-                owner_conn_active = bool(
-                    current_owner and self._is_active_daemon_conn(bot["node_id"], current_owner)
-                )
-
-                # 三路精确区分：
-                # 1) 重连对账已按孤儿收尾 -> 派发失败
-                # 2) 守护进程已确认收到/完成或新连接已在 active_turns 中接管 -> 只要未断连悬空即视为派发成功
-                # 3) 常规未确认路径 -> 要求发送成功且回合与归属连接均保持活跃
-                if reconciled_aborted:
-                    dispatch_ok = False
-                elif daemon_confirmed:
-                    dispatch_ok = (not turn_still_active) or owner_conn_active
+                inflight_now = self._inflight_dispatches.get(turn_id) or {}
+                cur_now = self.repo.get_turn(turn_id)
+                if (
+                    two_phase
+                    and start_sent
+                    and inflight_now.get("daemon_prepared")
+                    and not inflight_now.get("reconciled_aborted")
+                    and not inflight_now.get("daemon_confirmed")
+                    and cur_now
+                    and cur_now["status"] in (TurnStatus.QUEUED.value, TurnStatus.RUNNING.value)
+                    and self._turn_conn_owners.get(turn_id) == target_conn_id
+                    and self._is_active_daemon_conn(bot["node_id"], target_conn_id)
+                ):
+                    need_sync_commit = True
+                    inflight_now["sync_committing"] = True
                 else:
-                    dispatch_ok = bool(sent and turn_still_active and owner_conn_active)
+                    inflight_info = self._inflight_dispatches.pop(turn_id, None) or {}
+                    daemon_confirmed = bool(inflight_info.get("daemon_confirmed"))
+                    daemon_prepared = bool(inflight_info.get("daemon_prepared"))
+                    reconciled_aborted = bool(inflight_info.get("reconciled_aborted"))
 
-                if dispatch_ok:
-                    if two_phase and turn_still_active and not daemon_confirmed and not daemon_prepared and current_owner:
-                        self._authorized_commits[turn_id] = current_owner
-                else:
-                    self._turn_conn_owners.pop(turn_id, None)
-                    self._authorized_commits.pop(turn_id, None)
-                    if turn_still_active:
-                        self.repo.finish_turn(turn_id, TurnStatus.FAILED.value, error_message="派发失败")
-                        self.repo.set_bot_status(bot_id, BotStatus.ERROR.value, last_summary="派发失败")
-                        marked_failed_here = True
-                    if stage_sent_or_unknown and used_send_fn is not None and (not daemon_confirmed or reconciled_aborted):
-                        need_cancel_attempt = True
+                    cur_turn = cur_now
+                    turn_still_active = bool(
+                        cur_turn and cur_turn["status"] in (TurnStatus.QUEUED.value, TurnStatus.RUNNING.value)
+                    )
+                    current_owner = self._turn_conn_owners.get(turn_id)
+                    owner_conn_active = bool(
+                        current_owner and self._is_active_daemon_conn(bot["node_id"], current_owner)
+                    )
+
+                    if reconciled_aborted:
+                        dispatch_ok = False
+                    elif daemon_confirmed:
+                        dispatch_ok = (not turn_still_active) or owner_conn_active
+                    else:
+                        dispatch_ok = bool(sent and turn_still_active and owner_conn_active)
+
+                    if dispatch_ok:
+                        if two_phase and turn_still_active and not daemon_confirmed and current_owner:
+                            self._authorized_commits[turn_id] = current_owner
+                    else:
+                        self._turn_conn_owners.pop(turn_id, None)
+                        self._authorized_commits.pop(turn_id, None)
+                        if turn_still_active:
+                            self.repo.finish_turn(turn_id, TurnStatus.FAILED.value, error_message="派发失败")
+                            self.repo.set_bot_status(bot_id, BotStatus.ERROR.value, last_summary="派发失败")
+                            marked_failed_here = True
+                        if (
+                            (stage_sent_or_unknown or daemon_prepared)
+                            and used_send_fn is not None
+                            and (not daemon_confirmed or reconciled_aborted)
+                        ):
+                            need_cancel_attempt = True
+
+            if need_sync_commit:
+                commit_sent, commit_fn, commit_unknown = self._send_to_daemon_with_fn(
+                    bot["node_id"],
+                    {"type": "turn.commit", "bot_id": bot_id, "turn_id": turn_id},
+                    expected_conn_id=target_conn_id,
+                )
+                sent = commit_sent
+                delivery_unknown = commit_unknown
+                if commit_fn is not None:
+                    used_send_fn = commit_fn
+
+                with self._lock:
+                    inflight_info = self._inflight_dispatches.pop(turn_id, None) or {}
+                    daemon_confirmed = bool(inflight_info.get("daemon_confirmed"))
+                    reconciled_aborted = bool(inflight_info.get("reconciled_aborted"))
+
+                    cur_turn = self.repo.get_turn(turn_id)
+                    turn_still_active = bool(
+                        cur_turn and cur_turn["status"] in (TurnStatus.QUEUED.value, TurnStatus.RUNNING.value)
+                    )
+                    current_owner = self._turn_conn_owners.get(turn_id)
+                    owner_conn_active = bool(
+                        current_owner and self._is_active_daemon_conn(bot["node_id"], current_owner)
+                    )
+
+                    if reconciled_aborted:
+                        dispatch_ok = False
+                    elif daemon_confirmed:
+                        dispatch_ok = (not turn_still_active) or owner_conn_active
+                    else:
+                        dispatch_ok = bool(sent and turn_still_active and owner_conn_active)
+
+                    if not dispatch_ok:
+                        self._turn_conn_owners.pop(turn_id, None)
+                        self._authorized_commits.pop(turn_id, None)
+                        if turn_still_active:
+                            self.repo.finish_turn(turn_id, TurnStatus.FAILED.value, error_message="派发失败")
+                            self.repo.set_bot_status(bot_id, BotStatus.ERROR.value, last_summary="派发失败")
+                            marked_failed_here = True
+                        if used_send_fn is not None and (not daemon_confirmed or reconciled_aborted):
+                            need_cancel_attempt = True
         finally:
             with self._lock:
                 self._inflight_dispatches.pop(turn_id, None)

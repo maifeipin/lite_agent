@@ -1284,12 +1284,61 @@ def test_stale_conn_turn_finished_after_reconnect_reconcile_and_reset_cannot_res
 
         # 场景 I：WebSocket 写入前中止、未知态补偿取消与两阶段显式授权（turn.start -> turn.prepared -> turn.commit）
         import asyncio
+        import selectors
         from lite_agent.features.pc_cli.daemon.config import DaemonConfig
         from lite_agent.features.pc_cli.daemon.daemon import PcCliDaemon
         from lite_agent.features.pc_cli.ws_server import _WsConnection
 
-        # I-1 & I-2: 在目标事件循环内安全创建 Event 并在退出前排空所有挂起协程，避免 Windows Proactor 停滞
-        loop = asyncio.new_event_loop()
+        class _WakeEventSelector(selectors.BaseSelector):
+            def __init__(self) -> None:
+                super().__init__()
+                self._wake = threading.Event()
+                self._map: dict = {}
+
+            def wake(self) -> None:
+                self._wake.set()
+
+            def register(self, fileobj, events, data=None):
+                key = selectors.SelectorKey(fileobj, 0, events, data)
+                self._map[fileobj] = key
+                return key
+
+            def unregister(self, fileobj):
+                return self._map.pop(fileobj)
+
+            def select(self, timeout=None):
+                if timeout is None:
+                    self._wake.wait(timeout=5.0)
+                elif timeout > 0:
+                    self._wake.wait(timeout=timeout)
+                self._wake.clear()
+                return []
+
+            def close(self) -> None:
+                self._wake.set()
+                self._map.clear()
+
+            def get_map(self):
+                return self._map
+
+        class _SocketlessEventLoop(asyncio.SelectorEventLoop):
+            """纯内存唤醒事件循环：不创建本地 loopback socketpair，兼容受限 Windows 沙箱环境。"""
+
+            def __init__(self) -> None:
+                self._wake_selector = _WakeEventSelector()
+                super().__init__(self._wake_selector)
+
+            def _make_self_pipe(self) -> None:
+                pass
+
+            def _close_self_pipe(self) -> None:
+                pass
+
+            def _write_to_self(self) -> None:
+                self._wake_selector.wake()
+
+        # I-1 & I-2: 使用无套接字事件循环测试预写中止与排空超时未知态，避免受限沙箱 socketpair 停滞
+        loop = _SocketlessEventLoop()
         loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
         loop_thread.start()
         try:
@@ -1438,7 +1487,104 @@ def test_stale_conn_turn_finished_after_reconnect_reconcile_and_reset_cannot_res
                 await asyncio.wait_for(task2, timeout=2.0)
             assert adapter_calls == ["turn_authorized_ok"]
 
-        asyncio.run(_verify_daemon_yields_without_starting_cli())
+        daemon_loop = _SocketlessEventLoop()
+        try:
+            daemon_loop.run_until_complete(_verify_daemon_yields_without_starting_cli())
+        finally:
+            daemon_loop.close()
+
+        # I-5（P1 回归）：turn.prepared 在 start_turn 发送返回与派发后临界区交界处到达时，绝不漏发 turn.commit
+        # (a) 模拟第一次状态读取阶段并发注入 turn.prepared：由于判定与登记在同一把锁内，并发回执必在锁释放后命中 _authorized_commits 并发出 turn.commit
+        c10c_wire: list[dict] = []
+        hub.handle_daemon_hello(
+            "c10c",
+            lambda m: c10c_wire.append(m),
+            {
+                "node_id": "mac1",
+                "engines": ["codex"],
+                "workspace_roots": ["/w"],
+                "active_turns": [],
+                "capabilities": ["turn_two_phase"],
+            },
+        )
+        orig_get_turn = repo.get_turn
+        prepared_thread_holder: list[threading.Thread] = []
+        entered_post_send_check = threading.Event()
+
+        def _get_turn_spawning_concurrent_prepared(tid: str):
+            res_turn = orig_get_turn(tid)
+            if not entered_post_send_check.is_set() and res_turn and res_turn.get("prompt") == "interleaved-prepared-turn":
+                entered_post_send_check.set()
+                th_prep = threading.Thread(
+                    target=hub.handle_daemon_turn_prepared,
+                    args=({"bot_id": bot_id, "turn_id": tid},),
+                    kwargs={"sender_node_id": "mac1", "conn_id": "c10c"},
+                )
+                prepared_thread_holder.append(th_prep)
+                th_prep.start()
+                # 给并发线程一点时间阻塞在 hub._lock 上，验证锁释放后异步分支必定接手发送 turn.commit
+                threading.Event().wait(0.03)
+            return res_turn
+
+        repo.get_turn = _get_turn_spawning_concurrent_prepared  # type: ignore[method-assign]
+        try:
+            ok_i5, res_i5 = hub.start_turn(bot_id, "interleaved-prepared-turn")
+        finally:
+            repo.get_turn = orig_get_turn  # type: ignore[method-assign]
+            for th_prep in prepared_thread_holder:
+                th_prep.join(timeout=2.0)
+
+        assert ok_i5 is True
+        i5_tid = res_i5["turn"]["turn_id"]
+        assert repo.get_turn(i5_tid)["status"] == "running"
+        assert [m["type"] for m in c10c_wire] == ["turn.start", "turn.commit"]
+        assert i5_tid not in hub._authorized_commits
+        hub.handle_daemon_turn_finished(
+            {"bot_id": bot_id, "turn_id": i5_tid, "status": "completed"},
+            sender_node_id="mac1",
+            conn_id="c10c",
+        )
+
+        # (b) 对照验证同步授权分支：turn.prepared 在进入派发后临界区之前已到达且正常成功，start_turn 同步发出唯一一次 turn.commit
+        c10d_wire: list[dict] = []
+
+        def _c10d_fast_prepared_ok(msg: dict):
+            c10d_wire.append(msg)
+            if msg.get("type") == "turn.start":
+                hub.handle_daemon_turn_prepared(
+                    {"bot_id": bot_id, "turn_id": msg["turn_id"]},
+                    sender_node_id="mac1",
+                    conn_id="c10d",
+                )
+                # 即使守护进程重复发送一次 turn.prepared，sync_committing 保护也绝不重复发送或误取消
+                hub.handle_daemon_turn_prepared(
+                    {"bot_id": bot_id, "turn_id": msg["turn_id"]},
+                    sender_node_id="mac1",
+                    conn_id="c10d",
+                )
+
+        hub.handle_daemon_hello(
+            "c10d",
+            _c10d_fast_prepared_ok,
+            {
+                "node_id": "mac1",
+                "engines": ["codex"],
+                "workspace_roots": ["/w"],
+                "active_turns": [],
+                "capabilities": ["turn_two_phase"],
+            },
+        )
+        ok_i5b, res_i5b = hub.start_turn(bot_id, "sync-prepared-ok-turn")
+        assert ok_i5b is True
+        i5b_tid = res_i5b["turn"]["turn_id"]
+        assert repo.get_turn(i5b_tid)["status"] == "running"
+        assert [m["type"] for m in c10d_wire] == ["turn.start", "turn.commit"]
+        assert i5b_tid not in hub._authorized_commits
+        hub.handle_daemon_turn_finished(
+            {"bot_id": bot_id, "turn_id": i5b_tid, "status": "completed"},
+            sender_node_id="mac1",
+            conn_id="c10d",
+        )
 
         # I-4（P2 回归）：未知投递叠加重连对账、以及补偿取消发送抛错时，统一提示先确认状态且如实反映取消发送结果
         # 同时覆盖两阶段节点在收到 turn.prepared 后 turn.commit 写入超时（delivery_unknown=True）的分支
