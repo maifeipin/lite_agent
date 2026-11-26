@@ -346,6 +346,7 @@ class PcCliRepository:
         bot_id: str,
         *,
         name: Optional[str] = None,
+        cwd: Optional[str] = None,
         approval_mode: Optional[str] = None,
         execution_mode: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
@@ -359,6 +360,9 @@ class PcCliRepository:
         if name is not None:
             fields.append("name = ?")
             values.append(name)
+        if cwd is not None:
+            fields.append("cwd = ?")
+            values.append(cwd)
         if approval_mode is not None:
             fields.append("approval_mode = ?")
             values.append(approval_mode)

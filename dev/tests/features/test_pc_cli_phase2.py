@@ -1758,3 +1758,390 @@ def test_bot_system_prompt_templates_and_first_turn_injection():
         assert "scripts/rss_topic" in repo.get_bot(plain_id)["system_prompt"]
     finally:
         hub.close()
+
+
+def test_create_bot_cwd_verification_and_safe_auto_create(tmp_path):
+    """验证创建/更新 Bot 时目录存在性校验、白名单内安全自动建目录以及路径越界拒绝。"""
+    import io
+    import os
+    import threading
+    from urllib.parse import urlparse
+    from lite_agent.features.pc_cli.daemon.env_probe import ensure_safe_dir, list_safe_dirs
+    from lite_agent.features.pc_cli.routes import handle_bots_sub_dispatch, handle_post_bots
+
+    root_dir = tmp_path / "workspace"
+    root_dir.mkdir()
+    missing_dir = root_dir / "RSS" / "bot"
+    outside_dir = tmp_path / "outside" / "escape"
+
+    # 1. env_probe 单元测试：默认不建目录、create_if_missing=True 在白名单内安全创建、越界拒绝
+    ok_no, _, err_no = list_safe_dirs(str(missing_dir), [str(root_dir)], create_if_missing=False)
+    assert ok_no is False and "目录不存在" in err_no
+    assert not missing_dir.exists()
+
+    ok_esc, _, err_esc = ensure_safe_dir(str(outside_dir), [str(root_dir)])
+    assert ok_esc is False and ("白名单" in err_esc or "暂不支持自动创建" in err_esc)
+    assert not outside_dir.exists()
+
+    # 1b. P1 回归：父目录被符号链接/目录联接替换指向白名单外时，ensure_safe_dir 必须拒绝且不在白名单外创建子目录
+    outside_target = tmp_path / "outside_target"
+    outside_target.mkdir()
+    link_parent = root_dir / "link_parent"
+    link_created = False
+    try:
+        os.symlink(str(outside_target), str(link_parent), target_is_directory=True)
+        link_created = True
+    except OSError:
+        if os.name == "nt":
+            import subprocess
+            cp = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(link_parent), str(outside_target)],
+                capture_output=True,
+                text=True,
+            )
+            link_created = cp.returncode == 0
+    if link_created:
+        escaped_child = link_parent / "should_not_create"
+        ok_sym, _, err_sym = ensure_safe_dir(str(escaped_child), [str(root_dir)])
+        assert ok_sym is False and ("符号链接" in err_sym or "目录联接" in err_sym or "白名单" in err_sym or "暂不支持自动创建" in err_sym)
+        assert not (outside_target / "should_not_create").exists()
+
+    # 1c. P1 回归：模拟 POSIX 环境下白名单根目录被替换为符号链接时，
+    # - 无固定句柄调用：逐级以 O_NOFOLLOW 打开原始路径即刻触发 ELOOP 拒绝（绝不先 realpath 跟随外部目标）
+    # - 已固定句柄调用：直接从启动时 pinned_root_fds 的可信句柄出发（os.dup(root_fd)），绝不重新打开路径解析根目录
+    import errno
+    from unittest import mock
+    import lite_agent.features.pc_cli.daemon.env_probe as env_probe_mod
+
+    opened_calls: list[tuple] = []
+    mkdir_calls: list[tuple] = []
+
+    def _fake_open_symlink_root(path, flags, *args, **kwargs):
+        opened_calls.append((path, flags, kwargs.get("dir_fd")))
+        if path == "swapped_root":
+            raise OSError(errno.ELOOP, "Too many levels of symbolic links")
+        return 100 + len(opened_calls)
+
+    with (
+        mock.patch.object(env_probe_mod.os, "name", "posix"),
+        mock.patch.object(env_probe_mod.os, "sep", "/"),
+        mock.patch.object(env_probe_mod.os, "O_DIRECTORY", 0x10000, create=True),
+        mock.patch.object(env_probe_mod.os, "O_NOFOLLOW", 0x20000, create=True),
+        mock.patch.object(env_probe_mod.os, "open", side_effect=_fake_open_symlink_root),
+        mock.patch.object(env_probe_mod.os, "close", return_value=None),
+        mock.patch.object(env_probe_mod.os, "mkdir", side_effect=lambda p, **kw: mkdir_calls.append((p, kw.get("dir_fd")))),
+        mock.patch.object(env_probe_mod, "_is_pinned_root_intact", return_value=True),
+        mock.patch.object(env_probe_mod.os.path, "abspath", side_effect=lambda p: p),
+        mock.patch.object(env_probe_mod.os.path, "normpath", side_effect=lambda p: p),
+        mock.patch.object(env_probe_mod.os.path, "commonpath", side_effect=lambda ps: "/swapped_root" if all(x.startswith("/swapped_root") for x in ps) else "/"),
+        mock.patch.object(env_probe_mod.os.path, "relpath", side_effect=lambda p, b: p[len(b):].lstrip("/") or "."),
+    ):
+        ok_swapped, _, err_swapped = ensure_safe_dir("/swapped_root/sub", ["/swapped_root"])
+        assert ok_swapped is False and "符号链接" in err_swapped
+        assert mkdir_calls == []
+
+    # 验证固定句柄模式直接 dup(root_fd=42) 并在 dir_fd=99 上逐级创建，绝不调用 os.open("/", ...)
+    pinned_opened: list[tuple] = []
+    pinned_mkdirs: list[tuple] = []
+    with (
+        mock.patch.object(env_probe_mod.os, "name", "posix"),
+        mock.patch.object(env_probe_mod.os, "sep", "/"),
+        mock.patch.object(env_probe_mod.os, "O_DIRECTORY", 0x10000, create=True),
+        mock.patch.object(env_probe_mod.os, "O_NOFOLLOW", 0x20000, create=True),
+        mock.patch.object(env_probe_mod.os, "dup", return_value=99) as mock_dup,
+        mock.patch.object(env_probe_mod.os, "open", side_effect=lambda p, f, **kw: (pinned_opened.append((p, kw.get("dir_fd"))), 200)[1]),
+        mock.patch.object(env_probe_mod.os, "close", return_value=None),
+        mock.patch.object(env_probe_mod.os, "mkdir", side_effect=lambda p, **kw: pinned_mkdirs.append((p, kw.get("dir_fd")))),
+        mock.patch.object(env_probe_mod, "_is_pinned_root_intact", return_value=True),
+        mock.patch.object(env_probe_mod.os.path, "abspath", side_effect=lambda p: p),
+        mock.patch.object(env_probe_mod.os.path, "normpath", side_effect=lambda p: p),
+        mock.patch.object(env_probe_mod.os.path, "commonpath", side_effect=lambda ps: "/trusted_root" if all(x.startswith("/trusted_root") for x in ps) else "/"),
+        mock.patch.object(env_probe_mod.os.path, "relpath", side_effect=lambda p, b: p[len(b):].lstrip("/") or "."),
+    ):
+        ok_pinned, created_p, err_p = ensure_safe_dir(
+            "/trusted_root/a/b",
+            ["/trusted_root"],
+            pinned_roots=[
+                env_probe_mod.PinnedWorkspaceRoot(real_path="/trusted_root", dev=1, ino=10, fd=42)
+            ],
+        )
+        assert ok_pinned is True and err_p == ""
+        mock_dup.assert_called_once_with(42)
+        assert pinned_mkdirs == [("a", 99), ("b", 200)]
+        assert pinned_opened == [("a", 99), ("b", 200)]
+    # 同时通过 mock 验证 _is_pinned_root_intact 在根目录被删除/改指向后返回 False
+    with mock.patch.object(env_probe_mod, "_is_pinned_root_intact", return_value=False):
+        ok_tampered, _, _ = ensure_safe_dir(
+            "/trusted_root/a",
+            ["/trusted_root"],
+            pinned_roots=[
+                env_probe_mod.PinnedWorkspaceRoot(real_path="/trusted_root", dev=1, ino=10, fd=42)
+            ],
+        )
+        assert ok_tampered is False
+
+    # 1d. P1 真实文件系统回归：「守护进程启动后白名单根目录被替换为指向外部既有目录的符号链接/目录联接」，
+    # 验证目录探测（dir.list_request）与执行前校验（turn.start）两条路径均拒绝访问且不调用底层 CLI
+    swap_root = tmp_path / "daemon_pinned_root"
+    swap_root.mkdir()
+    ext_root = tmp_path / "external_existing_root"
+    ext_existing_sub = ext_root / "already_exists"
+    ext_existing_sub.mkdir(parents=True)
+
+    from lite_agent.features.pc_cli.daemon.config import DaemonConfig
+    from lite_agent.features.pc_cli.daemon.daemon import PcCliDaemon
+
+    ran_turns: list[str] = []
+
+    class _NeverRunAdapter:
+        async def run_turn(self, **kw):
+            ran_turns.append(kw["turn_id"])
+            return type("R", (), {"status": "completed", "native_session_id": "s", "error": None})()
+
+        async def cancel_turn(self, bot_id: str, turn_id: str) -> None:
+            pass
+
+    d_cfg = DaemonConfig(
+        hub_ws_url="ws://127.0.0.1:9/ws",
+        daemon_token="tok",
+        node_id="n_swap",
+        display_name="Swap Test",
+        workspace_roots=[str(swap_root)],
+    )
+    swap_daemon = PcCliDaemon(d_cfg, adapters={"codex": _NeverRunAdapter()})  # type: ignore[dict-item]
+    try:
+        # 启动后将 swap_root 移走并替换为指向 ext_root 的符号链接或 Windows 目录联接
+        moved_root = tmp_path / "daemon_pinned_root_moved"
+        swap_root.rename(moved_root)
+        swapped_ok = False
+        try:
+            os.symlink(str(ext_root), str(swap_root), target_is_directory=True)
+            swapped_ok = True
+        except OSError:
+            if os.name == "nt":
+                import subprocess
+                cp = subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", str(swap_root), str(ext_root)],
+                    capture_output=True,
+                    text=True,
+                )
+                swapped_ok = cp.returncode == 0
+        if swapped_ok:
+            spoofed_existing = swap_root / "already_exists"
+            assert spoofed_existing.is_dir()
+
+            out_msgs: list[dict] = []
+
+            class _OutWs:
+                async def send_json(self, payload: dict):
+                    out_msgs.append(payload)
+
+            async def _verify_both_paths_reject_swapped_root():
+                ows = _OutWs()
+                # 路径 1：dir.list_request 访问已存在的子目录 -> 必须拒绝
+                await swap_daemon._dispatch(
+                    ows,  # type: ignore[arg-type]
+                    {"type": "dir.list_request", "req_id": "r_sub", "path": str(spoofed_existing)},
+                )
+                assert out_msgs[-1]["type"] == "dir.list_result"
+                assert out_msgs[-1]["entries"] == []
+                assert "白名单" in out_msgs[-1]["error"]
+
+                # 路径 1b：dir.list_request 列出空根目录 -> 被篡改根目录不得返回
+                await swap_daemon._dispatch(
+                    ows,  # type: ignore[arg-type]
+                    {"type": "dir.list_request", "req_id": "r_root", "path": ""},
+                )
+                assert out_msgs[-1]["entries"] == []
+
+                # 路径 2：turn.start 执行前校验 -> 必须拒绝且不调用底层 CLI 适配器
+                await swap_daemon._dispatch(
+                    ows,  # type: ignore[arg-type]
+                    {
+                        "type": "turn.start",
+                        "bot_id": "b_swap",
+                        "turn_id": "t_swap",
+                        "engine": "codex",
+                        "cwd": str(spoofed_existing),
+                        "prompt": "hello",
+                    },
+                )
+                t_task = swap_daemon._active_tasks.get("b_swap")
+                if t_task:
+                    await t_task
+                assert ran_turns == []
+                assert out_msgs[-1]["type"] == "turn.finished"
+                assert out_msgs[-1]["status"] == "failed"
+                assert "白名单" in out_msgs[-1]["error"]
+
+            import asyncio
+            import selectors
+
+            class _SimpleWake(selectors.BaseSelector):
+                def __init__(self):
+                    super().__init__()
+                    self._ev = threading.Event()
+                    self._m = {}
+
+                def register(self, f, e, d=None):
+                    k = selectors.SelectorKey(f, 0, e, d)
+                    self._m[f] = k
+                    return k
+
+                def unregister(self, f):
+                    return self._m.pop(f)
+
+                def select(self, timeout=None):
+                    if timeout is None or timeout > 0:
+                        self._ev.wait(timeout=0.5 if timeout is None else timeout)
+                    self._ev.clear()
+                    return []
+
+                def close(self):
+                    self._ev.set()
+
+                def get_map(self):
+                    return self._m
+
+            class _NoSockLoop(asyncio.SelectorEventLoop):
+                def __init__(self):
+                    self._w = _SimpleWake()
+                    super().__init__(self._w)
+
+                def _make_self_pipe(self):
+                    pass
+
+                def _close_self_pipe(self):
+                    pass
+
+                def _write_to_self(self):
+                    self._w._ev.set()
+
+            sloop = _NoSockLoop()
+            try:
+                sloop.run_until_complete(_verify_both_paths_reject_swapped_root())
+            finally:
+                sloop.close()
+    finally:
+        swap_daemon.close()
+
+    # 2. Hub + Routes 闭环：POST /bots 在节点在线时校验目录，未勾选自动创建拒绝，勾选后安全创建并建 Bot
+    repo = PcCliRepository(":memory:")
+    hub = PcCliHub(repo=repo)
+    try:
+        dir_requests: list[dict] = []
+
+        def _fake_daemon_send(msg: dict):
+            if msg.get("type") == "dir.list_request":
+                dir_requests.append(msg)
+                ok_d, entries, err_d = list_safe_dirs(
+                    str(msg.get("path") or ""),
+                    [str(root_dir)],
+                    create_if_missing=bool(msg.get("create_if_missing")),
+                )
+                hub.handle_daemon_dir_list_result(
+                    {"req_id": msg["req_id"], "entries": entries if ok_d else [], "error": "" if ok_d else err_d},
+                    sender_node_id="mac1",
+                    conn_id="c1",
+                )
+
+        hub.handle_daemon_hello(
+            "c1",
+            _fake_daemon_send,
+            {"node_id": "mac1", "engines": ["codex"], "workspace_roots": [str(root_dir)]},
+        )
+
+        def _call_route(method: str, url: str, body: dict):
+            raw = json.dumps(body).encode("utf-8")
+
+            class _H:
+                command = method
+                headers = {"Content-Length": str(len(raw))}
+                rfile = io.BytesIO(raw)
+                wfile = io.BytesIO()
+                status_code = None
+
+                def send_response(self, code):
+                    self.status_code = code
+
+                def send_header(self, k, v):
+                    pass
+
+                def end_headers(self):
+                    pass
+
+            h = _H()
+            if url == "/api/v1/pc-cli/bots":
+                handle_post_bots(h, urlparse(url), hub)
+            else:
+                handle_bots_sub_dispatch(h, urlparse(url), hub)
+            return h.status_code, json.loads(h.wfile.getvalue().decode("utf-8"))
+
+        # 未勾选自动创建 -> 400 拦截，不会等到发消息才报 FileNotFoundError
+        sc1, res1 = _call_route(
+            "POST",
+            "/api/v1/pc-cli/bots",
+            {"name": "rss-bot", "node_id": "mac1", "engine": "codex", "cwd": str(missing_dir)},
+        )
+        assert sc1 == 400 and res1["success"] is False
+        assert "目录不存在" in res1["error"]
+        assert not missing_dir.exists()
+
+        # 勾选 create_cwd_if_missing=True：POSIX 下基于 dir_fd+O_NOFOLLOW 自动创建；Windows 下 fail-closed 拒绝
+        sc2, res2 = _call_route(
+            "POST",
+            "/api/v1/pc-cli/bots",
+            {
+                "name": "rss-bot",
+                "node_id": "mac1",
+                "engine": "codex",
+                "cwd": str(missing_dir),
+                "create_cwd_if_missing": True,
+            },
+        )
+        if os.name == "posix":
+            assert sc2 == 201 and res2["success"] is True
+            assert missing_dir.is_dir()
+            bid = res2["bot"]["bot_id"]
+        else:
+            assert sc2 == 400 and res2["success"] is False
+            assert "暂不支持自动创建" in res2["error"]
+            assert not missing_dir.exists()
+            existing_dir = root_dir / "existing_bot_dir"
+            existing_dir.mkdir()
+            sc2_ok, res2_ok = _call_route(
+                "POST",
+                "/api/v1/pc-cli/bots",
+                {"name": "rss-bot", "node_id": "mac1", "engine": "codex", "cwd": str(existing_dir)},
+            )
+            assert sc2_ok == 201 and res2_ok["success"] is True
+            bid = res2_ok["bot"]["bot_id"]
+
+        # PATCH 支持修改 cwd（POSIX 可自动建目录，Windows 校验已有目录）
+        alt_dir = root_dir / "alt_dir"
+        if os.name != "posix":
+            alt_dir.mkdir()
+        sc3, res3 = _call_route(
+            "PATCH",
+            f"/api/v1/pc-cli/bots/{bid}",
+            {"cwd": str(alt_dir), "create_cwd_if_missing": os.name == "posix"},
+        )
+        assert sc3 == 200 and res3["success"] is True
+        assert alt_dir.is_dir() and repo.get_bot(bid)["cwd"] == str(alt_dir)
+
+        # P2 回归：回合运行中调用 PATCH cwd + create_cwd_if_missing=True，必须先拒绝且不得触发远端建目录
+        ok_turn, _ = hub.start_turn(bid, "busy-turn")
+        assert ok_turn is True
+        req_count_before = len(dir_requests)
+        blocked_dir = root_dir / "blocked_during_running"
+        sc4, res4 = _call_route(
+            "PATCH",
+            f"/api/v1/pc-cli/bots/{bid}",
+            {"cwd": str(blocked_dir), "create_cwd_if_missing": True},
+        )
+        assert sc4 == 400 and res4["success"] is False
+        assert "运行中" in res4["error"]
+        assert len(dir_requests) == req_count_before
+        assert not blocked_dir.exists()
+    finally:
+        hub.close()

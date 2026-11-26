@@ -656,6 +656,8 @@ class PcCliHub:
         )
         self._emit_bot_summary(bot_id)
         self._broadcast_clients({"type": "bot.event", "event": ev}, bot_id_filter=bot_id)
+        if status == TurnStatus.FAILED.value:
+            logger.warning(f"回合失败 node={sender_node_id} bot={bot_id} turn={turn_id}: {error_msg}")
         if status in (TurnStatus.COMPLETED.value, TurnStatus.FAILED.value):
             bname = bot["name"] if bot else bot_id
             latest = self.repo.get_bot(bot_id)
@@ -672,7 +674,14 @@ class PcCliHub:
     def list_nodes(self) -> List[Dict[str, Any]]:
         return self.repo.list_nodes()
 
-    def list_node_dirs(self, node_id: str, path: str = "", timeout: float = 5.0) -> Tuple[bool, Dict[str, Any]]:
+    def list_node_dirs(
+        self,
+        node_id: str,
+        path: str = "",
+        timeout: float = 5.0,
+        *,
+        create_if_missing: bool = False,
+    ) -> Tuple[bool, Dict[str, Any]]:
         if not self.is_node_online(node_id):
             return False, {"error": f"节点 '{node_id}' 当前不在线"}
         req_id = f"dir_{uuid.uuid4().hex[:10]}"
@@ -681,7 +690,10 @@ class PcCliHub:
         with self._lock:
             self._dir_waiters[req_id] = (ev, holder)
         try:
-            sent = self._send_to_daemon(node_id, {"type": "dir.list_request", "req_id": req_id, "path": path})
+            req_msg: Dict[str, Any] = {"type": "dir.list_request", "req_id": req_id, "path": path}
+            if create_if_missing:
+                req_msg["create_if_missing"] = True
+            sent = self._send_to_daemon(node_id, req_msg)
             if not sent:
                 return False, {"error": f"向节点 '{node_id}' 发送目录查询失败"}
             if not ev.wait(timeout=timeout):
@@ -706,6 +718,8 @@ class PcCliHub:
         model: Optional[str] = None,
         system_prompt: str = "",
         instruction_template: str = "",
+        create_cwd_if_missing: bool = False,
+        verify_cwd_on_online_node: bool = False,
     ) -> Tuple[bool, Dict[str, Any]]:
         name = (name or "").strip()
         node_id = (node_id or "").strip()
@@ -742,6 +756,16 @@ class PcCliHub:
         roots = node.get("workspace_roots") or []
         if roots and not self._is_cwd_in_roots(cwd, roots, platform=str(node.get("platform") or "")):
             return False, {"error": f"工作目录 '{cwd}' 不在节点 '{node_id}' 允许的白名单根目录内: {roots}"}
+        if (verify_cwd_on_online_node or create_cwd_if_missing) and self.is_node_online(node_id):
+            dir_ok, dir_res = self.list_node_dirs(
+                node_id=node_id,
+                path=cwd,
+                create_if_missing=create_cwd_if_missing,
+            )
+            if not dir_ok:
+                reason = str(dir_res.get("error") or "目录不可访问")
+                hint = "请点选已有目录，或勾选「目录不存在时自动创建」" if not create_cwd_if_missing else "请检查路径权限或白名单"
+                return False, {"error": f"工作目录校验失败 ({reason})，{hint}"}
 
         bot = self.repo.create_bot(
             name=name,
@@ -780,16 +804,42 @@ class PcCliHub:
                 return False, {"error": f"无效的模型名: {clean_model}"}
             kwargs["model"] = clean_model
         raw_tpl = kwargs.pop("instruction_template", None)
+        create_cwd_if_missing = bool(kwargs.pop("create_cwd_if_missing", False))
+        verify_cwd_on_online_node = bool(kwargs.pop("verify_cwd_on_online_node", False))
         if raw_tpl is not None or kwargs.get("system_prompt") is not None:
             sp_ok, resolved_sp, sp_err = resolve_bot_system_prompt(kwargs.get("system_prompt"), raw_tpl)
             if not sp_ok:
                 return False, {"error": sp_err}
             kwargs["system_prompt"] = resolved_sp
+        new_cwd: Optional[str] = None
+        if "cwd" in kwargs and kwargs["cwd"] is not None:
+            new_cwd = str(kwargs["cwd"]).strip()
+            if not new_cwd:
+                return False, {"error": "工作目录 cwd 不能为空"}
+            kwargs["cwd"] = new_cwd
+            with self._lock:
+                existing_bot = self.repo.get_bot(bot_id)
+                if not existing_bot:
+                    return False, {"error": f"Bot '{bot_id}' 不存在"}
+                if self.repo.get_active_turn_for_bot(bot_id):
+                    return False, {"error": "当前回合运行中，请待结束或中止后再修改会话或工作目录"}
+            node = self.repo.get_node(existing_bot["node_id"])
+            roots = (node.get("workspace_roots") or []) if node else []
+            if roots and not self._is_cwd_in_roots(new_cwd, roots, platform=str((node or {}).get("platform") or "")):
+                return False, {"error": f"工作目录 '{new_cwd}' 不在节点 '{existing_bot['node_id']}' 允许的白名单根目录内: {roots}"}
+            if (verify_cwd_on_online_node or create_cwd_if_missing) and self.is_node_online(existing_bot["node_id"]):
+                dir_ok, dir_res = self.list_node_dirs(
+                    node_id=existing_bot["node_id"],
+                    path=new_cwd,
+                    create_if_missing=create_cwd_if_missing,
+                )
+                if not dir_ok:
+                    return False, {"error": f"工作目录校验失败 ({dir_res.get('error') or '目录不可访问'})"}
         with self._lock:
-            if kwargs.get("reset_session"):
+            if kwargs.get("reset_session") or new_cwd is not None:
                 active = self.repo.get_active_turn_for_bot(bot_id)
                 if active:
-                    return False, {"error": "当前回合运行中，请待结束或中止后再开启新会话"}
+                    return False, {"error": "当前回合运行中，请待结束或中止后再修改会话或工作目录"}
             bot = self.repo.update_bot(bot_id, **kwargs)
             if not bot:
                 return False, {"error": f"Bot '{bot_id}' 不存在"}

@@ -8,10 +8,12 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import os
 import re
 import shutil
+import stat
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -215,10 +217,94 @@ def discover_engine_models(
     return result
 
 
-def is_path_within_roots(target_path: str, roots: List[str]) -> bool:
-    if not target_path or not roots:
+@dataclass(frozen=True)
+class PinnedWorkspaceRoot:
+    """守护进程启动时固定的可信白名单根目录身份（跨 POSIX / Windows 共享）。"""
+
+    real_path: str
+    dev: int
+    ino: int
+    fd: Optional[int] = None
+
+
+def pin_workspace_roots(roots: List[str]) -> List[PinnedWorkspaceRoot]:
+    """在守护进程载入配置时一次性解析并固定白名单根目录身份（路径 + 设备/inode + POSIX 目录句柄）。"""
+    pinned: List[PinnedWorkspaceRoot] = []
+    seen: set[str] = set()
+    is_posix_dirfd = bool(os.name == "posix" and hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW"))
+    for root in roots:
+        cleaned = (root or "").strip()
+        if not cleaned:
+            continue
+        real_root = os.path.realpath(os.path.expanduser(cleaned))
+        if real_root in seen or not os.path.isdir(real_root):
+            continue
+        try:
+            lst = os.lstat(real_root)
+            if stat.S_ISLNK(lst.st_mode) or not stat.S_ISDIR(lst.st_mode) or getattr(lst, "st_reparse_tag", 0):
+                continue
+            if is_posix_dirfd:
+                fd = os.open(real_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                st = os.fstat(fd)
+                pinned.append(PinnedWorkspaceRoot(real_path=real_root, dev=st.st_dev, ino=st.st_ino, fd=fd))
+            else:
+                st = os.stat(real_root)
+                pinned.append(PinnedWorkspaceRoot(real_path=real_root, dev=st.st_dev, ino=st.st_ino, fd=None))
+            seen.add(real_root)
+        except OSError:
+            continue
+    return pinned
+
+
+def close_pinned_roots(pinned: List[PinnedWorkspaceRoot]) -> None:
+    """释放已固定的白名单根目录文件描述符。"""
+    for item in list(pinned):
+        if item.fd is not None and item.fd >= 0:
+            try:
+                os.close(item.fd)
+            except OSError:
+                pass
+    pinned.clear()
+
+
+def _is_pinned_root_intact(root: PinnedWorkspaceRoot) -> bool:
+    """核验固定的白名单根目录当前未被替换为符号链接/目录联接，且底层 (st_dev, st_ino) 身份未变。"""
+    try:
+        lst = os.lstat(root.real_path)
+        if stat.S_ISLNK(lst.st_mode) or not stat.S_ISDIR(lst.st_mode):
+            return False
+        if getattr(lst, "st_reparse_tag", 0):
+            return False
+        st = os.stat(root.real_path)
+        if (root.dev or root.ino) and (st.st_dev != root.dev or st.st_ino != root.ino):
+            return False
+        return True
+    except OSError:
+        return False
+
+
+def is_path_within_roots(
+    target_path: str,
+    roots: List[str],
+    *,
+    pinned_roots: Optional[List[PinnedWorkspaceRoot]] = None,
+) -> bool:
+    if not target_path:
         return False
     real_target = os.path.realpath(os.path.expanduser(target_path))
+    if pinned_roots is not None:
+        for p in pinned_roots:
+            if not _is_pinned_root_intact(p):
+                continue
+            try:
+                if os.path.commonpath([real_target, p.real_path]) == p.real_path:
+                    return True
+            except ValueError:
+                continue
+        return False
+
+    if not roots:
+        return False
     for root in roots:
         real_root = os.path.realpath(os.path.expanduser(root))
         try:
@@ -230,22 +316,175 @@ def is_path_within_roots(target_path: str, roots: List[str]) -> bool:
     return False
 
 
-def list_safe_dirs(req_path: str, roots: List[str], max_entries: int = 100) -> Tuple[bool, List[Dict[str, str]], str]:
+def resolve_safe_cwd(
+    target_path: str,
+    roots: List[str],
+    *,
+    pinned_roots: Optional[List[PinnedWorkspaceRoot]] = None,
+) -> Optional[str]:
+    """校验并返回真实存在且位于可信白名单根目录内的规范化工作目录；不合法或根目录被篡改时返回 None。"""
+    if not is_path_within_roots(target_path, roots, pinned_roots=pinned_roots):
+        return None
+    real_target = os.path.realpath(os.path.expanduser(target_path))
+    if not os.path.isdir(real_target):
+        return None
+    if not is_path_within_roots(real_target, roots, pinned_roots=pinned_roots):
+        return None
+    return real_target
+
+
+def _resolve_relative_parts_under_pinned(
+    target_path: str,
+    pinned_roots: List[PinnedWorkspaceRoot],
+) -> Optional[Tuple[str, int, List[str]]]:
+    """仅基于启动时固定的可信根目录身份解析相对路径段，绝不重新调用 realpath 解析根目录。"""
+    abs_target = os.path.normpath(os.path.abspath(os.path.expanduser(target_path)))
+    for p in pinned_roots:
+        if p.fd is None or p.fd < 0 or not _is_pinned_root_intact(p):
+            continue
+        try:
+            if os.path.commonpath([abs_target, p.real_path]) == p.real_path:
+                rel = os.path.relpath(abs_target, p.real_path)
+                if rel == ".":
+                    return p.real_path, p.fd, []
+                parts = [seg for seg in rel.split(os.sep) if seg and seg != "."]
+                if any(seg == ".." for seg in parts):
+                    return None
+                return p.real_path, p.fd, parts
+        except ValueError:
+            continue
+    return None
+
+
+def _resolve_relative_parts_under_raw_roots(target_path: str, roots: List[str]) -> Optional[Tuple[str, List[str]]]:
+    """无固定句柄时按配置原始绝对路径（不经 realpath 跟随符号链接）计算相对路径段。"""
+    abs_target = os.path.normpath(os.path.abspath(os.path.expanduser(target_path)))
+    for root in roots:
+        abs_root = os.path.normpath(os.path.abspath(os.path.expanduser(root)))
+        if not abs_root:
+            continue
+        try:
+            if os.path.commonpath([abs_target, abs_root]) == abs_root:
+                rel = os.path.relpath(abs_target, abs_root)
+                if rel == ".":
+                    return abs_root, []
+                parts = [p for p in rel.split(os.sep) if p and p != "."]
+                if any(p == ".." for p in parts):
+                    return None
+                return abs_root, parts
+        except ValueError:
+            continue
+    return None
+
+
+def ensure_safe_dir(
+    req_path: str,
+    roots: List[str],
+    *,
+    pinned_roots: Optional[List[PinnedWorkspaceRoot]] = None,
+) -> Tuple[bool, str, str]:
+    """从启动时固定的可信白名单根目录句柄出发逐级安全创建目录（仅 POSIX dir_fd+O_NOFOLLOW 启用；Windows 保持 fail-closed）。"""
+    cleaned = (req_path or "").strip()
+    if not cleaned:
+        return False, "", "目录路径不能为空"
+
+    if not (os.name == "posix" and hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW")):
+        return False, "", "当前平台暂不支持自动创建不存在的工作目录，请先在本机创建目录后再点选"
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    cur_fd = -1
+    cur_path = ""
+    parts: List[str] = []
+
+    try:
+        if pinned_roots is not None:
+            matched = _resolve_relative_parts_under_pinned(cleaned, pinned_roots)
+            if matched is None:
+                return False, "", f"路径不在已固定的工作目录白名单内: {cleaned}"
+            pinned_root, root_fd, parts = matched
+            cur_fd = os.dup(root_fd)
+            cur_path = pinned_root
+        else:
+            anchored = _resolve_relative_parts_under_raw_roots(cleaned, roots)
+            if anchored is None:
+                return False, "", f"路径不在允许的工作目录白名单内: {cleaned}"
+            abs_root, parts = anchored
+            # 未传入固定句柄时，直接按配置原始路径从 / 起逐级以 O_NOFOLLOW 打开（拒绝已被替换为符号链接的根目录）
+            root_parts = [p for p in abs_root.split(os.sep) if p]
+            cur_fd = os.open(os.sep, flags)
+            cur_path = os.sep
+            for rpart in root_parts:
+                try:
+                    next_fd = os.open(rpart, flags, dir_fd=cur_fd)
+                except OSError as e:
+                    return False, "", f"拒绝通过符号链接或无效白名单根目录创建目录: {abs_root} ({e})"
+                os.close(cur_fd)
+                cur_fd = next_fd
+                cur_path = os.path.join(cur_path, rpart)
+
+        for part in parts:
+            try:
+                os.mkdir(part, dir_fd=cur_fd)
+            except FileExistsError:
+                pass
+            try:
+                next_fd = os.open(part, flags, dir_fd=cur_fd)
+            except OSError as e:
+                return False, "", f"拒绝通过符号链接或非目录路径创建目录: {os.path.join(cur_path, part)} ({e})"
+            os.close(cur_fd)
+            cur_fd = next_fd
+            cur_path = os.path.join(cur_path, part)
+        return True, cur_path, ""
+    except OSError as e:
+        return False, "", f"创建目录失败: {e}"
+    finally:
+        if cur_fd >= 0:
+            try:
+                os.close(cur_fd)
+            except OSError:
+                pass
+
+
+def list_safe_dirs(
+    req_path: str,
+    roots: List[str],
+    max_entries: int = 100,
+    *,
+    create_if_missing: bool = False,
+    pinned_roots: Optional[List[PinnedWorkspaceRoot]] = None,
+) -> Tuple[bool, List[Dict[str, str]], str]:
     """安全列出白名单根目录下的子目录。req_path 为空时返回根目录列表。"""
     if not req_path.strip():
         entries = []
+        if pinned_roots is not None:
+            for p in pinned_roots:
+                if _is_pinned_root_intact(p):
+                    entries.append({"name": os.path.basename(p.real_path) or p.real_path, "path": p.real_path})
+            return True, entries, ""
         for r in roots:
             real_r = os.path.realpath(os.path.expanduser(r))
             if os.path.isdir(real_r):
                 entries.append({"name": os.path.basename(real_r) or real_r, "path": real_r})
         return True, entries, ""
 
-    if not is_path_within_roots(req_path, roots):
+    if not is_path_within_roots(req_path, roots, pinned_roots=pinned_roots):
         return False, [], f"路径不在允许的工作目录白名单内: {req_path}"
 
     real_dir = os.path.realpath(os.path.expanduser(req_path))
     if not os.path.isdir(real_dir):
-        return False, [], f"目录不存在: {req_path}"
+        if create_if_missing:
+            ok_mk, created_dir, mk_err = ensure_safe_dir(
+                req_path,
+                roots,
+                pinned_roots=pinned_roots,
+            )
+            if not ok_mk:
+                return False, [], mk_err
+            real_dir = created_dir
+        else:
+            return False, [], f"目录不存在: {req_path}"
+    elif not is_path_within_roots(real_dir, roots, pinned_roots=pinned_roots):
+        return False, [], f"路径不在允许的工作目录白名单内: {req_path}"
 
     entries = []
     try:

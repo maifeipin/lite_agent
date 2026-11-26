@@ -754,6 +754,36 @@ html, body, #app {
   overflow-y: auto;
   margin-top: 6px;
 }
+.checkbox-inline {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 7px;
+  margin-top: 7px;
+  margin-bottom: 0 !important;
+  font-size: 12px !important;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.checkbox-inline input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.bot-id-tag {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+}
+.bot-id-tag:hover {
+  color: #e0e7ff;
+  border: 1px solid rgba(99, 102, 241, 0.45);
+}
 .dir-item {
   display: flex;
   align-items: center;

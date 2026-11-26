@@ -276,6 +276,7 @@ const app = createApp({
       model: '',
       name: '',
       system_prompt: '',
+      create_cwd_if_missing: false,
     });
     const dirEntries = ref([]);
     const dirLoading = ref(false);
@@ -367,6 +368,8 @@ const app = createApp({
           items.push({
             key: `e-${ev.seq_id}`,
             kind: 'status',
+            botId: ev.bot_id || store.activeBotId || '',
+            turnId: ev.turn_id || '',
             status: p.status || '',
             error: p.error || '',
           });
@@ -374,6 +377,8 @@ const app = createApp({
           items.push({
             key: `e-${ev.seq_id}`,
             kind: 'status',
+            botId: ev.bot_id || store.activeBotId || '',
+            turnId: ev.turn_id || '',
             status: ev.event_type === 'warning' || p.non_fatal ? 'warning' : 'error',
             error: p.message || '执行异常',
           });
@@ -386,6 +391,11 @@ const app = createApp({
         }
       }
       return items;
+    });
+
+    const selectedNodePlatform = computed(() => {
+      const node = store.nodes.find((n) => n.node_id === form.value.node_id);
+      return (node && node.platform) || '';
     });
 
     const selectedNodeEngines = computed(() => {
@@ -537,6 +547,9 @@ const app = createApp({
       form.value.cwd = '';
       form.value.model_select = '';
       form.value.model = '';
+      if (selectedNodePlatform.value === 'win32') {
+        form.value.create_cwd_if_missing = false;
+      }
       const engines = selectedNodeEngines.value;
       if (!engines.includes(form.value.engine)) {
         form.value.engine = engines[0] || 'codex';
@@ -580,6 +593,7 @@ const app = createApp({
           reasoning_effort: form.value.reasoning_effort || '',
           model: resolvedModel || null,
           system_prompt: (form.value.system_prompt || '').trim(),
+          create_cwd_if_missing: Boolean(form.value.create_cwd_if_missing),
         });
         showCreateDrawer.value = false;
         form.value.name = '';
@@ -588,6 +602,7 @@ const app = createApp({
         form.value.execution_mode = 'agent';
         form.value.reasoning_effort = '';
         form.value.system_prompt = '';
+        form.value.create_cwd_if_missing = false;
         showToast(`已创建 Bot: ${bot.name}`);
         await openBot(bot.bot_id);
       } catch (e) {
@@ -869,6 +884,18 @@ const app = createApp({
       }
     }
 
+    function copyBotId(botId) {
+      if (!botId) return;
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        navigator.clipboard.writeText(botId).then(
+          () => showToast(`已复制 Bot ID: ${botId}`),
+          () => showToast(`Bot ID: ${botId}`)
+        );
+      } else {
+        showToast(`Bot ID: ${botId}`);
+      }
+    }
+
     function handleSaveToken() {
       saveToken(tokenInput.value);
       showTokenModal.value = false;
@@ -971,6 +998,7 @@ const app = createApp({
       store,
       isDesktop,
       selectDesktopBot,
+      copyBotId,
       showCreateDrawer,
       showTokenModal,
       authMode,
@@ -998,6 +1026,7 @@ const app = createApp({
       activeBot,
       activeBotApprovals,
       activeTimeline,
+      selectedNodePlatform,
       selectedNodeEngines,
       selectedEngineModels,
       availableReasoningEfforts,

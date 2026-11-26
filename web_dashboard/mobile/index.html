@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#0a0b10">
   <title>PC Bots | Lite Agent</title>
   <link rel="manifest" href="./manifest.json?v=1">
-  <link rel="stylesheet" href="./style.css?v=10">
+  <link rel="stylesheet" href="./style.css?v=11">
   <script src="./vendor/marked.min.js?v=1"></script>
 </head>
 <body>
@@ -102,8 +102,10 @@
               <div class="desktop-bot-title-block">
                 <div class="desktop-bot-title-row">
                   <span class="desktop-bot-name">{{ activeBot.name }}</span>
+                  <span class="tag bot-id-tag" @click="copyBotId(activeBot.bot_id)" title="点击复制 Bot ID">{{ activeBot.bot_id }}</span>
                   <span class="tag" :class="activeBot.engine">{{ activeBot.engine.toUpperCase() }}</span>
-                  <span class="status-badge" :class="activeBot.status">{{ statusLabel(activeBot.status) }}</span>
+                  <span class="tag bot-id-tag" @click="copyBotId(activeBot.bot_id)" title="点击复制 Bot ID">{{ activeBot.bot_id }}</span>
+          <span class="status-badge" :class="activeBot.status">{{ statusLabel(activeBot.status) }}</span>
                   <span class="desktop-node-meta">{{ activeBot.node_display_name || activeBot.node_id }} · {{ activeBot.node_status === 'online' ? '🟢 在线' : '⚪ 离线' }}</span>
                 </div>
                 <div class="desktop-bot-cwd" :title="activeBot.cwd">{{ activeBot.cwd }}</div>
@@ -178,7 +180,7 @@
                 <div v-else-if="item.kind === 'delta'" class="msg-assistant is-streaming" v-html="item.html"></div>
                 <div v-else-if="item.kind === 'assistant'" class="msg-assistant" v-html="item.html"></div>
                 <div v-else-if="item.kind === 'status'" class="turn-banner" :class="{ error: item.status === 'failed' || item.status === 'error' }">
-                  — 回合状态: {{ item.status }}<span v-if="item.error"> ({{ item.error }})</span> —
+                  — 回合状态: {{ item.status }}<span v-if="item.botId || item.turnId"> · {{ item.botId }}<span v-if="item.turnId"> / {{ item.turnId }}</span></span><span v-if="item.error"> ({{ item.error }})</span> —
                 </div>
               </template>
             </section>
@@ -633,6 +635,7 @@
           >
             {{ activeBot.approval_mode === 'ask' ? '🛡 需审批' : '⚡ 自动' }}
           </button>
+          <span class="tag bot-id-tag" @click="copyBotId(activeBot.bot_id)" title="点击复制 Bot ID">{{ activeBot.bot_id }}</span>
           <span class="status-badge" :class="activeBot.status">{{ statusLabel(activeBot.status) }}</span>
         </div>
       </div>
@@ -670,7 +673,7 @@
           <div v-else-if="item.kind === 'assistant'" class="msg-assistant" v-html="item.html"></div>
 
           <div v-else-if="item.kind === 'status'" class="turn-banner" :class="{ error: item.status === 'failed' || item.status === 'error' }">
-            — 回合状态: {{ item.status }}<span v-if="item.error"> ({{ item.error }})</span> —
+            — 回合状态: {{ item.status }}<span v-if="item.botId || item.turnId"> · {{ item.botId }}<span v-if="item.turnId"> / {{ item.turnId }}</span></span><span v-if="item.error"> ({{ item.error }})</span> —
           </div>
         </template>
       </section>
@@ -752,6 +755,11 @@
           <div class="field">
             <label>工作目录（可点选下方白名单目录或手动输入）</label>
             <input v-model="form.cwd" placeholder="例如 /Users/dev/project 或 C:\Projects\app" />
+            <label class="checkbox-inline" :style="selectedNodePlatform === 'win32' ? 'opacity:0.55;cursor:not-allowed;' : ''">
+              <input type="checkbox" v-model="form.create_cwd_if_missing" :disabled="selectedNodePlatform === 'win32'" />
+              <span v-if="selectedNodePlatform === 'win32'">目录不存在时自动创建（Windows 节点暂不支持，请先在本机建好目录）</span>
+              <span v-else>目录不存在时自动创建（仅限 macOS / Linux 白名单根目录内）</span>
+            </label>
             <div class="dir-box" v-if="dirEntries.length || dirLoading">
               <div class="dir-item" v-if="dirLoading" style="color:var(--muted)">正在读取 PC 目录...</div>
               <div class="dir-item" v-for="d in dirEntries" :key="d.path" @click="onPickDir(d)">
@@ -888,6 +896,6 @@
     </div>
   </div>
 
-  <script type="module" src="./app.js?v=14"></script>
+  <script type="module" src="./app.js?v=15"></script>
 </body>
 </html>

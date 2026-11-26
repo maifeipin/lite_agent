@@ -417,6 +417,46 @@ body {
     background: var(--bg-main);
 }
 
+/* 进入 PC Bots 工作台时隐藏右下角悬浮球与最小化终端条，避免遮挡发送按钮；可通过左侧栏底部快捷按钮随时呼出 */
+body.pc-bots-active #chat-fab,
+body.pc-bots-active #terminal-window.minimized {
+    display: none !important;
+}
+
+.sidebar-footer-actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.sidebar-dock-btn {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    border: 1px solid var(--panel-border);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text-muted);
+    font-size: 12px;
+    font-family: var(--font-mono);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.sidebar-dock-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--accent);
+    background: rgba(99, 102, 241, 0.16);
+}
+
+.app-container.sidebar-collapsed .sidebar-footer-actions {
+    display: none;
+}
+
 /* 顶栏检索 */
 .top-header {
     height: 70px;

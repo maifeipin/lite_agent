@@ -75,6 +75,10 @@ def handle_post_bots(handler: Any, parsed_url: Any, hub: PcCliHub) -> None:
     except Exception as e:
         _send_json(handler, 400, {"error": f"无效 JSON: {e}"})
         return
+    raw_create_cwd = body.get("create_cwd_if_missing")
+    if raw_create_cwd is not None and not isinstance(raw_create_cwd, bool):
+        _send_json(handler, 400, {"success": False, "error": "create_cwd_if_missing 必须为布尔值"})
+        return
     ok, res = hub.create_bot(
         name=str(body.get("name") or ""),
         node_id=str(body.get("node_id") or ""),
@@ -86,6 +90,8 @@ def handle_post_bots(handler: Any, parsed_url: Any, hub: PcCliHub) -> None:
         model=body.get("model"),
         system_prompt=str(body.get("system_prompt") or ""),
         instruction_template=str(body.get("instruction_template") or ""),
+        create_cwd_if_missing=raw_create_cwd is True,
+        verify_cwd_on_online_node=True,
     )
     _send_json(handler, 201 if ok else 400, {"success": ok, **res})
 
@@ -126,9 +132,18 @@ def handle_bots_sub_dispatch(handler: Any, parsed_url: Any, hub: PcCliHub) -> No
             if raw_tpl is not None and not isinstance(raw_tpl, str):
                 _send_json(handler, 400, {"success": False, "error": "instruction_template 必须为字符串"})
                 return
+            raw_cwd = body.get("cwd")
+            if raw_cwd is not None and not isinstance(raw_cwd, str):
+                _send_json(handler, 400, {"success": False, "error": "cwd 必须为字符串"})
+                return
+            raw_create_cwd = body.get("create_cwd_if_missing")
+            if raw_create_cwd is not None and not isinstance(raw_create_cwd, bool):
+                _send_json(handler, 400, {"success": False, "error": "create_cwd_if_missing 必须为布尔值"})
+                return
             ok, res = hub.update_bot(
                 bot_id,
                 name=body.get("name"),
+                cwd=raw_cwd,
                 approval_mode=body.get("approval_mode"),
                 execution_mode=body.get("execution_mode"),
                 reasoning_effort=body.get("reasoning_effort"),
@@ -137,6 +152,8 @@ def handle_bots_sub_dispatch(handler: Any, parsed_url: Any, hub: PcCliHub) -> No
                 instruction_template=raw_tpl,
                 archived=body.get("archived"),
                 reset_session=raw_reset is True,
+                create_cwd_if_missing=raw_create_cwd is True,
+                verify_cwd_on_online_node=raw_cwd is not None,
             )
             _send_json(handler, 200 if ok else 400, {"success": ok, **res})
         elif method == "DELETE":

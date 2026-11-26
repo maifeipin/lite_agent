@@ -19,11 +19,14 @@ from .adapters.base import BaseCliAdapter, apply_bot_system_prompt
 from .adapters.codex_adapter import CodexCliAdapter
 from .config import DaemonConfig
 from .env_probe import (
+    PinnedWorkspaceRoot,
     build_engine_env,
+    close_pinned_roots,
     detect_available_engines,
     discover_engine_models,
-    is_path_within_roots,
     list_safe_dirs,
+    pin_workspace_roots,
+    resolve_safe_cwd,
 )
 
 logger = logging.getLogger("pc_cli.daemon")
@@ -65,6 +68,17 @@ class PcCliDaemon:
         self._committed_turns: set[str] = set()  # 已收到 turn.commit、尚未收尾的 turn_id
         self._cancelled_turn_ids: "collections.OrderedDict[str, None]" = collections.OrderedDict()
         self._stop_event = asyncio.Event()
+        # 在载入配置时一次性固定白名单根目录身份（路径 + st_dev/st_ino + POSIX dir_fd），目录探测与执行前校验共用
+        self._pinned_roots: list[PinnedWorkspaceRoot] = pin_workspace_roots(config.workspace_roots)
+
+    def close(self) -> None:
+        close_pinned_roots(self._pinned_roots)
+
+    def __del__(self) -> None:
+        try:
+            close_pinned_roots(self._pinned_roots)
+        except Exception:
+            pass
 
     def _snapshot_active_turns(self) -> list[str]:
         return list(dict.fromkeys([*self._active_turns.values(), *self._committed_turns]))
@@ -182,7 +196,13 @@ class PcCliDaemon:
         if mtype == "dir.list_request":
             req_id = str(msg.get("req_id") or "")
             req_path = str(msg.get("path") or "")
-            ok, entries, err = list_safe_dirs(req_path, self.config.workspace_roots)
+            create_if_missing = bool(msg.get("create_if_missing"))
+            ok, entries, err = list_safe_dirs(
+                req_path,
+                self.config.workspace_roots,
+                create_if_missing=create_if_missing,
+                pinned_roots=self._pinned_roots,
+            )
             await ws.send_json({
                 "type": "dir.list_result",
                 "req_id": req_id,
@@ -323,13 +343,18 @@ class PcCliDaemon:
                 })
                 return
 
-            if not is_path_within_roots(cwd, self.config.workspace_roots):
+            safe_cwd = resolve_safe_cwd(
+                cwd,
+                self.config.workspace_roots,
+                pinned_roots=self._pinned_roots,
+            )
+            if not safe_cwd:
                 await self._safe_send_json(ws, {
                     "type": "turn.finished",
                     "bot_id": bot_id,
                     "turn_id": turn_id,
                     "status": "failed",
-                    "error": f"工作目录不在允许的白名单内: {cwd}",
+                    "error": f"工作目录不存在或不在允许的白名单内: {cwd}",
                 })
                 return
 
@@ -386,7 +411,7 @@ class PcCliDaemon:
                     result = await self.adapters[engine].run_turn(
                         bot_id=bot_id,
                         turn_id=turn_id,
-                        cwd=cwd,
+                        cwd=safe_cwd,
                         prompt=effective_prompt,
                         native_session_id=str(native_session_id) if native_session_id else None,
                         approval_mode=approval_mode,
@@ -396,6 +421,8 @@ class PcCliDaemon:
                         execution_mode=execution_mode,
                         reasoning_effort=reasoning_effort,
                     )
+                    if result.status == "failed":
+                        logger.warning(f"回合执行失败 bot={bot_id} turn={turn_id} engine={engine}: {result.error}")
                     await self._safe_send_json(ws, {
                         "type": "turn.finished",
                         "bot_id": bot_id,
@@ -405,6 +432,7 @@ class PcCliDaemon:
                         "error": result.error,
                     })
                 except Exception as e:
+                    logger.warning(f"回合执行异常 bot={bot_id} turn={turn_id} engine={engine}: {e}")
                     await self._safe_send_json(ws, {
                         "type": "turn.finished",
                         "bot_id": bot_id,

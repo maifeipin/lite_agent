@@ -389,6 +389,7 @@ function _callLifecycle(hook, container) {
 }
 
 function setPcBotsWorkspaceVisible(visible) {
+    document.body.classList.toggle('pc-bots-active', Boolean(visible));
     const workspace = document.getElementById('pc-bots-workspace');
     const iframe = document.getElementById('pc-bots-iframe');
     const topHeader = document.querySelector('.top-header');
@@ -403,7 +404,28 @@ function setPcBotsWorkspaceVisible(visible) {
     }
 }
 
+function initSidebarDockControls() {
+    const termBtn = document.getElementById('sidebar-terminal-btn');
+    const chatBtn = document.getElementById('sidebar-chat-btn');
+    if (termBtn) {
+        termBtn.addEventListener('click', () => {
+            const term = document.getElementById('terminal-window');
+            if (!term) return;
+            term.classList.toggle('minimized');
+            const toggleBtn = document.getElementById('term-toggle');
+            if (toggleBtn) toggleBtn.textContent = term.classList.contains('minimized') ? '展开' : '收起';
+        });
+    }
+    if (chatBtn) {
+        chatBtn.addEventListener('click', () => {
+            const drawer = document.getElementById('chat-drawer');
+            if (drawer) drawer.classList.toggle('open');
+        });
+    }
+}
+
 function initFilterButtons() {
+    initSidebarDockControls();
     const container = document.querySelector('.app-container') || document.body;
     document.querySelectorAll('.filter-btn').forEach(btn => {
         btn.addEventListener('click', () => {
