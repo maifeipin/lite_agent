@@ -59,12 +59,54 @@ function sanitizeRenderedHtml(html) {
     });
 }
 
-function renderMarkdownSafe(text) {
-  const escaped = escapeHtml(text);
-  if (typeof window.marked !== 'undefined' && typeof window.marked.parse === 'function') {
-    return sanitizeRenderedHtml(window.marked.parse(escaped, { breaks: true }));
+let _safeMarkdownRenderer = null;
+
+function getSafeMarkdownRenderer() {
+  if (_safeMarkdownRenderer) return _safeMarkdownRenderer;
+  if (typeof window.marked === 'undefined' || typeof window.marked.Renderer !== 'function') {
+    return null;
   }
-  return escaped.replace(/\n/g, '<br>');
+  const renderer = new window.marked.Renderer();
+  // 禁用原始 HTML 直出（防 XSS），同时避免提前 escapeHtml 破坏引用块与代码块转义
+  renderer.html = (html) => escapeHtml(typeof html === 'string' ? html : (html && html.text) || '');
+  renderer.link = (href, title, text) => {
+    const rawHref = typeof href === 'object' && href !== null ? href.href : href;
+    const rawText = typeof href === 'object' && href !== null ? href.text : text;
+    const url = String(rawHref || '').trim();
+    const label = String(rawText || url);
+    if (/^file:/i.test(url)) {
+      return `<code class="md-file-ref">${label}</code>`;
+    }
+    if (isSafeUrl(url)) {
+      return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+    }
+    return `<span>${label}</span>`;
+  };
+  renderer.image = (href, title, text) => {
+    const rawHref = typeof href === 'object' && href !== null ? href.href : href;
+    const rawAlt = typeof href === 'object' && href !== null ? href.text : text;
+    const url = String(rawHref || '').trim();
+    const alt = escapeHtml(rawAlt || '');
+    if (isSafeUrl(url)) {
+      return `<img src="${escapeHtml(url)}" alt="${alt}" loading="lazy" />`;
+    }
+    return alt ? `<span>[${alt}]</span>` : '';
+  };
+  renderer.table = (header, body) =>
+    `<div class="md-table-wrap"><table><thead>${header}</thead><tbody>${body}</tbody></table></div>`;
+  _safeMarkdownRenderer = renderer;
+  return renderer;
+}
+
+function renderMarkdownSafe(text) {
+  const raw = String(text || '');
+  if (typeof window.marked !== 'undefined' && typeof window.marked.parse === 'function') {
+    const renderer = getSafeMarkdownRenderer();
+    const opts = { gfm: true, breaks: true };
+    if (renderer) opts.renderer = renderer;
+    return sanitizeRenderedHtml(window.marked.parse(raw, opts));
+  }
+  return escapeHtml(raw).replace(/\n/g, '<br>');
 }
 
 function formatApprovalField(val) {
@@ -236,8 +278,16 @@ const app = createApp({
           const prev = items[items.length - 1];
           if (prev && prev.kind === 'delta' && prev.turnId === ev.turn_id) {
             prev.text += p.delta || '';
+            prev.html = renderMarkdownSafe(prev.text);
           } else {
-            items.push({ key: `delta-${ev.seq_id}`, kind: 'delta', turnId: ev.turn_id, text: p.delta || '' });
+            const firstText = p.delta || '';
+            items.push({
+              key: `delta-${ev.seq_id}`,
+              kind: 'delta',
+              turnId: ev.turn_id,
+              text: firstText,
+              html: renderMarkdownSafe(firstText),
+            });
           }
         } else if (ev.event_type === 'assistant_message') {
           // 若紧跟同一个 turn 的流式 delta，直接替换为最终完整消息避免重复
@@ -710,6 +760,24 @@ const app = createApp({
       }
     }
 
+    async function handleResetSession(bot) {
+      if (!bot || updatingApprovalMode.value || sending.value) return;
+      if (bot.status === 'running' || bot.status === 'waiting_approval') {
+        showToast('当前回合运行中，请待结束或中止后再开启新会话');
+        return;
+      }
+      if (!window.confirm(`确认重置 "${bot.name}" 的上下文并开启新会话？（保留 Bot 配置与历史展示记录）`)) return;
+      updatingApprovalMode.value = true;
+      try {
+        await updateBot(bot.bot_id, { reset_session: true });
+        showToast('已开启新会话，下一条指令将使用全新上下文');
+      } catch (e) {
+        showToast(e.message || '开启新会话失败');
+      } finally {
+        updatingApprovalMode.value = false;
+      }
+    }
+
     async function handleDeleteBot(bot) {
       if (!window.confirm(`确认删除 Bot "${bot.name}" 及其全部历史日志？`)) return;
       try {
@@ -818,6 +886,7 @@ const app = createApp({
       handleToggleApprovalMode,
       handleCycleExecutionMode,
       handleCycleReasoningEffort,
+      handleResetSession,
       handleDeleteBot,
       handleSaveToken,
       refreshAll,

@@ -813,3 +813,47 @@ for line in sys.stdin:
     )
     assert res_w.status == "completed"
     assert any(et == "warning" and "custom-model" in str(p.get("message", "")) for et, p in captured_events)
+
+
+def test_reset_session_and_mobile_markdown_upgrade():
+    """验证开启新会话（reset_session）的运行中保护与清空 native_session_id，以及移动端 GFM Markdown 契约。"""
+    repo = PcCliRepository(":memory:")
+    hub = PcCliHub(repo=repo)
+    try:
+        hub.handle_daemon_hello("c1", lambda _: None, {"node_id": "mac1", "engines": ["codex"], "workspace_roots": ["/w"]})
+        ok_b, b_res = hub.create_bot(name="demo", node_id="mac1", engine="codex", cwd="/w")
+        assert ok_b is True
+        bot_id = b_res["bot"]["bot_id"]
+
+        # 模拟已有历史会话 ID
+        repo.set_bot_status(bot_id, "idle", native_session_id="thread_old_123")
+        assert repo.get_bot(bot_id)["native_session_id"] == "thread_old_123"
+
+        # 运行中禁止重置会话
+        ok_t, t_res = hub.start_turn(bot_id, "working")
+        assert ok_t is True
+        ok_busy, err_busy = hub.update_bot(bot_id, reset_session=True)
+        assert ok_busy is False
+        assert "运行中" in err_busy["error"]
+        assert repo.get_bot(bot_id)["native_session_id"] == "thread_old_123"
+
+        # 回合结束后允许重置，native_session_id 置空
+        hub.handle_daemon_turn_finished(
+            {"bot_id": bot_id, "turn_id": t_res["turn"]["turn_id"], "status": "completed", "native_session_id": "thread_old_123"},
+            sender_node_id="mac1",
+            conn_id="c1",
+        )
+        ok_reset, res_reset = hub.update_bot(bot_id, reset_session=True)
+        assert ok_reset is True
+        assert res_reset["bot"]["native_session_id"] is None
+    finally:
+        hub.close()
+
+    app_js = (MOBILE_DIR / "app.js").read_text(encoding="utf-8")
+    index_html = (MOBILE_DIR / "index.html").read_text(encoding="utf-8")
+    style_css = (MOBILE_DIR / "style.css").read_text(encoding="utf-8")
+    assert "getSafeMarkdownRenderer" in app_js
+    assert "md-table-wrap" in app_js and ".md-table-wrap" in style_css
+    assert "md-file-ref" in app_js and "code.md-file-ref" in style_css
+    assert "handleResetSession" in app_js and "handleResetSession(activeBot)" in index_html
+    assert 'class="msg-assistant is-streaming"' in index_html

@@ -346,6 +346,7 @@ class PcCliRepository:
         reasoning_effort: Optional[str] = None,
         model: Optional[str] = None,
         archived: Optional[bool] = None,
+        reset_session: bool = False,
     ) -> Optional[Dict[str, Any]]:
         fields: List[str] = []
         values: List[Any] = []
@@ -367,6 +368,8 @@ class PcCliRepository:
         if archived is not None:
             fields.append("archived = ?")
             values.append(1 if archived else 0)
+        if reset_session:
+            fields.append("native_session_id = NULL")
         if not fields:
             return self.get_bot(bot_id)
         fields.append("updated_at = ?")

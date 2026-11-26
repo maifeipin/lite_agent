@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#0a0b10">
   <title>PC Bots | Lite Agent</title>
   <link rel="manifest" href="./manifest.json?v=1">
-  <link rel="stylesheet" href="./style.css?v=6">
+  <link rel="stylesheet" href="./style.css?v=7">
   <script src="./vendor/marked.min.js?v=1"></script>
 </head>
 <body>
@@ -237,6 +237,15 @@
           <button
             v-if="activeBot"
             class="btn btn-icon"
+            :disabled="updatingApprovalMode || sending || activeBot.status === 'running' || activeBot.status === 'waiting_approval'"
+            @click="handleResetSession(activeBot)"
+            title="开启新会话（清空上下文，保留 Bot 配置）"
+          >
+            🆕
+          </button>
+          <button
+            v-if="activeBot"
+            class="btn btn-icon"
             @click="handleDeleteBot(activeBot)"
             title="删除 Bot"
           >
@@ -306,7 +315,7 @@
             </div>
           </details>
 
-          <div v-else-if="item.kind === 'delta'" class="msg-assistant" style="white-space:pre-wrap;">{{ item.text }}</div>
+          <div v-else-if="item.kind === 'delta'" class="msg-assistant is-streaming" v-html="item.html"></div>
 
           <div v-else-if="item.kind === 'assistant'" class="msg-assistant" v-html="item.html"></div>
 
@@ -471,6 +480,6 @@
     </div>
   </div>
 
-  <script type="module" src="./app.js?v=9"></script>
+  <script type="module" src="./app.js?v=10"></script>
 </body>
 </html>

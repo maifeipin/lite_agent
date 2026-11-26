@@ -120,6 +120,7 @@ def handle_bots_sub_dispatch(handler: Any, parsed_url: Any, hub: PcCliHub) -> No
                 reasoning_effort=body.get("reasoning_effort"),
                 model=body.get("model"),
                 archived=body.get("archived"),
+                reset_session=bool(body.get("reset_session")),
             )
             _send_json(handler, 200 if ok else 400, {"success": ok, **res})
         elif method == "DELETE":

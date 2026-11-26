@@ -565,6 +565,10 @@ class PcCliHub:
             if not is_valid_model_name(clean_model):
                 return False, {"error": f"无效的模型名: {clean_model}"}
             kwargs["model"] = clean_model
+        if kwargs.get("reset_session"):
+            active = self.repo.get_active_turn_for_bot(bot_id)
+            if active:
+                return False, {"error": "当前回合运行中，请待结束或中止后再开启新会话"}
         bot = self.repo.update_bot(bot_id, **kwargs)
         if not bot:
             return False, {"error": f"Bot '{bot_id}' 不存在"}
