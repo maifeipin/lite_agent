@@ -331,6 +331,9 @@ html, body, #app {
   flex-direction: column;
   gap: 10px;
 }
+.event-stream > * {
+  flex-shrink: 0;
+}
 
 .msg-user {
   align-self: flex-end;
@@ -346,14 +349,15 @@ html, body, #app {
 .msg-assistant {
   align-self: flex-start;
   max-width: 96%;
+  min-width: 0;
   background: var(--panel);
   border: 1px solid var(--border);
   padding: 10px 13px;
   border-radius: 14px 14px 14px 4px;
   word-break: break-word;
+  overflow-wrap: anywhere;
   line-height: 1.55;
   font-size: 14px;
-  overflow-x: hidden;
 }
 .msg-assistant.is-streaming {
   border-color: rgba(99, 102, 241, 0.45);
