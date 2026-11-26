@@ -54,8 +54,8 @@ class PcCliHub:
         self._approval_ack_waiters: Dict[str, Tuple[threading.Event, Dict[str, Any]]] = {}
         # turn_id -> conn_id（绑定回合所属的 Daemon 连接，防跨连接串扰）
         self._turn_conn_owners: Dict[str, str] = {}
-        # turn_id -> target_conn_id（正在调用 send_fn 派发中的回合，供重连对账显式识别）
-        self._inflight_dispatches: Dict[str, str] = {}
+        # turn_id -> {"target_conn_id": str, "daemon_confirmed": bool, "reconciled_aborted": bool}
+        self._inflight_dispatches: Dict[str, Dict[str, Any]] = {}
         # 启动时重置所有节点状态为离线，等待真实 Daemon 重连上报
         self.repo.mark_all_nodes_offline()
 
@@ -175,7 +175,8 @@ class PcCliHub:
                     active = self.repo.get_active_turn_for_bot(bot["bot_id"])
                     if active:
                         tid = active["turn_id"]
-                        inflight_conn = self._inflight_dispatches.get(tid)
+                        inflight_info = self._inflight_dispatches.get(tid)
+                        inflight_conn = inflight_info.get("target_conn_id") if inflight_info else None
                         if inflight_conn is None or inflight_conn == conn_id:
                             self._turn_conn_owners[tid] = conn_id
             # 仅在对账完成后才注册新连接为可派发状态，防止新回合被握手快照误判为孤儿回合
@@ -247,13 +248,19 @@ class PcCliHub:
             if not active:
                 continue
             turn_id = active["turn_id"]
+            inflight_info = self._inflight_dispatches.get(turn_id)
             if turn_id in reported_ids:
                 if new_conn_id:
                     self._turn_conn_owners[turn_id] = new_conn_id
+                if inflight_info is not None:
+                    inflight_info["daemon_confirmed"] = True
+                    inflight_info["reconciled_aborted"] = False
                 continue
             # 显式识别正在向当前同一连接派发中的回合（握手快照生成时尚未派发，不应误判为孤儿）
-            if new_conn_id and self._inflight_dispatches.get(turn_id) == new_conn_id:
+            if new_conn_id and inflight_info is not None and inflight_info.get("target_conn_id") == new_conn_id:
                 continue
+            if inflight_info is not None:
+                inflight_info["reconciled_aborted"] = True
             self._turn_conn_owners.pop(turn_id, None)
             self.repo.finish_turn(turn_id, status=TurnStatus.FAILED.value, error_message=err_msg)
             self.repo.expire_pending_approvals(bot_id=bot_id)
@@ -384,13 +391,17 @@ class PcCliHub:
         event_payload = payload.get("payload") or {}
         if not event_type:
             return None
-        if not self._validate_daemon_turn_ownership(
-            sender_node_id=sender_node_id,
-            conn_id=conn_id,
-            bot_id=bot_id,
-            turn_id=turn_id,
-        ):
-            return None
+        with self._lock:
+            if not self._validate_daemon_turn_ownership(
+                sender_node_id=sender_node_id,
+                conn_id=conn_id,
+                bot_id=bot_id,
+                turn_id=turn_id,
+            ):
+                return None
+            inflight_info = self._inflight_dispatches.get(turn_id)
+            if inflight_info is not None:
+                inflight_info["daemon_confirmed"] = True
 
         ev = self.repo.append_event(
             bot_id=bot_id,
@@ -419,13 +430,17 @@ class PcCliHub:
         tool_name = str(payload.get("tool_name") or "tool")
         summary = str(payload.get("summary") or f"请求执行 {tool_name}")
         raw_req = payload.get("raw_request") or {}
-        if not self._validate_daemon_turn_ownership(
-            sender_node_id=sender_node_id,
-            conn_id=conn_id,
-            bot_id=bot_id,
-            turn_id=turn_id,
-        ):
-            return None
+        with self._lock:
+            if not self._validate_daemon_turn_ownership(
+                sender_node_id=sender_node_id,
+                conn_id=conn_id,
+                bot_id=bot_id,
+                turn_id=turn_id,
+            ):
+                return None
+            inflight_info = self._inflight_dispatches.get(turn_id)
+            if inflight_info is not None:
+                inflight_info["daemon_confirmed"] = True
 
         appr = self.repo.create_approval(
             approval_id=approval_id,
@@ -497,6 +512,9 @@ class PcCliHub:
             if not owned:
                 return
             bot, _turn = owned
+            inflight_info = self._inflight_dispatches.get(turn_id)
+            if inflight_info is not None:
+                inflight_info["daemon_confirmed"] = True
             self._turn_conn_owners.pop(turn_id, None)
             self.repo.finish_turn(turn_id, status=status, error_message=error_msg)
             self.repo.expire_pending_approvals(turn_id=turn_id)
@@ -702,10 +720,18 @@ class PcCliHub:
                 return False, {"error": f"创建回合冲突（可能已有并发运行中的回合）: {e}"}
             turn_id = turn["turn_id"]
             self._turn_conn_owners[turn_id] = target_conn_id
-            self._inflight_dispatches[turn_id] = target_conn_id
+            self._inflight_dispatches[turn_id] = {
+                "target_conn_id": target_conn_id,
+                "daemon_confirmed": False,
+                "reconciled_aborted": False,
+            }
 
         sent = False
         used_send_fn: Optional[SendFunc] = None
+        need_cancel_old_conn = False
+        marked_failed_here = False
+        err_msg = ""
+        cur_turn: Optional[Dict[str, Any]] = None
         try:
             sent, used_send_fn = self._send_to_daemon_with_fn(
                 bot["node_id"],
@@ -724,33 +750,48 @@ class PcCliHub:
                 },
                 expected_conn_id=target_conn_id,
             )
+            with self._lock:
+                inflight_info = self._inflight_dispatches.pop(turn_id, None) or {}
+                daemon_confirmed = bool(inflight_info.get("daemon_confirmed"))
+                reconciled_aborted = bool(inflight_info.get("reconciled_aborted"))
+
+                cur_turn = self.repo.get_turn(turn_id)
+                turn_still_active = bool(
+                    cur_turn and cur_turn["status"] in (TurnStatus.QUEUED.value, TurnStatus.RUNNING.value)
+                )
+                current_owner = self._turn_conn_owners.get(turn_id)
+                owner_conn_active = bool(
+                    current_owner and self._is_active_daemon_conn(bot["node_id"], current_owner)
+                )
+
+                # 三路精确区分：
+                # 1) 重连对账已按孤儿收尾 -> 派发失败
+                # 2) 守护进程已确认收到/完成或新连接已在 active_turns 中接管 -> 只要未断连悬空即视为派发成功（不误报失败、不覆盖接管状态）
+                # 3) 常规未确认路径 -> 要求发送成功且回合与归属连接均保持活跃
+                if reconciled_aborted:
+                    dispatch_ok = False
+                elif daemon_confirmed:
+                    dispatch_ok = (not turn_still_active) or owner_conn_active
+                else:
+                    dispatch_ok = bool(sent and turn_still_active and owner_conn_active)
+
+                if not dispatch_ok:
+                    self._turn_conn_owners.pop(turn_id, None)
+                    if turn_still_active:
+                        reason = "派发到 PC 节点失败" if (not sent and not reconciled_aborted) else "派发期间 PC 连接已切换"
+                        self.repo.finish_turn(turn_id, TurnStatus.FAILED.value, error_message=reason)
+                        self.repo.set_bot_status(bot_id, BotStatus.ERROR.value, last_summary=reason)
+                        marked_failed_here = True
+                    if sent and used_send_fn is not None and (not daemon_confirmed or reconciled_aborted):
+                        need_cancel_old_conn = True
+                    err_msg = (
+                        "派发指令到 PC 节点失败"
+                        if (not sent and not reconciled_aborted)
+                        else "派发期间 PC 节点连接已切换或回合已中断，请重试"
+                    )
         finally:
             with self._lock:
                 self._inflight_dispatches.pop(turn_id, None)
-
-        need_cancel_old_conn = False
-        marked_failed_here = False
-        with self._lock:
-            cur_turn = self.repo.get_turn(turn_id)
-            turn_still_active = bool(
-                cur_turn and cur_turn["status"] in (TurnStatus.QUEUED.value, TurnStatus.RUNNING.value)
-            )
-            current_owner = self._turn_conn_owners.get(turn_id)
-            owner_conn_active = bool(
-                current_owner and self._is_active_daemon_conn(bot["node_id"], current_owner)
-            )
-            if not sent or not turn_still_active or not owner_conn_active:
-                self._turn_conn_owners.pop(turn_id, None)
-                if turn_still_active:
-                    reason = "派发到 PC 节点失败" if not sent else "派发期间 PC 连接已切换"
-                    self.repo.finish_turn(turn_id, TurnStatus.FAILED.value, error_message=reason)
-                    self.repo.set_bot_status(bot_id, BotStatus.ERROR.value, last_summary=reason)
-                    marked_failed_here = True
-                if sent and used_send_fn is not None:
-                    need_cancel_old_conn = True
-                err_msg = "派发指令到 PC 节点失败" if not sent else "派发期间 PC 节点连接已切换或回合已中断，请重试"
-            else:
-                err_msg = ""
 
         if err_msg:
             if need_cancel_old_conn and used_send_fn is not None:
@@ -764,7 +805,7 @@ class PcCliHub:
 
         self._emit_bot_summary(bot_id)
         self._broadcast_clients({"type": "bot.event", "event": ev}, bot_id_filter=bot_id)
-        return True, {"turn": turn, "event": ev}
+        return True, {"turn": cur_turn or turn, "event": ev}
 
     def cancel_turn(self, bot_id: str, expected_turn_id: Optional[str] = None) -> Tuple[bool, Dict[str, Any]]:
         bot = self.repo.get_bot(bot_id)

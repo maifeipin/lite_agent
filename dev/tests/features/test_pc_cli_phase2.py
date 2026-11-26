@@ -1211,5 +1211,75 @@ def test_stale_conn_turn_finished_after_reconnect_reconcile_and_reset_cannot_res
         assert ok_f is True
         f_tid = res_f["turn"]["turn_id"]
         assert repo.get_turn(f_tid)["status"] == "running"
+        hub.handle_daemon_turn_finished(
+            {"bot_id": bot_id, "turn_id": f_tid, "status": "completed"},
+            sender_node_id="mac1",
+            conn_id="c6",
+        )
+
+        # 场景 G（P1）：send_fn 返回前原连接已送达 turn.finished -> start_turn 必须返回 True、保留会话 ID、不补发 turn.cancel
+        c7_msgs: list[dict] = []
+
+        def _c7_fast_finish_inside_send(msg: dict):
+            c7_msgs.append(msg)
+            if msg.get("type") == "turn.start":
+                hub.handle_daemon_turn_finished(
+                    {
+                        "bot_id": bot_id,
+                        "turn_id": msg["turn_id"],
+                        "status": "completed",
+                        "native_session_id": "sess_fast_ok",
+                    },
+                    sender_node_id="mac1",
+                    conn_id="c7",
+                )
+
+        hub.handle_daemon_hello(
+            "c7",
+            _c7_fast_finish_inside_send,
+            {"node_id": "mac1", "engines": ["codex"], "workspace_roots": ["/w"], "active_turns": []},
+        )
+        ok_g, res_g = hub.start_turn(bot_id, "instant-complete")
+        assert ok_g is True
+        assert [m["type"] for m in c7_msgs] == ["turn.start"]
+        assert res_g["turn"]["status"] == "completed"
+        assert repo.get_turn(res_g["turn"]["turn_id"])["status"] == "completed"
+        assert repo.get_bot(bot_id)["native_session_id"] == "sess_fast_ok"
+
+        # 场景 H（P2）：新连接 c9 握手已上报接管该回合，随后旧连接 c8 的 send_fn 抛错 -> 不得把运行中回合误标为 failed
+        c9_msgs: list[dict] = []
+
+        def _c8_adopted_then_send_raises(msg: dict):
+            if msg.get("type") == "turn.start":
+                hub.handle_daemon_hello(
+                    "c9",
+                    lambda m: c9_msgs.append(m),
+                    {
+                        "node_id": "mac1",
+                        "engines": ["codex"],
+                        "workspace_roots": ["/w"],
+                        "active_turns": [msg["turn_id"]],
+                    },
+                )
+                raise ConnectionError("old socket closed after flushing")
+
+        hub.handle_daemon_hello(
+            "c8",
+            _c8_adopted_then_send_raises,
+            {"node_id": "mac1", "engines": ["codex"], "workspace_roots": ["/w"], "active_turns": []},
+        )
+        ok_h, res_h = hub.start_turn(bot_id, "adopted-before-send-err")
+        assert ok_h is True
+        h_tid = res_h["turn"]["turn_id"]
+        assert repo.get_turn(h_tid)["status"] == "running"
+        assert c9_msgs == []
+        # 新连接 c9 可正常完成该已接管回合
+        hub.handle_daemon_turn_finished(
+            {"bot_id": bot_id, "turn_id": h_tid, "status": "completed", "native_session_id": "sess_c9_ok"},
+            sender_node_id="mac1",
+            conn_id="c9",
+        )
+        assert repo.get_turn(h_tid)["status"] == "completed"
+        assert repo.get_bot(bot_id)["native_session_id"] == "sess_c9_ok"
     finally:
         hub.close()
