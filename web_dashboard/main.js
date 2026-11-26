@@ -118,6 +118,7 @@ function jsonParseSafe(s) {
 //  Core: Unified Search Pipeline
 // ============================================================
 async function performSearch(append = false) {
+    if (state.activeSource === 'pc-bots') return;
     if (state.isLoading) return;
     const query = state.searchQuery;
     const limit = state.limit;
@@ -387,6 +388,21 @@ function _callLifecycle(hook, container) {
     }
 }
 
+function setPcBotsWorkspaceVisible(visible) {
+    const workspace = document.getElementById('pc-bots-workspace');
+    const iframe = document.getElementById('pc-bots-iframe');
+    const topHeader = document.querySelector('.top-header');
+    const facetPanel = document.getElementById('facet-panel');
+    const resultsCanvas = document.querySelector('.results-canvas');
+    if (workspace) workspace.style.display = visible ? 'flex' : 'none';
+    if (topHeader) topHeader.style.display = visible ? 'none' : '';
+    if (facetPanel && visible) facetPanel.style.display = 'none';
+    if (resultsCanvas) resultsCanvas.style.display = visible ? 'none' : '';
+    if (visible && iframe && !iframe.getAttribute('src')) {
+        iframe.setAttribute('src', iframe.getAttribute('data-src') || './mobile/?desktop=1');
+    }
+}
+
 function initFilterButtons() {
     const container = document.querySelector('.app-container') || document.body;
     document.querySelectorAll('.filter-btn').forEach(btn => {
@@ -399,9 +415,13 @@ function initFilterButtons() {
             state.activeSource = btn.getAttribute('data-source');
             state.offset = 0;
             state.activeFilters = {};
-            performSearch(false);
-            if (typeof updateFacetPanelVisibility === 'function') {
-                updateFacetPanelVisibility();
+            const isPcBots = state.activeSource === 'pc-bots';
+            setPcBotsWorkspaceVisible(isPcBots);
+            if (!isPcBots) {
+                performSearch(false);
+                if (typeof updateFacetPanelVisibility === 'function') {
+                    updateFacetPanelVisibility();
+                }
             }
 
             // Mount new tab (deferred so render completes first)

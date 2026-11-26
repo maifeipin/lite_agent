@@ -8,13 +8,362 @@
   <meta name="theme-color" content="#0a0b10">
   <title>PC Bots | Lite Agent</title>
   <link rel="manifest" href="./manifest.json?v=1">
-  <link rel="stylesheet" href="./style.css?v=8">
+  <link rel="stylesheet" href="./style.css?v=9">
   <script src="./vendor/marked.min.js?v=1"></script>
 </head>
 <body>
   <div id="app" v-cloak>
     <div class="toast" v-if="store.toastMsg">{{ store.toastMsg }}</div>
 
+    <!-- 桌面宽屏分栏工作台（左侧常驻 Bot 列表 + 右侧实时对话 / 看板 / AI 总管） -->
+    <div class="desktop-shell" v-if="isDesktop">
+      <aside class="desktop-sidebar">
+        <div class="desktop-sidebar-head">
+          <div class="topbar-left">
+            <span class="ws-dot" :class="store.wsState" :title="'WS: ' + store.wsState"></span>
+            <span class="topbar-title">PC CLI Bots</span>
+          </div>
+          <div class="topbar-actions">
+            <button class="btn btn-icon" @click="store.activeTab === 'dashboard' ? switchTab('dashboard') : refreshAll()" title="刷新">↻</button>
+            <button class="btn btn-icon" @click="showTokenModal = true" title="Token 鉴权">🔑</button>
+            <button class="btn btn-primary" @click="openCreateDrawer">+ 新建</button>
+          </div>
+        </div>
+
+        <div class="desktop-seg-tabs">
+          <button class="desktop-seg-btn" :class="{ active: store.activeTab === 'bots' }" @click="switchTab('bots')">
+            <span>🤖 Bots</span>
+            <span class="desktop-seg-count">{{ store.bots.length }}</span>
+          </button>
+          <button class="desktop-seg-btn" :class="{ active: store.activeTab === 'dashboard' }" @click="switchTab('dashboard')">
+            <span>📊 看板</span>
+            <span class="desktop-seg-badge" v-if="store.pendingApprovals.length">{{ store.pendingApprovals.length }}</span>
+          </button>
+          <button class="desktop-seg-btn" :class="{ active: store.activeTab === 'manager' }" @click="switchTab('manager')">
+            <span>🧠 总管</span>
+          </button>
+        </div>
+
+        <div class="desktop-node-strip">
+          <button
+            class="node-pill"
+            :class="{ active: store.selectedNodeFilter === '' }"
+            @click="store.selectedNodeFilter = ''"
+          >
+            全部 ({{ store.nodes.length }})
+          </button>
+          <button
+            v-for="node in store.nodes"
+            :key="node.node_id"
+            class="node-pill"
+            :class="{ online: node.status === 'online', active: store.selectedNodeFilter === node.node_id }"
+            @click="store.selectedNodeFilter = (store.selectedNodeFilter === node.node_id ? '' : node.node_id)"
+          >
+            <span class="dot"></span>
+            <span>{{ node.display_name || node.node_id }}</span>
+          </button>
+        </div>
+
+        <div class="desktop-bot-list">
+          <template v-if="filteredBots.length">
+            <div
+              v-for="bot in filteredBots"
+              :key="bot.bot_id"
+              class="bot-card desktop-bot-item"
+              :class="[bot.status, { 'is-selected': store.activeTab === 'bots' && store.activeBotId === bot.bot_id }]"
+              @click="selectDesktopBot(bot.bot_id)"
+            >
+              <div class="bot-card-head">
+                <div class="bot-name">{{ bot.name }}</div>
+                <span class="status-badge" :class="bot.status">{{ statusLabel(bot.status) }}</span>
+              </div>
+              <div class="bot-meta">
+                <span class="tag" :class="bot.engine">{{ bot.engine.toUpperCase() }}</span>
+                <span v-if="bot.execution_mode && bot.execution_mode !== 'agent'" class="tag">{{ executionModeLabel(bot.execution_mode) }}</span>
+                <span v-if="bot.model" class="tag">{{ bot.model }}</span>
+                <span>{{ bot.node_display_name || bot.node_id }}</span>
+                <span>{{ bot.node_status === 'online' ? '🟢' : '⚪' }}</span>
+              </div>
+              <div class="bot-summary">{{ bot.last_summary || bot.cwd }}</div>
+            </div>
+          </template>
+          <div class="empty-state" v-else style="padding:28px 12px;">
+            <p v-if="store.loadingBots">正在加载 Bot 列表...</p>
+            <p v-else>暂无 Bot，点击右上角「+ 新建」绑定在线 PC。</p>
+          </div>
+        </div>
+      </aside>
+
+      <main class="desktop-main">
+        <!-- 右侧视图 1：Bot 实时对话工作区 -->
+        <template v-if="store.activeTab === 'bots'">
+          <template v-if="activeBot">
+            <header class="desktop-bot-header">
+              <div class="desktop-bot-title-block">
+                <div class="desktop-bot-title-row">
+                  <span class="desktop-bot-name">{{ activeBot.name }}</span>
+                  <span class="tag" :class="activeBot.engine">{{ activeBot.engine.toUpperCase() }}</span>
+                  <span class="status-badge" :class="activeBot.status">{{ statusLabel(activeBot.status) }}</span>
+                  <span class="desktop-node-meta">{{ activeBot.node_display_name || activeBot.node_id }} · {{ activeBot.node_status === 'online' ? '🟢 在线' : '⚪ 离线' }}</span>
+                </div>
+                <div class="desktop-bot-cwd" :title="activeBot.cwd">{{ activeBot.cwd }}</div>
+              </div>
+              <div class="desktop-bot-controls">
+                <button
+                  class="mode-badge"
+                  :class="activeBot.approval_mode"
+                  :disabled="updatingApprovalMode || sending || activeBot.status === 'running' || activeBot.status === 'waiting_approval'"
+                  @click="handleToggleApprovalMode(activeBot)"
+                  title="点击切换审批模式（自动 / 需审批）"
+                >
+                  {{ activeBot.approval_mode === 'ask' ? '需审批 (ask)' : '自动 (auto)' }}
+                </button>
+                <button
+                  class="mode-badge"
+                  :class="activeBot.execution_mode || 'agent'"
+                  :disabled="updatingApprovalMode || sending || activeBot.status === 'running' || activeBot.status === 'waiting_approval'"
+                  @click="handleCycleExecutionMode(activeBot)"
+                  title="点击切换工作模式（执行 / 规划 / 问答）"
+                >
+                  {{ executionModeLabel(activeBot.execution_mode) }}
+                </button>
+                <button
+                  v-if="activeBot.engine === 'codex'"
+                  class="mode-badge effort"
+                  :disabled="updatingApprovalMode || sending || activeBot.status === 'running' || activeBot.status === 'waiting_approval'"
+                  @click="handleCycleReasoningEffort(activeBot)"
+                  title="点击切换思考深度（Codex 专属）"
+                >
+                  思考:{{ reasoningEffortLabel(activeBot.reasoning_effort) }}
+                </button>
+                <span v-if="activeBot.model" class="tag">{{ activeBot.model }}</span>
+                <button
+                  v-if="activeBot.status === 'running' || activeBot.status === 'waiting_approval'"
+                  class="btn btn-danger"
+                  @click="handleCancel"
+                >
+                  ■ 中止
+                </button>
+                <button
+                  class="btn"
+                  :disabled="updatingApprovalMode || sending || activeBot.status === 'running' || activeBot.status === 'waiting_approval'"
+                  @click="handleResetSession(activeBot)"
+                  title="开启新会话（清空上下文，保留 Bot 配置）"
+                >
+                  🆕 新会话
+                </button>
+                <button class="btn btn-icon" @click="handleDeleteBot(activeBot)" title="删除 Bot">🗑</button>
+              </div>
+            </header>
+
+            <section class="event-stream desktop-stream" ref="streamEl">
+              <div class="empty-state" v-if="!activeTimeline.length">
+                <p v-if="store.loadingEvents">正在加载历史记录...</p>
+                <p v-else>在下方输入指令，直接远程驱动 {{ activeBot.name }}（{{ activeBot.engine.toUpperCase() }}）。</p>
+              </div>
+
+              <template v-for="item in activeTimeline" :key="item.key">
+                <div v-if="item.kind === 'user'" class="msg-user">{{ item.text }}</div>
+                <details v-else-if="item.kind === 'tool'" class="tool-card" :class="{ 'is-error': item.isError }">
+                  <summary>
+                    <span>{{ item.done ? (item.isError ? '❌' : '✅') : '⏳' }}</span>
+                    <span>{{ item.toolName }}</span>
+                  </summary>
+                  <div class="tool-body">
+                    <div v-if="item.params" style="margin-bottom:6px;color:#93c5fd;">参数: {{ item.params }}</div>
+                    <div v-if="item.output">{{ item.output }}</div>
+                  </div>
+                </details>
+                <div v-else-if="item.kind === 'delta'" class="msg-assistant is-streaming" v-html="item.html"></div>
+                <div v-else-if="item.kind === 'assistant'" class="msg-assistant" v-html="item.html"></div>
+                <div v-else-if="item.kind === 'status'" class="turn-banner" :class="{ error: item.status === 'failed' || item.status === 'error' }">
+                  — 回合状态: {{ item.status }}<span v-if="item.error"> ({{ item.error }})</span> —
+                </div>
+              </template>
+            </section>
+
+            <div class="approval-stack" v-if="activeBotApprovals.length">
+              <div class="approval-bar" v-for="appr in activeBotApprovals" :key="appr.approval_id">
+                <div class="approval-title">⚠️ 等待权限审批 · {{ appr.tool_name }}</div>
+                <details class="approval-details">
+                  <summary class="approval-preview">{{ appr.summary || appr.tool_name }}</summary>
+                  <div class="approval-full">{{ formatApprovalFullDetail(appr) }}</div>
+                </details>
+                <div class="approval-actions">
+                  <button class="btn btn-ok" @click="handleApproval(appr.approval_id, 'allow_once')">允许本次</button>
+                  <button
+                    v-if="activeBot.engine === 'codex'"
+                    class="btn btn-primary"
+                    @click="handleApproval(appr.approval_id, 'allow_session')"
+                  >
+                    本会话允许
+                  </button>
+                  <button class="btn btn-danger" @click="handleApproval(appr.approval_id, 'deny')">拒绝</button>
+                </div>
+              </div>
+            </div>
+
+            <footer class="composer desktop-composer">
+              <textarea
+                v-model="promptInput"
+                rows="2"
+                placeholder="输入指令发送给 PC CLI... (Ctrl+Enter / Cmd+Enter 发送)"
+                @keydown.ctrl.enter.prevent="handleSendPrompt"
+                @keydown.meta.enter.prevent="handleSendPrompt"
+              ></textarea>
+              <button
+                v-if="hasNativeVoice"
+                class="btn btn-icon"
+                :class="{ 'btn-voice-recording': voiceState === 'recording' && voiceTarget === 'prompt', 'btn-voice-busy': voiceState === 'transcribing' && voiceTarget === 'prompt' }"
+                :disabled="voiceState === 'transcribing'"
+                @click="handleVoiceToggle('prompt')"
+              >
+                {{ voiceState === 'transcribing' && voiceTarget === 'prompt' ? '⏳' : (voiceState === 'recording' && voiceTarget === 'prompt' ? '⏹' : '🎙') }}
+              </button>
+              <button class="btn btn-primary desktop-send-btn" :disabled="sending || !promptInput.trim()" @click="handleSendPrompt">
+                {{ sending ? '发送中...' : '发送' }}
+              </button>
+            </footer>
+          </template>
+
+          <div class="desktop-empty-main" v-else>
+            <div style="font-size:36px;margin-bottom:10px;">🤖</div>
+            <h3 style="margin-bottom:8px;">选择一个 Bot 开始远程会话</h3>
+            <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">左侧已常驻展示全部 PC 节点与 Bot 状态，点击任意卡片即可立即切换。</p>
+            <button class="btn btn-primary" @click="openCreateDrawer">+ 新建 Bot</button>
+          </div>
+        </template>
+
+        <!-- 右侧视图 2：总体统计看板 -->
+        <template v-else-if="store.activeTab === 'dashboard'">
+          <header class="desktop-bot-header">
+            <div class="desktop-bot-title-block">
+              <div class="desktop-bot-title-row">
+                <span class="desktop-bot-name">📊 总体统计看板</span>
+              </div>
+              <div class="desktop-bot-cwd">聚合全部在线 PC 节点、活跃 Bot、回合成功率与待审批队列</div>
+            </div>
+            <div class="desktop-bot-controls">
+              <button class="btn" @click="switchTab('dashboard')">↻ 刷新统计</button>
+            </div>
+          </header>
+          <main class="view-body desktop-dashboard-body">
+            <template v-if="store.stats">
+              <div class="kpi-grid desktop-kpi-grid">
+                <div class="kpi-card">
+                  <div class="kpi-label">在线 PC 节点</div>
+                  <div class="kpi-val">{{ store.stats.nodes.online }} / {{ store.stats.nodes.total }}</div>
+                  <div class="kpi-sub">离线 {{ store.stats.nodes.offline }} 台</div>
+                </div>
+                <div class="kpi-card">
+                  <div class="kpi-label">活跃 Bot</div>
+                  <div class="kpi-val">{{ store.stats.bots.active }}</div>
+                  <div class="kpi-sub">运行 {{ store.stats.bots.running }} · 待审批 {{ store.stats.bots.waiting_approval }}</div>
+                </div>
+                <div class="kpi-card">
+                  <div class="kpi-label">近 {{ store.stats.days }} 天回合</div>
+                  <div class="kpi-val">{{ store.stats.turns.total }}</div>
+                  <div class="kpi-sub">成功率 {{ store.stats.turns.success_rate }}% · 均值 {{ (store.stats.turns.avg_duration_ms / 1000).toFixed(1) }}s</div>
+                </div>
+                <div class="kpi-card">
+                  <div class="kpi-label">AI 总管消耗</div>
+                  <div class="kpi-val">{{ store.stats.manager_usage.calls }} 次</div>
+                  <div class="kpi-sub">{{ store.stats.manager_usage.total_tokens }} tokens</div>
+                </div>
+              </div>
+
+              <div class="section-title">待处理授权队列 ({{ store.pendingApprovals.length }})</div>
+              <div class="bot-list" v-if="store.pendingApprovals.length">
+                <div class="bot-card waiting_approval" v-for="appr in store.pendingApprovals" :key="appr.approval_id" style="cursor:default;">
+                  <div class="bot-card-head">
+                    <div class="bot-name">{{ appr.approval_type === 'bot_delete' ? '🗑 删除 Bot 授权' : (appr.approval_type === 'turn_cancel' ? '■ 中止回合授权' : '⚠️ CLI 工具审批') }}</div>
+                    <span class="tag">{{ appr.requested_by }}</span>
+                  </div>
+                  <details class="approval-details">
+                    <summary class="approval-preview">{{ appr.summary || appr.tool_name }}</summary>
+                    <div class="approval-full">{{ formatApprovalFullDetail(appr) }}</div>
+                  </details>
+                  <div class="approval-actions">
+                    <button class="btn btn-ok" @click="handleApproval(appr.approval_id, 'allow_once')">确认批准</button>
+                    <button class="btn btn-danger" @click="handleApproval(appr.approval_id, 'deny')">拒绝</button>
+                  </div>
+                </div>
+              </div>
+              <div class="empty-state" v-else style="padding:28px 12px;">当前无待审批事项</div>
+            </template>
+            <div class="empty-state" v-else>正在加载统计数据...</div>
+          </main>
+        </template>
+
+        <!-- 右侧视图 3：AI 总管 -->
+        <template v-else>
+          <header class="desktop-bot-header">
+            <div class="desktop-bot-title-block">
+              <div class="desktop-bot-title-row">
+                <span class="desktop-bot-name">🧠 AI 总管</span>
+              </div>
+              <div class="desktop-bot-cwd">跨 PC 节点汇总进度、批量创建或管理 Bot</div>
+            </div>
+            <div class="desktop-bot-controls">
+              <select
+                v-if="store.models.length"
+                class="model-select"
+                v-model="store.selectedManagerModel"
+                title="切换 conf.d/llm.json 总管模型（请求级）"
+              >
+                <option v-for="m in store.models" :key="m.name" :value="m.name">
+                  {{ m.name }}
+                </option>
+              </select>
+            </div>
+          </header>
+          <section class="event-stream desktop-stream" ref="managerStreamEl">
+            <div class="empty-state" v-if="!store.managerMessages.length">
+              <p>我是你的多 PC Bot AI 总管，支持右上角切换 <code>llm.json</code> 模型。</p>
+              <p style="margin-top:8px;font-size:13px;">你可以说：“汇总所有 Bot 进度”、“在 Mac 上建一个 Codex Bot”或“申请清理闲置 Bot”。</p>
+            </div>
+            <template v-for="m in store.managerMessages" :key="m.key">
+              <div v-if="m.role === 'user'" class="msg-user">{{ m.text }}</div>
+              <div v-else-if="m.role === 'error'" class="turn-banner error">{{ m.text }}</div>
+              <div v-else class="msg-assistant">
+                <details class="tool-card" v-if="m.toolTrace && m.toolTrace.length" style="margin-bottom:8px;">
+                  <summary>🔧 已执行 {{ m.toolTrace.length }} 个总管工具 ({{ m.model }})</summary>
+                  <div class="tool-body">{{ JSON.stringify(m.toolTrace, null, 2) }}</div>
+                </details>
+                <div v-html="m.html"></div>
+                <div class="approval-bar" v-for="appr in (m.approvals || [])" :key="appr.approval_id" style="margin-top:10px;border-radius:10px;">
+                  <div class="approval-title">⚠️ 需要你确认授权 · {{ appr.tool_name }}</div>
+                  <details class="approval-details">
+                    <summary class="approval-preview">{{ appr.summary || appr.tool_name }}</summary>
+                    <div class="approval-full">{{ formatApprovalFullDetail(appr) }}</div>
+                  </details>
+                  <div class="approval-actions" v-if="!appr.resolved">
+                    <button class="btn btn-ok" @click="handleApproval(appr.approval_id, 'allow_once')">确认执行</button>
+                    <button class="btn btn-danger" @click="handleApproval(appr.approval_id, 'deny')">拒绝</button>
+                  </div>
+                  <div v-else style="font-size:12px;color:var(--muted);">已处理: {{ appr.resolved }}</div>
+                </div>
+              </div>
+            </template>
+          </section>
+          <footer class="composer desktop-composer">
+            <textarea
+              v-model="managerInput"
+              rows="2"
+              placeholder="对 AI 总管说话（如：汇总进度 / 创建或申请删除 Bot）... (Ctrl+Enter 发送)"
+              @keydown.ctrl.enter.prevent="handleSendManager"
+              @keydown.meta.enter.prevent="handleSendManager"
+            ></textarea>
+            <button class="btn btn-primary desktop-send-btn" :disabled="managerSending || !managerInput.trim()" @click="handleSendManager">
+              {{ managerSending ? '...' : '发送' }}
+            </button>
+          </footer>
+        </template>
+      </main>
+    </div>
+
+    <!-- 移动端双屏视图（保持 Android WebView / 窄屏体验原样不变） -->
+    <template v-else>
     <!-- 主视图（3 Tab：Bot 列表 / 总体看板 / AI 总管） -->
     <div class="app-shell" v-if="!store.activeBotId">
       <header class="topbar">
@@ -370,6 +719,7 @@
         </button>
       </footer>
     </div>
+    </template>
 
     <!-- 视图 2：新建 Bot 抽屉 -->
     <div class="modal-backdrop" v-if="showCreateDrawer" @click.self="showCreateDrawer = false">
@@ -480,6 +830,6 @@
     </div>
   </div>
 
-  <script type="module" src="./app.js?v=10"></script>
+  <script type="module" src="./app.js?v=11"></script>
 </body>
 </html>

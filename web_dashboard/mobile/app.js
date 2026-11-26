@@ -1,7 +1,7 @@
 /**
  * Lite Agent PC CLI Mobile PWA 根应用 (零构建 Vue 3 ESM)
  */
-import { createApp, computed, nextTick, onMounted, ref, watch } from './vendor/vue.esm-browser.prod.js';
+import { createApp, computed, nextTick, onMounted, onUnmounted, ref, watch } from './vendor/vue.esm-browser.prod.js';
 import {
   cancelTurn,
   connectWs,
@@ -198,6 +198,14 @@ const app = createApp({
     const managerInput = ref('');
     const managerSending = ref(false);
     const managerStreamEl = ref(null);
+
+    const forceDesktop = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('desktop') === '1';
+    const isDesktop = ref(
+      typeof window !== 'undefined' ? (forceDesktop || window.innerWidth >= 900) : false
+    );
+    const handleResize = () => {
+      isDesktop.value = forceDesktop || window.innerWidth >= 900;
+    };
 
     // Android 离线语音输入（WebViewCompat.addWebMessageListener 安全消息通道）
     const hasNativeVoice = ref(
@@ -799,8 +807,18 @@ const app = createApp({
       try {
         await deleteBot(bot.bot_id);
         showToast(`已删除 ${bot.name}`);
+        if (isDesktop.value && !store.activeBotId && filteredBots.value.length) {
+          await openBot(filteredBots.value[0].bot_id);
+        }
       } catch (e) {
         showToast(e.message);
+      }
+    }
+
+    async function selectDesktopBot(botId) {
+      store.activeTab = 'bots';
+      if (botId) {
+        await openBot(botId);
       }
     }
 
@@ -825,6 +843,15 @@ const app = createApp({
     );
 
     watch(
+      () => filteredBots.value,
+      (list) => {
+        if (isDesktop.value && store.activeTab === 'bots' && !store.activeBotId && list.length) {
+          openBot(list[0].bot_id);
+        }
+      }
+    );
+
+    watch(
       () => store.wsState,
       (val) => {
         if (val === 'auth_required') {
@@ -843,16 +870,25 @@ const app = createApp({
     );
 
     onMounted(async () => {
+      window.addEventListener('resize', handleResize);
       await refreshAll();
       connectWs();
       const m = window.location.hash.match(/^#bot\/([^/]+)$/);
       if (m) {
         await openBot(m[1]);
+      } else if (isDesktop.value && !store.activeBotId && filteredBots.value.length) {
+        await openBot(filteredBots.value[0].bot_id);
       }
+    });
+
+    onUnmounted(() => {
+      window.removeEventListener('resize', handleResize);
     });
 
     return {
       store,
+      isDesktop,
+      selectDesktopBot,
       showCreateDrawer,
       showTokenModal,
       tokenInput,
