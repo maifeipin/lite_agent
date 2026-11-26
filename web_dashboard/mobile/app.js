@@ -98,15 +98,27 @@ function getSafeMarkdownRenderer() {
   return renderer;
 }
 
+const _markdownRenderCache = new Map();
+const _MARKDOWN_CACHE_LIMIT = 300;
+
 function renderMarkdownSafe(text) {
   const raw = String(text || '');
+  const cached = _markdownRenderCache.get(raw);
+  if (cached !== undefined) return cached;
+  let rendered;
   if (typeof window.marked !== 'undefined' && typeof window.marked.parse === 'function') {
     const renderer = getSafeMarkdownRenderer();
     const opts = { gfm: true, breaks: true };
     if (renderer) opts.renderer = renderer;
-    return sanitizeRenderedHtml(window.marked.parse(raw, opts));
+    rendered = sanitizeRenderedHtml(window.marked.parse(raw, opts));
+  } else {
+    rendered = escapeHtml(raw).replace(/\n/g, '<br>');
   }
-  return escapeHtml(raw).replace(/\n/g, '<br>');
+  if (_markdownRenderCache.size >= _MARKDOWN_CACHE_LIMIT) {
+    _markdownRenderCache.clear();
+  }
+  _markdownRenderCache.set(raw, rendered);
+  return rendered;
 }
 
 function formatApprovalField(val) {
@@ -278,15 +290,13 @@ const app = createApp({
           const prev = items[items.length - 1];
           if (prev && prev.kind === 'delta' && prev.turnId === ev.turn_id) {
             prev.text += p.delta || '';
-            prev.html = renderMarkdownSafe(prev.text);
           } else {
-            const firstText = p.delta || '';
             items.push({
               key: `delta-${ev.seq_id}`,
               kind: 'delta',
               turnId: ev.turn_id,
-              text: firstText,
-              html: renderMarkdownSafe(firstText),
+              text: p.delta || '',
+              html: '',
             });
           }
         } else if (ev.event_type === 'assistant_message') {
@@ -314,6 +324,12 @@ const app = createApp({
             status: ev.event_type === 'warning' || p.non_fatal ? 'warning' : 'error',
             error: p.message || '执行异常',
           });
+        }
+      }
+      // 仅对最终保留的流式片段做一次 Markdown 解析，避免增量循环与已被替换片段重复解析
+      for (const item of items) {
+        if (item.kind === 'delta') {
+          item.html = renderMarkdownSafe(item.text);
         }
       }
       return items;

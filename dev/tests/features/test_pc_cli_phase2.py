@@ -857,3 +857,210 @@ def test_reset_session_and_mobile_markdown_upgrade():
     assert "md-file-ref" in app_js and "code.md-file-ref" in style_css
     assert "handleResetSession" in app_js and "handleResetSession(activeBot)" in index_html
     assert 'class="msg-assistant is-streaming"' in index_html
+    assert "_markdownRenderCache" in app_js
+    assert "if (item.kind === 'delta')" in app_js
+
+
+def test_reset_session_concurrency_and_route_validation():
+    """回归验证：重置与完成/发起回合共用锁无竞态，以及 PATCH reset_session 严格校验布尔值。"""
+    import io
+    import threading
+    from urllib.parse import urlparse
+    from lite_agent.features.pc_cli.routes import handle_bots_sub_dispatch
+
+    repo = PcCliRepository(":memory:")
+    hub = PcCliHub(repo=repo)
+    try:
+        sent_to_daemon: list[dict] = []
+        hub.handle_daemon_hello(
+            "c1",
+            lambda msg: sent_to_daemon.append(msg),
+            {"node_id": "mac1", "engines": ["codex"], "workspace_roots": ["/w"]},
+        )
+        ok_b, b_res = hub.create_bot(name="race-bot", node_id="mac1", engine="codex", cwd="/w")
+        assert ok_b is True
+        bot_id = b_res["bot"]["bot_id"]
+
+        # 1. 复现并验证：handle_daemon_turn_finished 刚执行完 finish_turn 尚未 set_bot_status 时，
+        #    并发 update_bot(reset_session=True) 必须等待锁释放，不能出现“重置成功但旧 ID 又被写回”。
+        ok_t, t_res = hub.start_turn(bot_id, "step1")
+        assert ok_t is True
+        turn_id = t_res["turn"]["turn_id"]
+
+        orig_finish_turn = repo.finish_turn
+        entered_finish = threading.Event()
+        allow_continue = threading.Event()
+
+        def _slow_finish_turn(*args, **kwargs):
+            res = orig_finish_turn(*args, **kwargs)
+            entered_finish.set()
+            allow_continue.wait(timeout=2.0)
+            return res
+
+        repo.finish_turn = _slow_finish_turn
+        reset_result: dict = {}
+
+        def _run_finish():
+            hub.handle_daemon_turn_finished(
+                {
+                    "bot_id": bot_id,
+                    "turn_id": turn_id,
+                    "status": "completed",
+                    "native_session_id": "thread_stale_999",
+                },
+                sender_node_id="mac1",
+                conn_id="c1",
+            )
+
+        def _run_reset():
+            entered_finish.wait(timeout=2.0)
+            ok_r, payload_r = hub.update_bot(bot_id, reset_session=True)
+            reset_result["ok"] = ok_r
+            reset_result["payload"] = payload_r
+
+        t1 = threading.Thread(target=_run_finish)
+        t2 = threading.Thread(target=_run_reset)
+        t1.start()
+        t2.start()
+        assert entered_finish.wait(timeout=2.0)
+        # 稍等片刻让 t2 阻塞在 hub._lock 上，再放行 t1
+        threading.Event().wait(0.05)
+        allow_continue.set()
+        t1.join(timeout=3.0)
+        t2.join(timeout=3.0)
+        repo.finish_turn = orig_finish_turn
+
+        assert reset_result.get("ok") is True
+        # 最终 native_session_id 必须保持 None，不会被旧回合写回 thread_stale_999
+        assert repo.get_bot(bot_id)["native_session_id"] is None
+
+        # 2. PATCH 路由严格校验 reset_session 必须为 JSON 布尔值，字符串 "false" 返回 400 且不清空会话
+        repo.set_bot_status(bot_id, "idle", native_session_id="thread_keep_777")
+
+        def _call_patch(body_dict: dict):
+            raw = json.dumps(body_dict).encode("utf-8")
+
+            class _DummyHandler:
+                command = "PATCH"
+                headers = {"Content-Length": str(len(raw))}
+                rfile = io.BytesIO(raw)
+                wfile = io.BytesIO()
+                status_code = None
+
+                def send_response(self, code):
+                    self.status_code = code
+
+                def send_header(self, k, v):
+                    pass
+
+                def end_headers(self):
+                    pass
+
+            h = _DummyHandler()
+            handle_bots_sub_dispatch(h, urlparse(f"/api/v1/pc-cli/bots/{bot_id}"), hub)
+            return h.status_code, json.loads(h.wfile.getvalue().decode("utf-8"))
+
+        sc_str, res_str = _call_patch({"reset_session": "false"})
+        assert sc_str == 400
+        assert res_str["success"] is False
+        assert repo.get_bot(bot_id)["native_session_id"] == "thread_keep_777"
+
+        sc_false, res_false = _call_patch({"reset_session": False})
+        assert sc_false == 200
+        assert res_false["success"] is True
+        assert repo.get_bot(bot_id)["native_session_id"] == "thread_keep_777"
+
+        sc_true, res_true = _call_patch({"reset_session": True})
+        assert sc_true == 200
+        assert res_true["success"] is True
+        assert repo.get_bot(bot_id)["native_session_id"] is None
+    finally:
+        hub.close()
+
+
+def test_stale_conn_turn_finished_after_reconnect_reconcile_and_reset_cannot_restore_session():
+    """回归验证 P1：归属校验移入 self._lock 且重连对账共用同一把锁，旧连接迟到 turn.finished 无法写回旧 native_session_id。"""
+    import threading
+
+    repo = PcCliRepository(":memory:")
+    hub = PcCliHub(repo=repo)
+    try:
+        hub.handle_daemon_hello("c1", lambda _: None, {"node_id": "mac1", "engines": ["codex"], "workspace_roots": ["/w"]})
+        ok_b, b_res = hub.create_bot(name="reconn-bot", node_id="mac1", engine="codex", cwd="/w")
+        assert ok_b is True
+        bot_id = b_res["bot"]["bot_id"]
+
+        # 场景 A：旧完成消息校验后暂停 -> 新连接重连收尾 + 重置会话 -> 旧消息继续
+        # 因校验已在 self._lock 内，新连接对账与重置会串行等待旧消息完成后再执行重置，最终会话仍为 None
+        ok_t1, t1_res = hub.start_turn(bot_id, "turn-a")
+        assert ok_t1 is True
+        turn_id_1 = t1_res["turn"]["turn_id"]
+
+        orig_validate = hub._validate_daemon_turn_ownership
+        validate_done = threading.Event()
+        allow_finish = threading.Event()
+        reconn_reset_result: dict = {}
+
+        def _pausing_validate(*args, **kwargs):
+            res = orig_validate(*args, **kwargs)
+            validate_done.set()
+            allow_finish.wait(timeout=2.0)
+            return res
+
+        hub._validate_daemon_turn_ownership = _pausing_validate  # type: ignore[method-assign]
+
+        def _old_conn_finish():
+            hub.handle_daemon_turn_finished(
+                {"bot_id": bot_id, "turn_id": turn_id_1, "status": "completed", "native_session_id": "old_sess_1"},
+                sender_node_id="mac1",
+                conn_id="c1",
+            )
+
+        def _reconnect_and_reset():
+            validate_done.wait(timeout=2.0)
+            hub.handle_daemon_hello(
+                "c2",
+                lambda _: None,
+                {"node_id": "mac1", "engines": ["codex"], "workspace_roots": ["/w"], "active_turns": []},
+            )
+            ok_r, payload_r = hub.update_bot(bot_id, reset_session=True)
+            reconn_reset_result["ok"] = ok_r
+            reconn_reset_result["payload"] = payload_r
+
+        t_old = threading.Thread(target=_old_conn_finish)
+        t_new = threading.Thread(target=_reconnect_and_reset)
+        t_old.start()
+        t_new.start()
+        assert validate_done.wait(timeout=2.0)
+        threading.Event().wait(0.05)
+        allow_finish.set()
+        t_old.join(timeout=3.0)
+        t_new.join(timeout=3.0)
+        hub._validate_daemon_turn_ownership = orig_validate  # type: ignore[method-assign]
+
+        assert reconn_reset_result.get("ok") is True
+        assert repo.get_bot(bot_id)["native_session_id"] is None
+
+        # 场景 B：新连接先重连对账收尾孤儿回合 + 用户重置会话 -> 旧连接迟到 turn.finished 到达，必须被锁内校验拒绝
+        repo.set_bot_status(bot_id, "idle", native_session_id="old_sess_2")
+        ok_t2, t2_res = hub.start_turn(bot_id, "turn-b")
+        assert ok_t2 is True
+        turn_id_2 = t2_res["turn"]["turn_id"]
+
+        hub.handle_daemon_hello(
+            "c3",
+            lambda _: None,
+            {"node_id": "mac1", "engines": ["codex"], "workspace_roots": ["/w"], "active_turns": []},
+        )
+        ok_r2, _ = hub.update_bot(bot_id, reset_session=True)
+        assert ok_r2 is True
+        assert repo.get_bot(bot_id)["native_session_id"] is None
+
+        hub.handle_daemon_turn_finished(
+            {"bot_id": bot_id, "turn_id": turn_id_2, "status": "completed", "native_session_id": "old_sess_2"},
+            sender_node_id="mac1",
+            conn_id="c2",
+        )
+        assert repo.get_bot(bot_id)["native_session_id"] is None
+    finally:
+        hub.close()

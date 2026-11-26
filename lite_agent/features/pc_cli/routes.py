@@ -112,6 +112,10 @@ def handle_bots_sub_dispatch(handler: Any, parsed_url: Any, hub: PcCliHub) -> No
             except Exception as e:
                 _send_json(handler, 400, {"error": f"无效 JSON: {e}"})
                 return
+            raw_reset = body.get("reset_session")
+            if raw_reset is not None and not isinstance(raw_reset, bool):
+                _send_json(handler, 400, {"success": False, "error": "reset_session 必须为布尔值"})
+                return
             ok, res = hub.update_bot(
                 bot_id,
                 name=body.get("name"),
@@ -120,7 +124,7 @@ def handle_bots_sub_dispatch(handler: Any, parsed_url: Any, hub: PcCliHub) -> No
                 reasoning_effort=body.get("reasoning_effort"),
                 model=body.get("model"),
                 archived=body.get("archived"),
-                reset_session=bool(body.get("reset_session")),
+                reset_session=raw_reset is True,
             )
             _send_json(handler, 200 if ok else 400, {"success": ok, **res})
         elif method == "DELETE":

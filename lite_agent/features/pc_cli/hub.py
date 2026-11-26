@@ -188,35 +188,37 @@ class PcCliHub:
     def _reconcile_node_active_turns(self, node_id: str, reported_active_turns: List[Any]) -> None:
         """Daemon 重连上线时对账活跃回合：若守护进程已重启，自动收尾孤儿 running 回合，避免 Bot 永久卡死。"""
         reported_ids = {str(t) for t in reported_active_turns if t}
-        reconciled = 0
+        reconciled_events: List[Tuple[str, Dict[str, Any]]] = []
         err_msg = "守护进程已重启，原回合已中断"
-        for bot in self.repo.list_bots(include_archived=True):
-            if bot.get("node_id") != node_id:
-                continue
-            bot_id = bot["bot_id"]
-            active = self.repo.get_active_turn_for_bot(bot_id)
-            if not active:
-                continue
-            turn_id = active["turn_id"]
-            if turn_id in reported_ids:
-                continue
-            self.repo.finish_turn(turn_id, status=TurnStatus.FAILED.value, error_message=err_msg)
-            self.repo.expire_pending_approvals(bot_id=bot_id)
-            ev = self.repo.append_event(
-                bot_id=bot_id,
-                turn_id=turn_id,
-                event_type=EventType.TURN_STATUS.value,
-                payload={
-                    "status": TurnStatus.FAILED.value,
-                    "error": err_msg,
-                    "native_session_id": bot.get("native_session_id"),
-                },
-            )
-            self.repo.set_bot_status(bot_id, BotStatus.ERROR.value, last_summary=err_msg)
+        with self._lock:
+            for bot in self.repo.list_bots(include_archived=True):
+                if bot.get("node_id") != node_id:
+                    continue
+                bot_id = bot["bot_id"]
+                active = self.repo.get_active_turn_for_bot(bot_id)
+                if not active:
+                    continue
+                turn_id = active["turn_id"]
+                if turn_id in reported_ids:
+                    continue
+                self.repo.finish_turn(turn_id, status=TurnStatus.FAILED.value, error_message=err_msg)
+                self.repo.expire_pending_approvals(bot_id=bot_id)
+                ev = self.repo.append_event(
+                    bot_id=bot_id,
+                    turn_id=turn_id,
+                    event_type=EventType.TURN_STATUS.value,
+                    payload={
+                        "status": TurnStatus.FAILED.value,
+                        "error": err_msg,
+                        "native_session_id": bot.get("native_session_id"),
+                    },
+                )
+                self.repo.set_bot_status(bot_id, BotStatus.ERROR.value, last_summary=err_msg)
+                reconciled_events.append((bot_id, ev))
+                logger.warning(f"节点 {node_id} 重连对账：已自动收尾孤儿回合 bot={bot_id} turn={turn_id}")
+        for bot_id, ev in reconciled_events:
             self._broadcast_clients({"type": "bot.event", "bot_id": bot_id, "event": ev}, bot_id_filter=bot_id)
-            reconciled += 1
-            logger.warning(f"节点 {node_id} 重连对账：已自动收尾孤儿回合 bot={bot_id} turn={turn_id}")
-        if reconciled:
+        if reconciled_events:
             self._broadcast_clients({"type": "bots.updated", "bots": self.repo.list_bots()})
 
     def handle_daemon_disconnect(self, node_id: str, conn_id: str) -> None:
@@ -417,29 +419,29 @@ class PcCliHub:
         status = str(payload.get("status") or TurnStatus.COMPLETED.value)
         native_session_id = payload.get("native_session_id")
         error_msg = payload.get("error")
-        owned = self._validate_daemon_turn_ownership(
-            sender_node_id=sender_node_id,
-            conn_id=conn_id,
-            bot_id=bot_id,
-            turn_id=turn_id,
-        )
-        if not owned:
-            return
-        bot, _turn = owned
-
-        self.repo.finish_turn(turn_id, status=status, error_message=error_msg)
-        self.repo.expire_pending_approvals(turn_id=turn_id)
-        bot_status = BotStatus.ERROR.value if status == TurnStatus.FAILED.value else BotStatus.IDLE.value
-        summary = (
-            f"失败: {error_msg}" if status == TurnStatus.FAILED.value and error_msg
-            else ("已中止" if status == TurnStatus.CANCELLED.value else None)
-        )
-        self.repo.set_bot_status(
-            bot_id,
-            bot_status,
-            last_summary=summary,
-            native_session_id=str(native_session_id) if native_session_id else None,
-        )
+        with self._lock:
+            owned = self._validate_daemon_turn_ownership(
+                sender_node_id=sender_node_id,
+                conn_id=conn_id,
+                bot_id=bot_id,
+                turn_id=turn_id,
+            )
+            if not owned:
+                return
+            bot, _turn = owned
+            self.repo.finish_turn(turn_id, status=status, error_message=error_msg)
+            self.repo.expire_pending_approvals(turn_id=turn_id)
+            bot_status = BotStatus.ERROR.value if status == TurnStatus.FAILED.value else BotStatus.IDLE.value
+            summary = (
+                f"失败: {error_msg}" if status == TurnStatus.FAILED.value and error_msg
+                else ("已中止" if status == TurnStatus.CANCELLED.value else None)
+            )
+            self.repo.set_bot_status(
+                bot_id,
+                bot_status,
+                last_summary=summary,
+                native_session_id=str(native_session_id) if native_session_id else None,
+            )
         ev = self.repo.append_event(
             bot_id=bot_id,
             turn_id=turn_id,
@@ -565,13 +567,14 @@ class PcCliHub:
             if not is_valid_model_name(clean_model):
                 return False, {"error": f"无效的模型名: {clean_model}"}
             kwargs["model"] = clean_model
-        if kwargs.get("reset_session"):
-            active = self.repo.get_active_turn_for_bot(bot_id)
-            if active:
-                return False, {"error": "当前回合运行中，请待结束或中止后再开启新会话"}
-        bot = self.repo.update_bot(bot_id, **kwargs)
-        if not bot:
-            return False, {"error": f"Bot '{bot_id}' 不存在"}
+        with self._lock:
+            if kwargs.get("reset_session"):
+                active = self.repo.get_active_turn_for_bot(bot_id)
+                if active:
+                    return False, {"error": "当前回合运行中，请待结束或中止后再开启新会话"}
+            bot = self.repo.update_bot(bot_id, **kwargs)
+            if not bot:
+                return False, {"error": f"Bot '{bot_id}' 不存在"}
         self._emit_bot_summary(bot_id)
         return True, {"bot": bot}
 
