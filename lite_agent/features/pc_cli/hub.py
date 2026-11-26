@@ -19,12 +19,14 @@ from lite_agent.features.pc_cli.contracts import (
     BotStatus,
     EXECUTION_MODES,
     EventType,
+    MAX_SYSTEM_PROMPT_CHARS,
     NodeStatus,
     REASONING_EFFORTS,
     SUPPORTED_ENGINES,
     TurnStatus,
     VALID_DECISIONS,
     is_valid_model_name,
+    resolve_bot_system_prompt,
 )
 from lite_agent.features.pc_cli.repository import PcCliRepository
 
@@ -702,6 +704,8 @@ class PcCliHub:
         execution_mode: str = "agent",
         reasoning_effort: str = "",
         model: Optional[str] = None,
+        system_prompt: str = "",
+        instruction_template: str = "",
     ) -> Tuple[bool, Dict[str, Any]]:
         name = (name or "").strip()
         node_id = (node_id or "").strip()
@@ -726,6 +730,9 @@ class PcCliHub:
         clean_model = (model or "").strip() or None
         if not is_valid_model_name(clean_model):
             return False, {"error": f"无效的模型名 '{clean_model}'，仅允许字母、数字及 . _ : / -"}
+        sp_ok, resolved_sp, sp_err = resolve_bot_system_prompt(system_prompt, instruction_template)
+        if not sp_ok:
+            return False, {"error": sp_err}
 
         node = self.repo.get_node(node_id)
         if not node:
@@ -745,6 +752,7 @@ class PcCliHub:
             execution_mode=execution_mode,
             reasoning_effort=reasoning_effort,
             model=clean_model,
+            system_prompt=resolved_sp,
         )
         self._emit_bot_summary(bot["bot_id"])
         return True, {"bot": bot}
@@ -771,6 +779,12 @@ class PcCliHub:
             if not is_valid_model_name(clean_model):
                 return False, {"error": f"无效的模型名: {clean_model}"}
             kwargs["model"] = clean_model
+        raw_tpl = kwargs.pop("instruction_template", None)
+        if raw_tpl is not None or kwargs.get("system_prompt") is not None:
+            sp_ok, resolved_sp, sp_err = resolve_bot_system_prompt(kwargs.get("system_prompt"), raw_tpl)
+            if not sp_ok:
+                return False, {"error": sp_err}
+            kwargs["system_prompt"] = resolved_sp
         with self._lock:
             if kwargs.get("reset_session"):
                 active = self.repo.get_active_turn_for_bot(bot_id)
@@ -866,6 +880,7 @@ class PcCliHub:
             "execution_mode": bot.get("execution_mode") or "agent",
             "reasoning_effort": bot.get("reasoning_effort") or "",
             "model": bot.get("model"),
+            "system_prompt": bot.get("system_prompt") or "",
         }
         if two_phase:
             start_msg["require_commit"] = True

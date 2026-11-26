@@ -116,6 +116,15 @@ MANAGER_TOOLS_SCHEMA: List[Dict[str, Any]] = [
                     "execution_mode": {"type": "string", "enum": ["agent", "plan", "chat"], "description": "工作模式：agent(读写执行)/plan(规划，Codex 只读沙箱、AGY 拒绝提权)/chat(问答，Codex 只读沙箱、AGY 拒绝提权)，默认 agent"},
                     "reasoning_effort": {"type": "string", "enum": ["", "low", "medium", "high", "xhigh"], "description": "可选思考深度，留空跟随 CLI 默认"},
                     "model": {"type": "string", "description": "可选 CLI 模型覆盖"},
+                    "instruction_template": {
+                        "type": "string",
+                        "enum": ["", "general_dev", "readonly_audit", "bill_analyst", "ops_debugger", "rss_meili_digest"],
+                        "description": "可选内置角色约束模板（通用开发规范/只读巡检/账单查询/安全运维排障/RSS与聚合情报专家），留空不套用",
+                    },
+                    "system_prompt": {
+                        "type": "string",
+                        "description": "可选 Bot 专属角色定义、上下文说明与约束规则（Markdown 文本，会话首轮自动注入，与目录自带 AGENTS.md 互补）",
+                    },
                 },
                 "required": ["name", "node_id", "engine", "cwd"],
             },
@@ -302,6 +311,8 @@ class PcCliManager:
                 execution_mode=str(args.get("execution_mode") or "agent"),
                 reasoning_effort=str(args.get("reasoning_effort") or ""),
                 model=args.get("model"),
+                system_prompt=str(args.get("system_prompt") or ""),
+                instruction_template=str(args.get("instruction_template") or ""),
             )
             return {"ok": ok, **res}
 

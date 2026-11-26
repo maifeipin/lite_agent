@@ -134,13 +134,17 @@
                 const r = await fetch('/agent/api/v1/auth', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, password }),
+                    body: JSON.stringify({ username, password, device_name: 'web-dashboard' }),
                 });
                 const d = await r.json();
                 if (d.success && d.review_token && d.scope === 'review-meetings:host') {
                     sessionStorage.setItem('review_token', d.review_token);
                     sessionStorage.setItem('review_token_expires_at', String(d.review_token_expires_at));
                     sessionStorage.setItem('dashboard_auth', 'ok');
+                    if (d.session_token) {
+                        sessionStorage.setItem('user_session_token', d.session_token);
+                        sessionStorage.setItem('pc_cli_token_source', 'session');
+                    }
                     window.location.href = '/';
                 } else {
                     errEl.textContent = d.error || '账号或密码错误';

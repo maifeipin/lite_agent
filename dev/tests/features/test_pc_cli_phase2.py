@@ -1649,3 +1649,112 @@ def test_stale_conn_turn_finished_after_reconnect_reconcile_and_reset_cannot_res
         assert not res_p2["error"].endswith("请重试")
     finally:
         hub.close()
+
+
+def test_bot_system_prompt_templates_and_first_turn_injection():
+    """验证 Bot 角色/约束指令模板合并、持久化、长度校验、turn.start 透传及首轮注入/续聊不重复注入。"""
+    from lite_agent.features.pc_cli.contracts import MAX_SYSTEM_PROMPT_CHARS
+    from lite_agent.features.pc_cli.daemon.adapters.base import apply_bot_system_prompt
+
+    repo = PcCliRepository(":memory:")
+    hub = PcCliHub(repo=repo)
+    try:
+        wire: list[dict] = []
+        hub.handle_daemon_hello(
+            "c1",
+            lambda msg: wire.append(msg),
+            {"node_id": "mac1", "engines": ["codex"], "workspace_roots": ["/w"]},
+        )
+        # 非法模板拒绝
+        ok_bad, res_bad = hub.create_bot(
+            name="bad-tpl", node_id="mac1", engine="codex", cwd="/w", instruction_template="no_such_tpl"
+        )
+        assert ok_bad is False and "不支持的指令模板" in res_bad["error"]
+
+        # 超长 system_prompt 拒绝
+        ok_long, res_long = hub.create_bot(
+            name="too-long", node_id="mac1", engine="codex", cwd="/w", system_prompt="x" * (MAX_SYSTEM_PROMPT_CHARS + 1)
+        )
+        assert ok_long is False and str(MAX_SYSTEM_PROMPT_CHARS) in res_long["error"]
+
+        # 模板 + 专属约束合并持久化并透传至 turn.start
+        ok_b, res_b = hub.create_bot(
+            name="auditor",
+            node_id="mac1",
+            engine="codex",
+            cwd="/w",
+            instruction_template="readonly_audit",
+            system_prompt="## 上下文说明\n仅排查 vps1 只读日志。",
+        )
+        assert ok_b is True
+        bot = res_b["bot"]
+        assert "只读巡检与分析专家" in bot["system_prompt"]
+        assert "仅排查 vps1 只读日志" in bot["system_prompt"]
+
+        ok_t, _ = hub.start_turn(bot["bot_id"], "检查健康状态")
+        assert ok_t is True
+        assert wire[-1]["type"] == "turn.start"
+        assert "仅排查 vps1 只读日志" in wire[-1]["system_prompt"]
+
+        # 首轮注入 <bot_instructions>，续聊带 native_session_id 时不重复注入
+        first = apply_bot_system_prompt("检查健康状态", bot["system_prompt"], native_session_id=None)
+        assert first.startswith("<bot_instructions>\n") and first.endswith("\n\n检查健康状态")
+        second = apply_bot_system_prompt("继续查第二项", bot["system_prompt"], native_session_id="sess_123")
+        assert second == "继续查第二项"
+
+        # 验证 RSS 与 Meilisearch 聚合情报模板可用
+        ok_rss, res_rss = hub.create_bot(
+            name="rss-digest",
+            node_id="mac1",
+            engine="codex",
+            cwd="/w",
+            instruction_template="rss_meili_digest",
+        )
+        assert ok_rss is True
+        assert "scripts/rss_topic" in res_rss["bot"]["system_prompt"]
+        assert "Meilisearch" in res_rss["bot"]["system_prompt"]
+
+        # P2 回归：PATCH /api/v1/pc-cli/bots/<id> 仅传 instruction_template 时必须解析并持久化更新
+        import io
+        from urllib.parse import urlparse
+        from lite_agent.features.pc_cli.routes import handle_bots_sub_dispatch
+
+        def _patch_bot(bid: str, body: dict):
+            raw = json.dumps(body).encode("utf-8")
+
+            class _H:
+                command = "PATCH"
+                headers = {"Content-Length": str(len(raw))}
+                rfile = io.BytesIO(raw)
+                wfile = io.BytesIO()
+                status_code = None
+
+                def send_response(self, code):
+                    self.status_code = code
+
+                def send_header(self, k, v):
+                    pass
+
+                def end_headers(self):
+                    pass
+
+            h = _H()
+            handle_bots_sub_dispatch(h, urlparse(f"/api/v1/pc-cli/bots/{bid}"), hub)
+            return h.status_code, json.loads(h.wfile.getvalue().decode("utf-8"))
+
+        ok_plain, res_plain = hub.create_bot(name="plain-bot", node_id="mac1", engine="codex", cwd="/w")
+        assert ok_plain is True
+        plain_id = res_plain["bot"]["bot_id"]
+        assert repo.get_bot(plain_id)["system_prompt"] == ""
+
+        sc_ok, p_ok = _patch_bot(plain_id, {"instruction_template": "rss_meili_digest"})
+        assert sc_ok == 200 and p_ok["success"] is True
+        reloaded = repo.get_bot(plain_id)
+        assert "scripts/rss_topic" in reloaded["system_prompt"]
+        assert "Meilisearch" in reloaded["system_prompt"]
+
+        sc_bad, p_bad = _patch_bot(plain_id, {"instruction_template": "nonexistent_tpl"})
+        assert sc_bad == 400 and p_bad["success"] is False
+        assert "scripts/rss_topic" in repo.get_bot(plain_id)["system_prompt"]
+    finally:
+        hub.close()

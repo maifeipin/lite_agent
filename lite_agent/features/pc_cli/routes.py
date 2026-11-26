@@ -84,6 +84,8 @@ def handle_post_bots(handler: Any, parsed_url: Any, hub: PcCliHub) -> None:
         execution_mode=str(body.get("execution_mode") or "agent"),
         reasoning_effort=str(body.get("reasoning_effort") or ""),
         model=body.get("model"),
+        system_prompt=str(body.get("system_prompt") or ""),
+        instruction_template=str(body.get("instruction_template") or ""),
     )
     _send_json(handler, 201 if ok else 400, {"success": ok, **res})
 
@@ -116,6 +118,14 @@ def handle_bots_sub_dispatch(handler: Any, parsed_url: Any, hub: PcCliHub) -> No
             if raw_reset is not None and not isinstance(raw_reset, bool):
                 _send_json(handler, 400, {"success": False, "error": "reset_session 必须为布尔值"})
                 return
+            raw_sp = body.get("system_prompt")
+            if raw_sp is not None and not isinstance(raw_sp, str):
+                _send_json(handler, 400, {"success": False, "error": "system_prompt 必须为字符串"})
+                return
+            raw_tpl = body.get("instruction_template")
+            if raw_tpl is not None and not isinstance(raw_tpl, str):
+                _send_json(handler, 400, {"success": False, "error": "instruction_template 必须为字符串"})
+                return
             ok, res = hub.update_bot(
                 bot_id,
                 name=body.get("name"),
@@ -123,6 +133,8 @@ def handle_bots_sub_dispatch(handler: Any, parsed_url: Any, hub: PcCliHub) -> No
                 execution_mode=body.get("execution_mode"),
                 reasoning_effort=body.get("reasoning_effort"),
                 model=body.get("model"),
+                system_prompt=raw_sp,
+                instruction_template=raw_tpl,
                 archived=body.get("archived"),
                 reset_session=raw_reset is True,
             )

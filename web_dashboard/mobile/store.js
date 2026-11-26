@@ -4,7 +4,21 @@
 import { reactive } from './vendor/vue.esm-browser.prod.js';
 
 const TOKEN_STORAGE_KEY = 'pc_cli_client_token';
+const USER_SESSION_TOKEN_KEY = 'user_session_token';
+const TOKEN_SOURCE_KEY = 'pc_cli_token_source';
 const API_BASE = '/agent/api/v1/pc-cli';
+
+function readInitialToken() {
+  try {
+    const source = sessionStorage.getItem(TOKEN_SOURCE_KEY);
+    if (source === 'manual') {
+      return localStorage.getItem(TOKEN_STORAGE_KEY) || '';
+    }
+    const sess = sessionStorage.getItem(USER_SESSION_TOKEN_KEY);
+    if (sess && sess.trim()) return sess.trim();
+  } catch (_) {}
+  return localStorage.getItem(TOKEN_STORAGE_KEY) || '';
+}
 
 const STATUS_WEIGHT = {
   waiting_approval: 0,
@@ -14,7 +28,7 @@ const STATUS_WEIGHT = {
 };
 
 export const store = reactive({
-  token: localStorage.getItem(TOKEN_STORAGE_KEY) || '',
+  token: readInitialToken(),
   wsState: 'disconnected', // disconnected | connecting | connected | auth_required
   nodes: [],
   bots: [],
@@ -50,10 +64,28 @@ export function showToast(msg, durationMs = 2600) {
   }, durationMs);
 }
 
-export function saveToken(tok) {
-  store.token = (tok || '').trim();
-  if (store.token) {
-    localStorage.setItem(TOKEN_STORAGE_KEY, store.token);
+export function saveToken(tok, options = {}) {
+  const clean = (tok || '').trim();
+  const source = options && options.source === 'session' ? 'session' : 'manual';
+  store.token = clean;
+  if (source === 'session') {
+    try {
+      if (clean) {
+        sessionStorage.setItem(USER_SESSION_TOKEN_KEY, clean);
+        sessionStorage.setItem(TOKEN_SOURCE_KEY, 'session');
+      } else {
+        sessionStorage.removeItem(USER_SESSION_TOKEN_KEY);
+        sessionStorage.removeItem(TOKEN_SOURCE_KEY);
+      }
+    } catch (_) {}
+    return;
+  }
+  // 手动「Token 直连」或原生注入：仅切换当前连接来源为 manual，保留 user_session_token 供主页退出时撤销
+  try {
+    sessionStorage.setItem(TOKEN_SOURCE_KEY, 'manual');
+  } catch (_) {}
+  if (clean) {
+    localStorage.setItem(TOKEN_STORAGE_KEY, clean);
   } else {
     localStorage.removeItem(TOKEN_STORAGE_KEY);
   }

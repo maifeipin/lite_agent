@@ -15,7 +15,7 @@ from typing import Any, Dict, Optional
 
 from ._ws_client import StdlibWsClient
 from .adapters.agy_adapter import AgyCliAdapter
-from .adapters.base import BaseCliAdapter
+from .adapters.base import BaseCliAdapter, apply_bot_system_prompt
 from .adapters.codex_adapter import CodexCliAdapter
 from .config import DaemonConfig
 from .env_probe import (
@@ -288,6 +288,12 @@ class PcCliDaemon:
         execution_mode = str(msg.get("execution_mode") or "agent")
         reasoning_effort = str(msg.get("reasoning_effort") or "")
         model = msg.get("model")
+        system_prompt = str(msg.get("system_prompt") or "")
+        effective_prompt = apply_bot_system_prompt(
+            prompt,
+            system_prompt,
+            native_session_id=str(native_session_id) if native_session_id else None,
+        )
 
         try:
             # 两阶段授权：在收到 Hub 显式 turn.commit 前严禁抢锁或启动底层 CLI（即便事件循环已多次切换）
@@ -381,7 +387,7 @@ class PcCliDaemon:
                         bot_id=bot_id,
                         turn_id=turn_id,
                         cwd=cwd,
-                        prompt=prompt,
+                        prompt=effective_prompt,
                         native_session_id=str(native_session_id) if native_session_id else None,
                         approval_mode=approval_mode,
                         model=str(model) if model else None,

@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS cli_bots (
     execution_mode TEXT NOT NULL DEFAULT 'agent',
     reasoning_effort TEXT NOT NULL DEFAULT '',
     model TEXT,
+    system_prompt TEXT NOT NULL DEFAULT '',
     native_session_id TEXT,
     status TEXT NOT NULL DEFAULT 'idle',
     last_summary TEXT NOT NULL DEFAULT '',
@@ -124,6 +125,7 @@ class PcCliRepository:
             self._ensure_column("pc_nodes", "engine_models_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column("cli_bots", "execution_mode", "TEXT NOT NULL DEFAULT 'agent'")
             self._ensure_column("cli_bots", "reasoning_effort", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("cli_bots", "system_prompt", "TEXT NOT NULL DEFAULT ''")
             # 兼容旧库迁移：先将同一 Bot 多余的历史活跃回合收敛为 failed，再建部分唯一索引
             self._conn.execute(
                 """
@@ -267,6 +269,7 @@ class PcCliRepository:
         execution_mode: str = "agent",
         reasoning_effort: str = "",
         model: Optional[str] = None,
+        system_prompt: str = "",
         bot_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         bid = bot_id or f"bot_{uuid.uuid4().hex[:12]}"
@@ -276,13 +279,14 @@ class PcCliRepository:
                 """
                 INSERT INTO cli_bots (
                     bot_id, name, node_id, engine, cwd, approval_mode, execution_mode, reasoning_effort, model,
-                    native_session_id, status, last_summary, archived, created_at, updated_at
+                    system_prompt, native_session_id, status, last_summary, archived, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '', 0, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '', 0, ?, ?)
                 """,
                 (
                     bid, name, node_id, engine, cwd, approval_mode,
                     execution_mode or "agent", reasoning_effort or "", model,
+                    system_prompt or "",
                     BotStatus.IDLE.value, ts, ts,
                 ),
             )
@@ -300,6 +304,7 @@ class PcCliRepository:
             "execution_mode": row["execution_mode"] or "agent",
             "reasoning_effort": row["reasoning_effort"] or "",
             "model": row["model"],
+            "system_prompt": row["system_prompt"] or "",
             "native_session_id": row["native_session_id"],
             "status": row["status"],
             "last_summary": row["last_summary"],
@@ -345,6 +350,7 @@ class PcCliRepository:
         execution_mode: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
         model: Optional[str] = None,
+        system_prompt: Optional[str] = None,
         archived: Optional[bool] = None,
         reset_session: bool = False,
     ) -> Optional[Dict[str, Any]]:
@@ -365,6 +371,9 @@ class PcCliRepository:
         if model is not None:
             fields.append("model = ?")
             values.append(model or None)
+        if system_prompt is not None:
+            fields.append("system_prompt = ?")
+            values.append(system_prompt)
         if archived is not None:
             fields.append("archived = ?")
             values.append(1 if archived else 0)

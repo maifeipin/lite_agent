@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#0a0b10">
   <title>PC Bots | Lite Agent</title>
   <link rel="manifest" href="./manifest.json?v=1">
-  <link rel="stylesheet" href="./style.css?v=9">
+  <link rel="stylesheet" href="./style.css?v=10">
   <script src="./vendor/marked.min.js?v=1"></script>
 </head>
 <body>
@@ -137,6 +137,7 @@
                   思考:{{ reasoningEffortLabel(activeBot.reasoning_effort) }}
                 </button>
                 <span v-if="activeBot.model" class="tag">{{ activeBot.model }}</span>
+                <span v-if="activeBot.system_prompt" class="tag" :title="activeBot.system_prompt">📋 角色指令</span>
                 <button
                   v-if="activeBot.status === 'running' || activeBot.status === 'waiting_approval'"
                   class="btn btn-danger"
@@ -721,115 +722,172 @@
     </div>
     </template>
 
-    <!-- 视图 2：新建 Bot 抽屉 -->
+    <!-- 视图 2：新建 Bot 抽屉（桌面宽屏双列紧凑 + 固定底栏，手机端同套自适应） -->
     <div class="modal-backdrop" v-if="showCreateDrawer" @click.self="showCreateDrawer = false">
-      <div class="drawer">
+      <div class="drawer drawer-create">
         <div class="drawer-head">
           <h3>新建 PC CLI Bot</h3>
           <button class="btn btn-icon" @click="showCreateDrawer = false">✕</button>
         </div>
 
-        <div class="field">
-          <label>目标在线 PC 节点</label>
-          <select v-model="form.node_id" @change="onNodeChange">
-            <option value="" disabled>请选择在线 PC</option>
-            <option v-for="n in onlineNodes" :key="n.node_id" :value="n.node_id">
-              {{ n.display_name || n.node_id }} ({{ n.platform }})
-            </option>
-          </select>
-        </div>
-
-        <div class="field">
-          <label>CLI 引擎</label>
-          <select v-model="form.engine" @change="onEngineChange">
-            <option v-for="eng in selectedNodeEngines" :key="eng" :value="eng">{{ eng }}</option>
-          </select>
-        </div>
-
-        <div class="field">
-          <label>工作目录（可点选下方白名单目录或手动输入）</label>
-          <input v-model="form.cwd" placeholder="例如 /Users/dev/project 或 C:\Projects\app" />
-          <div class="dir-box" v-if="dirEntries.length || dirLoading">
-            <div class="dir-item" v-if="dirLoading" style="color:var(--muted)">正在读取 PC 目录...</div>
-            <div class="dir-item" v-for="d in dirEntries" :key="d.path" @click="onPickDir(d)">
-              <span>📁 {{ d.name }}</span>
-              <span style="color:var(--muted);font-size:11px;">进入</span>
+        <div class="drawer-body">
+          <div class="field-row">
+            <div class="field">
+              <label>目标在线 PC 节点</label>
+              <select v-model="form.node_id" @change="onNodeChange">
+                <option value="" disabled>请选择在线 PC</option>
+                <option v-for="n in onlineNodes" :key="n.node_id" :value="n.node_id">
+                  {{ n.display_name || n.node_id }} ({{ n.platform }})
+                </option>
+              </select>
+            </div>
+            <div class="field">
+              <label>CLI 引擎</label>
+              <select v-model="form.engine" @change="onEngineChange">
+                <option v-for="eng in selectedNodeEngines" :key="eng" :value="eng">{{ eng }}</option>
+              </select>
             </div>
           </div>
-        </div>
 
-        <div class="field">
-          <label>Bot 名称（留空默认取目录名）</label>
-          <input v-model="form.name" placeholder="例如 lite_agent-codex" />
-        </div>
-
-        <div class="field">
-          <label>权限模式</label>
-          <select v-model="form.approval_mode">
-            <option value="auto">自动执行 (auto)</option>
-            <option value="ask">危险操作需审批 (ask)</option>
-          </select>
-        </div>
-
-        <div class="field-row">
           <div class="field">
-            <label>工作模式</label>
-            <select v-model="form.execution_mode">
-              <option value="agent">Agent (读写执行)</option>
-              <option value="plan">{{ form.engine === 'codex' ? 'Plan (只读规划)' : 'Plan (规划 · 拒绝提权)' }}</option>
-              <option value="chat">{{ form.engine === 'codex' ? 'Chat (只读问答)' : 'Chat (问答 · 拒绝提权)' }}</option>
-            </select>
+            <label>工作目录（可点选下方白名单目录或手动输入）</label>
+            <input v-model="form.cwd" placeholder="例如 /Users/dev/project 或 C:\Projects\app" />
+            <div class="dir-box" v-if="dirEntries.length || dirLoading">
+              <div class="dir-item" v-if="dirLoading" style="color:var(--muted)">正在读取 PC 目录...</div>
+              <div class="dir-item" v-for="d in dirEntries" :key="d.path" @click="onPickDir(d)">
+                <span>📁 {{ d.name }}</span>
+                <span style="color:var(--muted);font-size:11px;">进入</span>
+              </div>
+            </div>
           </div>
-          <div class="field">
-            <label>思考深度</label>
-            <select v-model="form.reasoning_effort">
-              <option value="">CLI 默认</option>
-              <option v-for="lv in availableReasoningEfforts" :key="lv" :value="lv">
-                {{ reasoningEffortOptionLabel(lv) }}
-              </option>
-            </select>
+
+          <div class="field-row">
+            <div class="field">
+              <label>Bot 名称（留空默认取目录名）</label>
+              <input v-model="form.name" placeholder="例如 lite_agent-codex" />
+            </div>
+            <div class="field">
+              <label>权限模式</label>
+              <select v-model="form.approval_mode">
+                <option value="auto">自动执行 (auto)</option>
+                <option value="ask">危险操作需审批 (ask)</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="field-row-3">
+            <div class="field">
+              <label>工作模式</label>
+              <select v-model="form.execution_mode">
+                <option value="agent">Agent (读写执行)</option>
+                <option value="plan">{{ form.engine === 'codex' ? 'Plan (只读规划)' : 'Plan (规划 · 拒绝提权)' }}</option>
+                <option value="chat">{{ form.engine === 'codex' ? 'Chat (只读问答)' : 'Chat (问答 · 拒绝提权)' }}</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>思考深度</label>
+              <select v-model="form.reasoning_effort">
+                <option value="">CLI 默认</option>
+                <option v-for="lv in availableReasoningEfforts" :key="lv" :value="lv">
+                  {{ reasoningEffortOptionLabel(lv) }}
+                </option>
+              </select>
+            </div>
+            <div class="field">
+              <label>模型选择</label>
+              <select v-model="form.model_select" @change="onModelSelectChange">
+                <option value="">跟随 PC 默认</option>
+                <option v-for="m in selectedEngineModels" :key="m.id" :value="m.id">
+                  {{ m.name }}{{ m.is_default ? ' (默认)' : '' }}
+                </option>
+                <option value="__custom__">自定义模型名...</option>
+              </select>
+              <input
+                v-if="form.model_select === '__custom__'"
+                v-model="form.model"
+                placeholder="仅限字母数字及 . _ : / -"
+                style="margin-top:6px;"
+              />
+            </div>
+          </div>
+
+          <div class="field" style="margin-bottom:0;">
+            <label>角色与专属指令（可选 · 会话首轮自动注入，工作目录自带 AGENTS.md 也会自动生效）</label>
+            <div class="template-chips">
+              <button
+                type="button"
+                class="template-chip"
+                v-for="tpl in instructionTemplates"
+                :key="tpl.key"
+                @click="applyInstructionTemplate(tpl.key)"
+              >
+                + {{ tpl.label }}
+              </button>
+              <button
+                v-if="form.system_prompt"
+                type="button"
+                class="template-chip ghost"
+                @click="form.system_prompt = ''"
+              >
+                清空
+              </button>
+            </div>
+            <textarea
+              v-model="form.system_prompt"
+              rows="4"
+              placeholder="可点上方模板一键填入，或自由编写角色定位、专属上下文说明与约束规则（Markdown）..."
+            ></textarea>
           </div>
         </div>
 
-        <div class="field">
-          <label>模型选择（自动读取 PC 已发现模型，或手动覆盖）</label>
-          <select v-model="form.model_select" @change="onModelSelectChange">
-            <option value="">跟随 PC 默认</option>
-            <option v-for="m in selectedEngineModels" :key="m.id" :value="m.id">
-              {{ m.name }}{{ m.is_default ? ' (默认)' : '' }}
-            </option>
-            <option value="__custom__">自定义模型名...</option>
-          </select>
-          <input
-            v-if="form.model_select === '__custom__'"
-            v-model="form.model"
-            placeholder="仅限字母数字及 . _ : / -"
-            style="margin-top:6px;"
-          />
+        <div class="drawer-foot">
+          <button class="btn btn-primary" style="width:100%;padding:11px;" :disabled="creating || !onlineNodes.length" @click="handleCreateBot">
+            {{ creating ? '创建中...' : '立即创建并进入' }}
+          </button>
         </div>
-
-        <button class="btn btn-primary" style="width:100%;padding:11px;" :disabled="creating || !onlineNodes.length" @click="handleCreateBot">
-          {{ creating ? '创建中...' : '立即创建并进入' }}
-        </button>
       </div>
     </div>
 
-    <!-- Token 配置弹窗 -->
+    <!-- 连接鉴权弹窗（支持账号密码换取 session_token，或直接填写 API Token） -->
     <div class="modal-backdrop" v-if="showTokenModal" @click.self="showTokenModal = false">
       <div class="drawer">
         <div class="drawer-head">
-          <h3>连接鉴权 Token</h3>
+          <h3>连接鉴权</h3>
           <button class="btn btn-icon" @click="showTokenModal = false">✕</button>
         </div>
-        <div class="field">
-          <label>API / WebSocket 访问 Token（保存在本机 localStorage）</label>
-          <input v-model="tokenInput" type="password" placeholder="输入 Lite Agent API Token" />
+        <div class="drawer-body">
+          <div class="desktop-seg-tabs" style="padding:0 0 12px;grid-template-columns:1fr 1fr;">
+            <button type="button" class="desktop-seg-btn" :class="{ active: authMode === 'password' }" @click="authMode = 'password'">账号密码登录</button>
+            <button type="button" class="desktop-seg-btn" :class="{ active: authMode === 'token' }" @click="authMode = 'token'">Token 直连</button>
+          </div>
+
+          <template v-if="authMode === 'password'">
+            <div class="field">
+              <label>账号</label>
+              <input v-model="loginUsername" type="text" autocomplete="username" placeholder="输入 Lite Agent 登录账号" @keydown.enter.prevent="handlePasswordLogin" />
+            </div>
+            <div class="field">
+              <label>密码</label>
+              <input v-model="loginPassword" type="password" autocomplete="current-password" placeholder="输入登录密码" @keydown.enter.prevent="handlePasswordLogin" />
+            </div>
+            <div v-if="loginError" style="color:var(--danger);font-size:12px;margin-bottom:10px;">{{ loginError }}</div>
+            <button class="btn btn-primary" style="width:100%;padding:11px;" :disabled="loggingIn || !loginUsername.trim() || !loginPassword.trim()" @click="handlePasswordLogin">
+              {{ loggingIn ? '验证登录中...' : '登录并连接' }}
+            </button>
+          </template>
+
+          <template v-else>
+            <div class="field">
+              <label>API / WebSocket 访问 Token（保存在本机 localStorage）</label>
+              <input v-model="tokenInput" type="password" placeholder="输入 Lite Agent API Token" @keydown.enter.prevent="handleSaveToken" />
+            </div>
+            <button class="btn btn-primary" style="width:100%;padding:11px;" @click="handleSaveToken">保存并连接</button>
+          </template>
         </div>
-        <button class="btn btn-primary" style="width:100%;padding:11px;" @click="handleSaveToken">保存并连接</button>
       </div>
     </div>
   </div>
 
-  <script type="module" src="./app.js?v=11"></script>
+  <script type="module" src="./app.js?v=14"></script>
 </body>
 </html>

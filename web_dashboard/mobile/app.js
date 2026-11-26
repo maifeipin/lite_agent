@@ -22,7 +22,7 @@ import {
   submitApproval,
   subscribeBotOnWs,
   updateBot,
-} from './store.js?v=5';
+} from './store.js?v=7';
 
 function escapeHtml(raw) {
   return String(raw || '')
@@ -190,7 +190,12 @@ const app = createApp({
   setup() {
     const showCreateDrawer = ref(false);
     const showTokenModal = ref(false);
-    const tokenInput = ref(store.token);
+    const authMode = ref('password'); // password | token
+    const loginUsername = ref('');
+    const loginPassword = ref('');
+    const loginError = ref('');
+    const loggingIn = ref(false);
+    const tokenInput = ref(localStorage.getItem('pc_cli_client_token') || '');
     const promptInput = ref('');
     const sending = ref(false);
     const updatingApprovalMode = ref(false);
@@ -220,6 +225,45 @@ const app = createApp({
     let activeVoiceReqId = '';
     let activeVoiceBotId = '';
 
+    const instructionTemplates = [
+      {
+        key: 'general_dev',
+        label: '通用开发规范',
+        content: '## 角色定位\n你是项目开发工程师，负责代码排查、修改与验证。\n\n## 约束规则\n- 严禁硬编码密码、Token、API Key 或私密配置。\n- 修改前先阅读相关上下文与现有规范（自动遵循工作目录中的 AGENTS.md）。\n- 改完代码后运行对应测试或语法校验，并简洁汇报改动与结果。',
+      },
+      {
+        key: 'readonly_audit',
+        label: '只读巡检专家',
+        content: '## 角色定位\n你是只读巡检与分析专家，仅负责核查状态、日志与数据。\n\n## 约束规则\n- 严格只读：禁止修改代码/配置、禁止写库、禁止重启或停止线上服务。\n- 结论先总后分，关键指标与异常项优先用 Markdown 表格和证据行呈现。',
+      },
+      {
+        key: 'bill_analyst',
+        label: '账单查询助手',
+        content: '## 角色定位\n你是个人财务与账单分析助手，负责查询账单、交易明细与解析健康度。\n\n## 约束规则\n- 仅以只读方式读取账单数据库与视图，严禁修改数据或回显邮箱密码/凭证配置。\n- 汇总金额、币种、异常告警时优先使用表格，并标明时间范围与口径。',
+      },
+      {
+        key: 'ops_debugger',
+        label: '安全运维排障',
+        content: '## 角色定位\n你是服务器与系统运维排障助手，负责定位故障根因并给出最小化修复方案。\n\n## 约束规则\n- 先查日志、进程、端口与配置确认根因，不做猜测性修改。\n- 涉及服务重启或线上变更前，先说明影响面与回滚方式。',
+      },
+      {
+        key: 'rss_meili_digest',
+        label: 'RSS与聚合情报专家',
+        content: '## 角色定位\n你是 RSS 热点阅读、Meilisearch 信息聚合与邮件/日程简报专家。\n\n## 上下文与数据源\n- 围绕 `scripts/rss_topic`（热点聚类、主题演进、去重与推送）及 Meilisearch 中的新闻、邮件、待办与日程索引开展检索与提炼。\n\n## 约束规则\n- 默认以只读方式检索和汇总，不随意修改索引数据或触发线上推送脚本；如需回写或重跑先征求确认。\n- 输出按「核心要点 / 热点主题 / 邮件与日程提醒」结构化呈现，优先使用 Markdown 表格与时间线，严禁输出密钥或邮箱密码。',
+      },
+    ];
+
+    function applyInstructionTemplate(key) {
+      const tpl = instructionTemplates.find((t) => t.key === key);
+      if (!tpl) return;
+      const cur = (form.value.system_prompt || '').trim();
+      if (!cur) {
+        form.value.system_prompt = tpl.content;
+      } else if (!cur.includes(tpl.content)) {
+        form.value.system_prompt = `${cur}\n\n${tpl.content}`;
+      }
+    }
+
     // 新建 Bot 表单
     const form = ref({
       node_id: '',
@@ -231,6 +275,7 @@ const app = createApp({
       model_select: '',
       model: '',
       name: '',
+      system_prompt: '',
     });
     const dirEntries = ref([]);
     const dirLoading = ref(false);
@@ -534,6 +579,7 @@ const app = createApp({
           execution_mode: form.value.execution_mode || 'agent',
           reasoning_effort: form.value.reasoning_effort || '',
           model: resolvedModel || null,
+          system_prompt: (form.value.system_prompt || '').trim(),
         });
         showCreateDrawer.value = false;
         form.value.name = '';
@@ -541,6 +587,7 @@ const app = createApp({
         form.value.model = '';
         form.value.execution_mode = 'agent';
         form.value.reasoning_effort = '';
+        form.value.system_prompt = '';
         showToast(`已创建 Bot: ${bot.name}`);
         await openBot(bot.bot_id);
       } catch (e) {
@@ -829,6 +876,41 @@ const app = createApp({
       refreshAll();
     }
 
+    async function handlePasswordLogin() {
+      const username = loginUsername.value.trim();
+      const password = loginPassword.value.trim();
+      if (!username || !password || loggingIn.value) return;
+      loginError.value = '';
+      loggingIn.value = true;
+      try {
+        const resp = await fetch('/agent/api/v1/auth', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username,
+            password,
+            device_name: isDesktop.value ? 'web-pc-bots' : 'mobile-pwa',
+          }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        const tok = data.session_token || data.access_token || '';
+        if (!resp.ok || !data.success || !tok) {
+          loginError.value = data.error || '账号或密码错误';
+          return;
+        }
+        saveToken(tok, { source: 'session' });
+        loginPassword.value = '';
+        showTokenModal.value = false;
+        showToast('登录成功，正在连接...');
+        connectWs();
+        await refreshAll();
+      } catch (e) {
+        loginError.value = (e && e.message) || '网络错误，请稍后重试';
+      } finally {
+        loggingIn.value = false;
+      }
+    }
+
     async function refreshAll() {
       try {
         await Promise.all([fetchNodes(), fetchBots(), fetchPendingApprovals(), fetchModels().catch(() => {})]);
@@ -864,8 +946,8 @@ const app = createApp({
 
     watch(
       () => store.token,
-      (val) => {
-        tokenInput.value = val;
+      () => {
+        tokenInput.value = localStorage.getItem('pc_cli_client_token') || '';
       }
     );
 
@@ -891,6 +973,11 @@ const app = createApp({
       selectDesktopBot,
       showCreateDrawer,
       showTokenModal,
+      authMode,
+      loginUsername,
+      loginPassword,
+      loginError,
+      loggingIn,
       tokenInput,
       promptInput,
       sending,
@@ -900,6 +987,8 @@ const app = createApp({
       managerStreamEl,
       switchTab,
       handleSendManager,
+      instructionTemplates,
+      applyInstructionTemplate,
       form,
       dirEntries,
       dirLoading,
@@ -941,6 +1030,7 @@ const app = createApp({
       handleResetSession,
       handleDeleteBot,
       handleSaveToken,
+      handlePasswordLogin,
       refreshAll,
       showToast,
     };

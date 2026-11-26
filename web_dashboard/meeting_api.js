@@ -5,6 +5,8 @@ window.ReviewMeetingAPI = (() => {
         sessionStorage.removeItem('review_token');
         sessionStorage.removeItem('review_token_expires_at');
         sessionStorage.removeItem('dashboard_auth');
+        sessionStorage.removeItem('user_session_token');
+        sessionStorage.removeItem('pc_cli_token_source');
     };
     const request = async (path, options = {}) => {
         if (!/^\/agent\/api\/v1\/review-meetings(?:[/?]|$)/.test(path)) {
@@ -27,7 +29,22 @@ window.ReviewMeetingAPI = (() => {
         return response;
     };
     const logout = async () => {
+        const userSessionToken = sessionStorage.getItem('user_session_token');
         try {
+            if (userSessionToken) {
+                try {
+                    await fetch('/agent/api/v1/auth/logout', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${userSessionToken}`,
+                        },
+                        body: JSON.stringify({ session_token: userSessionToken }),
+                    });
+                } catch (_) {
+                    // Best-effort revoke unified user session; always proceed to clear local state
+                }
+            }
             await request('/agent/api/v1/review-meetings/logout', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
             });

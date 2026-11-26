@@ -26,6 +26,19 @@ def normalize_reasoning_effort(effort: Optional[str]) -> str:
     return cleaned if cleaned in VALID_REASONING_EFFORTS else ""
 
 
+def apply_bot_system_prompt(
+    prompt: str,
+    system_prompt: Optional[str] = "",
+    *,
+    native_session_id: Optional[str] = None,
+) -> str:
+    """在会话首轮（无 native_session_id）时注入 Bot 专属角色/上下文/约束指令，续聊轮次不重复注入。"""
+    sp = str(system_prompt or "").strip()
+    if not sp or native_session_id:
+        return prompt
+    return f"<bot_instructions>\n{sp}\n</bot_instructions>\n\n{prompt}"
+
+
 def apply_execution_mode_prompt(
     prompt: str,
     execution_mode: Optional[str] = "agent",

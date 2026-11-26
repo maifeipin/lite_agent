@@ -44,5 +44,23 @@ function login() {
     assert.equal(logout.options.method, 'POST');
     assert.equal(logout.options.body, '{}');
     assert.equal(values.has('review_token'), false);
-    console.log('Meeting frontend: 5 scenarios passed');
+
+    // 场景 6：主页登录后附带 user_session_token，即便中途切为手动 Token 直连，退出时仍必须撤销统一会话并清理 sessionStorage
+    login();
+    values.set('user_session_token', 'sess-tok-123');
+    values.set('pc_cli_token_source', 'manual');
+    status = 200;
+    const beforeCount = calls.length;
+    await api.logout();
+    const logoutCalls = calls.slice(beforeCount);
+    assert.equal(logoutCalls.length, 2);
+    assert.equal(logoutCalls[0].url, '/agent/api/v1/auth/logout');
+    assert.equal(logoutCalls[0].options.method, 'POST');
+    assert.equal(logoutCalls[0].options.headers['Authorization'], 'Bearer sess-tok-123');
+    assert.equal(JSON.parse(logoutCalls[0].options.body).session_token, 'sess-tok-123');
+    assert.equal(logoutCalls[1].url, 'https://edge.maifeipin.com/agent/api/v1/review-meetings/logout');
+    assert.equal(values.has('user_session_token'), false);
+    assert.equal(values.has('pc_cli_token_source'), false);
+    assert.equal(values.has('review_token'), false);
+    console.log('Meeting frontend: 6 scenarios passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });
