@@ -1153,5 +1153,63 @@ def test_stale_conn_turn_finished_after_reconnect_reconcile_and_reset_cannot_res
         assert new_conn_msgs == []
         assert len(created_tid_holder) == 1
         assert repo.get_turn(created_tid_holder[0])["status"] == "failed"
+
+        # 场景 E：校验通过、旧连接 send_fn 发送尚未返回时发生重连对账（c5 发送中 -> c6 重连对账 -> c5 发送返回）
+        # 旧连接 c5 收到 turn.start 并随后收到补偿 turn.cancel；新连接 c6 不收任何消息；start_turn 必须返回 False 与 DB failed 一致
+        c5_msgs: list[dict] = []
+        c6_msgs: list[dict] = []
+
+        def _c5_send_with_midflight_reconnect(msg: dict):
+            c5_msgs.append(msg)
+            if msg.get("type") == "turn.start":
+                hub.handle_daemon_hello(
+                    "c6",
+                    lambda m: c6_msgs.append(m),
+                    {"node_id": "mac1", "engines": ["codex"], "workspace_roots": ["/w"], "active_turns": []},
+                )
+
+        hub.handle_daemon_hello(
+            "c5",
+            _c5_send_with_midflight_reconnect,
+            {"node_id": "mac1", "engines": ["codex"], "workspace_roots": ["/w"], "active_turns": []},
+        )
+        ok_e, res_e = hub.start_turn(bot_id, "midflight-reconnect")
+        assert ok_e is False
+        assert [m["type"] for m in c5_msgs] == ["turn.start", "turn.cancel"]
+        assert c6_msgs == []
+        e_tid = c5_msgs[0]["turn_id"]
+        assert repo.get_turn(e_tid)["status"] == "failed"
+
+        # 即使旧连接 c5 或新连接 c6 迟到回报该回合事件/完成，均按连接归属与终态严格拦截
+        assert (
+            hub.handle_daemon_event(
+                {"bot_id": bot_id, "turn_id": e_tid, "event_type": "text_delta", "payload": {"delta": "leak"}},
+                sender_node_id="mac1",
+                conn_id="c6",
+            )
+            is None
+        )
+
+        # 场景 F：同一连接 (c6) 派发在途时重复握手上报空 active_turns，_inflight_dispatches 应保护该在途回合不被误杀
+        c6_same_msgs: list[dict] = []
+
+        def _c6_same_conn_hello_midflight(msg: dict):
+            c6_same_msgs.append(msg)
+            if msg.get("type") == "turn.start":
+                hub.handle_daemon_hello(
+                    "c6",
+                    _c6_same_conn_hello_midflight,
+                    {"node_id": "mac1", "engines": ["codex"], "workspace_roots": ["/w"], "active_turns": []},
+                )
+
+        hub.handle_daemon_hello(
+            "c6",
+            _c6_same_conn_hello_midflight,
+            {"node_id": "mac1", "engines": ["codex"], "workspace_roots": ["/w"], "active_turns": []},
+        )
+        ok_f, res_f = hub.start_turn(bot_id, "same-conn-inflight")
+        assert ok_f is True
+        f_tid = res_f["turn"]["turn_id"]
+        assert repo.get_turn(f_tid)["status"] == "running"
     finally:
         hub.close()
