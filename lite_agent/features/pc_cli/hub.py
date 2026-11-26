@@ -98,12 +98,20 @@ class PcCliHub:
             except Exception as e:
                 logger.debug(f"向客户端 {cid} 推送失败: {e}")
 
-    def _send_to_daemon(self, node_id: str, message: Dict[str, Any]) -> bool:
+    def _send_to_daemon(
+        self,
+        node_id: str,
+        message: Dict[str, Any],
+        *,
+        expected_conn_id: Optional[str] = None,
+    ) -> bool:
         with self._lock:
             entry = self._daemons.get(node_id)
-        if not entry:
-            return False
-        _, send_fn = entry
+            if not entry:
+                return False
+            if expected_conn_id is not None and entry[0] != expected_conn_id:
+                return False
+            _, send_fn = entry
         try:
             send_fn(message)
             return True
@@ -620,8 +628,10 @@ class PcCliHub:
             bot = self.repo.get_bot(bot_id)
             if not bot:
                 return False, {"error": f"Bot '{bot_id}' 不存在"}
-            if not self.is_node_online(bot["node_id"]):
+            daemon_entry = self._daemons.get(bot["node_id"])
+            if not daemon_entry:
                 return False, {"error": f"目标 PC 节点 '{bot['node_id']}' 当前不在线"}
+            target_conn_id = daemon_entry[0]
             active = self.repo.get_active_turn_for_bot(bot_id)
             if active:
                 return False, {"error": f"Bot 当前已有运行中的回合 ({active['turn_id']})，请等待完成或先中止"}
@@ -635,6 +645,19 @@ class PcCliHub:
                 )
             except Exception as e:
                 return False, {"error": f"创建回合冲突（可能已有并发运行中的回合）: {e}"}
+
+        # 派发前绑定创建回合时选定的连接，若期间发生重连对账或回合已终结则绝不把旧回合派发给新连接
+        with self._lock:
+            cur_turn = self.repo.get_turn(turn["turn_id"])
+            conn_still_active = self._is_active_daemon_conn(bot["node_id"], target_conn_id)
+            turn_still_active = bool(
+                cur_turn and cur_turn["status"] in (TurnStatus.QUEUED.value, TurnStatus.RUNNING.value)
+            )
+            if not conn_still_active or not turn_still_active:
+                if turn_still_active:
+                    self.repo.finish_turn(turn["turn_id"], TurnStatus.FAILED.value, error_message="派发前 PC 连接已切换")
+                    self.repo.set_bot_status(bot_id, BotStatus.ERROR.value, last_summary="派发前 PC 连接已切换")
+                return False, {"error": "目标 PC 节点连接已切换或回合已中断，请重试"}
 
         sent = self._send_to_daemon(
             bot["node_id"],
@@ -651,10 +674,14 @@ class PcCliHub:
                 "reasoning_effort": bot.get("reasoning_effort") or "",
                 "model": bot.get("model"),
             },
+            expected_conn_id=target_conn_id,
         )
         if not sent:
-            self.repo.finish_turn(turn["turn_id"], TurnStatus.FAILED.value, error_message="派发到 PC 节点失败")
-            self.repo.set_bot_status(bot_id, BotStatus.ERROR.value, last_summary="派发到 PC 节点失败")
+            with self._lock:
+                cur_turn = self.repo.get_turn(turn["turn_id"])
+                if cur_turn and cur_turn["status"] in (TurnStatus.QUEUED.value, TurnStatus.RUNNING.value):
+                    self.repo.finish_turn(turn["turn_id"], TurnStatus.FAILED.value, error_message="派发到 PC 节点失败")
+                    self.repo.set_bot_status(bot_id, BotStatus.ERROR.value, last_summary="派发到 PC 节点失败")
             return False, {"error": "派发指令到 PC 节点失败"}
 
         self._emit_bot_summary(bot_id)

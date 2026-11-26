@@ -1104,5 +1104,54 @@ def test_stale_conn_turn_finished_after_reconnect_reconcile_and_reset_cannot_res
         assert start_res.get("ok") is True
         new_tid = start_res["payload"]["turn"]["turn_id"]
         assert repo.get_turn(new_tid)["status"] == "running"
+
+        # 场景 D：回合已写库 -> 释放锁后守护进程重连对账把它标为 failed -> start_turn 准备派发
+        # 派发必须绑定创建回合时的旧连接，拒绝向新连接发送 turn.start 并返回 False
+        hub.handle_daemon_turn_finished(
+            {"bot_id": bot_id, "turn_id": new_tid, "status": "completed"},
+            sender_node_id="mac1",
+            conn_id="c4",
+        )
+        new_conn_msgs: list[dict] = []
+        orig_send = hub._send_to_daemon
+
+        def _intercept_and_reconnect_before_dispatch(node_id, message, **kwargs):
+            return orig_send(node_id, message, **kwargs)
+
+        orig_start_atomic = repo.start_turn_atomic
+        created_tid_holder: list[str] = []
+
+        def _start_atomic_then_reconnect(*args, **kwargs):
+            t_obj, ev_obj = orig_start_atomic(*args, **kwargs)
+            created_tid_holder.append(t_obj["turn_id"])
+            return t_obj, ev_obj
+
+        # 在 start_turn 释放第一把锁后、准备派发前，于同一线程外插入 c5 重连对账
+        orig_is_active = hub._is_active_daemon_conn
+        reconnected_once = {"done": False}
+
+        def _reconnect_on_dispatch_check(nid, cid):
+            if not reconnected_once["done"] and cid == "c4":
+                reconnected_once["done"] = True
+                hub.handle_daemon_hello(
+                    "c5",
+                    lambda msg: new_conn_msgs.append(msg),
+                    {"node_id": "mac1", "engines": ["codex"], "workspace_roots": ["/w"], "active_turns": []},
+                )
+            return orig_is_active(nid, cid)
+
+        repo.start_turn_atomic = _start_atomic_then_reconnect  # type: ignore[method-assign]
+        hub._is_active_daemon_conn = _reconnect_on_dispatch_check  # type: ignore[method-assign]
+        try:
+            ok_d, res_d = hub.start_turn(bot_id, "raced-dispatch")
+        finally:
+            repo.start_turn_atomic = orig_start_atomic  # type: ignore[method-assign]
+            hub._is_active_daemon_conn = orig_is_active  # type: ignore[method-assign]
+
+        assert ok_d is False
+        assert "连接已切换" in res_d["error"] or "中断" in res_d["error"]
+        assert new_conn_msgs == []
+        assert len(created_tid_holder) == 1
+        assert repo.get_turn(created_tid_holder[0])["status"] == "failed"
     finally:
         hub.close()
