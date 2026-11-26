@@ -37,8 +37,18 @@ class _WsConnection:
         self._closed = False
         self._write_lock = asyncio.Lock()
 
-    async def send_frame(self, opcode: int, payload: bytes) -> None:
+    async def send_frame(
+        self,
+        opcode: int,
+        payload: bytes,
+        *,
+        send_state: Optional[Dict[str, Any]] = None,
+    ) -> None:
         if self._closed:
+            if send_state is not None:
+                err = ConnectionError("WebSocket 连接已关闭")
+                err.delivery_unknown = False  # type: ignore[attr-defined]
+                raise err
             return
         header = bytearray([0x80 | (opcode & 0x0F)])
         length = len(payload)
@@ -52,22 +62,64 @@ class _WsConnection:
             header.extend(struct.pack("!Q", length))
         async with self._write_lock:
             if self._closed:
+                if send_state is not None:
+                    err = ConnectionError("WebSocket 连接已关闭")
+                    err.delivery_unknown = False  # type: ignore[attr-defined]
+                    raise err
                 return
+            if send_state is not None:
+                with send_state["lock"]:
+                    if send_state["phase"] == "aborted":
+                        return
+                    send_state["phase"] = "writing"
             self.writer.write(bytes(header) + payload)
             await self.writer.drain()
 
-    async def send_json(self, data: Dict[str, Any]) -> None:
+    async def send_json(
+        self,
+        data: Dict[str, Any],
+        *,
+        send_state: Optional[Dict[str, Any]] = None,
+    ) -> None:
         raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
-        await self.send_frame(0x1, raw)
+        await self.send_frame(0x1, raw, send_state=send_state)
 
-    def send_json_threadsafe(self, data: Dict[str, Any], wait_timeout: float = 0.0) -> None:
+    def send_json_threadsafe(
+        self,
+        data: Dict[str, Any],
+        wait_timeout: float = 0.0,
+        *,
+        abort_on_timeout: bool = True,
+    ) -> None:
         if self._closed or self.loop.is_closed():
             if wait_timeout > 0:
-                raise ConnectionError("WebSocket 连接已关闭")
+                err = ConnectionError("WebSocket 连接已关闭")
+                err.delivery_unknown = False  # type: ignore[attr-defined]
+                raise err
             return
-        fut = asyncio.run_coroutine_threadsafe(self.send_json(data), self.loop)
+        send_state: Optional[Dict[str, Any]] = (
+            {"lock": threading.Lock(), "phase": "queued"}
+            if (wait_timeout > 0 and abort_on_timeout)
+            else None
+        )
+        fut = asyncio.run_coroutine_threadsafe(self.send_json(data, send_state=send_state), self.loop)
         if wait_timeout > 0:
-            fut.result(timeout=wait_timeout)
+            try:
+                fut.result(timeout=wait_timeout)
+            except BaseException as e:
+                fut.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
+                if send_state is not None:
+                    with send_state["lock"]:
+                        if send_state["phase"] == "queued":
+                            send_state["phase"] = "aborted"
+                            unknown = False
+                        else:
+                            unknown = True
+                else:
+                    unknown = True
+                if not hasattr(e, "delivery_unknown"):
+                    e.delivery_unknown = unknown  # type: ignore[attr-defined]
+                raise
 
     async def recv_text(self) -> Optional[str]:
         """读取完整文本消息（支持分片、自动回复 ping、处理 close）。连接关闭返回 None。"""
@@ -343,7 +395,11 @@ class PcCliWsServer:
                 if mtype == "node.hello":
                     node = self.hub.handle_daemon_hello(
                         conn_id,
-                        lambda d: conn.send_json_threadsafe(d, wait_timeout=3.0),
+                        lambda d: conn.send_json_threadsafe(
+                            d,
+                            wait_timeout=3.0,
+                            abort_on_timeout=(d.get("type") != "turn.cancel"),
+                        ),
                         msg,
                     )
                     node_id = node["node_id"]

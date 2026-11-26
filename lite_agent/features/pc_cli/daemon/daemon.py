@@ -6,6 +6,7 @@ Win/Mac 本地 PC CLI 守护进程主程序 (daemon.daemon).
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import sys
@@ -60,6 +61,7 @@ class PcCliDaemon:
         self._active_engines: Dict[str, str] = {}  # bot_id -> engine
         self._pending_approvals: Dict[str, asyncio.Future[str]] = {}  # approval_id -> Future[decision]
         self._turn_approval_ids: Dict[tuple[str, str], set[str]] = {}  # (bot_id, turn_id) -> set[approval_id]
+        self._cancelled_turn_ids: "collections.OrderedDict[str, None]" = collections.OrderedDict()
         self._stop_event = asyncio.Event()
 
     def request_stop(self) -> None:
@@ -177,6 +179,10 @@ class PcCliDaemon:
         elif mtype == "turn.cancel":
             bot_id = str(msg.get("bot_id") or "")
             req_tid = str(msg.get("turn_id") or "")
+            if req_tid:
+                self._cancelled_turn_ids[req_tid] = None
+                while len(self._cancelled_turn_ids) > 256:
+                    self._cancelled_turn_ids.popitem(last=False)
             active_tid = self._active_turns.get(bot_id)
             if not active_tid:
                 return
@@ -251,6 +257,15 @@ class PcCliDaemon:
 
         lock = self._get_bot_lock(bot_id)
         async with lock:
+            if turn_id and turn_id in self._cancelled_turn_ids:
+                self._cancelled_turn_ids.pop(turn_id, None)
+                await ws.send_json({
+                    "type": "turn.finished",
+                    "bot_id": bot_id,
+                    "turn_id": turn_id,
+                    "status": "cancelled",
+                })
+                return
             self._active_turns[bot_id] = turn_id
             self._active_engines[bot_id] = engine
             try:

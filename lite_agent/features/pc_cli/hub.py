@@ -110,20 +110,24 @@ class PcCliHub:
         message: Dict[str, Any],
         *,
         expected_conn_id: Optional[str] = None,
-    ) -> Tuple[bool, Optional[SendFunc]]:
+    ) -> Tuple[bool, Optional[SendFunc], bool]:
         with self._lock:
             entry = self._daemons.get(node_id)
             if not entry:
-                return False, None
+                return False, None, False
             if expected_conn_id is not None and entry[0] != expected_conn_id:
-                return False, None
+                return False, None, False
             _, send_fn = entry
         try:
             send_fn(message)
-            return True, send_fn
-        except Exception as e:
-            logger.warning(f"向节点 {node_id} 发送消息失败: {e}")
-            return False, send_fn
+            return True, send_fn, False
+        except BaseException as e:
+            if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                raise
+            # 若底层未显式证明写入前已中止（delivery_unknown=False），对 TimeoutError 等异常按投递结果未知处理
+            unknown = bool(getattr(e, "delivery_unknown", isinstance(e, TimeoutError)))
+            logger.warning(f"向节点 {node_id} 发送消息失败 (delivery_unknown={unknown}): {e}")
+            return False, send_fn, unknown
 
     def _send_to_daemon(
         self,
@@ -132,7 +136,7 @@ class PcCliHub:
         *,
         expected_conn_id: Optional[str] = None,
     ) -> bool:
-        sent, _ = self._send_to_daemon_with_fn(node_id, message, expected_conn_id=expected_conn_id)
+        sent, _, _ = self._send_to_daemon_with_fn(node_id, message, expected_conn_id=expected_conn_id)
         return sent
 
     def is_node_online(self, node_id: str) -> bool:
@@ -727,13 +731,14 @@ class PcCliHub:
             }
 
         sent = False
+        delivery_unknown = False
         used_send_fn: Optional[SendFunc] = None
         need_cancel_old_conn = False
         marked_failed_here = False
         err_msg = ""
         cur_turn: Optional[Dict[str, Any]] = None
         try:
-            sent, used_send_fn = self._send_to_daemon_with_fn(
+            sent, used_send_fn, delivery_unknown = self._send_to_daemon_with_fn(
                 bot["node_id"],
                 {
                     "type": "turn.start",
@@ -777,18 +782,26 @@ class PcCliHub:
 
                 if not dispatch_ok:
                     self._turn_conn_owners.pop(turn_id, None)
+                    may_have_delivered = sent or delivery_unknown
                     if turn_still_active:
-                        reason = "派发到 PC 节点失败" if (not sent and not reconciled_aborted) else "派发期间 PC 连接已切换"
+                        if delivery_unknown and not reconciled_aborted:
+                            reason = "派发等待超时（结果未知，已下发补偿取消）"
+                        elif not sent and not reconciled_aborted:
+                            reason = "派发到 PC 节点失败"
+                        else:
+                            reason = "派发期间 PC 连接已切换"
                         self.repo.finish_turn(turn_id, TurnStatus.FAILED.value, error_message=reason)
                         self.repo.set_bot_status(bot_id, BotStatus.ERROR.value, last_summary=reason)
                         marked_failed_here = True
-                    if sent and used_send_fn is not None and (not daemon_confirmed or reconciled_aborted):
+                    # 只要消息已发出或底层发送超时导致投递结果未知，均向该连接补发 turn.cancel 防止迟到重复执行
+                    if may_have_delivered and used_send_fn is not None and (not daemon_confirmed or reconciled_aborted):
                         need_cancel_old_conn = True
-                    err_msg = (
-                        "派发指令到 PC 节点失败"
-                        if (not sent and not reconciled_aborted)
-                        else "派发期间 PC 节点连接已切换或回合已中断，请重试"
-                    )
+                    if delivery_unknown and not reconciled_aborted:
+                        err_msg = "派发指令等待超时（投递结果未知，已下发补偿取消，请确认状态后再重试）"
+                    elif not sent and not reconciled_aborted:
+                        err_msg = "派发指令到 PC 节点失败"
+                    else:
+                        err_msg = "派发期间 PC 节点连接已切换或回合已中断，请重试"
         finally:
             with self._lock:
                 self._inflight_dispatches.pop(turn_id, None)
@@ -801,7 +814,10 @@ class PcCliHub:
                     pass
             if marked_failed_here:
                 self._emit_bot_summary(bot_id)
-            return False, {"error": err_msg}
+            err_payload: Dict[str, Any] = {"error": err_msg}
+            if delivery_unknown and not sent:
+                err_payload["delivery_unknown"] = True
+            return False, err_payload
 
         self._emit_bot_summary(bot_id)
         self._broadcast_clients({"type": "bot.event", "event": ev}, bot_id_filter=bot_id)
