@@ -104,8 +104,7 @@
                   <span class="desktop-bot-name">{{ activeBot.name }}</span>
                   <span class="tag bot-id-tag" @click="copyBotId(activeBot.bot_id)" title="点击复制 Bot ID">{{ activeBot.bot_id }}</span>
                   <span class="tag" :class="activeBot.engine">{{ activeBot.engine.toUpperCase() }}</span>
-                  <span class="tag bot-id-tag" @click="copyBotId(activeBot.bot_id)" title="点击复制 Bot ID">{{ activeBot.bot_id }}</span>
-          <span class="status-badge" :class="activeBot.status">{{ statusLabel(activeBot.status) }}</span>
+                  <span class="status-badge" :class="activeBot.status">{{ statusLabel(activeBot.status) }}</span>
                   <span class="desktop-node-meta">{{ activeBot.node_display_name || activeBot.node_id }} · {{ activeBot.node_status === 'online' ? '🟢 在线' : '⚪ 离线' }}</span>
                 </div>
                 <div class="desktop-bot-cwd" :title="activeBot.cwd">{{ activeBot.cwd }}</div>
