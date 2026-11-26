@@ -128,20 +128,26 @@ class PcCliHub:
         workspace_roots = [str(p) for p in (payload.get("workspace_roots") or []) if str(p).strip()]
         engine_models = self._sanitize_engine_models(payload.get("engine_models"))
 
+        reconciled_events: List[Tuple[str, Dict[str, Any]]] = []
         with self._lock:
+            node = self.repo.upsert_node(
+                node_id=node_id,
+                display_name=display_name,
+                platform=platform,
+                engines=engines,
+                engine_models=engine_models,
+                workspace_roots=workspace_roots,
+                status=NodeStatus.ONLINE.value,
+            )
+            if isinstance(payload.get("active_turns"), list):
+                reconciled_events = self._reconcile_node_active_turns_locked(node_id, payload["active_turns"])
+            # 仅在对账完成后才注册新连接为可派发状态，防止新回合被握手快照误判为孤儿回合
             self._daemons[node_id] = (conn_id, send_fn)
 
-        node = self.repo.upsert_node(
-            node_id=node_id,
-            display_name=display_name,
-            platform=platform,
-            engines=engines,
-            engine_models=engine_models,
-            workspace_roots=workspace_roots,
-            status=NodeStatus.ONLINE.value,
-        )
-        if isinstance(payload.get("active_turns"), list):
-            self._reconcile_node_active_turns(node_id, payload["active_turns"])
+        for bot_id, ev in reconciled_events:
+            self._broadcast_clients({"type": "bot.event", "bot_id": bot_id, "event": ev}, bot_id_filter=bot_id)
+        if reconciled_events:
+            self._broadcast_clients({"type": "bots.updated", "bots": self.repo.list_bots()})
         self._broadcast_clients({"type": "nodes.updated", "nodes": self.repo.list_nodes()})
         logger.info(f"PC 节点上线: {node_id} ({platform}, engines={engines})")
         return node
@@ -185,37 +191,44 @@ class PcCliHub:
             cleaned[eng_name] = out
         return cleaned
 
-    def _reconcile_node_active_turns(self, node_id: str, reported_active_turns: List[Any]) -> None:
-        """Daemon 重连上线时对账活跃回合：若守护进程已重启，自动收尾孤儿 running 回合，避免 Bot 永久卡死。"""
+    def _reconcile_node_active_turns_locked(
+        self, node_id: str, reported_active_turns: List[Any]
+    ) -> List[Tuple[str, Dict[str, Any]]]:
+        """调用方需已持有 self._lock：对账该节点孤儿活跃回合，返回待锁外广播的事件列表。"""
         reported_ids = {str(t) for t in reported_active_turns if t}
         reconciled_events: List[Tuple[str, Dict[str, Any]]] = []
         err_msg = "守护进程已重启，原回合已中断"
+        for bot in self.repo.list_bots(include_archived=True):
+            if bot.get("node_id") != node_id:
+                continue
+            bot_id = bot["bot_id"]
+            active = self.repo.get_active_turn_for_bot(bot_id)
+            if not active:
+                continue
+            turn_id = active["turn_id"]
+            if turn_id in reported_ids:
+                continue
+            self.repo.finish_turn(turn_id, status=TurnStatus.FAILED.value, error_message=err_msg)
+            self.repo.expire_pending_approvals(bot_id=bot_id)
+            ev = self.repo.append_event(
+                bot_id=bot_id,
+                turn_id=turn_id,
+                event_type=EventType.TURN_STATUS.value,
+                payload={
+                    "status": TurnStatus.FAILED.value,
+                    "error": err_msg,
+                    "native_session_id": bot.get("native_session_id"),
+                },
+            )
+            self.repo.set_bot_status(bot_id, BotStatus.ERROR.value, last_summary=err_msg)
+            reconciled_events.append((bot_id, ev))
+            logger.warning(f"节点 {node_id} 重连对账：已自动收尾孤儿回合 bot={bot_id} turn={turn_id}")
+        return reconciled_events
+
+    def _reconcile_node_active_turns(self, node_id: str, reported_active_turns: List[Any]) -> None:
+        """Daemon 重连上线时对账活跃回合：若守护进程已重启，自动收尾孤儿 running 回合，避免 Bot 永久卡死。"""
         with self._lock:
-            for bot in self.repo.list_bots(include_archived=True):
-                if bot.get("node_id") != node_id:
-                    continue
-                bot_id = bot["bot_id"]
-                active = self.repo.get_active_turn_for_bot(bot_id)
-                if not active:
-                    continue
-                turn_id = active["turn_id"]
-                if turn_id in reported_ids:
-                    continue
-                self.repo.finish_turn(turn_id, status=TurnStatus.FAILED.value, error_message=err_msg)
-                self.repo.expire_pending_approvals(bot_id=bot_id)
-                ev = self.repo.append_event(
-                    bot_id=bot_id,
-                    turn_id=turn_id,
-                    event_type=EventType.TURN_STATUS.value,
-                    payload={
-                        "status": TurnStatus.FAILED.value,
-                        "error": err_msg,
-                        "native_session_id": bot.get("native_session_id"),
-                    },
-                )
-                self.repo.set_bot_status(bot_id, BotStatus.ERROR.value, last_summary=err_msg)
-                reconciled_events.append((bot_id, ev))
-                logger.warning(f"节点 {node_id} 重连对账：已自动收尾孤儿回合 bot={bot_id} turn={turn_id}")
+            reconciled_events = self._reconcile_node_active_turns_locked(node_id, reported_active_turns)
         for bot_id, ev in reconciled_events:
             self._broadcast_clients({"type": "bot.event", "bot_id": bot_id, "event": ev}, bot_id_filter=bot_id)
         if reconciled_events:

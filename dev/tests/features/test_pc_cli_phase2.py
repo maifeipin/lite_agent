@@ -1062,5 +1062,47 @@ def test_stale_conn_turn_finished_after_reconnect_reconcile_and_reset_cannot_res
             conn_id="c2",
         )
         assert repo.get_bot(bot_id)["native_session_id"] is None
+
+        # 场景 C：重连对账完成前不允许新回合被握手快照误判为失败
+        hub.handle_daemon_disconnect("mac1", "c3")
+        orig_reconcile = hub._reconcile_node_active_turns_locked
+        entered_reconcile = threading.Event()
+        allow_reconcile = threading.Event()
+        start_res: dict = {}
+
+        def _slow_reconcile(*args, **kwargs):
+            entered_reconcile.set()
+            allow_reconcile.wait(timeout=2.0)
+            return orig_reconcile(*args, **kwargs)
+
+        hub._reconcile_node_active_turns_locked = _slow_reconcile  # type: ignore[method-assign]
+
+        def _do_hello():
+            hub.handle_daemon_hello(
+                "c4",
+                lambda _: None,
+                {"node_id": "mac1", "engines": ["codex"], "workspace_roots": ["/w"], "active_turns": []},
+            )
+
+        def _do_start():
+            entered_reconcile.wait(timeout=2.0)
+            ok_s, payload_s = hub.start_turn(bot_id, "fresh-turn")
+            start_res["ok"] = ok_s
+            start_res["payload"] = payload_s
+
+        th_h = threading.Thread(target=_do_hello)
+        th_s = threading.Thread(target=_do_start)
+        th_h.start()
+        th_s.start()
+        assert entered_reconcile.wait(timeout=2.0)
+        threading.Event().wait(0.05)
+        allow_reconcile.set()
+        th_h.join(timeout=3.0)
+        th_s.join(timeout=3.0)
+        hub._reconcile_node_active_turns_locked = orig_reconcile  # type: ignore[method-assign]
+
+        assert start_res.get("ok") is True
+        new_tid = start_res["payload"]["turn"]["turn_id"]
+        assert repo.get_turn(new_tid)["status"] == "running"
     finally:
         hub.close()
