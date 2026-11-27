@@ -176,7 +176,11 @@ def test_mobile_pwa_assets_security_and_pagination_guards():
     # 2. 独立历史同步游标 + 逐页循环 + 旧 WS 隔离
     assert "historySyncSeqByBot" in store_js
     assert "advanceHistoryCursor" in store_js
-    assert store_js.count("if (_ws !== ws) return;") >= 3
+    assert (
+        store_js.count("if (_ws !== ws) return;")
+        + store_js.count("if (_ws !== ws || _credentialEpoch !== sockEpoch) return;")
+        >= 3
+    )
     # 3. Markdown URL 协议安全过滤
     assert "sanitizeRenderedHtml" in app_js
     assert "isSafeUrl" in app_js
