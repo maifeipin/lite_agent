@@ -14,6 +14,7 @@ import {
   fetchNodes,
   fetchPendingApprovals,
   fetchStats,
+  getCredentialEpoch,
   saveToken,
   sendManagerChat,
   sendTurn,
@@ -22,7 +23,7 @@ import {
   submitApproval,
   subscribeBotOnWs,
   updateBot,
-} from './store.js?v=7';
+} from './store.js?v=16';
 
 function escapeHtml(raw) {
   return String(raw || '')
@@ -202,6 +203,7 @@ const app = createApp({
     const loginPassword = ref('');
     const loginError = ref('');
     const loggingIn = ref(false);
+    let loginAttemptSeq = 0;
     const tokenInput = ref(localStorage.getItem('pc_cli_client_token') || '');
     const promptInput = ref('');
     const sending = ref(false);
@@ -484,6 +486,7 @@ const app = createApp({
     }
 
     async function openBot(botId) {
+      const startEpoch = getCredentialEpoch();
       if (store.activeBotId !== botId) {
         cancelActiveVoice();
         promptInputSource.value = 'text';
@@ -491,12 +494,22 @@ const app = createApp({
       store.activeBotId = botId;
       window.location.hash = `#bot/${botId}`;
       await subscribeBotOnWs(botId);
+      if (getCredentialEpoch() !== startEpoch || store.activeBotId !== botId) {
+        return;
+      }
       try {
         await fetchEventsIncremental(botId);
+        if (getCredentialEpoch() !== startEpoch || store.activeBotId !== botId) {
+          return;
+        }
         await fetchPendingApprovals(botId);
-        scrollToBottom();
+        if (getCredentialEpoch() === startEpoch && store.activeBotId === botId) {
+          scrollToBottom();
+        }
       } catch (e) {
-        showToast(e.message);
+        if (getCredentialEpoch() === startEpoch) {
+          showToast(e.message);
+        }
       }
     }
 
@@ -963,7 +976,13 @@ const app = createApp({
     }
 
     function handleSaveToken() {
-      saveToken(tokenInput.value);
+      loginAttemptSeq += 1;
+      loggingIn.value = false;
+      loginError.value = '';
+      if (window.location.hash.startsWith('#bot/')) {
+        window.location.hash = '';
+      }
+      saveToken(tokenInput.value, { source: 'manual', userInitiated: true });
       showTokenModal.value = false;
       connectWs();
       refreshAll();
@@ -973,6 +992,8 @@ const app = createApp({
       const username = loginUsername.value.trim();
       const password = loginPassword.value.trim();
       if (!username || !password || loggingIn.value) return;
+      const attemptId = ++loginAttemptSeq;
+      const startEpoch = getCredentialEpoch();
       loginError.value = '';
       loggingIn.value = true;
       try {
@@ -983,24 +1004,40 @@ const app = createApp({
             username,
             password,
             device_name: isDesktop.value ? 'web-pc-bots' : 'mobile-pwa',
+            remember_me: true,
           }),
         });
         const data = await resp.json().catch(() => ({}));
+        if (attemptId !== loginAttemptSeq || getCredentialEpoch() !== startEpoch) {
+          return;
+        }
         const tok = data.session_token || data.access_token || '';
         if (!resp.ok || !data.success || !tok) {
           loginError.value = data.error || '账号或密码错误';
           return;
         }
-        saveToken(tok, { source: 'session' });
+        if (window.location.hash.startsWith('#bot/')) {
+          window.location.hash = '';
+        }
+        saveToken(tok, {
+          source: 'session',
+          refreshToken: data.refresh_token || '',
+          expiresAt: data.access_token_expires_at || data.expires_at || '',
+          userInitiated: true,
+        });
         loginPassword.value = '';
         showTokenModal.value = false;
         showToast('登录成功，正在连接...');
         connectWs();
         await refreshAll();
       } catch (e) {
-        loginError.value = (e && e.message) || '网络错误，请稍后重试';
+        if (attemptId === loginAttemptSeq && getCredentialEpoch() === startEpoch) {
+          loginError.value = (e && e.message) || '网络错误，请稍后重试';
+        }
       } finally {
-        loggingIn.value = false;
+        if (attemptId === loginAttemptSeq) {
+          loggingIn.value = false;
+        }
       }
     }
 

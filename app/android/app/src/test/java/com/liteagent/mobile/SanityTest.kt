@@ -28,13 +28,16 @@ import com.liteagent.mobile.core.voice.writeVerifiedManifest
 import com.liteagent.mobile.ui.discover.DiscoverViewModel
 import com.liteagent.mobile.ui.meetings.MeetingsViewModel
 import com.liteagent.mobile.ui.pcbots.PcBotsAuthSnapshot
+import com.liteagent.mobile.ui.pcbots.PcBotsSnapshotSource
 import com.liteagent.mobile.ui.pcbots.buildMobilePwaUrl
 import com.liteagent.mobile.ui.pcbots.buildTokenInjectionScript
 import com.liteagent.mobile.ui.pcbots.buildVoiceResultDispatchScript
 import com.liteagent.mobile.ui.pcbots.buildVoiceStateDispatchScript
 import com.liteagent.mobile.ui.pcbots.extractOriginRule
 import com.liteagent.mobile.ui.pcbots.isSameOrigin
+import com.liteagent.mobile.ui.pcbots.resolveSnapshotSource
 import com.liteagent.mobile.ui.pcbots.resolveTokenForUrl
+import com.liteagent.mobile.ui.pcbots.shouldInjectUnpairedSnapshot
 import com.liteagent.mobile.ui.phoneapp.PhoneAppViewModel
 import com.liteagent.mobile.ui.todos.TodoFilter
 import com.liteagent.mobile.ui.todos.TodosUiState
@@ -96,14 +99,74 @@ class SanityTest {
         assertFalse(isSameOrigin("https://evil.example.com/mobile/", "https://mail.maifeipin.com/mobile/"))
         assertFalse(isSameOrigin("http://mail.maifeipin.com/mobile/", "https://mail.maifeipin.com/mobile/"))
 
-        val script = buildTokenInjectionScript("tok_\"abc\"\\123")
-        assertTrue(script.contains("pc_cli_client_token"))
-        assertTrue(script.contains("\\\"abc\\\""))
+        val initScript = buildTokenInjectionScript("tok_\"abc\"\\123")
+        assertTrue(initScript.contains("pc_cli_client_token"))
+        assertTrue(initScript.contains("\\\"abc\\\""))
+        assertTrue(initScript.contains("location.reload"))
+
+        val pairedScript = buildTokenInjectionScript("tok_\"abc\"\\123", refreshedOk = true, reqId = "nref_1")
+        assertTrue(pairedScript.contains("\"nref_1\""))
+        assertFalse(pairedScript.contains("localStorage"))
+        assertFalse(pairedScript.contains("location.reload"))
 
         val snapA = PcBotsAuthSnapshot("https://a.example.com/", "https://a.example.com/mobile/", "tok_a")
         assertEquals("tok_a", resolveTokenForUrl("https://a.example.com/mobile/?bot=1", snapA))
         assertNull(resolveTokenForUrl("https://b.example.com/mobile/", snapA))
         assertNull(resolveTokenForUrl("https://a.example.com/mobile/", null))
+        assertEquals(PcBotsSnapshotSource.PROACTIVE, snapA.source)
+        assertTrue(shouldInjectUnpairedSnapshot(snapA, activeRefreshCount = 0))
+        assertFalse(shouldInjectUnpairedSnapshot(snapA, activeRefreshCount = 1))
+        assertFalse(shouldInjectUnpairedSnapshot(null, activeRefreshCount = 0))
+
+        // refreshAuth 产生的快照及后续 sessionFlow 同令牌重放必须保留 REFRESH_AUTH 来源，严禁触发无 reqId 注入
+        val normA = ServerUrlNormalizer.normalize("https://a.example.com/")
+        val srcDuringRefresh = resolveSnapshotSource(
+            requestedSource = PcBotsSnapshotSource.PROACTIVE,
+            previousSnapshot = snapA,
+            normalizedServerUrl = normA,
+            loadedToken = "tok_refreshed",
+            activeRefreshForServer = true
+        )
+        assertEquals(PcBotsSnapshotSource.REFRESH_AUTH, srcDuringRefresh)
+        val refreshSnap = PcBotsAuthSnapshot(
+            serverUrl = "https://a.example.com/",
+            targetUrl = "https://a.example.com/mobile/",
+            token = "tok_refreshed",
+            source = PcBotsSnapshotSource.REFRESH_AUTH
+        )
+        assertFalse(shouldInjectUnpairedSnapshot(refreshSnap, activeRefreshCount = 0))
+
+        // finally 将续期计数减回 0 后，Delayed sessionFlow / ON_RESUME 再次同步同一 tok_refreshed 仍保持 REFRESH_AUTH
+        val srcDelayedObserver = resolveSnapshotSource(
+            requestedSource = PcBotsSnapshotSource.PROACTIVE,
+            previousSnapshot = refreshSnap,
+            normalizedServerUrl = normA,
+            loadedToken = "tok_refreshed",
+            activeRefreshForServer = false,
+            lastRefreshTokenForServer = "tok_refreshed"
+        )
+        assertEquals(PcBotsSnapshotSource.REFRESH_AUTH, srcDelayedObserver)
+
+        // 真正产生全新主动令牌（如重新登录或后续主动预检刷新出新令牌）或用户点击原生刷新按钮时恢复 PROACTIVE
+        val srcNextProactive = resolveSnapshotSource(
+            requestedSource = PcBotsSnapshotSource.PROACTIVE,
+            previousSnapshot = refreshSnap,
+            normalizedServerUrl = normA,
+            loadedToken = "tok_proactive_new",
+            activeRefreshForServer = false,
+            lastRefreshTokenForServer = "tok_refreshed"
+        )
+        assertEquals(PcBotsSnapshotSource.PROACTIVE, srcNextProactive)
+        val srcManualReload = resolveSnapshotSource(
+            requestedSource = PcBotsSnapshotSource.PROACTIVE,
+            previousSnapshot = refreshSnap,
+            normalizedServerUrl = normA,
+            loadedToken = "tok_refreshed",
+            activeRefreshForServer = false,
+            lastRefreshTokenForServer = "tok_refreshed",
+            resetRefreshOrigin = true
+        )
+        assertEquals(PcBotsSnapshotSource.PROACTIVE, srcManualReload)
     }
 
     @Test

@@ -5,8 +5,11 @@ import { reactive } from './vendor/vue.esm-browser.prod.js';
 
 const TOKEN_STORAGE_KEY = 'pc_cli_client_token';
 const USER_SESSION_TOKEN_KEY = 'user_session_token';
+const USER_REFRESH_TOKEN_KEY = 'user_refresh_token';
+const USER_SESSION_EXPIRES_KEY = 'user_session_expires_at';
 const TOKEN_SOURCE_KEY = 'pc_cli_token_source';
 const API_BASE = '/agent/api/v1/pc-cli';
+const REFRESH_LEEWAY_SEC = 90;
 
 function readInitialToken() {
   try {
@@ -52,9 +55,20 @@ let _reconnectTimer = null;
 let _reconnectDelay = 1000;
 let _toastTimer = null;
 let _subscribeWaiter = null; // { botId, resolve, timer }
+let _nativeRefreshSeq = 0;
 let _nativeAuthRefreshPending = false;
 let _nativeAuthFallbackTimer = null;
 let _lastRejectedNativeToken = '';
+let _inflightNativeRefresh = null; // { reqId, epoch, status: 'pending' | 'timed_out' | 'superseded' }
+const _unsettledNativeRefreshIds = new Set();
+let _nativeRefreshTimedOutEpoch = -1;
+const _rejectedNativeTokens = new Set();
+let _userExplicitOverride = false;
+let _webRefreshPromise = null;
+let _webAuthRefreshPending = false;
+let _credentialEpoch = 0;
+let _wsWebRefreshAttempts = 0;
+const MAX_WS_WEB_REFRESH_ATTEMPTS = 1;
 
 export function showToast(msg, durationMs = 2600) {
   store.toastMsg = msg;
@@ -64,23 +78,87 @@ export function showToast(msg, durationMs = 2600) {
   }, durationMs);
 }
 
+export function getCredentialEpoch() {
+  return _credentialEpoch;
+}
+
+function resetCredentialBoundState() {
+  if (_reconnectTimer) {
+    clearTimeout(_reconnectTimer);
+    _reconnectTimer = null;
+  }
+  if (_ws) {
+    const oldWs = _ws;
+    _ws = null;
+    try { oldWs.close(); } catch (_) {}
+  }
+  if (_subscribeWaiter) {
+    clearTimeout(_subscribeWaiter.timer);
+    _subscribeWaiter.resolve(false);
+    _subscribeWaiter = null;
+  }
+  store.nodes = [];
+  store.bots = [];
+  store.activeBotId = null;
+  store.selectedNodeFilter = '';
+  store.eventsByBot = {};
+  store.historySyncSeqByBot = {};
+  store.pendingApprovals = [];
+  store.models = [];
+  store.selectedManagerModel = '';
+  store.stats = null;
+  store.managerMessages = [];
+  store.loadingBots = false;
+  store.loadingEvents = false;
+}
+
 export function saveToken(tok, options = {}) {
   const clean = (tok || '').trim();
-  const source = options && options.source === 'session' ? 'session' : 'manual';
+  const rawSource = options && options.source;
+  const source = rawSource === 'session' ? 'session' : (rawSource === 'native' ? 'native' : 'manual');
+  const isInternalRefresh = Boolean(options && options.internalRefresh);
+  if (options && options.userInitiated) {
+    _userExplicitOverride = true;
+  }
+  if (!isInternalRefresh) {
+    _credentialEpoch += 1;
+    _webRefreshPromise = null;
+    _wsWebRefreshAttempts = 0;
+    _webAuthRefreshPending = false;
+    _nativeAuthRefreshPending = false;
+    _nativeRefreshTimedOutEpoch = -1;
+    _rejectedNativeTokens.clear();
+    if (_inflightNativeRefresh && _inflightNativeRefresh.status === 'pending') {
+      _inflightNativeRefresh.status = 'superseded';
+    }
+    if (_nativeAuthFallbackTimer) {
+      clearTimeout(_nativeAuthFallbackTimer);
+      _nativeAuthFallbackTimer = null;
+    }
+    resetCredentialBoundState();
+  }
   store.token = clean;
   if (source === 'session') {
     try {
       if (clean) {
         sessionStorage.setItem(USER_SESSION_TOKEN_KEY, clean);
         sessionStorage.setItem(TOKEN_SOURCE_KEY, 'session');
+        if (options && typeof options.refreshToken === 'string' && options.refreshToken.trim()) {
+          sessionStorage.setItem(USER_REFRESH_TOKEN_KEY, options.refreshToken.trim());
+        }
+        if (options && options.expiresAt) {
+          sessionStorage.setItem(USER_SESSION_EXPIRES_KEY, String(options.expiresAt));
+        }
       } else {
         sessionStorage.removeItem(USER_SESSION_TOKEN_KEY);
+        sessionStorage.removeItem(USER_REFRESH_TOKEN_KEY);
+        sessionStorage.removeItem(USER_SESSION_EXPIRES_KEY);
         sessionStorage.removeItem(TOKEN_SOURCE_KEY);
       }
     } catch (_) {}
     return;
   }
-  // 手动「Token 直连」或原生注入：仅切换当前连接来源为 manual，保留 user_session_token 供主页退出时撤销
+  // 手动「Token 直连」或原生注入：仅切换当前连接来源为 manual，保留 user_session_token / user_refresh_token 供主页退出时撤销
   try {
     sessionStorage.setItem(TOKEN_SOURCE_KEY, 'manual');
   } catch (_) {}
@@ -91,17 +169,145 @@ export function saveToken(tok, options = {}) {
   }
 }
 
-async function apiFetch(path, options = {}) {
+function canUseWebRefresh() {
+  try {
+    if (sessionStorage.getItem(TOKEN_SOURCE_KEY) === 'manual') return false;
+    const rt = sessionStorage.getItem(USER_REFRESH_TOKEN_KEY);
+    return Boolean(rt && rt.trim());
+  } catch (_) {
+    return false;
+  }
+}
+
+function isSessionNearExpiry() {
+  try {
+    const exp = Number(sessionStorage.getItem(USER_SESSION_EXPIRES_KEY) || 0);
+    if (!exp) return false;
+    return Date.now() / 1000 >= exp - REFRESH_LEEWAY_SEC;
+  } catch (_) {
+    return false;
+  }
+}
+
+function clearWebRefreshTokens() {
+  try {
+    sessionStorage.removeItem(USER_REFRESH_TOKEN_KEY);
+    sessionStorage.removeItem(USER_SESSION_EXPIRES_KEY);
+  } catch (_) {}
+}
+
+export async function refreshWebSession({ failedToken = '' } = {}) {
+  if (!canUseWebRefresh()) return false;
+  // 若并发调用中已有其他协程率先完成刷新，直接复用新 token，严禁重复提交旧 refresh_token 触发重用检测
+  if (failedToken && store.token && store.token !== failedToken) {
+    return true;
+  }
+  if (_webRefreshPromise) {
+    return _webRefreshPromise;
+  }
+  const p = (async () => {
+    const startEpoch = _credentialEpoch;
+    const startAccessToken = store.token;
+    let refreshToken = '';
+    try {
+      refreshToken = (sessionStorage.getItem(USER_REFRESH_TOKEN_KEY) || '').trim();
+    } catch (_) {}
+    if (!refreshToken) return false;
+
+    const isStaleContext = () => {
+      if (_credentialEpoch !== startEpoch) return true;
+      if (!canUseWebRefresh()) return true;
+      try {
+        if ((sessionStorage.getItem(USER_REFRESH_TOKEN_KEY) || '').trim() !== refreshToken) {
+          return true;
+        }
+      } catch (_) {
+        return true;
+      }
+      return store.token !== startAccessToken;
+    };
+
+    try {
+      const resp = await fetch('/agent/api/v1/auth/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      // 在途期间若用户已切换手动 Token 或重新登录新会话，绝不覆盖新凭证或误删新会话的 refresh_token
+      if (isStaleContext()) {
+        return false;
+      }
+      const nextToken = (data.session_token || data.access_token || '').trim();
+      if (!resp.ok || !data.success || !nextToken) {
+        if (resp.status === 401 || resp.status === 403) {
+          clearWebRefreshTokens();
+        }
+        return false;
+      }
+      saveToken(nextToken, {
+        source: 'session',
+        refreshToken: (data.refresh_token || '').trim(),
+        expiresAt: data.access_token_expires_at || data.expires_at || '',
+        internalRefresh: true,
+      });
+      try {
+        if (data.review_token && data.review_token_expires_at) {
+          sessionStorage.setItem('review_token', data.review_token);
+          sessionStorage.setItem('review_token_expires_at', String(data.review_token_expires_at));
+        }
+      } catch (_) {}
+      return true;
+    } catch (_) {
+      return false;
+    }
+  })().finally(() => {
+    if (_webRefreshPromise === p) {
+      _webRefreshPromise = null;
+    }
+  });
+  _webRefreshPromise = p;
+  return p;
+}
+
+async function apiFetch(path, options = {}, _retried = false, _expectedEpoch = _credentialEpoch) {
+  if (_credentialEpoch !== _expectedEpoch) {
+    throw new Error('登录凭证已变更，请重新操作');
+  }
+  if (!_retried && canUseWebRefresh() && isSessionNearExpiry()) {
+    await refreshWebSession();
+    if (_credentialEpoch !== _expectedEpoch) {
+      throw new Error('登录凭证已变更，请重新操作');
+    }
+  }
+  const usedToken = store.token;
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
-  if (store.token) {
-    headers['Authorization'] = `Bearer ${store.token}`;
+  if (usedToken) {
+    headers['Authorization'] = `Bearer ${usedToken}`;
   }
   const resp = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  if (_credentialEpoch !== _expectedEpoch) {
+    throw new Error('登录凭证已变更，请重新操作');
+  }
   if (resp.status === 401 || resp.status === 403) {
-    store.wsState = 'auth_required';
+    if (!_retried && canUseWebRefresh()) {
+      const ok = await refreshWebSession({ failedToken: usedToken });
+      if (_credentialEpoch !== _expectedEpoch) {
+        throw new Error('登录凭证已变更，请重新操作');
+      }
+      if (ok) {
+        return apiFetch(path, options, true, _expectedEpoch);
+      }
+    }
+    if (_credentialEpoch === _expectedEpoch) {
+      store.wsState = 'auth_required';
+    }
     throw new Error('鉴权失败，请检查访问 Token');
   }
   const data = await resp.json().catch(() => ({}));
+  if (_credentialEpoch !== _expectedEpoch) {
+    throw new Error('登录凭证已变更，请重新操作');
+  }
   if (!resp.ok || data.success === false) {
     throw new Error(data.error || `请求失败 (${resp.status})`);
   }
@@ -130,14 +336,17 @@ export async function fetchNodeDirs(nodeId, path = '') {
 }
 
 export async function fetchBots() {
+  const startEpoch = _credentialEpoch;
   store.loadingBots = true;
   try {
-    const data = await apiFetch('/bots');
+    const data = await apiFetch('/bots', {}, false, startEpoch);
     store.bots = data.bots || [];
     sortBotsInPlace();
     return store.bots;
   } finally {
-    store.loadingBots = false;
+    if (_credentialEpoch === startEpoch) {
+      store.loadingBots = false;
+    }
   }
 }
 
@@ -200,6 +409,7 @@ export function mergeEvents(botId, newEvents, { advanceHistoryCursor = false } =
 }
 
 export async function fetchEventsIncremental(botId) {
+  const startEpoch = _credentialEpoch;
   const pageSize = 200;
   const maxPagesPerBatch = 25;
   const initialSeq = store.historySyncSeqByBot[botId] || 0;
@@ -209,7 +419,10 @@ export async function fetchEventsIncremental(botId) {
     for (let page = 0; page < maxPagesPerBatch; page++) {
       const afterSeq = store.historySyncSeqByBot[botId] || 0;
       const data = await apiFetch(
-        `/bots/${encodeURIComponent(botId)}/events?after_seq=${afterSeq}&limit=${pageSize}`
+        `/bots/${encodeURIComponent(botId)}/events?after_seq=${afterSeq}&limit=${pageSize}`,
+        {},
+        false,
+        startEpoch
       );
       const batch = data.events || [];
       if (batch.length > 0) {
@@ -221,16 +434,18 @@ export async function fetchEventsIncremental(botId) {
       }
       hasMore = true;
     }
-    if (hasMore && store.activeBotId === botId) {
+    if (hasMore && _credentialEpoch === startEpoch && store.activeBotId === botId) {
       showToast('历史事件较多，正在继续同步...', 1500);
       setTimeout(() => {
-        if (store.activeBotId === botId) {
+        if (_credentialEpoch === startEpoch && store.activeBotId === botId) {
           fetchEventsIncremental(botId).catch(() => {});
         }
       }, 60);
     }
   } finally {
-    store.loadingEvents = false;
+    if (_credentialEpoch === startEpoch) {
+      store.loadingEvents = false;
+    }
   }
 }
 
@@ -347,27 +562,66 @@ export function connectWs() {
     _ws = null;
   }
   if (!store.token) {
+    if (canUseWebRefresh() && !_webAuthRefreshPending && _wsWebRefreshAttempts < MAX_WS_WEB_REFRESH_ATTEMPTS) {
+      _wsWebRefreshAttempts += 1;
+      _webAuthRefreshPending = true;
+      const wsEpoch = _credentialEpoch;
+      store.wsState = 'connecting';
+      refreshWebSession().then((ok) => {
+        if (_credentialEpoch !== wsEpoch) return;
+        _webAuthRefreshPending = false;
+        if (ok && store.token) {
+          connectWs();
+        } else {
+          store.wsState = 'auth_required';
+        }
+      });
+      return;
+    }
     store.wsState = 'auth_required';
+    return;
+  }
+
+  if (canUseWebRefresh() && isSessionNearExpiry() && !_webAuthRefreshPending && _wsWebRefreshAttempts < MAX_WS_WEB_REFRESH_ATTEMPTS) {
+    _wsWebRefreshAttempts += 1;
+    _webAuthRefreshPending = true;
+    const wsEpoch = _credentialEpoch;
+    store.wsState = 'connecting';
+    refreshWebSession().then((ok) => {
+      if (_credentialEpoch !== wsEpoch) return;
+      _webAuthRefreshPending = false;
+      if (ok && store.token) {
+        connectWs();
+      } else {
+        store.wsState = 'auth_required';
+      }
+    });
     return;
   }
 
   store.wsState = 'connecting';
   const ws = new WebSocket(getWsUrl());
+  const sockEpoch = _credentialEpoch;
+  let sentToken = '';
   _ws = ws;
 
   ws.onopen = () => {
-    if (_ws !== ws) return;
-    ws.send(JSON.stringify({ type: 'auth', token: store.token }));
+    if (_ws !== ws || _credentialEpoch !== sockEpoch) return;
+    sentToken = store.token;
+    ws.send(JSON.stringify({ type: 'auth', token: sentToken }));
   };
 
   ws.onmessage = (evt) => {
-    if (_ws !== ws) return;
+    if (_ws !== ws || _credentialEpoch !== sockEpoch) return;
     let msg;
     try { msg = JSON.parse(evt.data); } catch (_) { return; }
 
     if (msg.type === 'auth.ok') {
       _nativeAuthRefreshPending = false;
+      _nativeRefreshTimedOutEpoch = -1;
+      _rejectedNativeTokens.clear();
       _lastRejectedNativeToken = '';
+      _wsWebRefreshAttempts = 0;
       if (_nativeAuthFallbackTimer) {
         clearTimeout(_nativeAuthFallbackTimer);
         _nativeAuthFallbackTimer = null;
@@ -376,7 +630,13 @@ export function connectWs() {
       _reconnectDelay = 1000;
       if (store.activeBotId) {
         const activeId = store.activeBotId;
-        subscribeBotOnWs(activeId).then(() => fetchEventsIncremental(activeId)).catch(() => {});
+        subscribeBotOnWs(activeId)
+          .then((ok) => {
+            if (ok && _credentialEpoch === sockEpoch && store.activeBotId === activeId) {
+              return fetchEventsIncremental(activeId);
+            }
+          })
+          .catch(() => {});
       }
       fetchNodes().catch(() => {});
       fetchBots().catch(() => {});
@@ -399,22 +659,61 @@ export function connectWs() {
         typeof window !== 'undefined' &&
         window.AndroidPcCliVoiceChannel &&
         typeof window.AndroidPcCliVoiceChannel.postMessage === 'function';
-      if (canAskNative && !_nativeAuthRefreshPending && store.token !== _lastRejectedNativeToken) {
+      const nativeFailedTok = sentToken || store.token;
+      if (canAskNative && _credentialEpoch === sockEpoch && !_nativeAuthRefreshPending && nativeFailedTok !== _lastRejectedNativeToken) {
+        const reqId = `nref_${++_nativeRefreshSeq}_${Date.now()}`;
         _nativeAuthRefreshPending = true;
-        _lastRejectedNativeToken = store.token;
+        _inflightNativeRefresh = { reqId, epoch: sockEpoch, status: 'pending' };
+        _unsettledNativeRefreshIds.add(reqId);
+        _lastRejectedNativeToken = nativeFailedTok;
         ws.close();
         try {
-          window.AndroidPcCliVoiceChannel.postMessage(JSON.stringify({ action: 'refreshAuth' }));
+          window.AndroidPcCliVoiceChannel.postMessage(JSON.stringify({ action: 'refreshAuth', reqId }));
         } catch (_) {}
         if (_nativeAuthFallbackTimer) clearTimeout(_nativeAuthFallbackTimer);
         _nativeAuthFallbackTimer = setTimeout(() => {
-          if (_nativeAuthRefreshPending) {
+          // 保留 _inflightNativeRefresh 记录并标记 timed_out + 锁定当前代数无 ID 回调，确保超时后任何后续无 ID 注入均无法覆盖 auth_required
+          if (_inflightNativeRefresh && _inflightNativeRefresh.reqId === reqId && _inflightNativeRefresh.status === 'pending') {
+            _inflightNativeRefresh.status = 'timed_out';
+          }
+          if (_credentialEpoch === sockEpoch) {
+            _nativeRefreshTimedOutEpoch = sockEpoch;
+          }
+          if (_nativeAuthRefreshPending && _credentialEpoch === sockEpoch) {
             _nativeAuthRefreshPending = false;
             store.wsState = 'auth_required';
             showToast('WebSocket 鉴权失败，请更新 Token');
           }
         }, 4500);
         return;
+      }
+      if (!canAskNative && _credentialEpoch === sockEpoch && !_webAuthRefreshPending && _wsWebRefreshAttempts < MAX_WS_WEB_REFRESH_ATTEMPTS) {
+        const failedTok = sentToken || store.token;
+        // 若同一凭证代数内并发 REST 401 已率先完成刷新并替换了 store.token，无需再次请求 /auth/refresh，直接用新令牌重连一次
+        if (failedTok && store.token && store.token !== failedTok) {
+          _wsWebRefreshAttempts += 1;
+          _webAuthRefreshPending = true;
+          ws.close();
+          _webAuthRefreshPending = false;
+          connectWs();
+          return;
+        }
+        if (canUseWebRefresh()) {
+          _wsWebRefreshAttempts += 1;
+          _webAuthRefreshPending = true;
+          ws.close();
+          refreshWebSession({ failedToken: failedTok }).then((ok) => {
+            if (_credentialEpoch !== sockEpoch) return;
+            _webAuthRefreshPending = false;
+            if (ok && store.token && store.token !== failedTok) {
+              connectWs();
+            } else {
+              store.wsState = 'auth_required';
+              showToast('会话已过期，请重新登录');
+            }
+          });
+          return;
+        }
       }
       _nativeAuthRefreshPending = false;
       store.wsState = 'auth_required';
@@ -467,7 +766,7 @@ export function connectWs() {
   ws.onclose = () => {
     if (_ws !== ws) return;
     _ws = null;
-    if (store.wsState === 'auth_required' || _nativeAuthRefreshPending) return;
+    if (store.wsState === 'auth_required' || _nativeAuthRefreshPending || _webAuthRefreshPending) return;
     store.wsState = 'disconnected';
     _reconnectTimer = setTimeout(() => {
       _reconnectDelay = Math.min(_reconnectDelay * 2, 15000);
@@ -476,14 +775,62 @@ export function connectWs() {
   };
 }
 
-export function applyNativeToken(newToken, refreshedOk = true) {
+export function applyNativeToken(newToken, refreshedOk = true, reqId = '') {
   const cleaned = String(newToken || '').trim();
-  if (_nativeAuthFallbackTimer) {
-    clearTimeout(_nativeAuthFallbackTimer);
-    _nativeAuthFallbackTimer = null;
+  const cleanReqId = String(reqId || '').trim();
+
+  // 1. 携带配对 reqId 的原生续期响应：必须精确命中当前唯一 pending 且同凭证代数的请求，超时/切换/旧请求一律丢弃
+  if (cleanReqId) {
+    _unsettledNativeRefreshIds.delete(cleanReqId);
+    const cur = _inflightNativeRefresh;
+    if (!cur || cur.reqId !== cleanReqId) {
+      return;
+    }
+    _inflightNativeRefresh = null;
+    if (_nativeAuthFallbackTimer) {
+      clearTimeout(_nativeAuthFallbackTimer);
+      _nativeAuthFallbackTimer = null;
+    }
+    const validPending = cur.status === 'pending' && _nativeAuthRefreshPending && cur.epoch === _credentialEpoch;
+    _nativeAuthRefreshPending = false;
+    if (!validPending) {
+      if (cur.epoch === _credentialEpoch) {
+        _nativeRefreshTimedOutEpoch = _credentialEpoch;
+      }
+      if (cleaned) {
+        _rejectedNativeTokens.add(cleaned);
+      }
+      return;
+    }
+    if (!cleaned) {
+      saveToken('');
+      store.wsState = 'auth_required';
+      return;
+    }
+    const changed = cleaned !== store.token;
+    if (changed) {
+      saveToken(cleaned, { source: 'native', internalRefresh: true });
+    }
+    if (!refreshedOk && !changed) {
+      store.wsState = 'auth_required';
+      showToast('WebSocket 鉴权失败，请重新登录或更新 Token');
+      return;
+    }
+    connectWs();
+    return;
   }
-  const wasWaitingRefresh = _nativeAuthRefreshPending;
-  _nativeAuthRefreshPending = false;
+
+  // 2. 无 reqId 回调无法证明续期归属：存在在途/未决续期、当前代数已发生续期超时、令牌曾被拒收，或用户已显式覆盖凭证时一律丢弃
+  if (
+    _nativeAuthRefreshPending ||
+    _inflightNativeRefresh !== null ||
+    _unsettledNativeRefreshIds.size > 0 ||
+    _nativeRefreshTimedOutEpoch === _credentialEpoch ||
+    _userExplicitOverride ||
+    (cleaned && _rejectedNativeTokens.has(cleaned))
+  ) {
+    return;
+  }
 
   if (!cleaned) {
     saveToken('');
@@ -493,17 +840,7 @@ export function applyNativeToken(newToken, refreshedOk = true) {
 
   const changed = cleaned !== store.token;
   if (changed) {
-    saveToken(cleaned);
-  }
-
-  if (wasWaitingRefresh) {
-    if (!refreshedOk && !changed) {
-      store.wsState = 'auth_required';
-      showToast('WebSocket 鉴权失败，请重新登录或更新 Token');
-      return;
-    }
-    connectWs();
-    return;
+    saveToken(cleaned, { source: 'native', internalRefresh: Boolean(store.token) });
   }
 
   if (changed && store.wsState !== 'connected') {
@@ -518,7 +855,7 @@ if (typeof window !== 'undefined') {
 // 手机锁屏/切后台恢复后自动增量补齐进度
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
-    if (store.wsState !== 'connected' && store.token) {
+    if (store.wsState !== 'connected' && (store.token || canUseWebRefresh())) {
       connectWs();
     } else {
       fetchBots().catch(() => {});

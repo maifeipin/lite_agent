@@ -56,10 +56,16 @@ import java.util.Locale
 private val pcBotsGson = Gson()
 private const val VOICE_WEB_MESSAGE_CHANNEL = "AndroidPcCliVoiceChannel"
 
+internal enum class PcBotsSnapshotSource {
+    PROACTIVE,
+    REFRESH_AUTH
+}
+
 internal data class PcBotsAuthSnapshot(
     val serverUrl: String,
     val targetUrl: String,
-    val token: String
+    val token: String,
+    val source: PcBotsSnapshotSource = PcBotsSnapshotSource.PROACTIVE
 )
 
 private data class VoiceBridgeRequest(
@@ -105,9 +111,62 @@ internal fun resolveTokenForUrl(url: String?, snapshot: PcBotsAuthSnapshot?): St
     return if (isSameOrigin(url, snapshot.targetUrl)) snapshot.token else null
 }
 
-internal fun buildTokenInjectionScript(token: String, refreshedOk: Boolean = true): String {
+internal fun resolveSnapshotSource(
+    requestedSource: PcBotsSnapshotSource,
+    previousSnapshot: PcBotsAuthSnapshot?,
+    normalizedServerUrl: String,
+    loadedToken: String,
+    activeRefreshForServer: Boolean,
+    lastRefreshTokenForServer: String? = null,
+    resetRefreshOrigin: Boolean = false
+): PcBotsSnapshotSource {
+    if (resetRefreshOrigin) {
+        return requestedSource
+    }
+    if (requestedSource == PcBotsSnapshotSource.REFRESH_AUTH || activeRefreshForServer) {
+        return PcBotsSnapshotSource.REFRESH_AUTH
+    }
+    if (lastRefreshTokenForServer != null && loadedToken == lastRefreshTokenForServer) {
+        return PcBotsSnapshotSource.REFRESH_AUTH
+    }
+    if (previousSnapshot != null &&
+        ServerUrlNormalizer.normalize(previousSnapshot.serverUrl) == normalizedServerUrl &&
+        previousSnapshot.source == PcBotsSnapshotSource.REFRESH_AUTH &&
+        previousSnapshot.token == loadedToken
+    ) {
+        return PcBotsSnapshotSource.REFRESH_AUTH
+    }
+    return requestedSource
+}
+
+internal fun shouldInjectUnpairedSnapshot(
+    snapshot: PcBotsAuthSnapshot?,
+    activeRefreshCount: Int = 0
+): Boolean {
+    if (snapshot == null) return false
+    if (activeRefreshCount > 0) return false
+    return snapshot.source == PcBotsSnapshotSource.PROACTIVE
+}
+
+internal fun buildTokenInjectionScript(
+    token: String,
+    refreshedOk: Boolean = true,
+    reqId: String = ""
+): String {
     val quoted = pcBotsGson.toJson(token)
     val okLiteral = if (refreshedOk) "true" else "false"
+    if (reqId.isNotBlank()) {
+        val reqLiteral = pcBotsGson.toJson(reqId)
+        return """
+            (function() {
+              try {
+                if (typeof window.__onPcCliNativeToken === 'function') {
+                  window.__onPcCliNativeToken($quoted, $okLiteral, $reqLiteral);
+                }
+              } catch (e) {}
+            })();
+        """.trimIndent()
+    }
     return """
         (function() {
           try {
@@ -192,11 +251,21 @@ fun PcBotsScreen(
 
     // 将服务器地址、目标 URL 与对应 Token 绑定为原子快照：切换服务器时立即清空，严禁把旧服 Token 注入新服
     var readySnapshot by remember { mutableStateOf<PcBotsAuthSnapshot?>(null) }
+    val currentServerState = rememberUpdatedState(activeServer)
+    var activeRefreshAuthCount by remember { mutableIntStateOf(0) }
+    val activeRefreshServers = remember { mutableStateMapOf<String, Int>() }
+    val lastRefreshTokenByServer = remember { mutableStateMapOf<String, String>() }
 
-    suspend fun syncAuthSnapshot(serverUrl: String, forceRefresh: Boolean = false): PcBotsAuthSnapshot {
+    suspend fun syncAuthSnapshot(
+        serverUrl: String,
+        forceRefresh: Boolean = false,
+        requestedSource: PcBotsSnapshotSource = PcBotsSnapshotSource.PROACTIVE,
+        resetRefreshOrigin: Boolean = false
+    ): PcBotsAuthSnapshot {
         val normNew = ServerUrlNormalizer.normalize(serverUrl)
-        val normPrev = readySnapshot?.serverUrl?.let { ServerUrlNormalizer.normalize(it) }
-        if (normPrev != null && normPrev != normNew) {
+        val prevSnap = readySnapshot
+        val normPrev = prevSnap?.serverUrl?.let { ServerUrlNormalizer.normalize(it) }
+        if (normPrev != null && normPrev != normNew && normNew == ServerUrlNormalizer.normalize(currentServerState.value)) {
             readySnapshot = null
         }
         try {
@@ -209,12 +278,30 @@ fun PcBotsScreen(
         } catch (_: Exception) {
             ""
         }
+        val activeForSrv = (activeRefreshServers[normNew] ?: 0) > 0
+        val effectiveSource = resolveSnapshotSource(
+            requestedSource = requestedSource,
+            previousSnapshot = readySnapshot ?: prevSnap,
+            normalizedServerUrl = normNew,
+            loadedToken = loadedToken,
+            activeRefreshForServer = activeForSrv,
+            lastRefreshTokenForServer = lastRefreshTokenByServer[normNew],
+            resetRefreshOrigin = resetRefreshOrigin
+        )
+        if (effectiveSource == PcBotsSnapshotSource.REFRESH_AUTH) {
+            lastRefreshTokenByServer[normNew] = loadedToken
+        } else {
+            lastRefreshTokenByServer.remove(normNew)
+        }
         val snap = PcBotsAuthSnapshot(
             serverUrl = serverUrl,
             targetUrl = targetForServer,
-            token = loadedToken
+            token = loadedToken,
+            source = effectiveSource
         )
-        readySnapshot = snap
+        if (normNew == ServerUrlNormalizer.normalize(currentServerState.value)) {
+            readySnapshot = snap
+        }
         return snap
     }
 
@@ -231,7 +318,6 @@ fun PcBotsScreen(
     }
 
     val currentSnapshotState = rememberUpdatedState(readySnapshot)
-    val currentServerState = rememberUpdatedState(activeServer)
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var registeredChannelTarget by remember { mutableStateOf<Pair<WebView, String>?>(null) }
@@ -414,17 +500,40 @@ fun PcBotsScreen(
                     "cancel" -> cancelActiveVoiceSession()
                     "openModels" -> showVoiceModelSheet = true
                     "refreshAuth" -> {
+                        val refreshReqId = req.reqId?.trim().orEmpty()
+                        if (refreshReqId.isEmpty()) return@post
+                        val targetSrv = currentServerState.value
+                        val normTargetSrv = ServerUrlNormalizer.normalize(targetSrv)
+                        activeRefreshAuthCount += 1
+                        activeRefreshServers[normTargetSrv] = (activeRefreshServers[normTargetSrv] ?: 0) + 1
                         scope.launch {
-                            val targetSrv = currentServerState.value
-                            var refreshedOk = false
                             try {
-                                refreshedOk = apiClient?.ensureFreshSession(targetSrv, force = true) ?: false
-                            } catch (_: Exception) {
-                            }
-                            val snap = syncAuthSnapshot(targetSrv, forceRefresh = false)
-                            val tok = resolveTokenForUrl(view.url, snap)
-                            if (tok != null) {
-                                view.evaluateJavascript(buildTokenInjectionScript(tok, refreshedOk = refreshedOk), null)
+                                var refreshedOk = false
+                                try {
+                                    refreshedOk = apiClient?.ensureFreshSession(targetSrv, force = true) ?: false
+                                } catch (_: Exception) {
+                                }
+                                val snap = syncAuthSnapshot(
+                                    serverUrl = targetSrv,
+                                    forceRefresh = false,
+                                    requestedSource = PcBotsSnapshotSource.REFRESH_AUTH
+                                )
+                                val sameActiveServer = normTargetSrv == ServerUrlNormalizer.normalize(currentServerState.value)
+                                val tok = if (sameActiveServer) resolveTokenForUrl(view.url, snap) else null
+                                if (tok != null) {
+                                    view.evaluateJavascript(
+                                        buildTokenInjectionScript(tok, refreshedOk = refreshedOk, reqId = refreshReqId),
+                                        null
+                                    )
+                                }
+                            } finally {
+                                val nextForSrv = ((activeRefreshServers[normTargetSrv] ?: 1) - 1).coerceAtLeast(0)
+                                if (nextForSrv == 0) {
+                                    activeRefreshServers.remove(normTargetSrv)
+                                } else {
+                                    activeRefreshServers[normTargetSrv] = nextForSrv
+                                }
+                                activeRefreshAuthCount = (activeRefreshAuthCount - 1).coerceAtLeast(0)
                             }
                         }
                     }
@@ -460,7 +569,7 @@ fun PcBotsScreen(
         webViewRef?.goBack()
     }
 
-    // 仅在当前服务器的原子快照就绪后，才绑定同源消息通道、加载目标页面或同步最新 Token
+    // 仅在当前服务器的原子快照就绪后，才绑定同源消息通道、加载目标页面或同步最新主动快照（禁止 refreshAuth 快照走无 ID 注入）
     LaunchedEffect(readySnapshot) {
         val snap = readySnapshot ?: return@LaunchedEffect
         val wv = webViewRef ?: return@LaunchedEffect
@@ -469,7 +578,7 @@ fun PcBotsScreen(
             errorMessage = null
             lastLoadedTargetUrl = snap.targetUrl
             wv.loadUrl(snap.targetUrl)
-        } else {
+        } else if (shouldInjectUnpairedSnapshot(snap, activeRefreshAuthCount)) {
             val tok = resolveTokenForUrl(wv.url, snap)
             if (tok != null) {
                 wv.evaluateJavascript(buildTokenInjectionScript(tok), null)
@@ -548,24 +657,42 @@ fun PcBotsScreen(
                         }
                         IconButton(
                             onClick = {
+                                val requestedServer = currentServerState.value
+                                val normRequested = ServerUrlNormalizer.normalize(requestedServer)
                                 scope.launch {
-                                    val snap = syncAuthSnapshot(activeServer, forceRefresh = false)
+                                    val snap = syncAuthSnapshot(
+                                        serverUrl = requestedServer,
+                                        forceRefresh = false,
+                                        requestedSource = PcBotsSnapshotSource.PROACTIVE,
+                                        resetRefreshOrigin = true
+                                    )
+                                    if (normRequested != ServerUrlNormalizer.normalize(currentServerState.value)) {
+                                        return@launch
+                                    }
                                     errorMessage = null
-                                    webViewRef?.let { wv ->
-                                        if (wv.url.isNullOrBlank() || !isSameOrigin(wv.url, snap.targetUrl)) {
-                                            lastLoadedTargetUrl = snap.targetUrl
-                                            wv.loadUrl(snap.targetUrl)
-                                        } else {
-                                            val tok = resolveTokenForUrl(wv.url, snap)
-                                            if (tok != null) {
-                                                val quoted = pcBotsGson.toJson(tok)
-                                                val syncOnlyScript = "(function(){try{var t=$quoted;if(t){window.localStorage.setItem('pc_cli_client_token',t);}else{window.localStorage.removeItem('pc_cli_client_token');}}catch(e){}})();"
-                                                wv.evaluateJavascript(syncOnlyScript) {
+                                    val wv = webViewRef ?: return@launch
+                                    if (wv.url.isNullOrBlank() || !isSameOrigin(wv.url, snap.targetUrl)) {
+                                        lastLoadedTargetUrl = snap.targetUrl
+                                        wv.loadUrl(snap.targetUrl)
+                                    } else {
+                                        val tok = resolveTokenForUrl(wv.url, snap)
+                                        if (tok != null) {
+                                            val quoted = pcBotsGson.toJson(tok)
+                                            val syncOnlyScript = "(function(){try{var t=$quoted;if(t){window.localStorage.setItem('pc_cli_client_token',t);}else{window.localStorage.removeItem('pc_cli_client_token');}}catch(e){}})();"
+                                            wv.evaluateJavascript(syncOnlyScript) {
+                                                if (
+                                                    webViewRef === wv &&
+                                                    normRequested == ServerUrlNormalizer.normalize(currentServerState.value) &&
+                                                    isSameOrigin(wv.url, snap.targetUrl)
+                                                ) {
                                                     wv.reload()
                                                 }
-                                            } else {
-                                                wv.reload()
                                             }
+                                        } else if (
+                                            webViewRef === wv &&
+                                            normRequested == ServerUrlNormalizer.normalize(currentServerState.value)
+                                        ) {
+                                            wv.reload()
                                         }
                                     }
                                 }
@@ -690,8 +817,9 @@ fun PcBotsScreen(
                                 override fun onPageFinished(view: WebView?, url: String?) {
                                     isLoading = false
                                     canGoBack = view?.canGoBack() == true
-                                    val tok = resolveTokenForUrl(url, currentSnapshotState.value)
-                                    if (view != null && tok != null) {
+                                    val snap = currentSnapshotState.value
+                                    val tok = resolveTokenForUrl(url, snap)
+                                    if (view != null && tok != null && shouldInjectUnpairedSnapshot(snap, activeRefreshAuthCount)) {
                                         view.evaluateJavascript(
                                             buildTokenInjectionScript(tok),
                                             null

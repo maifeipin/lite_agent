@@ -134,7 +134,7 @@
                 const r = await fetch('/agent/api/v1/auth', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, password, device_name: 'web-dashboard' }),
+                    body: JSON.stringify({ username, password, device_name: 'web-dashboard', remember_me: true }),
                 });
                 const d = await r.json();
                 if (d.success && d.review_token && d.scope === 'review-meetings:host') {
@@ -144,6 +144,12 @@
                     if (d.session_token) {
                         sessionStorage.setItem('user_session_token', d.session_token);
                         sessionStorage.setItem('pc_cli_token_source', 'session');
+                    }
+                    if (d.refresh_token) {
+                        sessionStorage.setItem('user_refresh_token', d.refresh_token);
+                    }
+                    if (d.access_token_expires_at || d.expires_at) {
+                        sessionStorage.setItem('user_session_expires_at', String(d.access_token_expires_at || d.expires_at));
                     }
                     window.location.href = '/';
                 } else {

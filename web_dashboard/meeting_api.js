@@ -6,6 +6,8 @@ window.ReviewMeetingAPI = (() => {
         sessionStorage.removeItem('review_token_expires_at');
         sessionStorage.removeItem('dashboard_auth');
         sessionStorage.removeItem('user_session_token');
+        sessionStorage.removeItem('user_refresh_token');
+        sessionStorage.removeItem('user_session_expires_at');
         sessionStorage.removeItem('pc_cli_token_source');
     };
     const request = async (path, options = {}) => {
@@ -30,16 +32,21 @@ window.ReviewMeetingAPI = (() => {
     };
     const logout = async () => {
         const userSessionToken = sessionStorage.getItem('user_session_token');
+        const userRefreshToken = sessionStorage.getItem('user_refresh_token');
         try {
-            if (userSessionToken) {
+            if (userSessionToken || userRefreshToken) {
                 try {
+                    const headers = { 'Content-Type': 'application/json' };
+                    if (userSessionToken) {
+                        headers['Authorization'] = `Bearer ${userSessionToken}`;
+                    }
+                    const payload = {};
+                    if (userSessionToken) payload.session_token = userSessionToken;
+                    if (userRefreshToken) payload.refresh_token = userRefreshToken;
                     await fetch('/agent/api/v1/auth/logout', {
                         method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${userSessionToken}`,
-                        },
-                        body: JSON.stringify({ session_token: userSessionToken }),
+                        headers,
+                        body: JSON.stringify(payload),
                     });
                 } catch (_) {
                     // Best-effort revoke unified user session; always proceed to clear local state
