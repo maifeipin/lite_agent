@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#0a0b10">
   <title>PC Bots | Lite Agent</title>
   <link rel="manifest" href="./manifest.json?v=1">
-  <link rel="stylesheet" href="./style.css?v=13">
+  <link rel="stylesheet" href="./style.css?v=14">
   <script src="./vendor/marked.min.js?v=1"></script>
 </head>
 <body>
@@ -140,13 +140,13 @@
                 <span v-if="activeBot.model" class="tag">{{ activeBot.model }}</span>
                 <button
                   type="button"
-                  class="btn"
-                  :class="{ 'btn-prompt-active': Boolean(activeBot.system_prompt) }"
+                  class="mode-badge"
+                  :class="activeBot.system_prompt ? 'prompt-configured' : 'prompt-empty'"
                   :disabled="updatingApprovalMode || sending || activeBot.status === 'running' || activeBot.status === 'waiting_approval'"
                   @click="openPromptModal(activeBot)"
                   :title="activeBot.system_prompt ? '查看或修改角色指令（已配置）' : '点击配置角色与专属指令'"
                 >
-                  📋 角色指令{{ activeBot.system_prompt ? ' · 已配' : '' }}
+                  📋 角色指令{{ activeBot.system_prompt ? ' ✓' : '' }}
                 </button>
                 <button
                   v-if="activeBot.status === 'running' || activeBot.status === 'waiting_approval'"
@@ -646,12 +646,12 @@
           <button
             type="button"
             class="mode-badge"
-            :class="{ 'prompt-configured': Boolean(activeBot.system_prompt) }"
+            :class="activeBot.system_prompt ? 'prompt-configured' : 'prompt-empty'"
             :disabled="updatingApprovalMode || sending || activeBot.status === 'running' || activeBot.status === 'waiting_approval'"
             @click="openPromptModal(activeBot)"
             :title="activeBot.system_prompt ? '查看或修改角色指令（已配置）' : '点击配置角色与专属指令'"
           >
-            📋 角色指令{{ activeBot.system_prompt ? ' · 已配' : '' }}
+            📋 角色指令{{ activeBot.system_prompt ? ' ✓' : '' }}
           </button>
           <span class="tag bot-id-tag" @click="copyBotId(activeBot.bot_id)" title="点击复制 Bot ID">{{ activeBot.bot_id }}</span>
           <span class="status-badge" :class="activeBot.status">{{ statusLabel(activeBot.status) }}</span>
