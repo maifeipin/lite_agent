@@ -1091,18 +1091,18 @@ html, body, #app {
 }
 
 .desktop-stream .msg-assistant {
-  max-width: min(92%, 960px);
+  max-width: 100%;
   padding: 13px 16px;
   font-size: 14.5px;
 }
 
 .desktop-stream .msg-user {
-  max-width: min(74%, 720px);
+  max-width: 82%;
   padding: 10px 15px;
 }
 
 .desktop-stream .tool-card {
-  max-width: min(92%, 960px);
+  max-width: 100%;
 }
 
 .desktop-composer {
