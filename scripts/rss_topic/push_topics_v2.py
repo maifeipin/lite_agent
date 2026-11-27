@@ -53,9 +53,48 @@ with open(BF, encoding="utf-8") as f:
 print("backfill records={}".format(len(backfill)), flush=True)
 
 # 3. upsert
+WAIT_TIMEOUT = 600
 batch = []
 total = 0
 miss_cat = miss_name = miss_bf = 0
+last_task_uid = None
+
+
+def flush_batch(items):
+    global total, last_task_uid
+    st, resp = req("/indexes/rss/documents?primaryKey=id", "PUT", items)
+    if st != 202:
+        print("  FAIL at {}: HTTP {} {}".format(total, st, resp), flush=True)
+        raise SystemExit(1)
+    task_uid = resp.get("taskUid")
+    if task_uid is None:
+        task_uid = resp.get("uid")
+    if task_uid is not None:
+        last_task_uid = task_uid
+    total += len(items)
+    if total % 5000 == 0:
+        print("  upserted {}...".format(total), flush=True)
+
+
+def wait_for_task(task_uid, timeout=WAIT_TIMEOUT):
+    deadline = time.monotonic() + timeout
+    last_status = None
+    while True:
+        st, task = req("/tasks/{}".format(task_uid), "GET")
+        last_status = task.get("status")
+        if last_status == "succeeded":
+            print("  task {} succeeded (duration={})".format(task_uid, task.get("duration")), flush=True)
+            return
+        if last_status in ("failed", "canceled"):
+            print("  ERROR: task {} {} -> {}".format(task_uid, last_status, task.get("error")), flush=True)
+            raise SystemExit(1)
+        if time.monotonic() >= deadline:
+            print("  ERROR: task {} timed out after {}s (status={})".format(
+                task_uid, timeout, last_status), flush=True)
+            raise SystemExit(1)
+        time.sleep(3)
+
+
 ids = set(doc_cat) | set(doc_name)
 for did in ids:
     cat = doc_cat.get(did, "")
@@ -67,36 +106,38 @@ for did in ids:
     bf = backfill.get(did, {})
     if not bf:
         miss_bf += 1
-    batch.append({
+    doc = {
         "id": did,
         "category": cat or "其他",
         "topics": [name] if name else [],
-        "content": bf.get("content", ""),
-        "published": bf.get("published", ""),
-        "date": bf.get("date", 0),
-    })
+    }
+    bf_content = bf.get("content")
+    if bf_content:
+        doc["content"] = bf_content
+    bf_published = bf.get("published")
+    if bf_published:
+        doc["published"] = bf_published
+    try:
+        bf_date = int(float(bf.get("date") or 0))
+    except Exception:
+        bf_date = 0
+    if bf_date > 0:
+        doc["date"] = bf_date
+    batch.append(doc)
     if len(batch) >= BATCH:
-        st, _ = req("/indexes/rss/documents?primaryKey=id", "PUT", batch)
-        if st == 202:
-            total += len(batch)
-            if total % 5000 == 0:
-                print("  upserted {}...".format(total), flush=True)
-        else:
-            print("  FAIL at {}: {}".format(total, st), flush=True)
+        flush_batch(batch)
         batch = []
 if batch:
-    st, _ = req("/indexes/rss/documents?primaryKey=id", "PUT", batch)
-    if st == 202:
-        total += len(batch)
+    flush_batch(batch)
 
 print("\nDONE upserted {} docs (miss_cat={} miss_name={} miss_bf={})".format(
     total, miss_cat, miss_name, miss_bf), flush=True)
-# 等索引完成再看 facet
-for _ in range(60):
-    time.sleep(3)
-    st, stats = req("/indexes/rss/stats")
-    if not stats.get("isIndexing"):
-        break
+
+# 等最后一批 taskUid 完成建索引
+if last_task_uid is not None:
+    print("waiting for taskUid={} (timeout={}s)...".format(last_task_uid, WAIT_TIMEOUT), flush=True)
+    wait_for_task(last_task_uid, timeout=WAIT_TIMEOUT)
+
 st, stats = req("/indexes/rss/stats")
 print("indexing={} numberOfDocuments={}".format(stats.get("isIndexing"), stats.get("numberOfDocuments")), flush=True)
 st, fd = req("/indexes/rss/search", "POST", {"q": "", "limit": 0, "facets": ["category", "topics"]})

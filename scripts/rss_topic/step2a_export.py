@@ -5,7 +5,7 @@
 MEILI_MASTER_KEY 从环境变量读。
 """
 import os, json, urllib.request, argparse, time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from paths import cfg
 
 KEY = os.environ["MEILI_MASTER_KEY"]
@@ -22,13 +22,29 @@ FIELDS = ["id", "title", "source", "link", "published", "date"]
 BATCH = 1000
 threshold = 0
 if args.days > 0:
-    threshold = int((datetime.now() - timedelta(days=args.days)).timestamp())
-    print("--days {}: date >= {} ({})".format(args.days, threshold, datetime.fromtimestamp(threshold)), flush=True)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=args.days)
+    threshold = int(cutoff.timestamp())
+    print("--days {}: date >= {} ({})".format(
+        args.days, threshold, datetime.fromtimestamp(threshold, tz=timezone.utc).isoformat()), flush=True)
 
 
 def fetch(offset, limit):
-    url = URL + "/indexes/rss/documents?limit=" + str(limit) + "&offset=" + str(offset)
-    r = urllib.request.Request(url, headers={"Authorization": "Bearer " + KEY})
+    if threshold > 0:
+        payload = {
+            "filter": "date >= {}".format(threshold),
+            "fields": FIELDS,
+            "limit": limit,
+            "offset": offset,
+        }
+        r = urllib.request.Request(
+            URL + "/indexes/rss/documents/fetch",
+            data=json.dumps(payload).encode("utf-8"),
+            method="POST",
+            headers={"Authorization": "Bearer " + KEY, "Content-Type": "application/json"},
+        )
+    else:
+        url = URL + "/indexes/rss/documents?limit=" + str(limit) + "&offset=" + str(offset)
+        r = urllib.request.Request(url, headers={"Authorization": "Bearer " + KEY})
     with urllib.request.urlopen(r, timeout=60) as resp:
         return json.loads(resp.read().decode())
 
@@ -51,13 +67,13 @@ with open(OUT, "w", encoding="utf-8") as f:
             did = d.get("id")
             if not did or did in seen:
                 continue
-            # --days 过滤 (date 是 unix ts 字符串)
+            # --days 客户端兜底过滤 (跳过 date<=0 脏数据与早于阈值的旧文)
             if threshold:
                 try:
                     dt = int(float(d.get("date") or 0))
                 except Exception:
                     dt = 0
-                if dt and dt < threshold:
+                if dt <= 0 or dt < threshold:
                     skipped_old += 1
                     continue
             seen.add(did)

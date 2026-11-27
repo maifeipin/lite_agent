@@ -5,8 +5,9 @@ history 存 /home/liteagent/rss_topic_work/history/{YYYYMMDD}_topic_counts.json�
 命中则推送 lite-agent。MEILI_MASTER_KEY 从环境变量读。
 """
 import os, json, urllib.request, time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
+from statistics import median
 from paths import cfg
 
 KEY = os.environ["MEILI_MASTER_KEY"]
@@ -15,6 +16,8 @@ INDEX = "rss"
 HISTORY = cfg("vps_work_dir", "/home/liteagent/rss_topic_work") + "/history"
 PUSH_URL = cfg("lite_agent_alert_url", "http://127.0.0.1:8887/api/v1/alert")
 PUSH_TOKEN = os.environ.get("API_AUTH_TOKEN", "")
+WINDOW_SECONDS = 86400
+MIN_WINDOW_TAGGED_DOCS = int(os.environ.get("HOTSPOT_MIN_DOCS", "50"))
 
 
 def req(path, method="GET", data=None):
@@ -25,29 +28,54 @@ def req(path, method="GET", data=None):
         return resp.status, json.loads(resp.read().decode() or "{}")
 
 
-# 今日起点 (UTC 当天 00:00 的 unix ts; 用 date 字段过滤)
-today_str = datetime.now().strftime("%Y%m%d")
-today_start = int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
-print("today={} (date >= {})".format(today_str, today_start), flush=True)
+# 检测上游 Meilisearch 是否仍在建索引，避免抢跑污染基线
+st, idx_stats = req("/indexes/{}/stats".format(INDEX), "GET")
+if idx_stats.get("isIndexing"):
+    print("SKIP: Meilisearch index '{}' is still indexing (isIndexing=True); preserving baseline & brief.".format(INDEX), flush=True)
+    raise SystemExit(1)
 
-# 今日各 topic 计数 (facet topics, 过滤今日文章)
+# 近 24 小时滚动窗口 (UTC unix ts; 用 date 字段过滤)
+now_local = datetime.now()
+today_str = now_local.strftime("%Y%m%d")
+window_start = int(datetime.now(timezone.utc).timestamp()) - WINDOW_SECONDS
+print("today={} window_24h (date >= {})".format(today_str, window_start), flush=True)
+
+# 近 24 小时各 topic 计数 (facet topics)
 st, d = req("/indexes/{}/search".format(INDEX), "POST",
-            {"q": "", "limit": 0, "filter": "date >= {}".format(today_start), "facets": ["topics"]})
-topic_counts = {k: v for k, v in d.get("facetDistribution", {}).get("topics", {}).items() if k and k != "未分类"}
-print("today topics: {} (total today docs: {})".format(len(topic_counts), d.get("estimatedTotalHits")), flush=True)
+            {"q": "", "limit": 0, "filter": "date >= {}".format(window_start), "facets": ["topics"]})
+raw_topic_facets = d.get("facetDistribution", {}).get("topics", {})
+topic_counts = {k: v for k, v in raw_topic_facets.items() if k and k != "未分类"}
+total_tagged = sum(topic_counts.values())
+print("window topics: {} (tagged_docs={}, estimatedTotalHits={})".format(
+    len(topic_counts), total_tagged, d.get("estimatedTotalHits")), flush=True)
+
+# 过去 7 日 (先读历史，再判断当前窗口是否异常偏低，避免污染基线)
+history = defaultdict(list)
+past_totals = []
+for i in range(1, 8):
+    d_ = (now_local - timedelta(days=i)).strftime("%Y%m%d")
+    f = "{}/{}_topic_counts.json".format(HISTORY, d_)
+    if os.path.exists(f):
+        day_counts = json.load(open(f, encoding="utf-8"))
+        day_total = sum(day_counts.values())
+        if day_total < MIN_WINDOW_TAGGED_DOCS:
+            continue
+        past_totals.append(day_total)
+        for t, c in day_counts.items():
+            history[t].append(c)
+
+low_floor = MIN_WINDOW_TAGGED_DOCS
+if len(past_totals) >= 2:
+    low_floor = max(low_floor, int(median(past_totals) * 0.1))
+
+if total_tagged < low_floor:
+    print("SKIP: window tagged_docs={} < min_threshold={} (past_totals={}); preserving baseline & brief.".format(
+        total_tagged, low_floor, past_totals), flush=True)
+    raise SystemExit(1)
 
 os.makedirs(HISTORY, exist_ok=True)
 today_file = "{}/{}_topic_counts.json".format(HISTORY, today_str)
 json.dump(topic_counts, open(today_file, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
-
-# 过去 7 日
-history = defaultdict(list)
-for i in range(1, 8):
-    d_ = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
-    f = "{}/{}_topic_counts.json".format(HISTORY, d_)
-    if os.path.exists(f):
-        for t, c in json.load(open(f, encoding="utf-8")).items():
-            history[t].append(c)
 
 # 热点判定
 hot = []
@@ -66,10 +94,12 @@ for topic, tc in topic_counts.items():
 
 def get_topic_docs(topic, limit=8):
     try:
-        filter_expr = f'topics = "{topic}"'
+        escaped = topic.replace("\\", "\\\\").replace('"', '\\"')
+        filter_expr = f'topics = "{escaped}" AND date >= {window_start}'
         status, d = req(f"/indexes/{INDEX}/search", "POST", {
             "q": "",
             "filter": filter_expr,
+            "sort": ["date:desc"],
             "limit": limit,
             "attributesToRetrieve": ["title", "content"]
         })
