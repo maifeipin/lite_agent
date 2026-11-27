@@ -69,43 +69,93 @@ jobs:
           retention-days: 7
 
       - name: Generate update.json and Publish GitHub Release (android-debug-latest)
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_SLUG: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
           APK_PATH="app/android/app/build/outputs/apk/debug/app-debug.apk"
           SIZE_BYTES=$(stat -c%s "$APK_PATH")
           SHA256=$(sha256sum "$APK_PATH" | awk '{print $1}')
-          VERSION_CODE=$(grep -oP 'versionCode\s*=.*?orElse\("\K[0-9]+' app/android/app/build.gradle.kts || echo "5")
-          VERSION_NAME=$(grep -oP 'versionName\s*=.*?orElse\("\K[^"]+' app/android/app/build.gradle.kts || echo "1.3.0")
+          VERSION_CODE=$(grep -oP 'versionCode\s*=.*?orElse\("\K[0-9]+' app/android/app/build.gradle.kts || echo "13")
+          VERSION_NAME=$(grep -oP 'versionName\s*=.*?orElse\("\K[^"]+' app/android/app/build.gradle.kts || echo "1.5.4")
           PUBLISHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           CHANGELOG=$(git log -1 --pretty=format:"%s (%h)")
 
-          python3 - <<EOF
-          import json
+          SIZE_BYTES="$SIZE_BYTES" SHA256="$SHA256" VERSION_CODE="$VERSION_CODE" \
+          VERSION_NAME="$VERSION_NAME" PUBLISHED_AT="$PUBLISHED_AT" CHANGELOG="$CHANGELOG" \
+          python3 - <<'PY'
+          import json, os
+
+          repo = os.environ["REPO_SLUG"]
+          sha = os.environ["COMMIT_SHA"]
+          short_sha = sha[:7]
+          version_code = int(os.environ["VERSION_CODE"])
+          version_name = os.environ["VERSION_NAME"]
+          size_bytes = int(os.environ["SIZE_BYTES"])
+          size_mb = size_bytes / (1024 * 1024)
+          sha256 = os.environ["SHA256"]
+          published_at = os.environ["PUBLISHED_AT"]
+          changelog = os.environ["CHANGELOG"]
+          download_url = f"https://github.com/{repo}/releases/download/android-debug-latest/app-debug.apk"
+          update_url = f"https://github.com/{repo}/releases/download/android-debug-latest/update.json"
+
           data = {
               "hasUpdate": True,
               "forceUpdate": False,
               "channel": "debug",
-              "versionCode": int("$VERSION_CODE"),
-              "versionName": "$VERSION_NAME",
+              "versionCode": version_code,
+              "versionName": version_name,
               "packageName": "com.liteagent.mobile.debug",
               "minSupportedVersionCode": 1,
-              "sizeBytes": int("$SIZE_BYTES"),
-              "sha256": "$SHA256",
-              "changelog": "$CHANGELOG",
-              "publishedAt": "$PUBLISHED_AT",
-              "downloadUrl": "https://github.com/${{ github.repository }}/releases/download/android-debug-latest/app-debug.apk"
+              "sizeBytes": size_bytes,
+              "sha256": sha256,
+              "changelog": changelog,
+              "publishedAt": published_at,
+              "downloadUrl": download_url,
           }
           with open("update.json", "w", encoding="utf-8") as f:
               json.dump(data, f, ensure_ascii=False, indent=2)
-          EOF
+
+          notes = f"""## 📱 Lite Agent Android 客户端 (v{version_name} · Build #{version_code})
+
+          ### ⬇️ 直接下载
+          - **APK 安装包 (`app-debug.apk`, {size_mb:.1f} MB)**：[点击直接下载]({download_url})
+          - **在线更新清单 (`update.json`)**：[{update_url}]({update_url})
+
+          ### 📦 构建信息
+          | 项目 | 详情 |
+          | --- | --- |
+          | 版本号 | `v{version_name}` (`versionCode={version_code}`) |
+          | 包名 | `com.liteagent.mobile.debug` |
+          | 构建提交 | `{short_sha}` — {changelog} |
+          | 构建时间 (UTC) | `{published_at}` |
+          | SHA-256 | `{sha256}` |
+
+          ### 🛠 安装与使用说明
+          1. **系统要求**：Android 8.0（API 26）及以上，支持 `arm64-v8a` / `armeabi-v7a`。
+          2. **下载安装**：下载上方 `app-debug.apk` 到手机后打开安装，首次安装请按系统提示允许浏览器或文件管理器「安装未知应用」（使用仓库固定签名，后续新版本可直接覆盖安装，保留本地数据）。
+          3. **首次连接**：打开 App（默认进入 **PC Bots**），在设置中填写你的 Lite Agent 服务端地址，使用 **账号密码登录** 或填写 API Token 即可连接。
+          4. **离线语音与自动更新**：
+             - 点击消息输入框右侧 `🎙` 授予麦克风权限，即可使用内置 Sherpa-ONNX 端侧离线中文语音输入。
+             - App 内置在线检查更新功能，后续原生版本发布后可在 App 内一键校验 SHA-256 并覆盖升级。
+          """
+          with open("release_notes.md", "w", encoding="utf-8") as f:
+              f.write(notes.strip() + "\n")
+          PY
 
           if gh release view android-debug-latest >/dev/null 2>&1; then
             gh release upload android-debug-latest "$APK_PATH" update.json --clobber
-            gh release edit android-debug-latest --title "Android Debug Latest (v${VERSION_NAME} #${VERSION_CODE})" --notes "Automated build from commit ${GITHUB_SHA}: ${CHANGELOG}"
+            gh release edit android-debug-latest \
+              --title "Lite Agent Android v${VERSION_NAME} (#${VERSION_CODE})" \
+              --notes-file release_notes.md \
+              --prerelease=false \
+              --latest
           else
             gh release create android-debug-latest "$APK_PATH" update.json \
-              --title "Android Debug Latest (v${VERSION_NAME} #${VERSION_CODE})" \
-              --notes "Automated build from commit ${GITHUB_SHA}: ${CHANGELOG}" \
-              --prerelease
+              --target "${COMMIT_SHA}" \
+              --title "Lite Agent Android v${VERSION_NAME} (#${VERSION_CODE})" \
+              --notes-file release_notes.md \
+              --latest
           fi
