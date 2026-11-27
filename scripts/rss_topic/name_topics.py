@@ -13,14 +13,20 @@ from paths import cfg
 TL = cfg("vps_tmp_dir", "/tmp") + "/topic_labels.json"
 CACHE = cfg("vps_work_dir", "/home/liteagent/rss_topic_work") + "/topic_names_cache.json"
 
-data = json.load(open(TL, encoding="utf-8"))
+with open(TL, encoding="utf-8") as f:
+    data = json.load(f)
+mode = data.get("mode", "daily")
 doc_topic = data["doc_topic"]      # {id: "cat::tid"}
 clusters = data["clusters"]        # {"cat::tid": {count, keywords, sample_titles}}
 
 names = {}
-if os.path.exists(CACHE):
-    names = json.load(open(CACHE, encoding="utf-8"))
-print("clusters={} cached_names={}".format(len(clusters), len(names)), flush=True)
+if mode == "weekly":
+    print("mode=weekly: ignoring old cache, renaming {} clusters".format(len(clusters)), flush=True)
+else:
+    if os.path.exists(CACHE):
+        with open(CACHE, encoding="utf-8") as f:
+            names = json.load(f)
+    print("mode={} clusters={} cached_names={}".format(mode, len(clusters), len(names)), flush=True)
 
 PROMPT = ("以下是一组 RSS 文章的标题样本(可能含少量噪声):\n{titles}\n\n"
           "请归纳这组文章的共同主题,起一个 2-6 个字的中文主题名"
@@ -64,36 +70,58 @@ def llm_name(titles):
 
 # 按文档数降序命名
 order = sorted(clusters.keys(), key=lambda k: -clusters[k].get("count", 0))
+target_n = 0
+renamed = 0
+failed = 0
 for key in order:
     if key.endswith("::-1"):
         names[key] = "未分类"
         continue
-    if key in names:
+    if mode != "weekly" and key in names:
         continue
     titles = [t for t in clusters[key].get("sample_titles", []) if t]
     if not titles:
         names[key] = "未分类"
         continue
+    target_n += 1
     for attempt in range(3):
         try:
             name = llm_name(titles[:12])
             if len(name) > 12:
                 name = name[:12]
             names[key] = name or "未分类"
-            print("{} ({} docs) -> {}  | e.g. {!r}".format(key, clusters[key]["count"], name, titles[0][:30]), flush=True)
+            renamed += 1
+            print("{} ({} docs) -> {}  | e.g. {!r}".format(key, clusters[key]["count"], names[key], titles[0][:30]), flush=True)
             break
         except Exception as e:
-            print("  {} err: {}".format(key, e), flush=True)
+            print("  {} err (attempt {}/3): {}".format(key, attempt + 1, e), flush=True)
             time.sleep(2 ** attempt)
     else:
+        failed += 1
         names[key] = "未分类"
-    json.dump(names, open(CACHE, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+        print("  {} fallback -> 未分类 (all retries failed)".format(key), flush=True)
     time.sleep(0.2)
+
+# 熔断保护: 避免 LLM 欠费/故障时把旧缓存和全量文档刷成「未分类」
+if target_n > 0 and (failed / target_n > 0.5 or renamed == 0):
+    print("FATAL: naming circuit-breaker triggered (mode={}, target={}, renamed={}, failed={}); preserving old cache & topic_labels.".format(
+        mode, target_n, renamed, failed), flush=True)
+    raise SystemExit(1)
+
+# 完成后原子写入缓存 (weekly 覆盖旧缓存; daily 仅在有新增命名时更新)
+if mode == "weekly" or renamed > 0 or failed > 0:
+    os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+    tmp_cache = CACHE + ".tmp"
+    with open(tmp_cache, "w", encoding="utf-8") as f:
+        json.dump(names, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_cache, CACHE)
 
 # id -> name
 doc_topic_name = {did: names.get(key, "未分类") for did, key in doc_topic.items()}
 
 data["topic_names_cn"] = names          # "cat::tid" -> name
 data["doc_topic_name"] = doc_topic_name  # id -> name
-json.dump(data, open(TL, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
-print("\nDONE named {} clusters, {} docs mapped".format(len(names), len(doc_topic_name)), flush=True)
+with open(TL, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+print("\nDONE mode={} named {} clusters (renamed={}, failed={}), {} docs mapped".format(
+    mode, len(names), renamed, failed, len(doc_topic_name)), flush=True)
