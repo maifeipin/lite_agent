@@ -133,6 +133,7 @@ html, body, #app {
 .btn-primary { background: var(--accent); border-color: transparent; color: #fff; }
 .btn-danger { background: rgba(239, 68, 68, 0.16); border-color: rgba(239, 68, 68, 0.4); color: #fca5a5; }
 .btn-ok { background: rgba(16, 185, 129, 0.16); border-color: rgba(16, 185, 129, 0.4); color: #6ee7b7; }
+.btn.btn-prompt-active { background: rgba(99, 102, 241, 0.16); border-color: rgba(99, 102, 241, 0.45); color: #e0e7ff; }
 .btn-icon { width: 34px; height: 34px; padding: 0; font-size: 16px; }
 
 /* Scrollable body */
@@ -329,6 +330,11 @@ html, body, #app {
   background: rgba(168, 85, 247, 0.16);
   border-color: rgba(168, 85, 247, 0.35);
   color: #d8b4fe;
+}
+.mode-badge.prompt-configured {
+  background: rgba(99, 102, 241, 0.2);
+  border-color: rgba(99, 102, 241, 0.45);
+  color: #e0e7ff;
 }
 .mode-badge:disabled {
   opacity: 0.5;

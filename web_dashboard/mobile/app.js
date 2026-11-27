@@ -189,6 +189,13 @@ function formatApprovalFullDetail(appr) {
 const app = createApp({
   setup() {
     const showCreateDrawer = ref(false);
+    const showPromptModal = ref(false);
+    const promptEditBotId = ref('');
+    const promptEditBotName = ref('');
+    const promptEditText = ref('');
+    const promptEditHasSession = ref(false);
+    const promptEditResetSession = ref(false);
+    const savingPrompt = ref(false);
     const showTokenModal = ref(false);
     const authMode = ref('password'); // password | token
     const loginUsername = ref('');
@@ -864,6 +871,65 @@ const app = createApp({
       }
     }
 
+    function openPromptModal(bot) {
+      if (!bot) return;
+      if (bot.status === 'running' || bot.status === 'waiting_approval') {
+        showToast('当前回合运行中，请待结束或中止后再编辑角色指令');
+        return;
+      }
+      promptEditBotId.value = bot.bot_id;
+      promptEditBotName.value = bot.name || bot.bot_id;
+      promptEditText.value = bot.system_prompt || '';
+      promptEditHasSession.value = Boolean(bot.native_session_id);
+      promptEditResetSession.value = false;
+      showPromptModal.value = true;
+    }
+
+    function applyEditInstructionTemplate(key) {
+      const tpl = instructionTemplates.find((t) => t.key === key);
+      if (!tpl) return;
+      const cur = (promptEditText.value || '').trim();
+      if (!cur) {
+        promptEditText.value = tpl.content;
+      } else if (!cur.includes(tpl.content)) {
+        promptEditText.value = `${cur}\n\n${tpl.content}`;
+      }
+    }
+
+    async function handleSaveSystemPrompt() {
+      const targetId = promptEditBotId.value;
+      if (!targetId || savingPrompt.value) return;
+      const liveBot = store.bots.find((b) => b.bot_id === targetId);
+      if (liveBot && (liveBot.status === 'running' || liveBot.status === 'waiting_approval')) {
+        showToast('当前回合运行中，请待结束或中止后再保存');
+        return;
+      }
+      savingPrompt.value = true;
+      updatingApprovalMode.value = true;
+      try {
+        const nextPrompt = (promptEditText.value || '').trim();
+        const doReset = Boolean(promptEditHasSession.value && promptEditResetSession.value);
+        const payload = { system_prompt: nextPrompt };
+        if (doReset) {
+          payload.reset_session = true;
+        }
+        await updateBot(targetId, payload);
+        showPromptModal.value = false;
+        if (doReset) {
+          showToast('已保存角色指令并开启新会话（下一条消息立即生效）');
+        } else if (promptEditHasSession.value && nextPrompt) {
+          showToast('已保存角色指令（将在下次开启「新会话」时注入）');
+        } else {
+          showToast(nextPrompt ? '已保存角色指令' : '已清空角色指令');
+        }
+      } catch (e) {
+        showToast(e.message || '保存角色指令失败');
+      } finally {
+        savingPrompt.value = false;
+        updatingApprovalMode.value = false;
+      }
+    }
+
     async function handleDeleteBot(bot) {
       if (!window.confirm(`确认删除 Bot "${bot.name}" 及其全部历史日志？`)) return;
       try {
@@ -1000,6 +1066,15 @@ const app = createApp({
       selectDesktopBot,
       copyBotId,
       showCreateDrawer,
+      showPromptModal,
+      promptEditBotName,
+      promptEditText,
+      promptEditHasSession,
+      promptEditResetSession,
+      savingPrompt,
+      openPromptModal,
+      applyEditInstructionTemplate,
+      handleSaveSystemPrompt,
       showTokenModal,
       authMode,
       loginUsername,

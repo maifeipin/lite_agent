@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#0a0b10">
   <title>PC Bots | Lite Agent</title>
   <link rel="manifest" href="./manifest.json?v=1">
-  <link rel="stylesheet" href="./style.css?v=12">
+  <link rel="stylesheet" href="./style.css?v=13">
   <script src="./vendor/marked.min.js?v=1"></script>
 </head>
 <body>
@@ -138,7 +138,16 @@
                   思考:{{ reasoningEffortLabel(activeBot.reasoning_effort) }}
                 </button>
                 <span v-if="activeBot.model" class="tag">{{ activeBot.model }}</span>
-                <span v-if="activeBot.system_prompt" class="tag" :title="activeBot.system_prompt">📋 角色指令</span>
+                <button
+                  type="button"
+                  class="btn"
+                  :class="{ 'btn-prompt-active': Boolean(activeBot.system_prompt) }"
+                  :disabled="updatingApprovalMode || sending || activeBot.status === 'running' || activeBot.status === 'waiting_approval'"
+                  @click="openPromptModal(activeBot)"
+                  :title="activeBot.system_prompt ? '查看或修改角色指令（已配置）' : '点击配置角色与专属指令'"
+                >
+                  📋 角色指令{{ activeBot.system_prompt ? ' · 已配' : '' }}
+                </button>
                 <button
                   v-if="activeBot.status === 'running' || activeBot.status === 'waiting_approval'"
                   class="btn btn-danger"
@@ -634,6 +643,16 @@
           >
             {{ activeBot.approval_mode === 'ask' ? '🛡 需审批' : '⚡ 自动' }}
           </button>
+          <button
+            type="button"
+            class="mode-badge"
+            :class="{ 'prompt-configured': Boolean(activeBot.system_prompt) }"
+            :disabled="updatingApprovalMode || sending || activeBot.status === 'running' || activeBot.status === 'waiting_approval'"
+            @click="openPromptModal(activeBot)"
+            :title="activeBot.system_prompt ? '查看或修改角色指令（已配置）' : '点击配置角色与专属指令'"
+          >
+            📋 角色指令{{ activeBot.system_prompt ? ' · 已配' : '' }}
+          </button>
           <span class="tag bot-id-tag" @click="copyBotId(activeBot.bot_id)" title="点击复制 Bot ID">{{ activeBot.bot_id }}</span>
           <span class="status-badge" :class="activeBot.status">{{ statusLabel(activeBot.status) }}</span>
         </div>
@@ -855,6 +874,58 @@
       </div>
     </div>
 
+    <!-- 角色指令查看/编辑弹窗 -->
+    <div class="modal-backdrop" v-if="showPromptModal" @click.self="showPromptModal = false">
+      <div class="drawer drawer-create">
+        <div class="drawer-head">
+          <h3>📋 角色与专属指令{{ promptEditBotName ? ' · ' + promptEditBotName : '' }}</h3>
+          <button class="btn btn-icon" @click="showPromptModal = false">✕</button>
+        </div>
+
+        <div class="drawer-body">
+          <div class="field" style="margin-bottom:0;">
+            <label>新会话首轮自动作为 <code>&lt;bot_instructions&gt;</code> 注入（工作目录自带 <code>AGENTS.md</code> 也会自动生效）</label>
+            <div class="template-chips">
+              <button
+                type="button"
+                class="template-chip"
+                v-for="tpl in instructionTemplates"
+                :key="tpl.key"
+                @click="applyEditInstructionTemplate(tpl.key)"
+              >
+                + {{ tpl.label }}
+              </button>
+              <button
+                v-if="promptEditText"
+                type="button"
+                class="template-chip ghost"
+                @click="promptEditText = ''"
+              >
+                清空
+              </button>
+            </div>
+            <textarea
+              v-model="promptEditText"
+              rows="8"
+              style="min-height:180px;"
+              placeholder="可点上方模板一键填入，或自由编写角色定位、专属上下文说明与协作约束规则（Markdown）..."
+            ></textarea>
+            <label class="checkbox-inline" v-if="promptEditHasSession" style="margin-top:10px;">
+              <input type="checkbox" v-model="promptEditResetSession" />
+              <span>同时开启新会话使新指令在下一条消息立即生效（不勾选则保留当前上下文，下次点「新会话」后生效）</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="drawer-foot" style="display:flex;gap:10px;">
+          <button type="button" class="btn" style="flex:1;padding:10px;" :disabled="savingPrompt" @click="showPromptModal = false">取消</button>
+          <button type="button" class="btn btn-primary" style="flex:2;padding:10px;" :disabled="savingPrompt" @click="handleSaveSystemPrompt">
+            {{ savingPrompt ? '保存中...' : '保存角色指令' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- 连接鉴权弹窗（支持账号密码换取 session_token，或直接填写 API Token） -->
     <div class="modal-backdrop" v-if="showTokenModal" @click.self="showTokenModal = false">
       <div class="drawer">
@@ -895,6 +966,6 @@
     </div>
   </div>
 
-  <script type="module" src="./app.js?v=15"></script>
+  <script type="module" src="./app.js?v=16"></script>
 </body>
 </html>
