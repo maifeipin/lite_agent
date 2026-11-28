@@ -251,7 +251,24 @@ def handle_post_manager_chat(handler: Any, parsed_url: Any, manager: PcCliManage
     _send_json(handler, 200 if ok else 400, {"success": ok, **res})
 
 
+def _require_favorites_owner(handler: Any, favorites: PcCliFavoritesService) -> bool:
+    """个人知识库收藏严格限本人访问：拒绝 guest / edge 及非所有者 user:general 会话。"""
+    if getattr(handler, "is_guest", False) or getattr(handler, "is_edge", False):
+        _send_json(handler, 403, {"success": False, "error": "仅知识库所有者可访问个人收藏"})
+        return False
+
+    user_session = getattr(handler, "user_session", None)
+    if isinstance(user_session, dict):
+        username = str(user_session.get("username") or "").strip()
+        if not username or username not in favorites.allowed_owners:
+            _send_json(handler, 403, {"success": False, "error": "仅知识库所有者可访问个人收藏"})
+            return False
+    return True
+
+
 def handle_get_favorites(handler: Any, parsed_url: Any, favorites: PcCliFavoritesService) -> None:
+    if not _require_favorites_owner(handler, favorites):
+        return
     qs = parse_qs(parsed_url.query)
     q = qs.get("q", [""])[0]
     bot_id = qs.get("bot_id", [None])[0] or None
@@ -271,6 +288,8 @@ def handle_post_favorites(
     hub: PcCliHub,
     favorites: PcCliFavoritesService,
 ) -> None:
+    if not _require_favorites_owner(handler, favorites):
+        return
     try:
         body = _read_body_json(handler)
     except ValueError:
@@ -302,6 +321,8 @@ def handle_post_favorites(
 
 
 def handle_favorites_sub_dispatch(handler: Any, parsed_url: Any, favorites: PcCliFavoritesService) -> None:
+    if not _require_favorites_owner(handler, favorites):
+        return
     path = _strip_agent_prefix(parsed_url.path)
     method = handler.command.upper()
     if path == "/api/v1/pc-cli/favorites/rebuild" and method == "POST":

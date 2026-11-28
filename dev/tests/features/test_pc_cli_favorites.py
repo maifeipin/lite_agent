@@ -176,6 +176,113 @@ class TestPcCliFavorites(unittest.TestCase):
             finally:
                 repo.close()
 
+    def test_owner_only_route_auth_rejects_non_owner_user_general_sessions(self):
+        """P1 回归：非所有者 user:general 会话、guest、edge 均被拒绝访问收藏的列表/读取/保存/删除/重建端点"""
+        import io
+        import json
+        from urllib.parse import urlparse
+        from lite_agent.features.pc_cli import routes
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            archive_db = os.path.join(tmp_dir, "output_archive.db")
+            meili = _FakeMeiliClient()
+            svc = PcCliFavoritesService(db_path=archive_db, meili_client=meili, allowed_owners={"chenli"})
+            ok, created = svc.save_favorite(
+                bot_id="bot_owner",
+                title="私密知识卡片",
+                content="仅所有者可见",
+                items=[{"turn_id": "t1", "seq_id": 1, "role": "assistant", "text": "仅所有者可见"}],
+            )
+            self.assertTrue(ok)
+            fav_id = created["favorite"]["id"]
+
+            def _make_handler(method: str, *, user_session=None, is_guest=False, is_edge=False, body=None):
+                raw = json.dumps(body).encode("utf-8") if body is not None else b""
+
+                class _FakeHandler:
+                    command = method
+                    headers = {"Content-Length": str(len(raw))}
+                    rfile = io.BytesIO(raw)
+                    wfile = io.BytesIO()
+                    status = None
+
+                    def send_response(self, code):
+                        self.status = code
+
+                    def send_header(self, k, v):
+                        pass
+
+                    def end_headers(self):
+                        pass
+
+                h = _FakeHandler()
+                h.user_session = user_session
+                h.is_guest = is_guest
+                h.is_edge = is_edge
+                return h
+
+            # 1. 普通非所有者 user:general 会话：列表/读取/删除/重建全部 403
+            other_sess = {"username": "other_user", "scope": "user:general"}
+            h_list = _make_handler("GET", user_session=other_sess)
+            routes.handle_get_favorites(h_list, urlparse("/agent/api/v1/pc-cli/favorites"), svc)
+            self.assertEqual(h_list.status, 403)
+
+            h_get = _make_handler("GET", user_session=other_sess)
+            routes.handle_favorites_sub_dispatch(h_get, urlparse(f"/agent/api/v1/pc-cli/favorites/{fav_id}"), svc)
+            self.assertEqual(h_get.status, 403)
+
+            h_del = _make_handler("DELETE", user_session=other_sess)
+            routes.handle_favorites_sub_dispatch(h_del, urlparse(f"/agent/api/v1/pc-cli/favorites/{fav_id}"), svc)
+            self.assertEqual(h_del.status, 403)
+            self.assertIsNotNone(svc.get_favorite(fav_id), "non-owner DELETE must NOT remove owner's favorite")
+
+            h_reb = _make_handler("POST", user_session=other_sess)
+            routes.handle_favorites_sub_dispatch(h_reb, urlparse("/agent/api/v1/pc-cli/favorites/rebuild"), svc)
+            self.assertEqual(h_reb.status, 403)
+
+            # 2. guest / edge 同样 403
+            h_guest = _make_handler("GET", is_guest=True)
+            routes.handle_get_favorites(h_guest, urlparse("/agent/api/v1/pc-cli/favorites"), svc)
+            self.assertEqual(h_guest.status, 403)
+
+            # 3. 本人会话（chenli）与静态管理员 Token（user_session=None）均放行 200
+            h_owner = _make_handler("GET", user_session={"username": "chenli", "scope": "user:general"})
+            routes.handle_get_favorites(h_owner, urlparse("/agent/api/v1/pc-cli/favorites"), svc)
+            self.assertEqual(h_owner.status, 200)
+            self.assertEqual(len(json.loads(h_owner.wfile.getvalue().decode("utf-8"))["favorites"]), 1)
+
+            h_admin = _make_handler("GET", user_session=None)
+            routes.handle_get_favorites(h_admin, urlparse("/agent/api/v1/pc-cli/favorites"), svc)
+            self.assertEqual(h_admin.status, 200)
+
+    def test_unsynced_meili_task_merges_sqlite_hits_even_when_meili_returns_empty(self):
+        """P2 回归：Meilisearch 仅入队或任务失败时，标记 enqueued/pending 且检索自动从 SQLite 补查，绝不漏搜"""
+        class _EnqueuedOnlyMeili(_FakeMeiliClient):
+            def upsert_document(self, doc):
+                # 模拟 Meilisearch 受理入队但尚未完成建索引（docs 中尚无该文档）
+                return ("enqueued", 42)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            archive_db = os.path.join(tmp_dir, "output_archive.db")
+            meili = _EnqueuedOnlyMeili()
+            svc = PcCliFavoritesService(db_path=archive_db, meili_client=meili)
+
+            ok, res = svc.save_favorite(
+                bot_id="bot_async",
+                title="异步入队验证",
+                content="Meilisearch 尚未追平时仍需可搜到这条关键字 ALPHA_999",
+                items=[{"turn_id": "t1", "seq_id": 9, "role": "assistant", "text": "ALPHA_999"}],
+            )
+            self.assertTrue(ok)
+            self.assertEqual(res["sync_state"], "enqueued")
+            self.assertFalse(res["meili_synced"])
+
+            # Meilisearch 返回空命中，但 search_favorites 自动从 SQLite 补查出该未追平条目
+            found = svc.search_favorites(query="ALPHA_999")
+            self.assertEqual(found["engine"], "meilisearch+sqlite")
+            self.assertEqual(len(found["favorites"]), 1)
+            self.assertEqual(found["favorites"][0]["title"], "异步入队验证")
+
 
 if __name__ == "__main__":
     unittest.main()
