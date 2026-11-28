@@ -15,6 +15,7 @@ import {
   fetchModels,
   fetchNodeDirs,
   fetchNodes,
+  fetchNoteForQuote,
   fetchPendingApprovals,
   fetchStats,
   getCredentialEpoch,
@@ -29,7 +30,7 @@ import {
   subscribeBotOnWs,
   updateBot,
   updateNoteRules,
-} from './store.js?v=18';
+} from './store.js?v=19';
 
 function escapeHtml(raw) {
   return String(raw || '')
@@ -681,12 +682,32 @@ const app = createApp({
       sending.value = true;
       const src = promptInputSource.value === 'voice' ? 'voice' : 'text';
       try {
-        await sendTurn(store.activeBotId, text, src);
+        // 发送回合前实时回源复核所有 [[kb:note:<id>]] 引用，并按服务端最新正文展开
+        let finalPrompt = text;
+        const refMatches = Array.from(text.matchAll(/\[\[kb:note:(\d+)(?:\|[^\]]*)?\]\]/g));
+        if (refMatches.length > 0) {
+          const uniqueIds = Array.from(new Set(refMatches.map((m) => Number(m[1]))));
+          const verifiedById = {};
+          for (const nid of uniqueIds) {
+            const res = await fetchNoteForQuote(nid);
+            if (!res || !res.success || !res.note) {
+              throw new Error((res && res.error) || `笔记 #${nid} 当前不可引用，已阻止发送`);
+            }
+            verifiedById[nid] = res.note;
+          }
+          finalPrompt = text.replace(/\[\[kb:note:(\d+)(?:\|[^\]]*)?\]\]/g, (_all, idStr) => {
+            const n = verifiedById[Number(idStr)];
+            if (!n) return '';
+            const meta = [n.folder_path, n.url].filter(Boolean).join(' · ');
+            return `【引用笔记：${n.title}】${meta ? `（出处：${meta}）` : ''}\n${n.content || ''}`;
+          });
+        }
+        await sendTurn(store.activeBotId, finalPrompt, src);
         promptInput.value = '';
         promptInputSource.value = 'text';
         scrollToBottom();
       } catch (e) {
-        showToast(e.message);
+        showToast(e.message || '发送失败');
       } finally {
         sending.value = false;
       }
@@ -1281,19 +1302,25 @@ const app = createApp({
       }
     }
 
-    function quoteNoteToInput(note) {
-      if (!note) return;
-      if (note.exclude_from_quote) {
-        showToast('该笔记已标记排除引用');
-        return;
+    async function quoteNoteToInput(note) {
+      if (!note || !note.note_id) return;
+      try {
+        const res = await fetchNoteForQuote(note.note_id);
+        if (!res || !res.success || !res.note) {
+          showToast((res && res.error) || '该笔记当前不可引用');
+          return;
+        }
+        const live = res.note;
+        const safeTitle = String(live.title || `Note #${live.note_id}`).replace(/[\[\]|]/g, ' ').slice(0, 60);
+        const token = `[[kb:note:${live.note_id}|${safeTitle}]]`;
+        promptInput.value = promptInput.value.trim()
+          ? `${promptInput.value.trim()}\n\n${token}\n`
+          : `${token}\n`;
+        showFavoritesDrawer.value = false;
+        showToast('已插入笔记引用标记（发送前将再次核验权限并展开正文）');
+      } catch (e) {
+        showToast(e.message || '该笔记已锁定或排除引用，无法引用');
       }
-      const meta = [note.folder_path, note.url].filter(Boolean).join(' · ');
-      const quoteBlock = `【引用笔记：${note.title}】${meta ? `（出处：${meta}）` : ''}\n${note.snippet || ''}\n\n`;
-      promptInput.value = promptInput.value.trim()
-        ? `${promptInput.value.trim()}\n\n${quoteBlock}`
-        : quoteBlock;
-      showFavoritesDrawer.value = false;
-      showToast('已插入输入框，确认后发送');
     }
 
     async function handleSearchFavorites() {

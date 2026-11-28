@@ -71,6 +71,9 @@ class FakeNotesMeili:
         self.delete_calls.append(list(doc_ids))
         return True, "succeeded"
 
+    def list_document_ids(self, page_size: int = 1000) -> Tuple[bool, List[int], str]:
+        return True, [int(k) for k in self.docs.keys()], ""
+
     def search(
         self,
         query: str,
@@ -320,3 +323,108 @@ def test_kb_notes_routes_enforce_owner_only_auth(tmp_path):
 def test_extract_markdown_headings_ignores_code_fences():
     md = "# 顶层标题\n```bash\n# shell comment\n```\n## 二级标题\n### 三级标题\n#### 四级忽略"
     assert extract_markdown_headings(md) == ["顶层标题", "二级标题", "三级标题"]
+
+
+def test_get_note_for_quote_rechecks_live_privacy_and_purges_locked(tmp_path):
+    source = FakeHedgeDocSource()
+    source.notes[101] = {
+        "note_id": 101,
+        "is_locked": False,
+        "folder_id": 1,
+        "folder_path": "工作",
+        "alias": "q-101",
+        "title": "可引用笔记",
+        "content": "实时引用正文内容",
+        "tags": ["工作"],
+        "created_at": "2026-11-01T00:00:00",
+        "updated_at": "2026-11-28T00:00:00",
+    }
+    meili = FakeNotesMeili()
+    svc = HedgeDocNotesService(
+        db_path=str(tmp_path / "archive.db"),
+        config={"personal_kb": {"owners": ["owner_user"]}},
+        source=source,
+        meili=meili,
+    )
+    ok_sync, _ = svc.sync_notes(note_ids=[101])
+    assert ok_sync is True
+
+    # 1. Allowed note returns live content
+    ok_q, res_q = svc.get_note_for_quote(101)
+    assert ok_q is True
+    assert res_q["note"]["content"] == "实时引用正文内容"
+
+    # 2. Note gets tagged 不引用 -> quote endpoint rejects with 403
+    source.notes[101]["tags"] = ["工作", "不引用"]
+    h_q = _DummyHandler(method="GET", user_session={"username": "owner_user"})
+    kb_routes.handle_notes_sub_dispatch(h_q, urlparse("/api/v1/kb/notes/101/quote"), svc)
+    assert h_q.status_code == 403
+    assert h_q.json_body()["code"] == "NOTE_EXCLUDED_FROM_QUOTE"
+
+    # 3. Note gets locked -> quote endpoint rejects with 403 AND purges Meilisearch doc
+    source.notes[101]["tags"] = ["工作"]
+    source.notes[101]["is_locked"] = True
+    h_q2 = _DummyHandler(method="GET", user_session={"username": "owner_user"})
+    kb_routes.handle_notes_sub_dispatch(h_q2, urlparse("/api/v1/kb/notes/101/quote"), svc)
+    assert h_q2.status_code == 403
+    assert h_q2.json_body()["code"] == "NOTE_EXCLUDED_FROM_INDEX"
+    assert "101" not in meili.docs
+
+
+def test_full_sync_purges_stray_meili_doc_not_in_local_sync_state(tmp_path):
+    """即使先前 upsert 超时迟到成功（本地 kb_notes_sync_state 无记录），全量对账仍会按 Meili 实际 ID 清理。"""
+    source = FakeHedgeDocSource()
+    source.notes[201] = {
+        "note_id": 201,
+        "is_locked": True,  # 已上锁，但 Meilisearch 里残留了迟到写入的旧文档
+        "folder_id": 1,
+        "folder_path": "个人资料",
+        "alias": "stray-201",
+        "title": "迟到写入的锁定笔记",
+        "content": "不应残留",
+        "tags": [],
+        "created_at": "2026-11-01T00:00:00",
+        "updated_at": "2026-11-28T00:00:00",
+    }
+    meili = FakeNotesMeili()
+    # 模拟迟到成功写入 Meilisearch 的文档（kb_notes_sync_state 中完全没有 201 和 999）
+    meili.docs["201"] = {"id": "201", "note_id": 201, "title": "stray"}
+    meili.docs["999"] = {"id": "999", "note_id": 999, "title": "deleted_orphan"}
+
+    svc = HedgeDocNotesService(db_path=str(tmp_path / "archive.db"), source=source, meili=meili)
+    ok, stats = svc.sync_notes()
+    assert ok is True
+    assert stats["deleted"] == 2
+    assert "201" not in meili.docs
+    assert "999" not in meili.docs
+
+
+def test_pre_write_recheck_blocks_sync_from_reindexing_newly_locked_note(tmp_path):
+    """抓取后、写入前笔记被上锁或打不索引时，提交前二次复核必须阻止写回并触发删除。"""
+
+    class RaceHedgeDocSource(FakeHedgeDocSource):
+        def fetch_live_statuses(self, note_ids: Sequence[int]) -> Dict[int, Dict[str, Any]]:
+            # 模拟在 fetch_active_notes 之后、upsert 之前，笔记 301 刚刚被上锁
+            self.notes[301]["is_locked"] = True
+            return super().fetch_live_statuses(note_ids)
+
+    source = RaceHedgeDocSource()
+    source.notes[301] = {
+        "note_id": 301,
+        "is_locked": False,
+        "folder_id": 1,
+        "folder_path": "工作",
+        "alias": "race-301",
+        "title": "并发上锁测试",
+        "content": "敏感内容",
+        "tags": [],
+        "created_at": "2026-11-01T00:00:00",
+        "updated_at": "2026-11-28T00:00:00",
+    }
+    meili = FakeNotesMeili()
+    svc = HedgeDocNotesService(db_path=str(tmp_path / "archive.db"), source=source, meili=meili)
+
+    ok, stats = svc.sync_notes()
+    assert ok is True
+    assert stats["upserted"] == 0
+    assert "301" not in meili.docs

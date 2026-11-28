@@ -614,6 +614,10 @@ export async function updateNoteRules(noteId, patch) {
   }, false, _credentialEpoch, KB_API_BASE);
 }
 
+export async function fetchNoteForQuote(noteId) {
+  return apiFetch(`/notes/${encodeURIComponent(String(noteId))}/quote`, {}, false, _credentialEpoch, KB_API_BASE);
+}
+
 function getWsUrl() {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${proto}//${window.location.host}/ws/pc-cli/client`;

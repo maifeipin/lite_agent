@@ -119,6 +119,18 @@ def handle_notes_sub_dispatch(
         _send_json(handler, status, {"success": ok, **res})
         return
 
+    m_quote = re.match(r"^/api/v1/kb/notes/(\d+)/quote$", path)
+    if m_quote and method == "GET":
+        note_id = int(m_quote.group(1))
+        ok, res = notes.get_note_for_quote(note_id)
+        if ok:
+            _send_json(handler, 200, {"success": True, **res})
+        else:
+            code = str(res.get("code") or "")
+            status = 403 if code in ("NOTE_EXCLUDED_FROM_INDEX", "NOTE_EXCLUDED_FROM_QUOTE") else 404
+            _send_json(handler, status, {"success": False, **res})
+        return
+
     m = re.match(r"^/api/v1/kb/notes/(\d+)/rules$", path)
     if m and method in ("PUT", "POST", "PATCH"):
         note_id = int(m.group(1))

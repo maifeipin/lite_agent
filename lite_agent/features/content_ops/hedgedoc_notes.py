@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import sqlite3
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -553,6 +554,37 @@ class NotesMeiliClient:
         task_uid = res.get("taskUid") if isinstance(res, dict) else None
         return self.wait_for_task(task_uid)
 
+    def list_document_ids(self, page_size: int = 1000) -> Tuple[bool, List[int], str]:
+        """分页列出 Meilisearch 索引中实际存在的文档 ID，用于全量对账兜底清理迟到写入。"""
+        if not self.is_configured():
+            return False, [], "Meilisearch 未配置"
+        ids: List[int] = []
+        offset = 0
+        limit = max(1, min(int(page_size), 1000))
+        while True:
+            ok, res = self._request_json(
+                "GET",
+                f"/indexes/{self.index_name}/documents?fields=id&limit={limit}&offset={offset}",
+            )
+            if not ok:
+                # 索引尚未创建时返回空列表而非报错
+                if "index_not_found" in str(res) or "HTTP 404" in str(res):
+                    return True, [], ""
+                return False, [], str(res)
+            results = res.get("results") if isinstance(res, dict) else []
+            if not isinstance(results, list) or not results:
+                break
+            for row in results:
+                if isinstance(row, dict) and row.get("id") is not None:
+                    try:
+                        ids.append(int(row["id"]))
+                    except Exception:
+                        continue
+            if len(results) < limit:
+                break
+            offset += limit
+        return True, ids, ""
+
     def search(
         self,
         query: str,
@@ -602,6 +634,7 @@ class HedgeDocNotesService:
         self.source: HedgeDocSource = source if source is not None else PostgresHedgeDocSource(config=cfg)
         self.meili: NotesMeiliClient = meili if meili is not None else NotesMeiliClient(config=cfg)
         self._schema_ready = False
+        self._sync_lock = threading.RLock()
 
     def _connect(self) -> sqlite3.Connection:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -757,93 +790,123 @@ class HedgeDocNotesService:
         note_ids: Optional[Sequence[int]] = None,
     ) -> Tuple[bool, Dict[str, Any]]:
         """
-        执行全量或指定 ID 集合的对账同步：
+        执行全量或指定 ID 集合的对账同步（与 set_note_rules 串行化，防止旧快照回写刚排除笔记）：
         - 先执行只读预检（缺失 note.is_locked 立即拒绝）；
-        - 仅推送变更项（projection_hash 变化）与删除项（上锁/不索引/规则排除/源库已删）；
+        - 全量对账同时扫描 Meilisearch 实际存在的 ID，清理迟到成功或已排除的孤儿文档；
+        - 提交写入前再次复核实时源库与 kb_note_rules 状态，防止并发排除被回写；
         - 仅在 Meilisearch 任务确认 succeeded 后推进 kb_notes_sync_state。
         """
-        ok_pre, pre_detail = self.source.preflight_check()
-        if not ok_pre:
-            return False, {"preflight_ok": False, "error": pre_detail}
+        with self._sync_lock:
+            ok_pre, pre_detail = self.source.preflight_check()
+            if not ok_pre:
+                return False, {"preflight_ok": False, "error": pre_detail}
 
-        if not self.meili.is_configured():
-            return False, {"preflight_ok": True, "error": "Meilisearch 未配置"}
+            if not self.meili.is_configured():
+                return False, {"preflight_ok": True, "error": "Meilisearch 未配置"}
 
-        scoped_ids = [int(nid) for nid in note_ids] if note_ids is not None else None
-        active_notes = self.source.fetch_active_notes(note_ids=scoped_ids)
-        rules = self.get_note_rules(note_ids=scoped_ids)
-        prev_hashes = self._get_sync_state(note_ids=scoped_ids)
+            scoped_ids = [int(nid) for nid in note_ids] if note_ids is not None else None
+            active_notes = self.source.fetch_active_notes(note_ids=scoped_ids)
+            rules = self.get_note_rules(note_ids=scoped_ids)
+            prev_hashes = self._get_sync_state(note_ids=scoped_ids)
 
-        seen_ids = set()
-        to_upsert: List[Dict[str, Any]] = []
-        to_upsert_hashes: Dict[int, str] = {}
-        to_delete: List[int] = []
-        skipped_unchanged = 0
-        excluded_count = 0
+            meili_existing_ids: Set[int] = set()
+            if scoped_ids is None and hasattr(self.meili, "list_document_ids"):
+                ok_ids, actual_ids, _err_ids = self.meili.list_document_ids()
+                if ok_ids:
+                    meili_existing_ids = set(actual_ids)
 
-        for raw in active_notes:
-            nid = int(raw["note_id"])
-            seen_ids.add(nid)
-            status = {
-                "exists": True,
-                "is_locked": bool(raw.get("is_locked", False)),
-                "tags": raw.get("tags") or [],
+            seen_ids: Set[int] = set()
+            to_upsert: List[Dict[str, Any]] = []
+            to_upsert_hashes: Dict[int, str] = {}
+            to_delete: List[int] = []
+            skipped_unchanged = 0
+            excluded_count = 0
+
+            for raw in active_notes:
+                nid = int(raw["note_id"])
+                seen_ids.add(nid)
+                status = {
+                    "exists": True,
+                    "is_locked": bool(raw.get("is_locked", False)),
+                    "tags": raw.get("tags") or [],
+                }
+                privacy = evaluate_note_privacy(status, rules.get(nid))
+                if privacy["exclude_from_index"]:
+                    excluded_count += 1
+                    if nid in prev_hashes or nid in meili_existing_ids or scoped_ids is not None:
+                        to_delete.append(nid)
+                    continue
+
+                doc = self._build_meili_doc(raw, exclude_from_quote=privacy["exclude_from_quote"])
+                proj_hash = compute_projection_hash(doc)
+                if prev_hashes.get(nid) == proj_hash and (scoped_ids is not None or not meili_existing_ids or nid in meili_existing_ids):
+                    skipped_unchanged += 1
+                    continue
+                to_upsert.append(doc)
+                to_upsert_hashes[nid] = proj_hash
+
+            if scoped_ids is None:
+                for old_nid in set(prev_hashes.keys()) | meili_existing_ids:
+                    if old_nid not in seen_ids:
+                        to_delete.append(old_nid)
+            else:
+                for req_nid in scoped_ids:
+                    if req_nid not in seen_ids and req_nid in prev_hashes:
+                        to_delete.append(req_nid)
+
+            # 提交写入前二次复核：若在抓取与提交之间笔记被上锁/标不索引/改规则，绝不写回索引
+            if to_upsert:
+                up_ids = [int(d["note_id"]) for d in to_upsert]
+                live_recheck = self.source.fetch_live_statuses(up_ids)
+                rules_recheck = self.get_note_rules(up_ids)
+                verified_upsert: List[Dict[str, Any]] = []
+                verified_hashes: Dict[int, str] = {}
+                for doc in to_upsert:
+                    nid = int(doc["note_id"])
+                    privacy_now = evaluate_note_privacy(live_recheck.get(nid), rules_recheck.get(nid))
+                    if privacy_now["exclude_from_index"]:
+                        excluded_count += 1
+                        to_delete.append(nid)
+                        continue
+                    if bool(doc.get("exclude_from_quote")) != bool(privacy_now["exclude_from_quote"]):
+                        doc["exclude_from_quote"] = bool(privacy_now["exclude_from_quote"])
+                        to_upsert_hashes[nid] = compute_projection_hash(doc)
+                    verified_upsert.append(doc)
+                    verified_hashes[nid] = to_upsert_hashes[nid]
+                to_upsert = verified_upsert
+                to_upsert_hashes = verified_hashes
+
+            to_delete = sorted(set(to_delete))
+
+            if to_delete:
+                ok_del, del_detail = self.meili.delete_documents([str(nid) for nid in to_delete])
+                if not ok_del:
+                    return False, {
+                        "preflight_ok": True,
+                        "error": f"Meilisearch 删除确认失败: {del_detail}",
+                        "pending_delete": len(to_delete),
+                    }
+                self._remove_sync_state(to_delete)
+
+            if to_upsert:
+                ok_up, up_detail = self.meili.upsert_documents(to_upsert)
+                if not ok_up:
+                    return False, {
+                        "preflight_ok": True,
+                        "error": f"Meilisearch 写入确认失败: {up_detail}",
+                        "deleted": len(to_delete),
+                        "pending_upsert": len(to_upsert),
+                    }
+                self._record_synced_docs(to_upsert, to_upsert_hashes)
+
+            return True, {
+                "preflight_ok": True,
+                "scanned": len(active_notes),
+                "upserted": len(to_upsert),
+                "deleted": len(to_delete),
+                "skipped_unchanged": skipped_unchanged,
+                "excluded_count": excluded_count,
             }
-            privacy = evaluate_note_privacy(status, rules.get(nid))
-            if privacy["exclude_from_index"]:
-                excluded_count += 1
-                if nid in prev_hashes or scoped_ids is not None:
-                    to_delete.append(nid)
-                continue
-
-            doc = self._build_meili_doc(raw, exclude_from_quote=privacy["exclude_from_quote"])
-            proj_hash = compute_projection_hash(doc)
-            if prev_hashes.get(nid) == proj_hash:
-                skipped_unchanged += 1
-                continue
-            to_upsert.append(doc)
-            to_upsert_hashes[nid] = proj_hash
-
-        if scoped_ids is None:
-            for old_nid in prev_hashes:
-                if old_nid not in seen_ids:
-                    to_delete.append(old_nid)
-        else:
-            for req_nid in scoped_ids:
-                if req_nid not in seen_ids and req_nid in prev_hashes:
-                    to_delete.append(req_nid)
-
-        to_delete = sorted(set(to_delete))
-
-        if to_delete:
-            ok_del, del_detail = self.meili.delete_documents([str(nid) for nid in to_delete])
-            if not ok_del:
-                return False, {
-                    "preflight_ok": True,
-                    "error": f"Meilisearch 删除确认失败: {del_detail}",
-                    "pending_delete": len(to_delete),
-                }
-            self._remove_sync_state(to_delete)
-
-        if to_upsert:
-            ok_up, up_detail = self.meili.upsert_documents(to_upsert)
-            if not ok_up:
-                return False, {
-                    "preflight_ok": True,
-                    "error": f"Meilisearch 写入确认失败: {up_detail}",
-                    "deleted": len(to_delete),
-                    "pending_upsert": len(to_upsert),
-                }
-            self._record_synced_docs(to_upsert, to_upsert_hashes)
-
-        return True, {
-            "preflight_ok": True,
-            "scanned": len(active_notes),
-            "upserted": len(to_upsert),
-            "deleted": len(to_delete),
-            "skipped_unchanged": skipped_unchanged,
-            "excluded_count": excluded_count,
-        }
 
     def set_note_rules(
         self,
@@ -851,52 +914,113 @@ class HedgeDocNotesService:
         exclude_from_index: Optional[bool] = None,
         exclude_from_quote: Optional[bool] = None,
     ) -> Tuple[bool, Dict[str, Any]]:
-        """更新单篇笔记的手动排除规则，并立即对账 Meilisearch 索引。"""
+        """更新单篇笔记的手动排除规则，并与同步写入串行化立即对账 Meilisearch 索引。"""
+        with self._sync_lock:
+            nid = int(note_id)
+            existing = self.get_note_rules([nid]).get(nid) or {
+                "exclude_from_index": False,
+                "exclude_from_quote": False,
+            }
+            next_no_index = bool(existing["exclude_from_index"]) if exclude_from_index is None else bool(exclude_from_index)
+            next_no_quote = bool(existing["exclude_from_quote"]) if exclude_from_quote is None else bool(exclude_from_quote)
+            now = _utc_now_iso()
+
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO kb_note_rules (note_id, exclude_from_index, exclude_from_quote, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(note_id) DO UPDATE SET
+                        exclude_from_index = excluded.exclude_from_index,
+                        exclude_from_quote = excluded.exclude_from_quote,
+                        updated_at = excluded.updated_at
+                    """,
+                    (nid, 1 if next_no_index else 0, 1 if next_no_quote else 0, now),
+                )
+
+            rule_obj = {
+                "note_id": nid,
+                "exclude_from_index": next_no_index,
+                "exclude_from_quote": next_no_quote,
+                "updated_at": now,
+            }
+
+            if next_no_index:
+                sync_info: Dict[str, Any] = {"action": "delete"}
+                if self.meili.is_configured():
+                    ok_del, detail = self.meili.delete_documents([str(nid)])
+                    sync_info["ok"] = ok_del
+                    sync_info["detail"] = detail
+                    if ok_del:
+                        self._remove_sync_state([nid])
+                else:
+                    sync_info["ok"] = True
+                    sync_info["detail"] = "meili_not_configured"
+                    self._remove_sync_state([nid])
+                return True, {"rule": rule_obj, "sync": sync_info}
+
+            ok_sync, sync_res = self.sync_notes(note_ids=[nid])
+            return True, {"rule": rule_obj, "sync": {"ok": ok_sync, **sync_res}}
+
+    def get_note_for_quote(self, note_id: int) -> Tuple[bool, Dict[str, Any]]:
+        """
+        引用前实时回源复核（供一键引用与发送回合前服务端校验，Fail-Closed）：
+        - 若已锁定/打不索引/设置 exclude_from_index/已删：拒绝并立即从 Meilisearch 清除；
+        - 若打不引用/设置 exclude_from_quote：拒绝引用，不返回正文；
+        - 仅在完全通过复核时返回最新标题、出处与正文。
+        """
         nid = int(note_id)
-        existing = self.get_note_rules([nid]).get(nid) or {
-            "exclude_from_index": False,
-            "exclude_from_quote": False,
-        }
-        next_no_index = bool(existing["exclude_from_index"]) if exclude_from_index is None else bool(exclude_from_index)
-        next_no_quote = bool(existing["exclude_from_quote"]) if exclude_from_quote is None else bool(exclude_from_quote)
-        now = _utc_now_iso()
+        try:
+            rows = self.source.fetch_active_notes(note_ids=[nid])
+        except Exception as e:
+            return False, {"code": "SOURCE_UNAVAILABLE", "error": f"源库实时复核失败，禁止引用: {e}"}
 
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO kb_note_rules (note_id, exclude_from_index, exclude_from_quote, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(note_id) DO UPDATE SET
-                    exclude_from_index = excluded.exclude_from_index,
-                    exclude_from_quote = excluded.exclude_from_quote,
-                    updated_at = excluded.updated_at
-                """,
-                (nid, 1 if next_no_index else 0, 1 if next_no_quote else 0, now),
-            )
-
-        rule_obj = {
-            "note_id": nid,
-            "exclude_from_index": next_no_index,
-            "exclude_from_quote": next_no_quote,
-            "updated_at": now,
-        }
-
-        if next_no_index:
-            sync_info: Dict[str, Any] = {"action": "delete"}
+        if not rows:
             if self.meili.is_configured():
-                ok_del, detail = self.meili.delete_documents([str(nid)])
-                sync_info["ok"] = ok_del
-                sync_info["detail"] = detail
+                ok_del, _ = self.meili.delete_documents([str(nid)])
                 if ok_del:
                     self._remove_sync_state([nid])
-            else:
-                sync_info["ok"] = True
-                sync_info["detail"] = "meili_not_configured"
-                self._remove_sync_state([nid])
-            return True, {"rule": rule_obj, "sync": sync_info}
+            return False, {"code": "NOTE_NOT_FOUND", "error": "笔记不存在或已删除"}
 
-        ok_sync, sync_res = self.sync_notes(note_ids=[nid])
-        return True, {"rule": rule_obj, "sync": {"ok": ok_sync, **sync_res}}
+        raw = rows[0]
+        live_status = {
+            "exists": True,
+            "is_locked": bool(raw.get("is_locked", False)),
+            "tags": raw.get("tags") or [],
+        }
+        rule = self.get_note_rules([nid]).get(nid)
+        privacy = evaluate_note_privacy(live_status, rule)
+
+        if privacy["exclude_from_index"]:
+            if self.meili.is_configured():
+                ok_del, _ = self.meili.delete_documents([str(nid)])
+                if ok_del:
+                    self._remove_sync_state([nid])
+            return False, {
+                "code": "NOTE_EXCLUDED_FROM_INDEX",
+                "error": "该笔记已锁定或已排除索引，禁止引用",
+            }
+
+        if privacy["exclude_from_quote"]:
+            return False, {
+                "code": "NOTE_EXCLUDED_FROM_QUOTE",
+                "error": "该笔记已标记排除引用，禁止进入模型上下文",
+            }
+
+        doc = self._build_meili_doc(raw, exclude_from_quote=False)
+        return True, {
+            "note": {
+                "note_id": nid,
+                "alias": doc["alias"],
+                "url": doc["url"],
+                "title": doc["title"],
+                "folder_path": doc["folder_path"],
+                "tags": doc["tags"],
+                "snippet": str(doc["content"])[:320],
+                "content": doc["content"],
+                "updated_at": doc["updated_at"],
+            }
+        }
 
     def search_notes(
         self,
