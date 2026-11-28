@@ -154,6 +154,26 @@ def register(context: Any) -> None:
     context.register_route("GET", "/api/v1/rss/brief", _handle_content_route)
     context.register_route("POST", "/api/v1/ocr", _handle_content_route)
 
+    # 3b. 注册个人知识库私有笔记路由与同步作业（归属 content_ops 资产检索中枢）
+    from lite_agent.features.content_ops import kb_routes
+    from lite_agent.features.content_ops.hedgedoc_notes import HedgeDocNotesService
+
+    cfg = getattr(context, "config", {}) or {}
+    hedgedoc_notes_service = HedgeDocNotesService(config=cfg)
+    context.register_route(
+        "GET",
+        "/api/v1/kb/notes",
+        lambda h, u: kb_routes.handle_get_notes(h, u, hedgedoc_notes_service),
+        description="检索 HedgeDoc 私有笔记（交付前实时隐私复核）",
+    )
+    context.register_route(
+        "ALL",
+        "/api/v1/kb/notes/",
+        lambda h, u: kb_routes.handle_notes_sub_dispatch(h, u, hedgedoc_notes_service),
+        is_prefix=True,
+        description="HedgeDoc 私有笔记预检、同步与手动排除规则子端点",
+    )
+
     # 4. 注册定时作业及专用回调处理器
     def _rss_push_handler(**kwargs):
         return rss_service.rss_push_job(context.send_owner_response)
@@ -161,6 +181,7 @@ def register(context: Any) -> None:
     if hasattr(context, "register_job_handler"):
         context.register_job_handler("ops_rss::rss_precompute", lambda **kw: rss_service.rss_precompute())
         context.register_job_handler("ops_rss::rss_push", _rss_push_handler)
+        context.register_job_handler("ops_kb::hedgedoc_sync", lambda **kw: hedgedoc_notes_service.sync_notes())
 
     # 5. 注册内容操作 RequestSelector 领域路由
     if hasattr(context, "register_domain"):

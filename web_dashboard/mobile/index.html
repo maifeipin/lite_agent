@@ -1084,10 +1084,16 @@
     <div class="modal-backdrop" v-if="showFavoritesDrawer" @click.self="showFavoritesDrawer = false">
       <div class="drawer" style="max-width:620px;">
         <div class="drawer-head">
-          <h3>⭐ 我的收藏（个人知识库）</h3>
+          <h3>⭐ 个人知识库</h3>
           <button class="btn btn-icon" @click="showFavoritesDrawer = false">✕</button>
         </div>
         <div class="drawer-body">
+          <div class="desktop-seg-tabs" style="padding:0 0 10px;grid-template-columns:1fr 1fr;">
+            <button type="button" class="desktop-seg-btn" :class="{ active: kbDrawerTab === 'favorites' }" @click="kbDrawerTab = 'favorites'; handleSearchFavorites()">⭐ 我的收藏</button>
+            <button type="button" class="desktop-seg-btn" :class="{ active: kbDrawerTab === 'notes' }" @click="kbDrawerTab = 'notes'; handleSearchNotes()">📝 私有笔记</button>
+          </div>
+
+          <template v-if="kbDrawerTab === 'favorites'">
           <div style="display:flex;gap:8px;margin-bottom:10px;">
             <input
               v-model="favSearchQuery"
@@ -1134,6 +1140,48 @@
               </div>
             </div>
           </div>
+          </template>
+
+          <template v-else>
+          <div style="display:flex;gap:8px;margin-bottom:10px;">
+            <input
+              v-model="noteSearchQuery"
+              type="text"
+              placeholder="搜 HedgeDoc 私有笔记标题、目录、标签或正文..."
+              style="flex:1;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:10px;padding:8px 11px;font-size:13.5px;"
+              @keydown.enter.prevent="handleSearchNotes"
+            />
+            <button class="btn btn-primary" @click="handleSearchNotes">搜索</button>
+          </div>
+          <div v-if="noteSearchError" style="color:var(--danger);font-size:12px;margin-bottom:8px;">{{ noteSearchError }}</div>
+          <div class="empty-state" v-if="store.loadingNotes" style="padding:24px 0;">正在实时核验并检索私有笔记...</div>
+          <div class="empty-state" v-else-if="!store.notes.length" style="padding:24px 0;">暂无匹配笔记（已锁定或排除索引的笔记不会返回）。</div>
+          <div v-else style="display:flex;flex-direction:column;gap:10px;">
+            <div class="fav-card" v-for="note in store.notes" :key="note.note_id">
+              <div class="fav-card-head">
+                <div class="fav-card-title">
+                  <a v-if="note.url" :href="note.url" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:underline;">{{ note.title }}</a>
+                  <span v-else>{{ note.title }}</span>
+                </div>
+                <span class="fav-deleted-tag" v-if="note.exclude_from_quote">🚫 已排除引用</span>
+              </div>
+              <div class="fav-card-meta">
+                <span v-if="note.folder_path">📁 {{ note.folder_path }}</span>
+                <span>· #{{ note.note_id }}</span>
+                <span v-if="note.updated_at">· {{ (note.updated_at || '').slice(0, 16).replace('T', ' ') }}</span>
+              </div>
+              <div class="template-chips" v-if="note.tags && note.tags.length" style="margin:6px 0;">
+                <span class="tag" v-for="t in note.tags" :key="t">#{{ t }}</span>
+              </div>
+              <div style="font-size:12.5px;color:var(--muted);margin:6px 0;white-space:pre-wrap;">{{ note.snippet }}</div>
+              <div class="fav-card-actions">
+                <button v-if="store.activeBotId && !note.exclude_from_quote" class="btn btn-primary" @click="quoteNoteToInput(note)">📎 引用到当前输入框</button>
+                <button class="btn" @click="handleToggleNoteNoQuote(note)">{{ note.exclude_from_quote ? '✅ 允许引用' : '🚫 排除引用' }}</button>
+                <button class="btn btn-danger" @click="handleExcludeNoteFromIndex(note)">🗑️ 排除索引</button>
+              </div>
+            </div>
+          </div>
+          </template>
         </div>
       </div>
     </div>
@@ -1177,6 +1225,6 @@
     </div>
   </div>
 
-  <script type="module" src="./app.js?v=26"></script>
+  <script type="module" src="./app.js?v=27"></script>
 </body>
 </html>

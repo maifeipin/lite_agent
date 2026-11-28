@@ -9,6 +9,7 @@ const USER_REFRESH_TOKEN_KEY = 'user_refresh_token';
 const USER_SESSION_EXPIRES_KEY = 'user_session_expires_at';
 const TOKEN_SOURCE_KEY = 'pc_cli_token_source';
 const API_BASE = '/agent/api/v1/pc-cli';
+const KB_API_BASE = '/agent/api/v1/kb';
 const REFRESH_LEEWAY_SEC = 90;
 
 function readInitialToken() {
@@ -52,6 +53,8 @@ export const store = reactive({
   botFavorites: [],
   collectedSourceKeys: [],
   loadingFavorites: false,
+  notes: [],
+  loadingNotes: false,
 });
 
 let _ws = null;
@@ -278,7 +281,7 @@ export async function refreshWebSession({ failedToken = '' } = {}) {
   return p;
 }
 
-async function apiFetch(path, options = {}, _retried = false, _expectedEpoch = _credentialEpoch) {
+async function apiFetch(path, options = {}, _retried = false, _expectedEpoch = _credentialEpoch, baseUrl = API_BASE) {
   if (_credentialEpoch !== _expectedEpoch) {
     throw new Error('登录凭证已变更，请重新操作');
   }
@@ -293,7 +296,7 @@ async function apiFetch(path, options = {}, _retried = false, _expectedEpoch = _
   if (usedToken) {
     headers['Authorization'] = `Bearer ${usedToken}`;
   }
-  const resp = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const resp = await fetch(`${baseUrl}${path}`, { ...options, headers });
   if (_credentialEpoch !== _expectedEpoch) {
     throw new Error('登录凭证已变更，请重新操作');
   }
@@ -304,7 +307,7 @@ async function apiFetch(path, options = {}, _retried = false, _expectedEpoch = _
         throw new Error('登录凭证已变更，请重新操作');
       }
       if (ok) {
-        return apiFetch(path, options, true, _expectedEpoch);
+        return apiFetch(path, options, true, _expectedEpoch, baseUrl);
       }
     }
     if (_credentialEpoch === _expectedEpoch) {
@@ -582,6 +585,33 @@ export async function deleteFavorite(favId) {
   store.favorites = store.favorites.filter((f) => f.id !== favId);
   store.botFavorites = store.botFavorites.filter((f) => f.id !== favId);
   return data;
+}
+
+export async function searchNotes({ q = '', limit = 20, purpose = 'search' } = {}) {
+  const startEpoch = _credentialEpoch;
+  store.loadingNotes = true;
+  try {
+    const params = new URLSearchParams();
+    if (q) params.set('q', q);
+    params.set('limit', String(limit || 20));
+    params.set('purpose', purpose || 'search');
+    const data = await apiFetch(`/notes?${params.toString()}`, {}, false, startEpoch, KB_API_BASE);
+    if (_credentialEpoch === startEpoch) {
+      store.notes = Array.isArray(data.items) ? data.items : [];
+    }
+    return data;
+  } finally {
+    if (_credentialEpoch === startEpoch) {
+      store.loadingNotes = false;
+    }
+  }
+}
+
+export async function updateNoteRules(noteId, patch) {
+  return apiFetch(`/notes/${encodeURIComponent(String(noteId))}/rules`, {
+    method: 'PUT',
+    body: JSON.stringify(patch || {}),
+  }, false, _credentialEpoch, KB_API_BASE);
 }
 
 function getWsUrl() {

@@ -20,6 +20,7 @@ import {
   getCredentialEpoch,
   saveFavorite,
   saveToken,
+  searchNotes,
   sendManagerChat,
   sendTurn,
   showToast,
@@ -27,7 +28,8 @@ import {
   submitApproval,
   subscribeBotOnWs,
   updateBot,
-} from './store.js?v=17';
+  updateNoteRules,
+} from './store.js?v=18';
 
 function escapeHtml(raw) {
   return String(raw || '')
@@ -1231,7 +1233,67 @@ const app = createApp({
 
     async function openFavoritesDrawer() {
       showFavoritesDrawer.value = true;
-      await handleSearchFavorites();
+      if (kbDrawerTab.value === 'notes') {
+        await handleSearchNotes();
+      } else {
+        await handleSearchFavorites();
+      }
+    }
+
+    const kbDrawerTab = ref('favorites'); // favorites | notes
+    const noteSearchQuery = ref('');
+    const noteSearchError = ref('');
+
+    async function handleSearchNotes() {
+      noteSearchError.value = '';
+      try {
+        const res = await searchNotes({ q: noteSearchQuery.value.trim(), limit: 25, purpose: 'search' });
+        if (res && res.error) {
+          noteSearchError.value = String(res.error);
+        }
+      } catch (e) {
+        noteSearchError.value = e.message || '检索私有笔记失败';
+        showToast(noteSearchError.value);
+      }
+    }
+
+    async function handleToggleNoteNoQuote(note) {
+      if (!note || !note.note_id) return;
+      const nextVal = !note.exclude_from_quote;
+      try {
+        await updateNoteRules(note.note_id, { exclude_from_quote: nextVal });
+        note.exclude_from_quote = nextVal;
+        showToast(nextVal ? '已设为「排除引用」（本人仍可检索）' : '已恢复允许引用');
+      } catch (e) {
+        showToast(e.message || '更新规则失败');
+      }
+    }
+
+    async function handleExcludeNoteFromIndex(note) {
+      if (!note || !note.note_id) return;
+      if (!window.confirm(`确认将「${note.title}」设为排除索引？将立即从 Meilisearch 移除且不再返回。`)) return;
+      try {
+        await updateNoteRules(note.note_id, { exclude_from_index: true });
+        store.notes = store.notes.filter((n) => n.note_id !== note.note_id);
+        showToast('已排除索引并从检索中移除');
+      } catch (e) {
+        showToast(e.message || '排除索引失败');
+      }
+    }
+
+    function quoteNoteToInput(note) {
+      if (!note) return;
+      if (note.exclude_from_quote) {
+        showToast('该笔记已标记排除引用');
+        return;
+      }
+      const meta = [note.folder_path, note.url].filter(Boolean).join(' · ');
+      const quoteBlock = `【引用笔记：${note.title}】${meta ? `（出处：${meta}）` : ''}\n${note.snippet || ''}\n\n`;
+      promptInput.value = promptInput.value.trim()
+        ? `${promptInput.value.trim()}\n\n${quoteBlock}`
+        : quoteBlock;
+      showFavoritesDrawer.value = false;
+      showToast('已插入输入框，确认后发送');
     }
 
     async function handleSearchFavorites() {
@@ -1434,6 +1496,13 @@ const app = createApp({
       quoteFavoriteToInput,
       jumpToFavoriteBot,
       handleDeleteFavorite,
+      kbDrawerTab,
+      noteSearchQuery,
+      noteSearchError,
+      handleSearchNotes,
+      handleToggleNoteNoQuote,
+      handleExcludeNoteFromIndex,
+      quoteNoteToInput,
       refreshAll,
       showToast,
     };
