@@ -14,7 +14,9 @@ from lite_agent.features.sys_ops.backup_service import (
     _is_excluded_core_entry,
     _snapshot_sqlite_db,
     _stage_core_backup_tree,
+    _write_upload_status,
     do_backup,
+    do_backup_and_sync,
 )
 
 
@@ -597,3 +599,62 @@ class TestSysOpsBackup(unittest.TestCase):
                     do_backup()
 
             self.assertTrue(os.path.exists(old_rsslite), "old archive must NOT be pruned if status persistence fails")
+
+    def test_upload_status_isolated_from_backup_status_and_guarded_by_batch_id(self):
+        """P1 回归：上传状态独立写入 backup_upload_status.json，绝不修改 backup_status.json，且旧批次回调不覆盖新批次"""
+        with tempfile.TemporaryDirectory() as tmp_root:
+            data_dir = os.path.join(tmp_root, "data")
+            os.makedirs(data_dir, exist_ok=True)
+            status_file = os.path.join(data_dir, "backup_status.json")
+            upload_status_file = os.path.join(data_dir, "backup_upload_status.json")
+
+            sentinel_manifest = {
+                "backup_batch_id": "20261128_030000",
+                "sqlite_snapshots": {"statements.db": {"status": "missing", "last_verified_archive": "data_old.zip"}},
+            }
+            with open(status_file, "w", encoding="utf-8") as sf:
+                json.dump(sentinel_manifest, sf)
+            before_raw = open(status_file, "r", encoding="utf-8").read()
+
+            with patch("lite_agent.features.sys_ops.backup_service._BASE_DIR", tmp_root), \
+                 patch("lite_agent.features.sys_ops.backup_service._BDPAN_SYNC_LOG", os.path.join(data_dir, "bdpan.log")), \
+                 patch("lite_agent.features.sys_ops.backup_service.do_backup", return_value="⚠️ 备份完成（存在降级、缺失或失败项）"), \
+                 patch("lite_agent.features.sys_ops.backup_service.subprocess.Popen") as mock_popen:
+                res = do_backup_and_sync()
+
+            self.assertIn("后台上传进行中", res)
+            mock_popen.assert_called_once()
+            # backup_status.json 必须一字未改
+            self.assertEqual(open(status_file, "r", encoding="utf-8").read(), before_raw)
+            # 独立上传状态文件记录了对应批次的 uploading
+            up1 = json.loads(open(upload_status_file, "r", encoding="utf-8").read())
+            self.assertEqual(up1["backup_batch_id"], "20261128_030000")
+            self.assertEqual(up1["status"], "uploading")
+
+            # 新批次 20261129_030000 开始上传后，旧批次 20261128_030000 的迟到完成回调必须被丢弃
+            self.assertTrue(_write_upload_status(upload_status_file, "20261129_030000", status="uploading"))
+            self.assertFalse(
+                _write_upload_status(
+                    upload_status_file,
+                    "20261128_030000",
+                    status="failed",
+                    error_message="stale failure",
+                    completion_time="2026-11-29 03:01:00",
+                )
+            )
+            up2 = json.loads(open(upload_status_file, "r", encoding="utf-8").read())
+            self.assertEqual(up2["backup_batch_id"], "20261129_030000")
+            self.assertEqual(up2["status"], "uploading")
+
+            # 当前新批次 20261129_030000 完成回调正常写入
+            self.assertTrue(
+                _write_upload_status(
+                    upload_status_file,
+                    "20261129_030000",
+                    status="success",
+                    completion_time="2026-11-29 03:05:00",
+                )
+            )
+            up3 = json.loads(open(upload_status_file, "r", encoding="utf-8").read())
+            self.assertEqual(up3["status"], "success")
+            self.assertEqual(up3["completion_time"], "2026-11-29 03:05:00")

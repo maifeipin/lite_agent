@@ -728,18 +728,83 @@ def _bdpan_sync_dir(backup_dir: str) -> Tuple[bool, str]:
     return True, detail
 
 
+def _write_json_atomic(file_path: str, payload: Dict[str, Any]) -> None:
+    """通过同目录临时文件 + fsync + os.replace 原子写入 JSON 文件。"""
+    import json
+    import tempfile
+
+    parent = os.path.dirname(file_path)
+    os.makedirs(parent, exist_ok=True)
+    tmp_fd, tmp_path = tempfile.mkstemp(prefix=".atomic_", suffix=".tmp", dir=parent)
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, file_path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+        raise
+
+
+def _write_upload_status(
+    upload_status_file: str,
+    batch_id: str,
+    *,
+    status: str,
+    error_message: Optional[str] = None,
+    completion_time: Optional[str] = None,
+) -> bool:
+    """原子更新独立的百度网盘上传状态文件（按 backup_batch_id 隔离，绝不触碰 backup_status.json）。
+
+    若状态文件已属于更新的备份批次，旧批次的完成回调将被丢弃，返回 False。
+    """
+    import json
+
+    existing: Dict[str, Any] = {}
+    if os.path.exists(upload_status_file):
+        try:
+            with open(upload_status_file, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                existing = loaded
+        except Exception:
+            existing = {}
+
+    existing_batch = str(existing.get("backup_batch_id") or "")
+    if status != "uploading" and existing_batch and batch_id and existing_batch != batch_id:
+        return False
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    payload = {
+        "backup_batch_id": batch_id,
+        "status": status,
+        "error_message": error_message,
+        "started_at": now_str if status == "uploading" else existing.get("started_at"),
+        "completion_time": completion_time,
+        "updated_at": now_str,
+    }
+    _write_json_atomic(upload_status_file, payload)
+    return True
+
+
 _ASYNC_UPLOAD_SCRIPT = '''#!/usr/bin/env python3
 """异步上传脚本：由 do_backup_and_sync() 生成并后台执行"""
-import sys, os, json
+import sys, os
 from datetime import datetime
 
 os.environ["PATH"] = "/usr/local/bin:/usr/bin:/bin:" + os.environ.get("PATH", "")
 sys.path.insert(0, __BASE_DIR__)
 
-from lite_agent.features.sys_ops.backup_service import _bdpan_sync_dir
+from lite_agent.features.sys_ops.backup_service import _bdpan_sync_dir, _write_upload_status
 
 backup_dir = __BACKUP_DIR__
-status_file = __STATUS_FILE__
+upload_status_file = __UPLOAD_STATUS_FILE__
+batch_id = __BATCH_ID__
 log_file = __LOG_FILE__
 
 def write_log(msg):
@@ -752,20 +817,18 @@ def write_log(msg):
         pass
 
 def update_status(success, detail):
-    if not os.path.exists(status_file):
-        return
     try:
-        with open(status_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        data["baidu_pcs_sync"] = {
-            "status": "success" if success else "failed",
-            "error_message": None if success else detail,
-            "completion_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-        with open(status_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        updated = _write_upload_status(
+            upload_status_file,
+            batch_id,
+            status="success" if success else "failed",
+            error_message=None if success else detail,
+            completion_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        if not updated:
+            write_log("Skipped stale upload status update for batch " + str(batch_id))
     except Exception as e:
-        write_log("Failed to update status: " + str(e))
+        write_log("Failed to update upload status: " + str(e))
 
 try:
     write_log("开始后台上传...")
@@ -1143,9 +1206,9 @@ def do_backup() -> str:
                     pass
             print(f"Halo backup failed: {e}")
 
-    # 保存状态
-    os.makedirs(os.path.dirname(status_file), exist_ok=True)
+    # 保存状态（backup_status.json 仅由 do_backup() 独占原子写入；上传状态独立存放于 backup_upload_status.json）
     status_data = {
+        "backup_batch_id": timestamp,
         "last_backup_time": now_str,
         "local_files": [os.path.abspath(p) for p, _ in backup_files],
         "total_size_mb": round(total_size_mb, 2),
@@ -1164,23 +1227,7 @@ def do_backup() -> str:
         "checklist": checklist,
         "backup_files": [f[0] for f in backup_files]
     }
-    # 先原子发布恢复清单（临时文件 + fsync + os.replace），成功后再按已发布清单清理旧归档
-    status_dir = os.path.dirname(status_file)
-    os.makedirs(status_dir, exist_ok=True)
-    tmp_fd, tmp_status_path = tempfile.mkstemp(prefix=".backup_status_", suffix=".tmp", dir=status_dir)
-    try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as sf:
-            json.dump(status_data, sf, ensure_ascii=False, indent=2)
-            sf.flush()
-            os.fsync(sf.fileno())
-        os.replace(tmp_status_path, status_file)
-    except Exception:
-        if os.path.exists(tmp_status_path):
-            try:
-                os.remove(tmp_status_path)
-            except Exception:
-                pass
-        raise
+    _write_json_atomic(status_file, status_data)
 
     for prefixes, keep_names in pending_prunes:
         _prune_old_archives(backup_dir, prefixes, keep_names)
@@ -1214,27 +1261,30 @@ def do_backup_and_sync() -> str:
     base_dir = _BASE_DIR
     backup_dir = os.path.join(base_dir, "backup")
     status_file = os.path.join(base_dir, "data", "backup_status.json")
+    upload_status_file = os.path.join(base_dir, "data", "backup_upload_status.json")
     log_file = _BDPAN_SYNC_LOG
 
+    batch_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     if os.path.exists(status_file):
         try:
             import json
             with open(status_file, "r", encoding="utf-8") as sf:
                 data = json.load(sf)
-            data["baidu_pcs_sync"] = {
-                "status": "uploading",
-                "error_message": None,
-                "completion_time": None
-            }
-            with open(status_file, "w", encoding="utf-8") as sf:
-                json.dump(data, sf, ensure_ascii=False, indent=2)
+            if isinstance(data, dict) and data.get("backup_batch_id"):
+                batch_id = str(data["backup_batch_id"])
         except Exception:
             pass
+
+    try:
+        _write_upload_status(upload_status_file, batch_id, status="uploading")
+    except Exception:
+        pass
 
     script = _ASYNC_UPLOAD_SCRIPT
     script = script.replace("__BASE_DIR__", repr(base_dir))
     script = script.replace("__BACKUP_DIR__", repr(backup_dir))
-    script = script.replace("__STATUS_FILE__", repr(status_file))
+    script = script.replace("__UPLOAD_STATUS_FILE__", repr(upload_status_file))
+    script = script.replace("__BATCH_ID__", repr(batch_id))
     script = script.replace("__LOG_FILE__", repr(log_file))
 
     script_fd, script_path = tempfile.mkstemp(suffix="_upload.py", prefix="bdpan_async_")

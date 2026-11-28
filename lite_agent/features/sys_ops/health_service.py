@@ -408,6 +408,18 @@ def get_health_report() -> str:
                         missing_files.append(os.path.basename(lf))
 
                 sync_info = sdata.get("baidu_pcs_sync", {})
+                upload_status_file = os.path.join(base_dir, 'data', 'backup_upload_status.json')
+                if os.path.exists(upload_status_file):
+                    try:
+                        with open(upload_status_file, 'r', encoding='utf-8') as uf:
+                            udata = json.load(uf)
+                        if isinstance(udata, dict):
+                            cur_batch = str(sdata.get("backup_batch_id") or "")
+                            up_batch = str(udata.get("backup_batch_id") or "")
+                            if not cur_batch or not up_batch or cur_batch == up_batch:
+                                sync_info = udata
+                    except Exception:
+                        pass
                 sync_status = sync_info.get("status", "pending")
                 sync_err = sync_info.get("error_message")
 
@@ -421,7 +433,7 @@ def get_health_report() -> str:
 
                 if sync_status == "success":
                     cloud_desc = "✅ 成功"
-                elif sync_status == "pending":
+                elif sync_status in ("pending", "uploading"):
                     cloud_desc = "⏳ 进行中/等待"
                 else:
                     cloud_desc = f"❌ 失败 ({sync_err})"
