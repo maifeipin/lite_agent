@@ -96,24 +96,21 @@ def resolve_allowed_owners(config: Optional[Dict[str, Any]] = None) -> Set[str]:
         if single and str(single).strip():
             owners.add(str(single).strip())
 
-    # 若未显式配置，读取单人部署的 htpasswd 首条账户作为唯一所有者（仅读用户名，不触碰密码哈希）
+    # 若未显式配置，仅在与登录端点一致的 dashboard_htpasswd_path 确认“仅存在唯一有效账户”时回退授权；多账户文件严格 fail-closed
     if not owners:
-        htpasswd_path = (
-            cfg.get("review_meeting_htpasswd")
-            or (cfg.get("review_meeting", {}) or {}).get("htpasswd_path")
-            or os.environ.get("REVIEW_MEETING_HTPASSWD")
-            or "/etc/nginx/.htpasswd"
-        )
-        if htpasswd_path and os.path.isfile(str(htpasswd_path)):
+        htpasswd_path = str(cfg.get("dashboard_htpasswd_path") or "/etc/nginx/conf.d/dashboard.htpasswd")
+        if htpasswd_path and os.path.isfile(htpasswd_path):
             try:
-                with open(str(htpasswd_path), "r", encoding="utf-8") as f:
+                found_users: Set[str] = set()
+                with open(htpasswd_path, "r", encoding="utf-8") as f:
                     for line in f:
                         line = line.strip()
                         if line and not line.startswith("#") and ":" in line:
-                            first_user = line.split(":", 1)[0].strip()
-                            if first_user:
-                                owners.add(first_user)
-                                break
+                            u = line.split(":", 1)[0].strip()
+                            if u:
+                                found_users.add(u)
+                if len(found_users) == 1:
+                    owners.update(found_users)
             except Exception:
                 pass
     return owners
@@ -733,17 +730,27 @@ class PcCliFavoritesService:
         with self._lock:
             with self._connect() as conn:
                 rows = conn.execute("SELECT * FROM kb_favorites ORDER BY updated_at DESC").fetchall()
-        docs = [self._to_meili_doc(self._row_to_dict(r)) for r in rows]
+                del_rows = conn.execute("SELECT id, created_at FROM kb_favorites_pending_deletes").fetchall()
+        snapshot_favs = [self._row_to_dict(r) for r in rows]
+        snapshot_versions = [(f["id"], f["updated_at"]) for f in snapshot_favs]
+        snapshot_pending_deletes = [(str(r["id"]), str(r["created_at"])) for r in del_rows]
+        docs = [self._to_meili_doc(f) for f in snapshot_favs]
+
         sync_state = self._normalize_sync_result(self.meili.rebuild_documents(docs))
-        if sync_state == "synced":
+        if sync_state in ("synced", "enqueued"):
             with self._lock:
                 with self._connect() as conn:
-                    conn.execute("UPDATE kb_favorites SET sync_state = 'synced'")
-                    conn.execute("DELETE FROM kb_favorites_pending_deletes")
-        elif sync_state == "enqueued":
-            with self._lock:
-                with self._connect() as conn:
-                    conn.execute("UPDATE kb_favorites SET sync_state = 'enqueued'")
+                    for fid, f_updated in snapshot_versions:
+                        conn.execute(
+                            "UPDATE kb_favorites SET sync_state = ? WHERE id = ? AND updated_at = ?",
+                            (sync_state, fid, f_updated),
+                        )
+                    if sync_state == "synced":
+                        for did, d_created in snapshot_pending_deletes:
+                            conn.execute(
+                                "DELETE FROM kb_favorites_pending_deletes WHERE id = ? AND created_at = ?",
+                                (did, d_created),
+                            )
         return sync_state == "synced", {
             "rebuilt_count": len(docs),
             "sync_state": sync_state,

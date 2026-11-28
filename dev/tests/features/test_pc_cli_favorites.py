@@ -283,6 +283,58 @@ class TestPcCliFavorites(unittest.TestCase):
             self.assertEqual(len(found["favorites"]), 1)
             self.assertEqual(found["favorites"][0]["title"], "异步入队验证")
 
+    def test_htpasswd_fallback_only_allows_single_account_and_rebuild_scopes_versions(self):
+        """P1/P2 回归：多账户 htpasswd 严格 fail-closed；rebuild 期间并发新增收藏不得被误标 synced"""
+        from lite_agent.features.pc_cli.favorites import resolve_allowed_owners
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            single_hp = os.path.join(tmp_dir, "single.htpasswd")
+            with open(single_hp, "w", encoding="utf-8") as f:
+                f.write("# comment\nchenli:$apr1$fake\n")
+            self.assertEqual(resolve_allowed_owners({"dashboard_htpasswd_path": single_hp}), {"chenli"})
+
+            multi_hp = os.path.join(tmp_dir, "multi.htpasswd")
+            with open(multi_hp, "w", encoding="utf-8") as f:
+                f.write("chenli:$apr1$fake1\nalice:$apr1$fake2\n")
+            self.assertEqual(resolve_allowed_owners({"dashboard_htpasswd_path": multi_hp}), set())
+
+            # 重建期间并发新增一条未能写入 Meilisearch 的收藏 -> rebuild 结束后该新条目仍保持 pending 且可由 SQLite 补查命中
+            archive_db = os.path.join(tmp_dir, "output_archive.db")
+            svc_holder = {}
+
+            class _ConcurrentRebuildMeili(_FakeMeiliClient):
+                def rebuild_documents(self, docs):
+                    self.docs = {d["id"]: dict(d) for d in docs}
+                    # 模拟 rebuild 在途期间有另一条新收藏落盘但 Meilisearch upsert 失败
+                    prev_fail = self.fail
+                    self.fail = True
+                    svc_holder["svc"].save_favorite(
+                        bot_id="bot_concurrent",
+                        title="并发新增收藏",
+                        content="CONCURRENT_NEW_888",
+                        items=[{"turn_id": "t9", "seq_id": 99, "role": "assistant", "text": "CONCURRENT_NEW_888"}],
+                    )
+                    self.fail = prev_fail
+                    return ("synced", 101)
+
+            meili = _ConcurrentRebuildMeili()
+            svc = PcCliFavoritesService(db_path=archive_db, meili_client=meili)
+            svc_holder["svc"] = svc
+            svc.save_favorite(
+                bot_id="bot_old",
+                title="原有收藏",
+                content="OLD_DOC",
+                items=[{"turn_id": "t1", "seq_id": 1, "role": "assistant", "text": "OLD_DOC"}],
+            )
+            ok_rb, _ = svc.rebuild_meili_index()
+            self.assertTrue(ok_rb)
+
+            # 并发新增的 CONCURRENT_NEW_888 不得被误标 synced，必须能通过 meilisearch+sqlite 补查搜到
+            found = svc.search_favorites(query="CONCURRENT_NEW_888")
+            self.assertEqual(found["engine"], "meilisearch+sqlite")
+            self.assertEqual(len(found["favorites"]), 1)
+            self.assertEqual(found["favorites"][0]["sync_state"], "pending")
+
 
 if __name__ == "__main__":
     unittest.main()
