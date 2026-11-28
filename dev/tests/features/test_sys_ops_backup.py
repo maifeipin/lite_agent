@@ -506,3 +506,94 @@ class TestSysOpsBackup(unittest.TestCase):
                 res = _snapshot_sqlite_db(ok_db, dst_db, budget_sec=10.0, max_attempts=1)
             self.assertEqual(res["status"], "failed")
             self.assertFalse(os.path.exists(dst_db))
+
+    def test_do_backup_reconciles_missing_previously_tracked_db_and_prunes_only_after_status_persist(self):
+        """P1 回归：本轮未发现的既有库标为 missing 并保留其归档引用；状态原子持久化失败时不清理任何旧归档"""
+        with tempfile.TemporaryDirectory() as tmp_root:
+            data_dir = os.path.join(tmp_root, "data")
+            backup_dir = os.path.join(tmp_root, "backup")
+            os.makedirs(data_dir, exist_ok=True)
+            os.makedirs(backup_dir, exist_ok=True)
+
+            old_archive_name = "data_20261127_030000.zip"
+            old_archive_path = os.path.join(backup_dir, old_archive_name)
+            with open(old_archive_path, "wb") as f:
+                f.write(b"contains-statements-db")
+
+            good_db = os.path.join(data_dir, "pc_cli.db")
+            c = sqlite3.connect(good_db)
+            c.execute("CREATE TABLE t (id INTEGER)")
+            c.execute("INSERT INTO t VALUES (1)")
+            c.commit()
+            c.close()
+
+            status_file = os.path.join(data_dir, "backup_status.json")
+            with open(status_file, "w", encoding="utf-8") as sf:
+                json.dump(
+                    {
+                        "sqlite_snapshots": {
+                            "data/pc_cli.db": {
+                                "status": "verified",
+                                "last_verified_at": "2026-11-27 03:00:00",
+                                "last_verified_archive": old_archive_name,
+                            },
+                            "statements.db": {
+                                "status": "verified",
+                                "last_verified_at": "2026-11-27 03:00:00",
+                                "last_verified_archive": old_archive_name,
+                            },
+                        }
+                    },
+                    sf,
+                )
+
+            def ok_zip(cmd, **kwargs):
+                if isinstance(cmd, list) and cmd and cmd[0] == "zip":
+                    with open(cmd[2], "wb") as zf:
+                        zf.write(b"PK\x05\x06" + b"\x00" * 18)
+                res = MagicMock()
+                res.returncode = 0
+                res.stdout = ""
+                return res
+
+            # 1) statements.db 所在目录未挂载（本轮未发现）-> 必须标为 missing、Core 降级、且保留 old_archive_path
+            with patch("lite_agent.features.sys_ops.backup_service._BASE_DIR", tmp_root), \
+                 patch("lite_agent.features.sys_ops.backup_service._BILLING_DIR", os.path.join(tmp_root, "unmounted_billing")), \
+                 patch("lite_agent.features.sys_ops.backup_service.subprocess.run", side_effect=ok_zip), \
+                 patch("lite_agent.features.sys_ops.backup_service._create_meili_dump", return_value=None), \
+                 patch("lite_agent.features.sys_ops.backup_service._backup_vaultwarden", return_value=None), \
+                 patch("lite_agent.features.sys_ops.backup_service._backup_mongodb", return_value=None), \
+                 patch("lite_agent.features.sys_ops.backup_service._backup_halo", return_value=None), \
+                 patch("lite_agent.features.sys_ops.backup_service._backup_hedgedoc", return_value=[]):
+                report = do_backup()
+
+            self.assertIn("Degraded", report)
+            self.assertTrue(os.path.exists(old_archive_path), "old archive referenced by missing statements.db must NOT be pruned")
+            saved = json.loads(open(status_file, "r", encoding="utf-8").read())
+            self.assertEqual(saved["sqlite_snapshots"]["statements.db"]["status"], "missing")
+            self.assertEqual(saved["sqlite_snapshots"]["statements.db"]["last_verified_archive"], old_archive_name)
+            self.assertEqual(saved["sqlite_snapshots"]["statements.db"]["last_verified_at"], "2026-11-27 03:00:00")
+
+            # 2) 若 backup_status.json 原子替换前崩溃（os.replace 抛异常），任何旧归档都不得提前被删
+            old_rsslite = os.path.join(backup_dir, "rsslite_20261127_030000.zip")
+            with open(old_rsslite, "wb") as f:
+                f.write(b"old-rsslite")
+            fake_mongo_dir = os.path.join(tmp_root, "mongo_tmp")
+            os.makedirs(fake_mongo_dir, exist_ok=True)
+            fake_mongo_file = os.path.join(fake_mongo_dir, "rsslite.gz")
+            with open(fake_mongo_file, "wb") as f:
+                f.write(b"new-rsslite")
+
+            with patch("lite_agent.features.sys_ops.backup_service._BASE_DIR", tmp_root), \
+                 patch("lite_agent.features.sys_ops.backup_service._BILLING_DIR", os.path.join(tmp_root, "unmounted_billing")), \
+                 patch("lite_agent.features.sys_ops.backup_service.subprocess.run", side_effect=ok_zip), \
+                 patch("lite_agent.features.sys_ops.backup_service._create_meili_dump", return_value=None), \
+                 patch("lite_agent.features.sys_ops.backup_service._backup_vaultwarden", return_value=None), \
+                 patch("lite_agent.features.sys_ops.backup_service._backup_mongodb", return_value=fake_mongo_file), \
+                 patch("lite_agent.features.sys_ops.backup_service._backup_halo", return_value=None), \
+                 patch("lite_agent.features.sys_ops.backup_service._backup_hedgedoc", return_value=[]), \
+                 patch("lite_agent.features.sys_ops.backup_service.os.replace", side_effect=OSError("simulated crash before status publish")):
+                with self.assertRaises(OSError):
+                    do_backup()
+
+            self.assertTrue(os.path.exists(old_rsslite), "old archive must NOT be pruned if status persistence fails")

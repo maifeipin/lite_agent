@@ -475,6 +475,28 @@ def _stage_core_backup_tree(
             staged_non_db.append(extra_name)
             has_staged_content = True
 
+    # 与上一份已登记 SQLite 清单对账：未发现的既有库标为 missing 并保留其上一份归档引用，防止被误删
+    for prev_key, prev_entry in sorted(prev_map.items()):
+        if prev_key in sqlite_snapshots or not isinstance(prev_entry, dict):
+            continue
+        if prev_entry.get("status") == "retired":
+            sqlite_snapshots[prev_key] = dict(prev_entry)
+            continue
+        if prev_entry.get("last_verified_at") or prev_entry.get("last_verified_archive"):
+            sqlite_snapshots[prev_key] = {
+                "status": "missing",
+                "size_bytes": 0,
+                "snapshot_time": None,
+                "error": "source db not found in this run",
+                "last_verified_at": prev_entry.get("last_verified_at"),
+                "last_verified_archive": prev_entry.get("last_verified_archive"),
+            }
+            failed_dbs.append(prev_key)
+            print(
+                f"  [sqlite] previously tracked db missing in this run: {prev_key} "
+                f"(retaining archive={prev_entry.get('last_verified_archive')})"
+            )
+
     return has_staged_content, sqlite_snapshots, failed_dbs, staged_non_db
 
 
@@ -778,6 +800,7 @@ def do_backup() -> str:
         "webmusic_media_postgres": "Missing",
     }
     backup_files = []
+    pending_prunes: List[Tuple[Tuple[str, ...], set]] = []
     total_size_mb = 0
     sqlite_snapshots: Dict[str, Any] = {}
     core_non_db_assets: List[str] = []
@@ -876,7 +899,7 @@ def do_backup() -> str:
             backup_files.append((data_zip, "data"))
             published_name = os.path.basename(data_zip)
             keep_core_archives = _promote_core_snapshots(sqlite_snapshots, published_name)
-            _prune_old_archives(backup_dir, ("data_", "lite_agent_backup_", "backup_"), keep_core_archives)
+            pending_prunes.append((("data_", "lite_agent_backup_", "backup_"), keep_core_archives))
             if failed_dbs:
                 checklist["lite_agent_core"] = f"Degraded (failed: {', '.join(failed_dbs)})"
             else:
@@ -912,7 +935,7 @@ def do_backup() -> str:
             total_size_mb += os.path.getsize(rsslite_zip) / (1024 * 1024)
             backup_files.append((rsslite_zip, "rsslite"))
             checklist["rsslite_mongodb"] = "OK"
-            _prune_old_archives(backup_dir, ("rsslite_",), {os.path.basename(rsslite_zip)})
+            pending_prunes.append((("rsslite_",), {os.path.basename(rsslite_zip)}))
             shutil.rmtree(mongo_dir, ignore_errors=True)
     except Exception as e:
         if os.path.exists(rsslite_zip):
@@ -938,7 +961,7 @@ def do_backup() -> str:
             total_size_mb += os.path.getsize(vw_zip) / (1024 * 1024)
             backup_files.append((vw_zip, "vaultwarden"))
             checklist["vaultwarden"] = "OK"
-            _prune_old_archives(backup_dir, ("vaultwarden_",), {os.path.basename(vw_zip)})
+            pending_prunes.append((("vaultwarden_",), {os.path.basename(vw_zip)}))
             shutil.rmtree(tree_dir, ignore_errors=True)
             if "db_backup.sqlite3" in vw_db and os.path.exists(vw_db):
                 try:
@@ -976,7 +999,7 @@ def do_backup() -> str:
             total_size_mb += os.path.getsize(meili_zip) / (1024 * 1024)
             backup_files.append((meili_zip, "meilisearch"))
             checklist["meilisearch"] = "OK"
-            _prune_old_archives(backup_dir, ("meilisearch_",), {os.path.basename(meili_zip)})
+            pending_prunes.append((("meilisearch_",), {os.path.basename(meili_zip)}))
             # ZIP 归档成功并记录 OK 后，才清理本次归档文件并安全清理确认由系统生成的过期 dump
             _clean_meili_dumps_after_archive(meili_dump)
     except Exception as e:
@@ -1019,7 +1042,7 @@ def do_backup() -> str:
                 backup_files.append((zip_path, "hedgedoc"))
                 checklist["hedgedoc_db"] = "OK"
                 hedgedoc_status["db"] = {"status": "OK", "last_ok_time": now_str}
-                _prune_old_archives(backup_dir, ("hedgedoc_db_",), {os.path.basename(zip_path)})
+                pending_prunes.append((("hedgedoc_db_",), {os.path.basename(zip_path)}))
                 shutil.rmtree(tree_dir, ignore_errors=True)
             except Exception as e:
                 if os.path.exists(zip_path):
@@ -1049,7 +1072,7 @@ def do_backup() -> str:
                     backup_files.append((zip_path, "hedgedoc"))
                     checklist["hedgedoc_uploads"] = "OK"
                     hedgedoc_status["uploads"] = {"status": "OK", "last_ok_time": now_str}
-                    _prune_old_archives(backup_dir, ("hedgedoc_uploads_",), {os.path.basename(zip_path)})
+                    pending_prunes.append((("hedgedoc_uploads_",), {os.path.basename(zip_path)}))
                     shutil.rmtree(tree_dir, ignore_errors=True)
                 except Exception as e:
                     if os.path.exists(zip_path):
@@ -1107,7 +1130,7 @@ def do_backup() -> str:
                 total_size_mb += os.path.getsize(halo_zip) / (1024 * 1024)
                 backup_files.append((halo_zip, "halo"))
                 checklist["halo"] = "OK"
-                _prune_old_archives(backup_dir, ("halo_",), {os.path.basename(halo_zip)})
+                pending_prunes.append((("halo_",), {os.path.basename(halo_zip)}))
                 shutil.rmtree(tree_dir, ignore_errors=True)
                 halo_parent = os.path.dirname(halo_db)
                 if os.path.isdir(halo_parent) and 'halo_backup_' in os.path.basename(halo_parent):
@@ -1141,8 +1164,26 @@ def do_backup() -> str:
         "checklist": checklist,
         "backup_files": [f[0] for f in backup_files]
     }
-    with open(status_file, "w", encoding="utf-8") as sf:
-        json.dump(status_data, sf, ensure_ascii=False, indent=2)
+    # 先原子发布恢复清单（临时文件 + fsync + os.replace），成功后再按已发布清单清理旧归档
+    status_dir = os.path.dirname(status_file)
+    os.makedirs(status_dir, exist_ok=True)
+    tmp_fd, tmp_status_path = tempfile.mkstemp(prefix=".backup_status_", suffix=".tmp", dir=status_dir)
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as sf:
+            json.dump(status_data, sf, ensure_ascii=False, indent=2)
+            sf.flush()
+            os.fsync(sf.fileno())
+        os.replace(tmp_status_path, status_file)
+    except Exception:
+        if os.path.exists(tmp_status_path):
+            try:
+                os.remove(tmp_status_path)
+            except Exception:
+                pass
+        raise
+
+    for prefixes, keep_names in pending_prunes:
+        _prune_old_archives(backup_dir, prefixes, keep_names)
 
     has_abnormal = any(
         not (str(v) == "OK" or str(v).startswith("Skipped"))
