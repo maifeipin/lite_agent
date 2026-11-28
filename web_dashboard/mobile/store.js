@@ -48,6 +48,10 @@ export const store = reactive({
   toastMsg: '',
   loadingBots: false,
   loadingEvents: false,
+  favorites: [],
+  botFavorites: [],
+  collectedSourceKeys: [],
+  loadingFavorites: false,
 });
 
 let _ws = null;
@@ -110,6 +114,10 @@ function resetCredentialBoundState() {
   store.managerMessages = [];
   store.loadingBots = false;
   store.loadingEvents = false;
+  store.favorites = [];
+  store.botFavorites = [];
+  store.collectedSourceKeys = [];
+  store.loadingFavorites = false;
 }
 
 export function saveToken(tok, options = {}) {
@@ -523,6 +531,57 @@ export async function sendManagerChat(message, modelName = '', priorHistory = nu
       history,
     }),
   });
+}
+
+export async function fetchFavorites({ q = '', botId = '', limit = 30 } = {}) {
+  const startEpoch = _credentialEpoch;
+  store.loadingFavorites = true;
+  try {
+    const params = new URLSearchParams();
+    if (q) params.set('q', q);
+    if (botId) params.set('bot_id', botId);
+    params.set('limit', String(limit || 30));
+    const data = await apiFetch(`/favorites?${params.toString()}`, {}, false, startEpoch);
+    store.favorites = data.favorites || [];
+    if (botId && Array.isArray(data.collected_keys)) {
+      store.collectedSourceKeys = data.collected_keys;
+    }
+    return data;
+  } finally {
+    if (_credentialEpoch === startEpoch) {
+      store.loadingFavorites = false;
+    }
+  }
+}
+
+export async function fetchBotFavorites(botId) {
+  if (!botId) {
+    store.botFavorites = [];
+    store.collectedSourceKeys = [];
+    return [];
+  }
+  const startEpoch = _credentialEpoch;
+  const params = new URLSearchParams({ bot_id: botId, limit: '50' });
+  const data = await apiFetch(`/favorites?${params.toString()}`, {}, false, startEpoch);
+  if (_credentialEpoch === startEpoch && store.activeBotId === botId) {
+    store.botFavorites = data.favorites || [];
+    store.collectedSourceKeys = Array.isArray(data.collected_keys) ? data.collected_keys : [];
+  }
+  return store.botFavorites;
+}
+
+export async function saveFavorite(payload) {
+  return apiFetch('/favorites', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteFavorite(favId) {
+  const data = await apiFetch(`/favorites/${encodeURIComponent(favId)}`, { method: 'DELETE' });
+  store.favorites = store.favorites.filter((f) => f.id !== favId);
+  store.botFavorites = store.botFavorites.filter((f) => f.id !== favId);
+  return data;
 }
 
 function getWsUrl() {

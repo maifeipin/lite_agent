@@ -10,6 +10,7 @@ import re
 from typing import Any, Dict
 from urllib.parse import parse_qs
 
+from lite_agent.features.pc_cli.favorites import PcCliFavoritesService
 from lite_agent.features.pc_cli.hub import PcCliHub
 from lite_agent.features.pc_cli.manager import PcCliManager
 from lite_agent.features.pc_cli.stats import collect_dashboard_stats
@@ -248,3 +249,79 @@ def handle_post_manager_chat(handler: Any, parsed_url: Any, manager: PcCliManage
         history=body.get("history") if isinstance(body.get("history"), list) else None,
     )
     _send_json(handler, 200 if ok else 400, {"success": ok, **res})
+
+
+def handle_get_favorites(handler: Any, parsed_url: Any, favorites: PcCliFavoritesService) -> None:
+    qs = parse_qs(parsed_url.query)
+    q = qs.get("q", [""])[0]
+    bot_id = qs.get("bot_id", [None])[0] or None
+    source_type = qs.get("source_type", [None])[0] or None
+    try:
+        limit = int(qs.get("limit", ["30"])[0] or "30")
+    except Exception:
+        limit = 30
+    res = favorites.search_favorites(query=q, bot_id=bot_id, source_type=source_type, limit=limit)
+    collected_keys = favorites.list_collected_source_keys(bot_id=bot_id) if bot_id else []
+    _send_json(handler, 200, {"success": True, **res, "collected_keys": collected_keys})
+
+
+def handle_post_favorites(
+    handler: Any,
+    parsed_url: Any,
+    hub: PcCliHub,
+    favorites: PcCliFavoritesService,
+) -> None:
+    try:
+        body = _read_body_json(handler)
+    except ValueError:
+        return
+    except Exception as e:
+        _send_json(handler, 400, {"error": f"无效 JSON: {e}"})
+        return
+
+    bot_id = str(body.get("bot_id") or "").strip()
+    bot = hub.repo.get_bot(bot_id) if bot_id else None
+    bot_name = str(body.get("bot_name") or (bot.get("name") if bot else "") or "")
+    node_id = str(body.get("node_id") or (bot.get("node_id") if bot else "") or "")
+    cwd = str(body.get("cwd") or (bot.get("cwd") if bot else "") or "")
+
+    ok, res = favorites.save_favorite(
+        bot_id=bot_id,
+        bot_name=bot_name,
+        node_id=node_id,
+        cwd=cwd,
+        title=str(body.get("title") or ""),
+        content=str(body.get("content") or ""),
+        note=str(body.get("note") or ""),
+        tags=body.get("tags"),
+        items=body.get("items") if isinstance(body.get("items"), list) else None,
+        append_to_id=body.get("append_to_id"),
+    )
+    status = 200 if (ok and (res.get("deduplicated") or res.get("appended"))) else (201 if ok else 400)
+    _send_json(handler, status, {"success": ok, **res})
+
+
+def handle_favorites_sub_dispatch(handler: Any, parsed_url: Any, favorites: PcCliFavoritesService) -> None:
+    path = _strip_agent_prefix(parsed_url.path)
+    method = handler.command.upper()
+    if path == "/api/v1/pc-cli/favorites/rebuild" and method == "POST":
+        ok, res = favorites.rebuild_meili_index()
+        _send_json(handler, 200 if ok else 503, {"success": ok, **res})
+        return
+
+    m = re.match(r"^/api/v1/pc-cli/favorites/([^/]+)$", path)
+    if not m:
+        _send_json(handler, 404, {"error": "Not found"})
+        return
+    fav_id = m.group(1)
+    if method == "GET":
+        fav = favorites.get_favorite(fav_id)
+        if not fav:
+            _send_json(handler, 404, {"error": "收藏条目不存在"})
+        else:
+            _send_json(handler, 200, {"success": True, "favorite": fav})
+    elif method == "DELETE":
+        ok, res = favorites.delete_favorite(fav_id)
+        _send_json(handler, 200 if ok else 404, {"success": ok, **res})
+    else:
+        _send_json(handler, 405, {"error": "Method not allowed"})

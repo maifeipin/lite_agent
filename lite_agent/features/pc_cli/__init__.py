@@ -10,6 +10,7 @@ import os
 from typing import Any, Optional
 
 from lite_agent.features.pc_cli import routes
+from lite_agent.features.pc_cli.favorites import PcCliFavoritesService
 from lite_agent.features.pc_cli.hub import PcCliHub
 from lite_agent.features.pc_cli.manager import PcCliManager
 from lite_agent.features.pc_cli.notifier import PcCliNotifier
@@ -74,6 +75,7 @@ def register(context: Any) -> None:
         or str((cfg.get("llm", {}).get("default") if isinstance(cfg, dict) else "") or "")
     )
     manager = PcCliManager(hub=hub, config=cfg, gateway=gateway, router=router, default_model=default_model)
+    favorites = PcCliFavoritesService(config=cfg)
     ws_server: Optional[PcCliWsServer] = None
 
     if pc_cfg.get("start_ws_server", True):
@@ -175,6 +177,25 @@ def register(context: Any) -> None:
             "/api/v1/pc-cli/manager/chat",
             lambda h, u: routes.handle_post_manager_chat(h, u, manager),
             description="与 LLM 总管对话调度 Bot 或发起授权单",
+        )
+        context.register_route(
+            "GET",
+            "/api/v1/pc-cli/favorites",
+            lambda h, u: routes.handle_get_favorites(h, u, favorites),
+            description="查询或检索 PC Bots 知识库收藏",
+        )
+        context.register_route(
+            "POST",
+            "/api/v1/pc-cli/favorites",
+            lambda h, u: routes.handle_post_favorites(h, u, hub, favorites),
+            description="收藏或追加 PC Bots 回复到个人知识库",
+        )
+        context.register_route(
+            "ALL",
+            "/api/v1/pc-cli/favorites/",
+            lambda h, u: routes.handle_favorites_sub_dispatch(h, u, favorites),
+            is_prefix=True,
+            description="单条收藏读取、取消收藏及索引重建子端点",
         )
 
     def _cleanup() -> None:

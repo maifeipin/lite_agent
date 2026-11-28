@@ -7,14 +7,18 @@ import {
   connectWs,
   createBot,
   deleteBot,
+  deleteFavorite,
+  fetchBotFavorites,
   fetchBots,
   fetchEventsIncremental,
+  fetchFavorites,
   fetchModels,
   fetchNodeDirs,
   fetchNodes,
   fetchPendingApprovals,
   fetchStats,
   getCredentialEpoch,
+  saveFavorite,
   saveToken,
   sendManagerChat,
   sendTurn,
@@ -23,7 +27,7 @@ import {
   submitApproval,
   subscribeBotOnWs,
   updateBot,
-} from './store.js?v=16';
+} from './store.js?v=17';
 
 function escapeHtml(raw) {
   return String(raw || '')
@@ -197,6 +201,21 @@ const app = createApp({
     const promptEditHasSession = ref(false);
     const promptEditResetSession = ref(false);
     const savingPrompt = ref(false);
+    const selectFavMode = ref(false);
+    const selectedFavKeys = ref([]);
+    const showCollectModal = ref(false);
+    const collectMode = ref('new'); // new | append
+    const collectTargetId = ref('');
+    const collectTitle = ref('');
+    const collectContent = ref('');
+    const collectTags = ref('');
+    const collectNote = ref('');
+    const collectItems = ref([]);
+    const savingFavorite = ref(false);
+    const showFavoritesDrawer = ref(false);
+    const favSearchQuery = ref('');
+    const favScope = ref('all'); // all | current_bot
+    const favSearchEngine = ref('');
     const showTokenModal = ref(false);
     const authMode = ref('password'); // password | token
     const loginUsername = ref('');
@@ -314,8 +333,18 @@ const app = createApp({
 
       for (const ev of raw) {
         const p = ev.payload || {};
+        const botIdForKey = ev.bot_id || store.activeBotId || '';
+        const sourceKey = `pc_cli:${botIdForKey}:${ev.turn_id || ''}:${ev.seq_id}`;
         if (ev.event_type === 'user_message') {
-          items.push({ key: `e-${ev.seq_id}`, kind: 'user', text: p.text || '' });
+          items.push({
+            key: `e-${ev.seq_id}`,
+            kind: 'user',
+            text: p.text || '',
+            rawText: p.text || '',
+            seqId: ev.seq_id,
+            turnId: ev.turn_id || '',
+            sourceKey,
+          });
         } else if (ev.event_type === 'thinking') {
           items.push({ key: `e-${ev.seq_id}`, kind: 'thinking', text: p.text || '' });
         } else if (ev.event_type === 'tool_start') {
@@ -372,6 +401,10 @@ const app = createApp({
             key: `e-${ev.seq_id}`,
             kind: 'assistant',
             html: renderMarkdownSafe(p.text || ''),
+            rawText: p.text || '',
+            seqId: ev.seq_id,
+            turnId: ev.turn_id || '',
+            sourceKey,
           });
         } else if (ev.event_type === 'turn_status') {
           items.push({
@@ -490,9 +523,12 @@ const app = createApp({
       if (store.activeBotId !== botId) {
         cancelActiveVoice();
         promptInputSource.value = 'text';
+        selectFavMode.value = false;
+        selectedFavKeys.value = [];
       }
       store.activeBotId = botId;
       window.location.hash = `#bot/${botId}`;
+      fetchBotFavorites(botId).catch(() => {});
       await subscribeBotOnWs(botId);
       if (getCredentialEpoch() !== startEpoch || store.activeBotId !== botId) {
         return;
@@ -1049,6 +1085,204 @@ const app = createApp({
       }
     }
 
+    function isMessageCollected(item) {
+      return Boolean(item && item.sourceKey && store.collectedSourceKeys.includes(item.sourceKey));
+    }
+
+    function toggleSelectFavMode() {
+      selectFavMode.value = !selectFavMode.value;
+      if (!selectFavMode.value) {
+        selectedFavKeys.value = [];
+      }
+    }
+
+    function isSelectedFav(item) {
+      return Boolean(item && item.sourceKey && selectedFavKeys.value.includes(item.sourceKey));
+    }
+
+    function toggleSelectFavItem(item) {
+      if (!item || !item.sourceKey) return;
+      const idx = selectedFavKeys.value.indexOf(item.sourceKey);
+      if (idx >= 0) {
+        selectedFavKeys.value.splice(idx, 1);
+      } else {
+        selectedFavKeys.value.push(item.sourceKey);
+      }
+    }
+
+    function _buildDefaultCollectTitle(items) {
+      for (const it of items) {
+        const txt = String(it.text || '').trim();
+        if (txt) {
+          const first = txt.split(/\r?\n/)[0].replace(/^[#*\-\s>]+/, '').trim();
+          if (first) return first.slice(0, 60);
+        }
+      }
+      return (activeBot.value && activeBot.value.name) ? `${activeBot.value.name} 收藏` : 'PC Bot 收藏';
+    }
+
+    async function _openCollectModalWithItems(items, overrideContent = '') {
+      if (!activeBot.value || !items.length) return;
+      collectItems.value = items;
+      collectTitle.value = _buildDefaultCollectTitle(items);
+      if (overrideContent) {
+        collectContent.value = overrideContent;
+      } else {
+        collectContent.value = items
+          .map((it) => (it.role === 'user' ? `**用户提问：**\n${it.text}` : it.text))
+          .join('\n\n');
+      }
+      collectTags.value = '';
+      collectNote.value = '';
+      collectMode.value = 'new';
+      collectTargetId.value = '';
+      showCollectModal.value = true;
+      try {
+        const list = await fetchBotFavorites(activeBot.value.bot_id);
+        if (list.length) {
+          collectTargetId.value = list[0].id;
+        }
+      } catch (_) {}
+    }
+
+    async function openCollectForSingle(item) {
+      if (!item || !activeBot.value) return;
+      let selectedExcerpt = '';
+      try {
+        const sel = window.getSelection ? window.getSelection().toString().trim() : '';
+        if (sel && sel.length >= 6 && item.rawText && item.rawText.includes(sel)) {
+          selectedExcerpt = sel;
+        }
+      } catch (_) {}
+      const payloadItem = {
+        source_key: item.sourceKey,
+        turn_id: item.turnId || '',
+        seq_id: item.seqId || 0,
+        role: item.kind === 'user' ? 'user' : 'assistant',
+        text: selectedExcerpt || item.rawText || '',
+      };
+      await _openCollectModalWithItems([payloadItem], selectedExcerpt);
+    }
+
+    async function openCollectForSelected() {
+      if (!activeBot.value || !selectedFavKeys.value.length) return;
+      const pickedSet = new Set(selectedFavKeys.value);
+      const ordered = activeTimeline.value
+        .filter((it) => (it.kind === 'user' || it.kind === 'assistant') && pickedSet.has(it.sourceKey))
+        .map((it) => ({
+          source_key: it.sourceKey,
+          turn_id: it.turnId || '',
+          seq_id: it.seqId || 0,
+          role: it.kind === 'user' ? 'user' : 'assistant',
+          text: it.rawText || '',
+        }));
+      if (!ordered.length) {
+        showToast('请先勾选至少一条提问或回复');
+        return;
+      }
+      await _openCollectModalWithItems(ordered);
+    }
+
+    async function handleSaveFavorite() {
+      if (!activeBot.value || savingFavorite.value) return;
+      const content = collectContent.value.trim();
+      if (!content) {
+        showToast('收藏正文不能为空');
+        return;
+      }
+      if (collectMode.value === 'append' && !collectTargetId.value) {
+        showToast('请选择要追加的已有收藏');
+        return;
+      }
+      savingFavorite.value = true;
+      try {
+        const res = await saveFavorite({
+          bot_id: activeBot.value.bot_id,
+          bot_name: activeBot.value.name || '',
+          node_id: activeBot.value.node_id || '',
+          cwd: activeBot.value.cwd || '',
+          title: collectTitle.value.trim(),
+          content,
+          tags: collectTags.value.trim(),
+          note: collectNote.value.trim(),
+          items: collectItems.value,
+          append_to_id: collectMode.value === 'append' ? collectTargetId.value : '',
+        });
+        showCollectModal.value = false;
+        selectFavMode.value = false;
+        selectedFavKeys.value = [];
+        await fetchBotFavorites(activeBot.value.bot_id).catch(() => {});
+        if (showFavoritesDrawer.value) {
+          await handleSearchFavorites();
+        }
+        if (res.deduplicated) {
+          showToast('该条内容已在收藏中，未重复创建');
+        } else if (res.appended) {
+          showToast(res.meili_synced ? '已增量追加到收藏并同步索引' : '已追加到收藏（本地库已保存）');
+        } else {
+          showToast(res.meili_synced ? '已收藏到知识库并同步索引' : '已收藏到知识库（本地库已保存）');
+        }
+      } catch (e) {
+        showToast(e.message);
+      } finally {
+        savingFavorite.value = false;
+      }
+    }
+
+    async function openFavoritesDrawer() {
+      showFavoritesDrawer.value = true;
+      await handleSearchFavorites();
+    }
+
+    async function handleSearchFavorites() {
+      try {
+        const targetBotId = favScope.value === 'current_bot' && store.activeBotId ? store.activeBotId : '';
+        const res = await fetchFavorites({ q: favSearchQuery.value.trim(), botId: targetBotId, limit: 40 });
+        favSearchEngine.value = res.engine || '';
+      } catch (e) {
+        showToast(e.message);
+      }
+    }
+
+    function isFavoriteBotAlive(fav) {
+      return Boolean(fav && fav.bot_id && store.bots.some((b) => b.bot_id === fav.bot_id));
+    }
+
+    function quoteFavoriteToInput(fav) {
+      if (!fav) return;
+      const meta = [fav.bot_name || fav.bot_id, fav.cwd].filter(Boolean).join(' · ');
+      const quoteBlock = `【引用收藏：${fav.title}】${meta ? `（出处：${meta}）` : ''}\n${fav.content}\n\n`;
+      promptInput.value = promptInput.value.trim()
+        ? `${promptInput.value.trim()}\n\n${quoteBlock}`
+        : quoteBlock;
+      showFavoritesDrawer.value = false;
+      showToast('已插入输入框，确认后发送');
+    }
+
+    async function jumpToFavoriteBot(fav) {
+      if (!isFavoriteBotAlive(fav)) {
+        showToast('原 Bot 已删除，收藏副本已独立保留');
+        return;
+      }
+      showFavoritesDrawer.value = false;
+      store.activeTab = 'bots';
+      await openBot(fav.bot_id);
+    }
+
+    async function handleDeleteFavorite(fav) {
+      if (!fav || !fav.id) return;
+      if (!window.confirm(`确认取消收藏「${fav.title}」？`)) return;
+      try {
+        await deleteFavorite(fav.id);
+        if (store.activeBotId) {
+          await fetchBotFavorites(store.activeBotId).catch(() => {});
+        }
+        showToast('已取消收藏并从检索移除');
+      } catch (e) {
+        showToast(e.message);
+      }
+    }
+
     watch(
       () => activeTimeline.value.length,
       () => scrollToBottom()
@@ -1172,6 +1406,34 @@ const app = createApp({
       handleDeleteBot,
       handleSaveToken,
       handlePasswordLogin,
+      selectFavMode,
+      selectedFavKeys,
+      showCollectModal,
+      collectMode,
+      collectTargetId,
+      collectTitle,
+      collectContent,
+      collectTags,
+      collectNote,
+      collectItems,
+      savingFavorite,
+      showFavoritesDrawer,
+      favSearchQuery,
+      favScope,
+      favSearchEngine,
+      isMessageCollected,
+      toggleSelectFavMode,
+      isSelectedFav,
+      toggleSelectFavItem,
+      openCollectForSingle,
+      openCollectForSelected,
+      handleSaveFavorite,
+      openFavoritesDrawer,
+      handleSearchFavorites,
+      isFavoriteBotAlive,
+      quoteFavoriteToInput,
+      jumpToFavoriteBot,
+      handleDeleteFavorite,
       refreshAll,
       showToast,
     };

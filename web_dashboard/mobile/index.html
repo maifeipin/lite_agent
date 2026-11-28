@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#0a0b10">
   <title>PC Bots | Lite Agent</title>
   <link rel="manifest" href="./manifest.json?v=1">
-  <link rel="stylesheet" href="./style.css?v=14">
+  <link rel="stylesheet" href="./style.css?v=15">
   <script src="./vendor/marked.min.js?v=1"></script>
 </head>
 <body>
@@ -24,6 +24,7 @@
             <span class="topbar-title">PC CLI Bots</span>
           </div>
           <div class="topbar-actions">
+            <button class="btn btn-icon" @click="openFavoritesDrawer" title="我的收藏（知识库检索）">⭐</button>
             <button class="btn btn-icon" @click="store.activeTab === 'dashboard' ? switchTab('dashboard') : refreshAll()" title="刷新">↻</button>
             <button class="btn btn-icon" @click="showTokenModal = true" title="Token 鉴权">🔑</button>
             <button class="btn btn-primary" @click="openCreateDrawer">+ 新建</button>
@@ -156,6 +157,15 @@
                   ■ 中止
                 </button>
                 <button
+                  type="button"
+                  class="mode-badge"
+                  :class="selectFavMode ? 'prompt-configured' : 'prompt-empty'"
+                  @click="toggleSelectFavMode"
+                  title="多选本会话中的提问与最终回复批量收藏"
+                >
+                  {{ selectFavMode ? '✓ 退出选择' : '☑️ 选择收藏' }}
+                </button>
+                <button
                   class="btn"
                   :disabled="updatingApprovalMode || sending || activeBot.status === 'running' || activeBot.status === 'waiting_approval'"
                   @click="handleResetSession(activeBot)"
@@ -174,7 +184,16 @@
               </div>
 
               <template v-for="item in activeTimeline" :key="item.key">
-                <div v-if="item.kind === 'user'" class="msg-user">{{ item.text }}</div>
+                <div v-if="item.kind === 'user'" class="msg-row msg-row-user">
+                  <input
+                    v-if="selectFavMode"
+                    type="checkbox"
+                    class="msg-check"
+                    :checked="isSelectedFav(item)"
+                    @change="toggleSelectFavItem(item)"
+                  />
+                  <div class="msg-user">{{ item.text }}</div>
+                </div>
                 <details v-else-if="item.kind === 'tool'" class="tool-card" :class="{ 'is-error': item.isError }">
                   <summary>
                     <span>{{ item.done ? (item.isError ? '❌' : '✅') : '⏳' }}</span>
@@ -186,12 +205,44 @@
                   </div>
                 </details>
                 <div v-else-if="item.kind === 'delta'" class="msg-assistant is-streaming" v-html="item.html"></div>
-                <div v-else-if="item.kind === 'assistant'" class="msg-assistant" v-html="item.html"></div>
+                <div v-else-if="item.kind === 'assistant'" class="msg-row msg-row-assistant">
+                  <input
+                    v-if="selectFavMode"
+                    type="checkbox"
+                    class="msg-check"
+                    :checked="isSelectedFav(item)"
+                    @change="toggleSelectFavItem(item)"
+                  />
+                  <div class="msg-assistant-wrap">
+                    <div class="msg-assistant" v-html="item.html"></div>
+                    <div class="msg-actions">
+                      <button
+                        type="button"
+                        class="fav-btn"
+                        :class="{ collected: isMessageCollected(item) }"
+                        @click="openCollectForSingle(item)"
+                        title="收藏到个人知识库（支持划词裁剪或追加到已有收藏）"
+                      >
+                        {{ isMessageCollected(item) ? '★ 已收藏' : '☆ 收藏' }}
+                      </button>
+                    </div>
+                  </div>
+                </div>
                 <div v-else-if="item.kind === 'status'" class="turn-banner" :class="{ error: item.status === 'failed' || item.status === 'error' }">
                   — 回合状态: {{ item.status }}<span v-if="item.botId || item.turnId"> · {{ item.botId }}<span v-if="item.turnId"> / {{ item.turnId }}</span></span><span v-if="item.error"> ({{ item.error }})</span> —
                 </div>
               </template>
             </section>
+
+            <div class="select-bar" v-if="selectFavMode">
+              <span>已勾选 {{ selectedFavKeys.length }} 条消息（仅提问与最终回复）</span>
+              <div style="display:flex;gap:8px;">
+                <button class="btn" @click="toggleSelectFavMode">取消</button>
+                <button class="btn btn-primary" :disabled="!selectedFavKeys.length" @click="openCollectForSelected">
+                  ⭐ 收藏已选 ({{ selectedFavKeys.length }})
+                </button>
+              </div>
+            </div>
 
             <div class="approval-stack" v-if="activeBotApprovals.length">
               <div class="approval-bar" v-for="appr in activeBotApprovals" :key="appr.approval_id">
@@ -395,6 +446,7 @@
               {{ m.name }}
             </option>
           </select>
+          <button class="btn btn-icon" @click="openFavoritesDrawer" title="我的收藏（知识库检索）">⭐</button>
           <button class="btn btn-icon" @click="store.activeTab === 'dashboard' ? switchTab('dashboard') : refreshAll()" title="刷新">↻</button>
           <button class="btn btn-icon" @click="showTokenModal = true" title="Token 鉴权">🔑</button>
           <button v-if="store.activeTab === 'bots'" class="btn btn-primary" @click="openCreateDrawer">+ 新建 Bot</button>
@@ -653,6 +705,16 @@
           >
             📋 角色指令{{ activeBot.system_prompt ? ' ✓' : '' }}
           </button>
+          <button
+            type="button"
+            class="mode-badge"
+            :class="selectFavMode ? 'prompt-configured' : 'prompt-empty'"
+            @click="toggleSelectFavMode"
+            title="多选提问与回复收藏到知识库"
+          >
+            {{ selectFavMode ? '✓ 退出选择' : '☑️ 选收藏' }}
+          </button>
+          <button type="button" class="mode-badge prompt-empty" @click="openFavoritesDrawer" title="打开我的收藏">⭐ 收藏</button>
           <span class="tag bot-id-tag" @click="copyBotId(activeBot.bot_id)" title="点击复制 Bot ID">{{ activeBot.bot_id }}</span>
           <span class="status-badge" :class="activeBot.status">{{ statusLabel(activeBot.status) }}</span>
         </div>
@@ -665,7 +727,16 @@
         </div>
 
         <template v-for="item in activeTimeline" :key="item.key">
-          <div v-if="item.kind === 'user'" class="msg-user">{{ item.text }}</div>
+          <div v-if="item.kind === 'user'" class="msg-row msg-row-user">
+            <input
+              v-if="selectFavMode"
+              type="checkbox"
+              class="msg-check"
+              :checked="isSelectedFav(item)"
+              @change="toggleSelectFavItem(item)"
+            />
+            <div class="msg-user">{{ item.text }}</div>
+          </div>
 
           <details v-else-if="item.kind === 'thinking'" class="tool-card">
             <summary>🧠 思考过程</summary>
@@ -688,13 +759,44 @@
 
           <div v-else-if="item.kind === 'delta'" class="msg-assistant is-streaming" v-html="item.html"></div>
 
-          <div v-else-if="item.kind === 'assistant'" class="msg-assistant" v-html="item.html"></div>
+          <div v-else-if="item.kind === 'assistant'" class="msg-row msg-row-assistant">
+            <input
+              v-if="selectFavMode"
+              type="checkbox"
+              class="msg-check"
+              :checked="isSelectedFav(item)"
+              @change="toggleSelectFavItem(item)"
+            />
+            <div class="msg-assistant-wrap">
+              <div class="msg-assistant" v-html="item.html"></div>
+              <div class="msg-actions">
+                <button
+                  type="button"
+                  class="fav-btn"
+                  :class="{ collected: isMessageCollected(item) }"
+                  @click="openCollectForSingle(item)"
+                >
+                  {{ isMessageCollected(item) ? '★ 已收藏' : '☆ 收藏' }}
+                </button>
+              </div>
+            </div>
+          </div>
 
           <div v-else-if="item.kind === 'status'" class="turn-banner" :class="{ error: item.status === 'failed' || item.status === 'error' }">
             — 回合状态: {{ item.status }}<span v-if="item.botId || item.turnId"> · {{ item.botId }}<span v-if="item.turnId"> / {{ item.turnId }}</span></span><span v-if="item.error"> ({{ item.error }})</span> —
           </div>
         </template>
       </section>
+
+      <div class="select-bar" v-if="selectFavMode">
+        <span>已选 {{ selectedFavKeys.length }} 条</span>
+        <div style="display:flex;gap:8px;">
+          <button class="btn" @click="toggleSelectFavMode">取消</button>
+          <button class="btn btn-primary" :disabled="!selectedFavKeys.length" @click="openCollectForSelected">
+            ⭐ 收藏已选
+          </button>
+        </div>
+      </div>
 
       <!-- 内联权限审批栈（整体高度受限可滚 + 单卡长命令折叠，确保多张卡时按钮与输入框也不被挤出视口） -->
       <div class="approval-stack" v-if="activeBotApprovals.length">
@@ -927,6 +1029,115 @@
     </div>
 
     <!-- 连接鉴权弹窗（支持账号密码换取 session_token，或直接填写 API Token） -->
+    <!-- 收藏到知识库弹窗（支持新建或追加到本次会话已有收藏 + 正文裁剪） -->
+    <div class="modal-backdrop" v-if="showCollectModal" @click.self="showCollectModal = false">
+      <div class="drawer">
+        <div class="drawer-head">
+          <h3>⭐ 收藏到个人知识库</h3>
+          <button class="btn btn-icon" @click="showCollectModal = false">✕</button>
+        </div>
+        <div class="drawer-body">
+          <div class="desktop-seg-tabs" style="padding:0 0 12px;grid-template-columns:1fr 1fr;" v-if="store.botFavorites.length">
+            <button type="button" class="desktop-seg-btn" :class="{ active: collectMode === 'new' }" @click="collectMode = 'new'">新建收藏卡片</button>
+            <button type="button" class="desktop-seg-btn" :class="{ active: collectMode === 'append' }" @click="collectMode = 'append'">➕ 追加到本会话已有 ({{ store.botFavorites.length }})</button>
+          </div>
+
+          <div class="field" v-if="collectMode === 'append' && store.botFavorites.length">
+            <label>选择本会话已有收藏卡片（增量追加，已收消息自动去重）</label>
+            <select v-model="collectTargetId">
+              <option v-for="bf in store.botFavorites" :key="bf.id" :value="bf.id">
+                {{ bf.title }} ({{ (bf.updated_at || '').slice(0, 16).replace('T', ' ') }})
+              </option>
+            </select>
+          </div>
+
+          <div class="field" v-if="collectMode === 'new'">
+            <label>收藏标题</label>
+            <input v-model="collectTitle" type="text" placeholder="自动生成，可按主题改写" />
+          </div>
+
+          <div class="field">
+            <label>收藏正文（原始 Markdown，可直接删减分拆只留需要段落）</label>
+            <textarea v-model="collectContent" rows="7" placeholder="收藏内容..."></textarea>
+          </div>
+
+          <div class="field-row-3">
+            <div class="field">
+              <label>标签（逗号分隔，可选）</label>
+              <input v-model="collectTags" type="text" placeholder="如：排障, 备份, 架构" />
+            </div>
+            <div class="field">
+              <label>备注（可选）</label>
+              <input v-model="collectNote" type="text" placeholder="记录为什么收藏它" />
+            </div>
+          </div>
+        </div>
+        <div class="drawer-foot">
+          <button class="btn btn-primary" style="width:100%;padding:11px;" :disabled="savingFavorite || !collectContent.trim()" @click="handleSaveFavorite">
+            {{ savingFavorite ? '保存并同步索引中...' : (collectMode === 'append' ? '确认增量追加' : '保存到知识库') }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 我的收藏检索抽屉（Meilisearch personal_kb + SQLite 兜底 + 一键引用） -->
+    <div class="modal-backdrop" v-if="showFavoritesDrawer" @click.self="showFavoritesDrawer = false">
+      <div class="drawer" style="max-width:620px;">
+        <div class="drawer-head">
+          <h3>⭐ 我的收藏（个人知识库）</h3>
+          <button class="btn btn-icon" @click="showFavoritesDrawer = false">✕</button>
+        </div>
+        <div class="drawer-body">
+          <div style="display:flex;gap:8px;margin-bottom:10px;">
+            <input
+              v-model="favSearchQuery"
+              type="text"
+              placeholder="搜关键词、标题、标签或项目目录..."
+              style="flex:1;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:10px;padding:8px 11px;font-size:13.5px;"
+              @keydown.enter.prevent="handleSearchFavorites"
+            />
+            <button class="btn btn-primary" @click="handleSearchFavorites">搜索</button>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;font-size:12px;color:var(--muted);">
+            <div style="display:flex;gap:6px;">
+              <button type="button" class="template-chip" :class="{ ghost: favScope !== 'all' }" @click="favScope = 'all'; handleSearchFavorites()">全部收藏</button>
+              <button v-if="store.activeBotId" type="button" class="template-chip" :class="{ ghost: favScope !== 'current_bot' }" @click="favScope = 'current_bot'; handleSearchFavorites()">仅当前 Bot</button>
+            </div>
+            <span v-if="favSearchEngine">检索: {{ favSearchEngine }}</span>
+          </div>
+
+          <div class="empty-state" v-if="store.loadingFavorites" style="padding:24px 0;">正在检索...</div>
+          <div class="empty-state" v-else-if="!store.favorites.length" style="padding:24px 0;">暂无匹配收藏，可在 Bot 回复旁点击「☆ 收藏」沉淀有价值的结论。</div>
+          <div v-else style="display:flex;flex-direction:column;gap:10px;">
+            <div class="fav-card" v-for="fav in store.favorites" :key="fav.id">
+              <div class="fav-card-head">
+                <div class="fav-card-title">{{ fav.title }}</div>
+                <span class="fav-deleted-tag" v-if="!isFavoriteBotAlive(fav)">原 Bot 已删除 · 副本完好</span>
+              </div>
+              <div class="fav-card-meta">
+                <span>{{ fav.bot_name || fav.bot_id || 'PC Bot' }}</span>
+                <span v-if="fav.cwd">· {{ fav.cwd }}</span>
+                <span>· {{ (fav.updated_at || '').slice(0, 16).replace('T', ' ') }}</span>
+              </div>
+              <div class="template-chips" v-if="fav.tags && fav.tags.length" style="margin:6px 0;">
+                <span class="tag" v-for="t in fav.tags" :key="t">#{{ t }}</span>
+              </div>
+              <div class="fav-card-note" v-if="fav.note">备注：{{ fav.note }}</div>
+              <details class="approval-details" style="margin:6px 0;">
+                <summary class="approval-preview">{{ fav.snippet || (fav.content || '').slice(0, 120) }}</summary>
+                <div class="approval-full" style="white-space:pre-wrap;">{{ fav.content }}</div>
+              </details>
+              <div class="fav-card-actions">
+                <button v-if="store.activeBotId" class="btn btn-primary" @click="quoteFavoriteToInput(fav)">📎 引用到当前输入框</button>
+                <button v-if="isFavoriteBotAlive(fav)" class="btn" @click="jumpToFavoriteBot(fav)">↪ 跳回原会话</button>
+                <button class="btn btn-danger" @click="handleDeleteFavorite(fav)">取消收藏</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="modal-backdrop" v-if="showTokenModal" @click.self="showTokenModal = false">
       <div class="drawer">
         <div class="drawer-head">
@@ -966,6 +1177,6 @@
     </div>
   </div>
 
-  <script type="module" src="./app.js?v=25"></script>
+  <script type="module" src="./app.js?v=26"></script>
 </body>
 </html>
