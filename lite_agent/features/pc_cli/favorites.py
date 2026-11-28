@@ -122,6 +122,14 @@ class PersonalKbMeiliClient:
     def __init__(self, config: Optional[Dict[str, Any]] = None, index_uid: str = PERSONAL_KB_INDEX):
         cfg = config if isinstance(config, dict) else {}
         meili_cfg = cfg.get("meilisearch", {}) if isinstance(cfg.get("meilisearch"), dict) else {}
+        if not meili_cfg.get("url") and config is not None:
+            try:
+                from lite_agent.core.config_loader import load_config
+                full_cfg = load_config() or {}
+                if isinstance(full_cfg.get("meilisearch"), dict):
+                    meili_cfg = full_cfg["meilisearch"]
+            except Exception:
+                pass
         self.base_url = str(meili_cfg.get("url") or "").rstrip("/")
         self.master_key = str(meili_cfg.get("master_key") or "")
         self.index_uid = index_uid
